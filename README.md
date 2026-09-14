@@ -17,6 +17,7 @@ its top level:
 
 ```text
 __init__.py
+main.py
 ui.py
 config.py
 sync.py
@@ -27,10 +28,10 @@ Calibre requires the top-level `__init__.py`; do not install the source
 directory itself.
 
 The plugin entry point is `TolinoSyncPlugin` in `__init__.py` with
-`actual_plugin = "ui:TolinoSyncAction"`, the Calibre `InterfaceAction` type,
-supported desktop platforms, and lazy loading enabled. The archive uses
-top-level imports for the flat layout and does not require a package-relative
-import context.
+`actual_plugin = "main:TolinoSyncAction"`, the Calibre `InterfaceAction`
+type, supported desktop platforms, and lazy loading enabled. Calibre imports
+the dedicated top-level `main.py` adapter from its ZipPlugin context; it then
+loads `ui.py` and the other flat modules without package-relative imports.
 
 ### Calibre 7.6 import compatibility
 

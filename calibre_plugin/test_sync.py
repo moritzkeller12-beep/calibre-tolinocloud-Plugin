@@ -1,4 +1,7 @@
 import unittest
+import ast
+import zipfile
+from pathlib import Path
 
 from .sync import fingerprint, plan_sync, sync_summary
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
@@ -53,6 +56,25 @@ class SyncPlanTests(unittest.TestCase):
     def test_sync_summary_is_deterministic_for_dashboard(self):
         self.assertEqual({"uploads": 2, "deletions": 1, "errors": 0, "total": 3},
                          sync_summary(2, 1))
+
+    def test_zip_entrypoint_uses_dedicated_flat_main_module(self):
+        archive = Path(__file__).parent.parent / "tolino_cloud_sync.zip"
+        if not archive.exists():
+            self.skipTest("build_plugin.py has not been run")
+        with zipfile.ZipFile(archive) as plugin:
+            self.assertIn("main.py", plugin.namelist())
+            metadata = ast.parse(plugin.read("__init__.py").decode("utf-8"))
+            values = [
+                node.value.value
+                for node in ast.walk(metadata)
+                if isinstance(node, ast.Assign)
+                and any(getattr(target, "id", "") == "actual_plugin"
+                        for target in node.targets)
+                and isinstance(node.value, ast.Constant)
+            ]
+            self.assertEqual(["main:TolinoSyncAction"], values)
+            self.assertIn("from ui import TolinoSyncAction",
+                          plugin.read("main.py").decode("utf-8"))
 
 
 if __name__ == "__main__":
