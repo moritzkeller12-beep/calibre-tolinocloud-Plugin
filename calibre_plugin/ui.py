@@ -577,6 +577,10 @@ class SyncDashboard(QDialog):
                                   token_callback=self.persist_refresh_token)
             client.login()
             self.set_refresh_token(client.refresh)
+            # CRITICAL: Ensure the new refresh token is persisted immediately
+            # This prevents "reuse exceeded" errors during sync
+            if client.refresh != settings["refresh_token"]:
+                self.persist_refresh_token(client.refresh)
             comparison_fields = [
                 name for name, checkbox in (
                     ("authors", self.compare_authors),
@@ -653,6 +657,8 @@ class SyncDashboard(QDialog):
         self.start.setEnabled(False)
         self.cancel.setEnabled(True)
         self.progress_label.setText("Synchronisierung läuft / Synchronizing")
+        # Ensure settings are up-to-date with the latest refresh token
+        settings["refresh_token"] = self.refresh.text().strip()
 
     def progress_changed(self, done, total, text):
         self.progress.setRange(0, total or 1)
