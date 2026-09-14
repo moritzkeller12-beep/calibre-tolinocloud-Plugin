@@ -2,6 +2,7 @@ import json
 import mimetypes
 import os
 import platform
+import re
 import time
 import uuid
 import webbrowser
@@ -66,6 +67,24 @@ PARTNERS = {
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 OAUTH_STATE_TTL = 300
+
+
+def normalize_refresh_token(value):
+    """Normalize a token copied from a browser field without exposing it."""
+    raw = "" if value is None else str(value)
+    trimmed = raw.strip()
+    whitespace_removed = trimmed != raw
+    quote_removed = len(trimmed) >= 2 and trimmed[0] == trimmed[-1] and trimmed[0] in "\"'"
+    if quote_removed:
+        trimmed = trimmed[1:-1].strip()
+        whitespace_removed = whitespace_removed or trimmed != raw.strip()[1:-1]
+    return trimmed, {
+        "token_category": "configured_refresh_token",
+        "token_length": len(trimmed),
+        "token_prefix": (trimmed[:4] + "...") if trimmed else "",
+        "outer_quotes_removed": quote_removed,
+        "surrounding_whitespace_removed": whitespace_removed,
+    }
 
 
 def _query_value(query, name):
@@ -158,6 +177,14 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     return data["refresh_token"], client.hardware
 
 
+def redact_error_text(value):
+    """Keep provider status text while removing credential-shaped values."""
+    text = str(value)
+    text = re.sub(r"(?i)(access[_-]?token|refresh[_-]?token|authorization|password|secret)"
+                  r"\s*[=:]\s*[^\s,;}&]+", r"\1=[REDACTED]", text)
+    return text[:500]
+
+
 class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
@@ -168,12 +195,30 @@ class TolinoClient:
         self.partner_id = int(partner_id)
         self.partner = PARTNERS[self.partner_id]
         self.hardware = hardware or hardware_id()
-        self.refresh = refresh
+        self.refresh, self.token_diagnostics = normalize_refresh_token(refresh)
         self.username = username
         self.password = secret
         self.timeout = timeout
         self.access = None
         self.expires_at = 0
+        self.last_http_status = None
+        self.last_error_text = None
+
+    def auth_diagnostics(self):
+        """Return safe authentication context for the debug report."""
+        return {
+            "partner_id": self.partner_id,
+            "partner_name": self.partner["name"],
+            "client_id": self.partner.get("client_id"),
+            "scope": self.partner.get("scope"),
+            "token_url": self.partner.get("token_url"),
+            "grant_type": "refresh_token",
+            "hardware_id": self.hardware,
+            "reseller_id": str(self.partner_id),
+            "http_status": self.last_http_status,
+            "error_text": self.last_error_text,
+            **self.token_diagnostics,
+        }
 
     def login(self):
         if self.refresh:
@@ -238,9 +283,13 @@ class TolinoClient:
         request = Request(url, data=body, headers=headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                self.last_http_status = response.status
+                self.last_error_text = None
                 raw = response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
+            self.last_http_status = exc.code
+            self.last_error_text = redact_error_text(detail)
             if exc.code == 401 and authenticated and self.refresh and _retry:
                 self.access = None
                 self.login()
@@ -249,7 +298,7 @@ class TolinoClient:
             if exc.code in (401, 403):
                 self.access = None
                 raise TolinoAuthError("Tolino rejected authentication (%s)." % exc.code)
-            raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, detail))
+            raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
         except (URLError, OSError) as exc:
             raise TolinoApiError("Tolino request failed: %s" % exc)
         if not raw:

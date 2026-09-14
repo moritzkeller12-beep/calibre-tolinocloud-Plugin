@@ -25,7 +25,8 @@ try:
                        safe_format_path, cover_bytes, unpack_plan_result,
                        unpack_upload_record, diagnose_preparation,
                        format_diagnostic_report)
-    from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
+    from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
+                         hardware_id, normalize_refresh_token)
 except ImportError:
     from config import save_settings, settings
     from sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
@@ -33,7 +34,8 @@ except ImportError:
                       safe_format_path, cover_bytes, unpack_plan_result,
                       unpack_upload_record, diagnose_preparation,
                       format_diagnostic_report)
-    from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
+    from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
+                        hardware_id, normalize_refresh_token)
 
 
 def _metadata_value(item, name, default=""):
@@ -171,12 +173,22 @@ class DiagnosticDialog(QDialog):
                     "response_type": type(inventory).__name__,
                     "item_count": len(inventory),
                     "sample": inventory[:3],
+                    "auth": client.auth_diagnostics(),
                 },
             }
         except Exception as exc:
+            auth = locals().get("client")
             result = {
                 "step": "Tolino-Antwort testen",
                 "status": "error",
+                "value": auth.auth_diagnostics() if auth else {
+                    "partner_id": values["partner_id"],
+                    "partner_name": PARTNERS[values["partner_id"]]["name"],
+                    "client_id": PARTNERS[values["partner_id"]].get("client_id"),
+                    "scope": PARTNERS[values["partner_id"]].get("scope"),
+                    "token_url": PARTNERS[values["partner_id"]].get("token_url"),
+                    **normalize_refresh_token(values["refresh_token"])[1],
+                },
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
                 "traceback": traceback.format_exc(),
@@ -340,10 +352,11 @@ class SyncDashboard(QDialog):
                             else "Nicht angemeldet / not configured")
 
     def values(self):
+        refresh_token, _ = normalize_refresh_token(self.refresh.text())
         return {
             "partner_id": self.partner.currentData(),
             "hardware_id": self.hardware.text().strip() or hardware_id(),
-            "refresh_token": self.refresh.text().strip(),
+            "refresh_token": refresh_token,
             "username": settings()["username"],
             "password": settings()["password"],
             "preferred_formats": [x.strip().upper() for x in self.formats.text().split(",") if x.strip()],

@@ -4,6 +4,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from . import config
 from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
@@ -13,7 +14,8 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    format_diagnostic_report, diagnose_preparation,
                    _diagnostic_formats)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
-                     hardware_id, validate_callback)
+                     TolinoClient, hardware_id, normalize_refresh_token,
+                     validate_callback)
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -272,6 +274,68 @@ class SyncPlanTests(unittest.TestCase):
         for partner_id in (3, 4, 6, 8, 13, 23, 30):
             self.assertIn(partner_id, PARTNERS)
         self.assertRegex(hardware_id(), r"^[123x]..A-00BCD-EFGHI-JKLMN-OPQRh$")
+
+    def test_partner_8_refresh_configuration_matches_reference(self):
+        self.assertEqual("webreader", PARTNERS[8]["client_id"])
+        self.assertEqual("SCOPE_BOSH", PARTNERS[8]["scope"])
+        self.assertEqual("https://www.orellfuessli.ch/auth/oauth2/token",
+                         PARTNERS[8]["token_url"])
+
+    def test_refresh_token_normalization_reports_only_safe_metadata(self):
+        token, info = normalize_refresh_token('  "refresh-secret-value"  ')
+        self.assertEqual("refresh-secret-value", token)
+        self.assertEqual(20, info["token_length"])
+        self.assertEqual("refr...", info["token_prefix"])
+        self.assertTrue(info["outer_quotes_removed"])
+        self.assertTrue(info["surrounding_whitespace_removed"])
+
+    def test_partner_8_refresh_payload_is_url_encoded_and_not_access_token(self):
+        captured = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"access_token":"access-secret","expires_in":3600}'
+
+        def request(request, timeout):
+            captured["url"] = request.full_url
+            captured["body"] = request.data.decode("utf-8")
+            captured["content_type"] = request.headers["Content-type"]
+            return Response()
+
+        with patch("calibre_plugin.tolino.urlopen", request):
+            client = TolinoClient(8, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+                                  " refresh-token ")
+            client.login()
+        self.assertEqual(PARTNERS[8]["token_url"], captured["url"])
+        self.assertEqual(
+            "client_id=webreader&grant_type=refresh_token&"
+            "refresh_token=refresh-token&scope=SCOPE_BOSH",
+            captured["body"])
+        self.assertEqual("application/x-www-form-urlencoded",
+                         captured["content_type"])
+        self.assertEqual("refresh-token", client.refresh)
+        self.assertNotEqual("access-secret", client.refresh)
+
+    def test_auth_diagnostics_redacts_token_content(self):
+        client = TolinoClient(8, "", '"secret-refresh"')
+        diagnostics = client.auth_diagnostics()
+        rendered = format_diagnostic_report([{
+            "step": "auth", "status": "error", "value": diagnostics,
+        }])
+        self.assertIn("partner_id", rendered)
+        self.assertIn("Books.ch / orellfuessli.ch", rendered)
+        self.assertIn("token_length", rendered)
+        self.assertIn("token_prefix", rendered)
+        self.assertNotIn("secret-refresh", rendered)
+        self.assertNotIn("authorization", rendered.casefold())
 
     def test_callback_requires_matching_state_and_fresh_timestamp(self):
         query = {"state": ["expected"], "code": ["opaque-code"]}
