@@ -396,17 +396,34 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
     server.timeout = timeout
     redirect_uri = callback_redirect_uri(server.server_port)
-    params = {
-        "client_id": partner["client_id"],
-        "response_type": "code",
-        "scope": partner["scope"],
-        "redirect_uri": redirect_uri,
-        "state": state,
-    }
-    for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
-        if partner.get(key):
-            params[key] = partner[key]
-    if not webbrowser.open(partner["auth_url"] + "?" + urlencode(params)):
+    
+    # Special handling for Orell Fussli (partner 8) - autologin endpoint
+    # does NOT accept redirect_uri in query parameters
+    if int(partner_id) == 8:
+        params = {
+            "client_id": partner["client_id"],
+            "response_type": "code",
+            "scope": partner["scope"],
+            "state": state,
+        }
+        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+            if partner.get(key):
+                params[key] = partner[key]
+        auth_url = partner["auth_url"]
+    else:
+        params = {
+            "client_id": partner["client_id"],
+            "response_type": "code",
+            "scope": partner["scope"],
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+            if partner.get(key):
+                params[key] = partner[key]
+        auth_url = partner["auth_url"]
+    
+    if not webbrowser.open(auth_url + "?" + urlencode(params)):
         server.server_close()
         raise TolinoAuthError("Could not open the system browser.")
     while not hasattr(server, "query") and time.time() - created_at < timeout:
