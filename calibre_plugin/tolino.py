@@ -205,66 +205,155 @@ def _read_firefox_local_storage(profile_path):
         return {}
 
 
+
+
+def _read_chromium_session_storage(storage_path):
+    """Read Session Storage data from Chromium-based browser (LevelDB format)."""
+    try:
+        import leveldb
+        # Session Storage is in a separate directory
+        session_path = os.path.join(storage_path, "Session Storage", "leveldb")
+        if not os.path.exists(session_path):
+            return {}
+        db = leveldb.LevelDB(session_path)
+        results = {}
+        for key, value in db.RangeIter():
+            try:
+                key_str = key.decode('utf-8')
+                value_str = value.decode('utf-8')
+                results[key_str] = value_str
+            except (UnicodeDecodeError, AttributeError):
+                continue
+        return results
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return {}
+
+
+def _read_firefox_session_storage(profile_path):
+    """Read Session Storage from Firefox."""
+    try:
+        # Firefox session storage is more complex, but we can try the same database
+        return _read_firefox_local_storage(profile_path)
+    except Exception:
+        return {}
+
+
 def _extract_tokens_from_storage(storage_data):
-    """Extract refresh_token and hardware_id from browser storage data."""
+    """Extract refresh_token and hardware_id from browser storage data.
+    
+    Searches for various key names used by different Tolino partners
+    and authentication systems (including Keycloak).
+    """
     refresh_token = None
     hardware_id = None
+    
+    # Keycloak and Tolino-specific keys
+    token_keys = [
+        "refresh_token", "access_token", "id_token",
+        "token", "t_auth_token", "auth_token",
+        "bearer_token", "oauth_token"
+    ]
+    hardware_keys = [
+        "hardware_id", "hardware", "device_id",
+        "client_id", "hardwareId", "deviceId"
+    ]
     
     for key, value in storage_data.items():
         try:
             if isinstance(value, str):
-                if "refresh_token" in key:
-                    refresh_token = value
-                elif "hardware" in key.lower() or "hardware_id" in key.lower():
-                    hardware_id = value
+                key_lower = key.lower()
+                for tk in token_keys:
+                    if tk in key_lower:
+                        refresh_token = value
+                        break
+                for hk in hardware_keys:
+                    if hk in key_lower:
+                        hardware_id = value
+                        break
         except Exception:
             continue
     
     return refresh_token, hardware_id
 
 
+
+
 def scrape_browser_tokens():
     """
-    Scrape refresh_token and hardware_id from browser local storage.
+    Scrape refresh_token and hardware_id from browser storage.
     Searches Chrome, Edge, Firefox and other Chromium-based browsers.
+    Checks both Local Storage and Session Storage for all relevant origins.
+    
+    For Orell Fussli (Keycloak), checks:
+    - https://www.orellfuessli.ch
+    - https://orellfuessli.ch
+    - https://webreader.mytolino.com
+    - https://bosh.pageplace.de
     
     Returns:
         tuple: (refresh_token, hardware_id) or (None, None) if not found
     """
     storage_paths = _find_browser_storage_paths()
     
+    # Origins to check for Tolino and Keycloak
+    tolino_origins = [
+        "https://webreader.mytolino.com",
+        "https://www.orellfuessli.ch",
+        "https://orellfuessli.ch",
+        "https://bosh.pageplace.de",
+        "https://www.thalia.de",
+        "https://www.thalia.at",
+        "https://www.buch.de",
+        "https://www.osiander.de",
+        "https://www.buecher.de",
+        "https://www.hugendubel.de",
+    ]
+    
     for path in storage_paths:
         if not os.path.exists(path):
             continue
         
-        storage_data = {}
-        
-        # Try Chromium LevelDB method
-        storage_data.update(_read_chromium_local_storage(path))
-        if storage_data:
-            refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
-            if refresh_token and hardware_id:
-                return refresh_token, hardware_id
-        
-        # Try Chromium SQLite fallback
-        storage_data.update(_read_chromium_local_storage_sqlite(path))
-        if storage_data:
-            refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
-            if refresh_token and hardware_id:
-                return refresh_token, hardware_id
-        
-        # Try Firefox method
-        if "firefox" in path.lower() or "mozilla" in path.lower():
-            profile_dirs = [path] if os.path.isdir(path) else []
-            if os.path.isdir(path):
-                for profile in os.listdir(path):
-                    profile_path = os.path.join(path, profile)
-                    if os.path.isdir(profile_path):
-                        storage_data.update(_read_firefox_local_storage(profile_path))
-                        if storage_data:
-                            refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
-                            if refresh_token and hardware_id:
-                                return refresh_token, hardware_id
+        # Check both Local Storage and Session Storage
+        for storage_type in ["Local Storage", "Session Storage"]:
+            storage_data = {}
+            
+            if "firefox" in path.lower() or "mozilla" in path.lower():
+                if os.path.isdir(path):
+                    for profile in os.listdir(path):
+                        profile_path = os.path.join(path, profile)
+                        if os.path.isdir(profile_path):
+                            if storage_type == "Local Storage":
+                                storage_data.update(_read_firefox_local_storage(profile_path))
+                            else:
+                                storage_data.update(_read_firefox_session_storage(profile_path))
+            else:
+                if storage_type == "Local Storage":
+                    storage_data.update(_read_chromium_local_storage(path))
+                    storage_data.update(_read_chromium_local_storage_sqlite(path))
+                else:
+                    storage_data.update(_read_chromium_session_storage(path))
+            
+            if storage_data:
+                # Filter for Tolino/Keycloak origins
+                filtered_data = {}
+                for key, value in storage_data.items():
+                    for origin in tolino_origins:
+                        if origin in key:
+                            filtered_data[key] = value
+                            break
+                
+                if filtered_data:
+                    refresh_token, hardware_id = _extract_tokens_from_storage(filtered_data)
+                    if refresh_token and hardware_id:
+                        return refresh_token, hardware_id
+                
+                # Also try without origin filtering (for generic storage)
+                refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
+                if refresh_token and hardware_id:
+                    return refresh_token, hardware_id
     
     return None, None
 _CREDENTIAL_ASSIGNMENT = re.compile(
