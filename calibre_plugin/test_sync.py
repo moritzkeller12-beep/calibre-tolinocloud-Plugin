@@ -15,7 +15,7 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    _diagnostic_formats)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      TolinoClient, hardware_id, normalize_refresh_token,
-                     validate_callback)
+                     sanitize_error, validate_callback)
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -373,6 +373,40 @@ class SyncPlanTests(unittest.TestCase):
         self.assertNotIn("password-secret", rendered)
         self.assertNotIn("access-secret", rendered)
         self.assertIn("[REDACTED]", rendered)
+
+    def test_sanitize_error_redacts_configured_variants_jwt_and_traceback(self):
+        refresh = '  "refresh-secret-value"  '
+        access = "access-secret-value"
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"
+        traceback_text = (
+            'Tolino HTTP 400: {"error":"invalid_grant",'
+            '"error_description":"refresh_token=%s access_token=%s"}\n'
+            "Authorization: Bearer %s\n"
+            "Traceback: leaked refresh-secret-value"
+        ) % (refresh.strip()[1:-1], access, jwt)
+        rendered = sanitize_error(traceback_text, (refresh, access))
+        self.assertIn("invalid_grant", rendered)
+        self.assertNotIn("refresh-secret-value", rendered)
+        self.assertNotIn(access, rendered)
+        self.assertNotIn(jwt, rendered)
+        self.assertIn("[REDACTED]", rendered)
+
+    def test_http_error_keeps_safe_fields_without_echoing_tokens(self):
+        from urllib.error import HTTPError
+
+        token = "refresh-secret-value"
+        body = ('{"error":"invalid_grant","error_description":"bad %s",'
+                '"refresh_token":"%s"}' % (token, token)).encode("utf-8")
+        error = HTTPError("https://example.invalid/token", 400, "Bad Request",
+                          {}, None)
+        error.read = lambda: body
+        client = TolinoClient(8, "", token)
+        with patch("calibre_plugin.tolino.urlopen", side_effect=error):
+            with self.assertRaisesRegex(TolinoAuthError, "authentication failed"):
+                client.login()
+        self.assertIn("invalid_grant", client.last_error_text)
+        self.assertIn("error_description", client.last_error_text)
+        self.assertNotIn(token, client.last_error_text)
 
     def test_diagnosis_reports_steps_and_continues_after_metadata_error(self):
         class Row:

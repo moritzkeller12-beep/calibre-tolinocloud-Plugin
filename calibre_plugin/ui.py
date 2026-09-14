@@ -26,7 +26,7 @@ try:
                        unpack_upload_record, diagnose_preparation,
                        format_diagnostic_report)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                         hardware_id, normalize_refresh_token)
+                         hardware_id, normalize_refresh_token, sanitize_error)
 except ImportError:
     from config import save_settings, settings
     from sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
@@ -35,7 +35,7 @@ except ImportError:
                       unpack_upload_record, diagnose_preparation,
                       format_diagnostic_report)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                        hardware_id, normalize_refresh_token)
+                        hardware_id, normalize_refresh_token, sanitize_error)
 
 
 def _metadata_value(item, name, default=""):
@@ -190,8 +190,13 @@ class DiagnosticDialog(QDialog):
                     **normalize_refresh_token(values["refresh_token"])[1],
                 },
                 "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "traceback": traceback.format_exc(),
+                "error_message": sanitize_error(
+                    exc, (values["refresh_token"], getattr(auth, "access", None))
+                ),
+                "traceback": sanitize_error(
+                    traceback.format_exc(),
+                    (values["refresh_token"], getattr(auth, "access", None)),
+                ),
             }
         self.output.append("\n" + format_diagnostic_report([result]))
 
@@ -253,7 +258,9 @@ class SyncWorker(QObject):
                 self.progress.emit(done, total, "Processed %s" % book_uuid)
             self.completed.emit(state, client.refresh)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(sanitize_error(
+                exc, (self.settings["refresh_token"], getattr(client, "access", None))
+            ))
 
 
 class SyncDashboard(QDialog):
@@ -452,7 +459,11 @@ class SyncDashboard(QDialog):
                 jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path, cover_path))
             settings["state"] = current
         except Exception as exc:
-            error_dialog(self, "Vorbereitung fehlgeschlagen / Preparation failed", str(exc), show=True)
+            error_dialog(
+                self, "Vorbereitung fehlgeschlagen / Preparation failed",
+                sanitize_error(exc, (self.settings["refresh_token"],)),
+                show=True,
+            )
             return
         summary = sync_summary(len(jobs), len(removals))
         self.progress.setRange(0, summary["total"] or 1)
@@ -489,7 +500,11 @@ class SyncDashboard(QDialog):
 
     def sync_failed(self, message):
         self.finish_thread()
-        error_dialog(self, "Synchronisierung fehlgeschlagen / Synchronization failed", message, show=True)
+        error_dialog(
+            self, "Synchronisierung fehlgeschlagen / Synchronization failed",
+            sanitize_error(message, (self.values()["refresh_token"],)),
+            show=True,
+        )
 
     def finish_thread(self):
         save_settings(self.values())

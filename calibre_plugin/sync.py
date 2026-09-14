@@ -6,6 +6,11 @@ import traceback
 import unicodedata
 from collections.abc import Iterable
 
+try:
+    from .tolino import sanitize_error
+except ImportError:
+    from tolino import sanitize_error
+
 
 def iter_book_ids(database):
     """Yield each existing Calibre book id once, across supported DB APIs."""
@@ -367,11 +372,7 @@ def redact_sensitive(value):
         return [redact_sensitive(item) for item in value]
     if isinstance(value, bytes):
         return "[%d bytes]" % len(value)
-    text = str(value)
-    text = re.sub(r"(?i)(authorization\s*:\s*)([^,;]+)", r"\1[REDACTED]", text)
-    text = re.sub(r"(?i)((?:access|refresh)[_-]?token|password|secret)\s*[=:]\s*[^\s,;]+",
-                  r"\1=[REDACTED]", text)
-    return text
+    return sanitize_error(value)
 
 
 def format_diagnostic_report(results):
@@ -386,9 +387,10 @@ def format_diagnostic_report(results):
                                     default=str))
         if result.get("error_type"):
             lines.append("Fehlertyp: %s" % result["error_type"])
-            lines.append("Fehlermeldung: %s" % result.get("error_message", ""))
+            lines.append("Fehlermeldung: %s" %
+                         sanitize_error(result.get("error_message", "")))
             lines.append("Traceback:")
-            lines.extend(str(result.get("traceback", "")).rstrip().splitlines())
+            lines.extend(sanitize_error(result.get("traceback", "")).rstrip().splitlines())
         lines.append("")
     return "\n".join(lines)
 

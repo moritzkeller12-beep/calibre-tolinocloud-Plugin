@@ -1,6 +1,6 @@
 # Tolino Cloud Sync for Calibre
 
-Plugin version: **0.3.2**. Author: **moritzkeller12-beep**.
+Plugin version: **0.3.3**. Author: **moritzkeller12-beep**.
 
 Native Python plugin for synchronizing an open Calibre library with the
 Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
@@ -97,6 +97,12 @@ whitespace and outer quotes are removed automatically. Never include the token
 itself in a diagnostic report. The report shows only its category, length, a
 four-character prefix, normalization flags, partner configuration, and HTTP
 status/error text.
+
+**Security warning:** Treat refresh tokens that appeared in an old Calibre
+traceback, error dialog, or diagnostic report as compromised. Revoke or
+replace them at the partner and configure the new token. Current errors and
+tracebacks redact configured refresh/access tokens, authorization values,
+Bearer/JWT-shaped credentials, and token-like server echoes.
 
 The dialog also provides **Im Browser anmelden**. The reference
 implementations register partner-specific Web Reader URLs, not loopback

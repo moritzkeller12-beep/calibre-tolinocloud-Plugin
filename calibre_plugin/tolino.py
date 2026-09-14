@@ -69,6 +69,57 @@ BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 OAUTH_STATE_TTL = 300
 
 
+_JWT_PATTERN = re.compile(
+    r"\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
+)
+_BEARER_PATTERN = re.compile(
+    r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"
+)
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)\b(access[_-]?token|refresh[_-]?token|authorization|"
+    r"t_auth_token|password|secret)\b\s*[:=]\s*"
+    r"(?:Bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^,\s;}&]+)"
+)
+
+
+def sanitize_error(value, secrets=()):
+    """Remove configured credentials and token-shaped values from any output."""
+    if isinstance(value, dict):
+        return {
+            str(key): "[REDACTED]" if (
+                "token" in str(key).casefold()
+                or str(key).casefold() in {
+                    "authorization", "password", "secret", "t_auth_token"
+                }
+            ) else sanitize_error(item, secrets)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_error(item, secrets) for item in value]
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    text = str(value)
+    candidates = set()
+    for secret in secrets:
+        if secret is None:
+            continue
+        raw = str(secret)
+        trimmed = raw.strip()
+        if trimmed:
+            candidates.update((raw, trimmed, '"' + trimmed + '"', "'" + trimmed + "'"))
+            if len(trimmed) >= 2 and trimmed[0] == trimmed[-1] and trimmed[0] in "\"'":
+                normalized = trimmed[1:-1].strip()
+                candidates.update((normalized, '"' + normalized + '"',
+                                   "'" + normalized + "'"))
+    for secret in sorted(candidates, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    text = _CREDENTIAL_ASSIGNMENT.sub(
+        lambda match: "%s=[REDACTED]" % match.group(1), text
+    )
+    text = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
+    return _JWT_PATTERN.sub("[REDACTED]", text)
+
+
 def normalize_refresh_token(value):
     """Normalize a token copied from a browser field without exposing it."""
     raw = "" if value is None else str(value)
@@ -179,10 +230,7 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
 
 def redact_error_text(value):
     """Keep provider status text while removing credential-shaped values."""
-    text = str(value)
-    text = re.sub(r"(?i)(access[_-]?token|refresh[_-]?token|authorization|password|secret)"
-                  r"\s*[=:]\s*[^\s,;}&]+", r"\1=[REDACTED]", text)
-    return text[:500]
+    return sanitize_error(value)[:500]
 
 
 class TolinoClient:
@@ -216,7 +264,8 @@ class TolinoClient:
             "hardware_id": self.hardware,
             "reseller_id": str(self.partner_id),
             "http_status": self.last_http_status,
-            "error_text": self.last_error_text,
+            "error_text": sanitize_error(self.last_error_text,
+                                         (self.refresh, self.access)),
             **self.token_diagnostics,
         }
 
@@ -287,9 +336,23 @@ class TolinoClient:
                 self.last_error_text = None
                 raw = response.read()
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:500]
+            raw_detail = exc.read().decode("utf-8", "replace")
             self.last_http_status = exc.code
-            self.last_error_text = redact_error_text(detail)
+            try:
+                payload = json.loads(raw_detail)
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                safe_detail = {
+                    key: payload[key] for key in ("error", "error_description")
+                    if key in payload
+                }
+                detail = json.dumps(safe_detail, ensure_ascii=False, sort_keys=True)
+            else:
+                detail = raw_detail
+            self.last_error_text = sanitize_error(
+                detail, (self.refresh, self.access)
+            )[:500]
             if exc.code == 401 and authenticated and self.refresh and _retry:
                 self.access = None
                 self.login()
@@ -300,7 +363,8 @@ class TolinoClient:
                 raise TolinoAuthError("Tolino rejected authentication (%s)." % exc.code)
             raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
         except (URLError, OSError) as exc:
-            raise TolinoApiError("Tolino request failed: %s" % exc)
+            raise TolinoApiError("Tolino request failed: %s" %
+                                 sanitize_error(exc, (self.refresh, self.access)))
         if not raw:
             return {}
         try:
