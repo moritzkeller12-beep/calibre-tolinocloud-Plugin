@@ -27,9 +27,13 @@ This repository also contains a native Python plugin in `calibre_plugin/`. It
 syncs directly with the open Calibre library and does not require the Docker,
 Bun, or Content Server setup above.
 
-1. Run `python build_plugin.py` from this repository.
+1. Run `python build_plugin.py` from this repository. This writes the
+   installable archive to the repository root as
+   `./tolino_cloud_sync.zip`.
 2. In Calibre choose **Preferences > Plugins > Load plugin from file** and
-   select `tolino_cloud_sync.zip`, then restart Calibre.
+   select exactly `tolino_cloud_sync.zip`, then restart Calibre. The archive
+   contains `__init__.py`, `ui.py`, `config.py`, `sync.py`, and `tolino.py`
+   directly at its root, as required by Calibre 7.x.
 3. Use the **Tolino Cloud Sync** toolbar/menu action to configure the partner,
    a Tolino refresh token (recommended) or login, preferred EPUB/PDF formats,
    cover uploads, and the optional deletion switch.

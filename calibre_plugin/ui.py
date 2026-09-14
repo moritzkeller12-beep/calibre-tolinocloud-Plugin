@@ -7,9 +7,15 @@ from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                      QFormLayout, QLineEdit, QMessageBox, QProgressDialog,
                      QPushButton)
 
-from .config import PREFERENCES, save_settings
-from .sync import load_state, plan_sync
-from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
+try:
+    from .config import PREFERENCES, save_settings
+    from .sync import load_state, plan_sync
+    from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
+except ImportError:
+    # The installable archive is intentionally flat at its top level.
+    from config import PREFERENCES, save_settings
+    from sync import load_state, plan_sync
+    from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
 
 class ConfigDialog(QDialog):
