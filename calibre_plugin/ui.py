@@ -9,17 +9,17 @@ try:
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
                          QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QTextEdit, QObject, pyqtSignal)
+                         QTextEdit, QObject, QInputDialog, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
                          QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QTextEdit, QObject, Signal as pyqtSignal)
+                         QTextEdit, QObject, QInputDialog, Signal as pyqtSignal)
 
 try:
-    from .config import save_settings, settings
+    from .config import save_account, save_settings, settings
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
                        load_state, metadata_by_id, plan_sync,
                        selected_book_ids, sync_summary, normalize_formats,
@@ -31,7 +31,7 @@ try:
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error)
 except ImportError:
-    from config import save_settings, settings
+    from config import save_account, save_settings, settings
     from sync import (compare_inventory, format_error_details, iter_book_ids,
                       load_state, metadata_by_id, plan_sync,
                       selected_book_ids, sync_summary, normalize_formats,
@@ -278,7 +278,9 @@ class SyncWorker(QObject):
 
     def persist_refresh_token(self, refresh):
         self.settings["refresh_token"] = refresh
-        save_settings({"refresh_token": refresh, "hardware_id": self.settings["hardware_id"]})
+        save_account(self.settings["account_name"], {
+            "refresh_token": refresh, "hardware_id": self.settings["hardware_id"],
+        }, active=self.settings["account_name"])
 
 
 class SyncDashboard(QDialog):
@@ -294,6 +296,12 @@ class SyncDashboard(QDialog):
 
         account = QGroupBox("Tolino-Konto / Tolino account")
         account_form = QFormLayout(account)
+        self.account_select = QComboBox()
+        self.account_new = QPushButton("Neues Konto / New account")
+        self.account_remove = QPushButton("Konto löschen / Remove")
+        account_buttons = QHBoxLayout()
+        account_buttons.addWidget(self.account_new)
+        account_buttons.addWidget(self.account_remove)
         self.partner = QComboBox()
         for pid, partner in sorted(PARTNERS.items()):
             self.partner.addItem("%s - %s" % (pid, partner["name"]), pid)
@@ -303,6 +311,11 @@ class SyncDashboard(QDialog):
         self.status = QLabel()
         self.browser = QPushButton("Im Browser anmelden / Sign in in browser")
         self.browser.clicked.connect(self.browser_login)
+        self.account_select.currentIndexChanged.connect(self.account_changed)
+        self.account_new.clicked.connect(self.new_account)
+        self.account_remove.clicked.connect(self.remove_account)
+        account_form.addRow("Konto / Account", self.account_select)
+        account_form.addRow("", account_buttons)
         account_form.addRow("Partner", self.partner)
         account_form.addRow("Hardware ID", self.hardware)
         account_form.addRow("Refresh token", self.refresh)
@@ -352,6 +365,48 @@ class SyncDashboard(QDialog):
         root.addWidget(buttons)
         self.load_values()
 
+    def _save_visible_account(self):
+        if not getattr(self, "account_name", None):
+            return
+        save_account(self.account_name, self.values(), active=self.account_name)
+
+    def account_changed(self, index):
+        if index < 0 or not getattr(self, "account_names", None):
+            return
+        self._save_visible_account()
+        self.account_name = self.account_select.itemData(index)
+        account = next(item for item in settings()["accounts"]
+                       if item["name"] == self.account_name)
+        self.partner.setCurrentIndex(max(0, self.partner.findData(account["partner_id"])))
+        self.hardware.setText(account["hardware_id"] or hardware_id())
+        self.refresh.setText(account["refresh_token"])
+        self.update_status()
+
+    def new_account(self):
+        self._save_visible_account()
+        base, accepted = QInputDialog.getText(
+            self, "Neues Konto / New account", "Name / Account name:")
+        base = str(base).strip()
+        if not accepted or not base:
+            return
+        names = set(self.account_names)
+        name, number = base, 2
+        while name in names:
+            name = "%s-%d" % (base, number)
+            number += 1
+        save_account(name, {"name": name}, active=name)
+        self.load_values()
+        self.account_select.setCurrentIndex(self.account_select.findData(name))
+
+    def remove_account(self):
+        if len(self.account_names) <= 1:
+            return
+        name = self.account_name
+        remaining = [item for item in settings()["accounts"] if item["name"] != name]
+        save_settings({"accounts": remaining,
+                       "active_account": remaining[0]["name"]})
+        self.load_values()
+
     def debug_diagnose(self):
         values = self.values()
         results = diagnose_preparation(
@@ -364,6 +419,15 @@ class SyncDashboard(QDialog):
 
     def load_values(self):
         values = settings()
+        self.account_names = [item["name"] for item in values["accounts"]]
+        self.account_select.blockSignals(True)
+        self.account_select.clear()
+        for name in self.account_names:
+            self.account_select.addItem(name, name)
+        self.account_name = values["active_account"]
+        self.account_select.setCurrentIndex(
+            max(0, self.account_select.findData(self.account_name)))
+        self.account_select.blockSignals(False)
         self.partner.setCurrentIndex(max(0, self.partner.findData(values["partner_id"])))
         self.hardware.setText(values["hardware_id"] or hardware_id())
         self.refresh.setText(values["refresh_token"])
@@ -383,14 +447,15 @@ class SyncDashboard(QDialog):
 
     def persist_refresh_token(self, refresh):
         self.set_refresh_token(refresh)
-        save_settings({
+        save_account(self.account_name, {
             "refresh_token": self.refresh.text(),
             "hardware_id": self.hardware.text().strip() or hardware_id(),
-        })
+        }, active=self.account_name)
 
     def values(self):
         refresh_token, _ = normalize_refresh_token(self.refresh.text())
         return {
+            "account_name": self.account_name,
             "partner_id": self.partner.currentData(),
             "hardware_id": self.hardware.text().strip() or hardware_id(),
             "refresh_token": refresh_token,
@@ -540,7 +605,10 @@ class SyncDashboard(QDialog):
 
     def sync_completed(self, state, refresh, updates):
         update_tolino_ids(self.gui.current_db, updates)
-        save_settings({"state": state, "refresh_token": refresh, "hardware_id": self.hardware.text().strip()})
+        save_account(self.account_name, {
+            "state": state, "refresh_token": refresh,
+            "hardware_id": self.hardware.text().strip() or hardware_id(),
+        }, active=self.account_name)
         self.finish_thread()
         info_dialog(self, "Tolino Cloud Sync", "Synchronisierung abgeschlossen / Synchronization complete.",
                     show_copy_button=False)
@@ -555,7 +623,7 @@ class SyncDashboard(QDialog):
         )
 
     def finish_thread(self):
-        save_settings(self.values())
+        self._save_visible_account()
         if self.thread:
             self.thread.quit()
             self.thread.wait()
@@ -577,7 +645,7 @@ class SyncDashboard(QDialog):
             self.cancel_sync()
             self.thread.quit()
             self.thread.wait()
-        save_settings(self.values())
+        self._save_visible_account()
         event.accept()
 
 

@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.5.0**. Autor: **moritzkeller12-beep**.
+Plugin-Version: **0.6.0**. Autor: **moritzkeller12-beep**.
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -10,7 +10,7 @@ angezeigt; die technische `deliverableId` steht separat als Tolino-ID.
 ## Voraussetzungen
 
 - Calibre **7.6 oder neuer**
-- ein Tolino-Web-Reader-Refresh-Token
+- ein oder mehrere Tolino-Web-Reader-Refresh-Tokens
 - Netzwerkzugriff auf die Tolino-Dienste
 
 ## Installation
@@ -37,16 +37,22 @@ technische ID separat.
 
 Im Dialog **Tolino Cloud Sync**:
 
-1. Partner **8 – Books.ch / Orell Füssli** auswählen.
-2. Eine stabile Hardware-ID übernehmen oder selbst festlegen.
-3. Den aktuellen `refresh_token` aus den Web-Reader-Netzwerkanfragen
+1. Das aktive, benannte Konto auswählen (mit **Neues Konto** können weitere
+   Konten angelegt werden). Pro Konto werden Partner, Hardware-ID und
+   `refresh_token` getrennt gespeichert.
+2. Partner **8 – Books.ch / Orell Füssli** auswählen.
+3. Eine stabile Hardware-ID übernehmen oder selbst festlegen.
+4. Den aktuellen `refresh_token` aus den Web-Reader-Netzwerkanfragen
    einfügen. Umgebende Leerzeichen und äußere Anführungszeichen werden
    entfernt.
-4. Bevorzugte Formate festlegen, normalerweise EPUB und PDF. Cover-Upload
+5. Bevorzugte Formate festlegen, normalerweise EPUB und PDF. Cover-Upload
    und Löschungen sind optional.
 
-Der Refresh-Token wird von Calibre gespeichert und bei einer Token-Rotation
-sofort aktualisiert. Ein Access-Token ist kein Ersatz für einen
+Der Refresh-Token wird kontenbezogen von Calibre gespeichert und bei einer
+Token-Rotation sofort aktualisiert. Auch der Synchronisationsstatus und die
+Tolino-IDs werden pro Konto geführt; pro Synchronisierung ist genau ein Konto
+aktiv. Alte Einzelkonto-Einstellungen werden beim ersten Öffnen automatisch in
+ein Konto `default` migriert. Ein Access-Token ist kein Ersatz für einen
 Refresh-Token. Tokens niemals in Tickets, Screenshots, Logs oder
 Diagnoseausgaben veröffentlichen; alte offengelegte Tokens beim Partner
 widerrufen oder ersetzen.

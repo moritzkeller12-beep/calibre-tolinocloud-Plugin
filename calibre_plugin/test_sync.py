@@ -767,6 +767,45 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
+    def test_legacy_settings_migrate_to_named_default_account(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.PREFERENCES.update({
+                "partner_id": 8, "hardware_id": "hw-a",
+                "refresh_token": "token-a", "state": {"u": {"tolino_id": "a"}},
+            })
+            values = config.settings()
+            self.assertEqual("default", values["active_account"])
+            self.assertEqual([{"name": "default", "partner_id": 8,
+                               "hardware_id": "hw-a", "refresh_token": "token-a",
+                               "username": "", "password": "",
+                               "state": {"u": {"tolino_id": "a"}}}],
+                             values["accounts"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_named_accounts_keep_tokens_and_state_isolated(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.settings()
+            config.save_account("alice", {"partner_id": 3, "refresh_token": "a",
+                                          "state": {"u": {"tolino_id": "a"}}},
+                                active="alice")
+            config.save_account("bob", {"partner_id": 8, "refresh_token": "b",
+                                        "state": {"u": {"tolino_id": "b"}}},
+                                active="bob")
+            values = config.settings()
+            accounts = {item["name"]: item for item in values["accounts"]}
+            self.assertEqual("bob", values["active_account"])
+            self.assertEqual("a", accounts["alice"]["state"]["u"]["tolino_id"])
+            self.assertEqual("b", accounts["bob"]["state"]["u"]["tolino_id"])
+            self.assertEqual("a", accounts["alice"]["refresh_token"])
+            self.assertEqual("b", accounts["bob"]["refresh_token"])
+        finally:
+            config.PREFERENCES = original
+
     def test_zip_entrypoint_uses_calibre_namespace_package(self):
         archive = Path(__file__).parent.parent / "tolino_cloud_sync.zip"
         if not archive.exists():
