@@ -1,9 +1,0 @@
-services:
-  tolino-sync:
-    build: .
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      # 
-      - ./sync/:/app/sync
