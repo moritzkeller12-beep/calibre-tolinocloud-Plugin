@@ -1,6 +1,6 @@
 import unittest
 
-from .sync import fingerprint, plan_sync
+from .sync import fingerprint, plan_sync, sync_summary
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
 
@@ -49,6 +49,10 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_redirect_uri_is_loopback_only(self):
         self.assertEqual("http://127.0.0.1:4321/callback", callback_redirect_uri(4321))
+
+    def test_sync_summary_is_deterministic_for_dashboard(self):
+        self.assertEqual({"uploads": 2, "deletions": 1, "errors": 0, "total": 3},
+                         sync_summary(2, 1))
 
 
 if __name__ == "__main__":

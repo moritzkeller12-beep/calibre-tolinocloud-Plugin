@@ -47,3 +47,12 @@ def load_state(raw):
     except (TypeError, ValueError):
         return {}
 
+
+def sync_summary(upload_count, delete_count, error_count=0):
+    """Return stable UI text data without depending on Qt or Calibre."""
+    return {
+        "uploads": int(upload_count),
+        "deletions": int(delete_count),
+        "errors": int(error_count),
+        "total": int(upload_count) + int(delete_count),
+    }
