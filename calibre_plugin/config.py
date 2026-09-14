@@ -31,6 +31,7 @@ DEFAULTS = {
     "preferred_formats": ["EPUB", "PDF"],
     "upload_covers": True,
     "enable_deletions": False,
+    "use_tolino_column": True,
     "tolino_column_notice_shown": False,
     "accounts": [],
     "active_account": DEFAULT_ACCOUNT_NAME,
@@ -101,6 +102,7 @@ def settings():
         for key, value in current.items():
             PREFERENCES[key] = value
         for key in ("preferred_formats", "upload_covers", "enable_deletions",
+                    "use_tolino_column",
                     "tolino_column_notice_shown"):
             PREFERENCES[key] = values[key]
         PREFERENCES.commit()
@@ -136,6 +138,7 @@ def save_settings(values):
     """Persist global options and the selected account (legacy-compatible)."""
     current = settings()
     for key in ("preferred_formats", "upload_covers", "enable_deletions",
+                "use_tolino_column",
                 "tolino_column_notice_shown"):
         if key in values:
             PREFERENCES[key] = values[key]

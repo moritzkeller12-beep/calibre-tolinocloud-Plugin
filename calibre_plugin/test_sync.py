@@ -310,8 +310,17 @@ class SyncPlanTests(unittest.TestCase):
             field_metadata = {}
 
         self.assertFalse(custom_column_available(Database()))
-        with self.assertRaises(AttributeError):
-            update_tolino_ids(Database(), [(7, "bosh_8_new")])
+        self.assertEqual(0, update_tolino_ids(Database(), [(7, "bosh_8_new")]))
+
+    def test_custom_column_can_be_disabled_even_when_present(self):
+        class Database:
+            field_metadata = {TOLINO_COLUMN: {"datatype": "text"}}
+
+            def set_field(self, field, values):
+                raise AssertionError("disabled column must not be written")
+
+        self.assertEqual(0, update_tolino_ids(
+            Database(), [(7, "bosh_8_new")], enabled=False))
 
     def test_metadata_tolino_id_accepts_calibre_style_mapping(self):
         self.assertEqual("bosh_8_id", metadata_tolino_id({"#tolino_id": " bosh_8_id "}))
@@ -750,6 +759,7 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual(config.DEFAULTS["partner_id"], values["partner_id"])
             self.assertEqual(config.DEFAULTS["preferred_formats"], values["preferred_formats"])
             self.assertEqual(config.DEFAULTS["state"], values["state"])
+            self.assertTrue(values["use_tolino_column"])
             self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
         finally:
             config.PREFERENCES = original
@@ -763,7 +773,19 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual("configured-token", values["refresh_token"])
             self.assertEqual("", values["hardware_id"])
             self.assertFalse(values["enable_deletions"])
+            self.assertTrue(values["use_tolino_column"])
             self.assertIsInstance(values["state"], dict)
+        finally:
+            config.PREFERENCES = original
+
+    def test_optional_column_setting_survives_preferences_migration(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.PREFERENCES["use_tolino_column"] = False
+            values = config.settings()
+            self.assertFalse(values["use_tolino_column"])
+            self.assertFalse(config.PREFERENCES["use_tolino_column"])
         finally:
             config.PREFERENCES = original
 
@@ -782,6 +804,7 @@ class SyncPlanTests(unittest.TestCase):
                                "username": "", "password": "",
                                "state": {"u": {"tolino_id": "a"}}}],
                              values["accounts"])
+            self.assertTrue(values["use_tolino_column"])
         finally:
             config.PREFERENCES = original
 

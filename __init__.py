@@ -7,7 +7,7 @@ except ImportError:
 class TolinoSyncPlugin(InterfaceActionBase):
     name = "Tolino Cloud Sync"
     description = "Synchronize the Calibre library with Tolino Cloud"
-    version = (0, 6, 0)
+    version = (0, 7, 0)
     author = "moritzkeller12-beep"
     type = "InterfaceAction"
     supported_platforms = ["linux", "windows", "osx"]

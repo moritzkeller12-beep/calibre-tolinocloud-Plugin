@@ -289,6 +289,7 @@ class SyncDashboard(QDialog):
         self.gui = gui
         self.thread = None
         self.worker = None
+        self.sync_column_enabled = False
         self.temp_files = []
         self.setWindowTitle("Tolino Cloud Sync")
         self.setMinimumWidth(560)
@@ -328,6 +329,8 @@ class SyncDashboard(QDialog):
         self.formats = QLineEdit()
         self.covers = QCheckBox("Covers hochladen / Upload covers")
         self.deletions = QCheckBox("Löschungen erlauben / Allow deletions")
+        self.tolino_column = QCheckBox(
+            "Tolino-ID-Spalte verwenden, wenn vorhanden / Use Tolino ID column when present")
         self.compare_authors = QCheckBox("Autor / Author (nur Vergleich/Filter)")
         self.compare_title = QCheckBox("Buchtitel / Title (nur Vergleich/Filter)")
         self.compare_isbn = QCheckBox("ISBN (nur Vergleich/Filter)")
@@ -341,6 +344,7 @@ class SyncDashboard(QDialog):
         option_form.addRow("", self.compare_title)
         option_form.addRow("", self.compare_isbn)
         option_form.addRow("", self.deletions)
+        option_form.addRow("", self.tolino_column)
         root.addWidget(options)
 
         self.progress_label = QLabel("Bereit / Ready")
@@ -368,6 +372,13 @@ class SyncDashboard(QDialog):
     def _save_visible_account(self):
         if not getattr(self, "account_name", None):
             return
+        save_settings({
+            "preferred_formats": [x.strip().upper()
+                                  for x in self.formats.text().split(",") if x.strip()],
+            "upload_covers": self.covers.isChecked(),
+            "enable_deletions": self.deletions.isChecked(),
+            "use_tolino_column": self.tolino_column.isChecked(),
+        })
         save_account(self.account_name, self.values(), active=self.account_name)
 
     def account_changed(self, index):
@@ -434,6 +445,7 @@ class SyncDashboard(QDialog):
         self.formats.setText(", ".join(values["preferred_formats"]))
         self.covers.setChecked(values["upload_covers"])
         self.deletions.setChecked(values["enable_deletions"])
+        self.tolino_column.setChecked(values["use_tolino_column"])
         self.update_status()
 
     def update_status(self):
@@ -464,6 +476,7 @@ class SyncDashboard(QDialog):
             "preferred_formats": [x.strip().upper() for x in self.formats.text().split(",") if x.strip()],
             "upload_covers": self.covers.isChecked(),
             "enable_deletions": self.deletions.isChecked(),
+            "use_tolino_column": self.tolino_column.isChecked(),
             "state": settings()["state"],
         }
 
@@ -488,18 +501,10 @@ class SyncDashboard(QDialog):
             QMessageBox.warning(self, "Konfiguration / Configuration",
                                 "Bitte zuerst einen Refresh-Token konfigurieren.")
             return
-        if not custom_column_available(self.gui.current_db):
-            message = (
-                "Die benutzerdefinierte Calibre-Spalte %s fehlt.\n\n"
-                "Bitte einmalig unter Einstellungen > Eigene Spalten eine "
-                "Text-Spalte mit Bezeichnung „%s“ und Lookup-Namen %s anlegen. "
-                "Danach die Synchronisierung erneut starten. Es werden keine "
-                "Tabellen direkt verändert."
-            ) % (TOLINO_COLUMN, TOLINO_COLUMN_LABEL, TOLINO_COLUMN)
-            QMessageBox.information(self, "Tolino-ID-Spalte einrichten", message)
-            if not settings["tolino_column_notice_shown"]:
-                save_settings({"tolino_column_notice_shown": True})
-            return
+        self.sync_column_enabled = (
+            settings["use_tolino_column"] and
+            custom_column_available(self.gui.current_db)
+        )
         try:
             metadata = {}
             for book_id in iter_book_ids(self.gui.current_db):
@@ -513,7 +518,7 @@ class SyncDashboard(QDialog):
                                                             _metadata_value(item, "identifiers"))),
                     "formats": _metadata_value(item, "formats"),
                     "last_modified": str(_metadata_value(item, "last_modified")),
-                    "tolino_id": metadata_tolino_id(item),
+                    "tolino_id": metadata_tolino_id(item) if self.sync_column_enabled else "",
                 }
             for item in metadata.values():
                 item["formats"] = normalize_formats(item["formats"])
@@ -534,7 +539,8 @@ class SyncDashboard(QDialog):
             comparison = compare_inventory(
                 metadata, state, client.inventory(), settings["preferred_formats"],
                 comparison_fields,
-                use_metadata_ids=len(settings()["accounts"]) == 1,
+                use_metadata_ids=(self.sync_column_enabled and
+                                  len(settings()["accounts"]) == 1),
             )
             dialog = InventoryDialog(comparison, self)
             if dialog.exec() != QDialog.Accepted:
@@ -605,7 +611,7 @@ class SyncDashboard(QDialog):
             self.cancel.setEnabled(False)
 
     def sync_completed(self, state, refresh, updates):
-        update_tolino_ids(self.gui.current_db, updates)
+        update_tolino_ids(self.gui.current_db, updates, enabled=self.sync_column_enabled)
         save_account(self.account_name, {
             "state": state, "refresh_token": refresh,
             "hardware_id": self.hardware.text().strip() or hardware_id(),

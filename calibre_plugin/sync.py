@@ -38,9 +38,9 @@ def custom_column_available(database):
     return TOLINO_COLUMN in fields
 
 
-def update_tolino_ids(database, updates):
-    """Persist IDs through Calibre's supported set_field API, never SQL."""
-    if not updates:
+def update_tolino_ids(database, updates, enabled=True):
+    """Persist IDs through Calibre's supported set_field API when enabled."""
+    if not enabled or not updates or not custom_column_available(database):
         return 0
     setter = getattr(database, "set_field", None)
     if not callable(setter):
