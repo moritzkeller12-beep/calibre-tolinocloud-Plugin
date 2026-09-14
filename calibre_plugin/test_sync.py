@@ -242,10 +242,36 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_safe_format_path_falls_back_for_old_signature_and_stale_ids(self):
         class OldDatabase:
+            def __init__(self):
+                self.calls = []
+
             def format_abspath(self, book_id, format_name):
+                self.calls.append((book_id, format_name))
+                raise AssertionError("view-index resolver must not be called")
+
+        class NewApi:
+            def __init__(self):
+                self.calls = []
+
+            def format_abspath(self, book_id, format_name):
+                self.calls.append((book_id, format_name))
                 return ("/library/book.epub", format_name)
 
-        self.assertEqual("/library/book.epub", safe_format_path(OldDatabase(), 2, "EPUB"))
+        database = OldDatabase()
+        database.new_api = NewApi()
+        self.assertEqual("/library/book.epub", safe_format_path(database, 2, "EPUB"))
+        self.assertEqual([], database.calls)
+        self.assertEqual([(2, "EPUB")], database.new_api.calls)
+
+        with self.assertRaisesRegex(ValueError, "ID-safe resolver"):
+            safe_format_path(OldDatabase(), 2, "EPUB")
+
+        class BrokenDatabase:
+            def format_abspath(self, book_id, format_name, index_is_id=False):
+                raise TypeError("internal resolver failure")
+
+        with self.assertRaisesRegex(TypeError, "internal resolver failure"):
+            safe_format_path(BrokenDatabase(), 2, "EPUB")
 
         class StaleDatabase:
             def has_id(self, book_id):
@@ -271,12 +297,18 @@ class SyncPlanTests(unittest.TestCase):
 
             class Database:
                 def format_abspath(self, book_id, format_name):
+                    raise AssertionError("view-index resolver must not be called")
+
+            class NewApi:
+                def format_abspath(self, book_id, format_name):
                     if format_name == "EPUB":
                         return book_file.name
                     return ()
 
+            database = Database()
+            database.new_api = NewApi()
             report = _diagnostic_formats(
-                Database(), {1: {"formats": FormatsList()}})
+                database, {1: {"formats": FormatsList()}})
             self.assertEqual(["EPUB", "PDF"], report["1"]["metadata_formats"])
             self.assertEqual("found", report["1"]["paths"]["EPUB"]["status"])
             self.assertEqual("missing", report["1"]["paths"]["PDF"]["status"])

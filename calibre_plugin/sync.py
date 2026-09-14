@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -174,7 +175,7 @@ def unpack_upload_record(record):
 
 
 def safe_format_path(database, book_id, format_name):
-    """Resolve a real Calibre id to a format path across DB API variants."""
+    """Resolve a real Calibre id without falling back to view-index semantics."""
     if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
         raise ValueError("Invalid Calibre book id: %r" % (book_id,))
     if not isinstance(format_name, str):
@@ -189,14 +190,24 @@ def safe_format_path(database, book_id, format_name):
     if not callable(resolver):
         raise ValueError("Calibre database does not provide format_abspath().")
     try:
-        path = resolver(book_id, format_name, index_is_id=True)
-    except TypeError:
-        # Older Calibre-compatible stubs and wrappers do not expose the keyword.
-        try:
-            path = resolver(book_id, format_name)
-        except (IndexError, KeyError, OSError, ValueError) as exc:
-            raise ValueError("Calibre returned no path for book %r format %s" %
-                             (book_id, format_name)) from exc
+        parameters = inspect.signature(resolver).parameters
+    except (TypeError, ValueError):
+        parameters = None
+    supports_id_flag = parameters is None or "index_is_id" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in (parameters.values() if parameters is not None else ())
+    )
+    if not supports_id_flag:
+        direct_api = getattr(getattr(database, "new_api", None),
+                             "format_abspath", None)
+        if not callable(direct_api):
+            raise ValueError(
+                "Calibre format API does not expose an ID-safe resolver.")
+    try:
+        if supports_id_flag:
+            path = resolver(book_id, format_name, index_is_id=True)
+        else:
+            path = direct_api(book_id, format_name)
     except (IndexError, KeyError, OSError, ValueError) as exc:
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name)) from exc

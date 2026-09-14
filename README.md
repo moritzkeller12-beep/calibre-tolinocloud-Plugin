@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.7.1**. Autor: **moritzkeller12-beep**.
+Plugin-Version: **0.7.2**. Autor: **moritzkeller12-beep**.
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -22,8 +22,10 @@ python3 build_plugin.py
 ```
 
 Die Datei `tolino_cloud_sync.zip` enthält die installierbare Calibre-
-Plugin-Struktur. In Calibre **Einstellungen > Plugins > Plugin aus Datei
-laden** auswählen und Calibre anschließend neu starten.
+Plugin-Struktur. Nach einem Upgrade die alte Plugin-Version in Calibre
+entfernen und `tolino_cloud_sync.zip` erneut laden, damit kein gecachtes
+Archiv verwendet wird. In Calibre **Einstellungen > Plugins > Plugin aus
+Datei laden** auswählen und Calibre anschließend neu starten.
 
 ## Einrichtung
 
