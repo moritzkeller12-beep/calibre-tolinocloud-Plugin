@@ -43,8 +43,12 @@ PARTNERS = {
     8: {"name": "Books.ch / orellfuessli.ch", "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.orellfuessli.ch/auth/oauth2/token",
-        "auth_url": "https://www.orellfuessli.ch/de.thalia.ecp.authservice.application/oauth2/authorize",
-        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
+        "auth_url": "https://www.orellfuessli.ch/auth/oauth2/autologin",
+        "reader_url": "https://webreader.mytolino.com/library/",
+        "x_buchde.mandant_id": "37",
+        "x_buchde.skin_id": "17",
+        "client_type": "TOLINO_WEBREADER",
+        "client_version": "5.2.0"},
     13: {
         "name": "Hugendubel.de",
         "client_id": "4c20de744aa8b83b79b692524c7ec6ae",
@@ -207,6 +211,9 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         "redirect_uri": redirect_uri,
         "state": state,
     }
+    for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+        if partner.get(key):
+            params[key] = partner[key]
     if not webbrowser.open(partner["auth_url"] + "?" + urlencode(params)):
         server.server_close()
         raise TolinoAuthError("Could not open the system browser.")
@@ -319,6 +326,9 @@ class TolinoClient:
                 "hardware_id": self.hardware,
                 "reseller_id": str(self.partner_id),
             })
+            for key in ("client_type", "client_version"):
+                if self.partner.get(key):
+                    headers[key] = self.partner[key]
         if data is not None:
             if form:
                 body = urlencode(data).encode("utf-8")

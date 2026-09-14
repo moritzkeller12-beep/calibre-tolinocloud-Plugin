@@ -1,6 +1,6 @@
 # Tolino Cloud Sync for Calibre
 
-Plugin version: **0.3.4**. Author: **moritzkeller12-beep**.
+Plugin version: **0.3.5**. Author: **moritzkeller12-beep**.
 
 Native Python plugin for synchronizing an open Calibre library with the
 Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
@@ -87,11 +87,17 @@ partner's Web Reader network requests. Tokens, credentials, and sync state are
 stored through Calibre's `JSONConfig` mechanism and are never logged.
 If the explicit Tolino test reports `HTTP 400 invalid_grant` / `Invalid refresh
 token`, the configured token is expired, invalid, or is not a refresh token.
-For partner 8 the verified refresh request is an URL-encoded form with
-`client_id=webreader`, `grant_type=refresh_token`, `scope=SCOPE_BOSH`, and
-`https://www.orellfuessli.ch/auth/oauth2/token`; authenticated API requests use
-the selected partner ID as `reseller_id`. A Web Reader `access_token` cannot be
-used as a refresh-token fallback. Copy the Web Reader request's
+For partner 8 the verified refresh request is an URL-encoded form with exactly
+`client_id=webreader`, `grant_type=refresh_token`, `refresh_token=<value>`,
+and `scope=SCOPE_BOSH` sent to
+`https://www.orellfuessli.ch/auth/oauth2/token` with
+`Content-Type: application/x-www-form-urlencoded`. Authenticated API requests
+use `reseller_id=8`, `client_type=TOLINO_WEBREADER`, and
+`client_version=5.2.0`. The Web Reader authorization endpoint is
+`https://www.orellfuessli.ch/auth/oauth2/autologin` and its registered redirect
+URI is `https://webreader.mytolino.com/library/`; the authorization parameters
+also include `x_buchde.mandant_id=37` and `x_buchde.skin_id=17`.
+A Web Reader `access_token` cannot be used as a refresh-token fallback. Copy the Web Reader request's
 `refresh_token` value, including its complete value, and paste it; surrounding
 whitespace and outer quotes are removed automatically. Never include the token
 itself in a diagnostic report. The report shows only its category, length, a
@@ -104,13 +110,14 @@ replace them at the partner and configure the new token. Current errors and
 tracebacks redact configured refresh/access tokens, authorization values,
 Bearer/JWT-shaped credentials, and token-like server echoes.
 
-The dialog also provides **Im Browser anmelden**. The reference
-implementations register partner-specific Web Reader URLs, not loopback
-redirects. Therefore the current partners deliberately report that a local
-browser callback is not supported instead of pretending an unregistered OAuth
-flow works. The implementation retains loopback-only callback validation with
-random state and a five-minute expiry for a partner only when its configuration
-explicitly proves support.
+The dialog also provides **Im Browser anmelden**. The Orell-Füssli reference
+flow uses the Web Reader redirect above, not a loopback redirect. Because that
+redirect is not registered for this local Calibre plugin, it deliberately
+refuses to pretend that the browser authorization-code flow can be completed
+locally; use the Web Reader refresh token instead. Loopback callback validation
+remains available only for a partner whose configuration explicitly proves
+support. No revoke endpoint is configured for partner 8 because neither
+reference supplies one.
 
 ## Synchronization behavior
 

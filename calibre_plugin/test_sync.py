@@ -2,6 +2,7 @@ import unittest
 import ast
 import os
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -324,6 +325,15 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("SCOPE_BOSH", PARTNERS[8]["scope"])
         self.assertEqual("https://www.orellfuessli.ch/auth/oauth2/token",
                          PARTNERS[8]["token_url"])
+        self.assertEqual(
+            "https://www.orellfuessli.ch/auth/oauth2/autologin",
+            PARTNERS[8]["auth_url"])
+        self.assertEqual("https://webreader.mytolino.com/library/",
+                         PARTNERS[8]["reader_url"])
+        self.assertEqual("37", PARTNERS[8]["x_buchde.mandant_id"])
+        self.assertEqual("17", PARTNERS[8]["x_buchde.skin_id"])
+        self.assertEqual("TOLINO_WEBREADER", PARTNERS[8]["client_type"])
+        self.assertEqual("5.2.0", PARTNERS[8]["client_version"])
 
     def test_refresh_token_normalization_reports_only_safe_metadata(self):
         token, info = normalize_refresh_token('  "refresh-secret-value"  ')
@@ -332,6 +342,36 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("refr...", info["token_prefix"])
         self.assertTrue(info["outer_quotes_removed"])
         self.assertTrue(info["surrounding_whitespace_removed"])
+
+    def test_partner_8_authenticated_headers_match_web_reader(self):
+        captured = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def request(request, timeout):
+            captured["headers"] = request.headers
+            return Response()
+
+        with patch("calibre_plugin.tolino.urlopen", request):
+            client = TolinoClient(8, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+                                  "refresh-token")
+            client.access = "access-token"
+            client.expires_at = time.time() + 60
+            client._request("https://bosh.pageplace.de/bosh/rest/inventory/delta")
+        headers = {key.casefold(): value for key, value in captured["headers"].items()}
+        self.assertEqual("8", headers["reseller_id"])
+        self.assertEqual("TOLINO_WEBREADER", headers["client_type"])
+        self.assertEqual("5.2.0", headers["client_version"])
 
     def test_partner_8_refresh_payload_is_url_encoded_and_not_access_token(self):
         captured = {}
