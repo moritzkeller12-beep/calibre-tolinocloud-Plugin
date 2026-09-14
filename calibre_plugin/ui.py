@@ -387,8 +387,7 @@ class SyncDashboard(QDialog):
                     "last_modified": str(_metadata_value(item, "last_modified")),
                 }
             for item in metadata.values():
-                if isinstance(item["formats"], str):
-                    item["formats"] = normalize_formats(item["formats"])
+                item["formats"] = normalize_formats(item["formats"])
             state = load_state(settings["state"])
             client = TolinoClient(settings["partner_id"], settings["hardware_id"],
                                   settings["refresh_token"], settings["username"],
@@ -420,7 +419,14 @@ class SyncDashboard(QDialog):
                 book_uuid = record["book_uuid"]
                 fmt = record["format_name"]
                 old_id = record["old_id"]
-                path = safe_format_path(self.gui.current_db, book_id, fmt)
+                try:
+                    path = safe_format_path(self.gui.current_db, book_id, fmt)
+                except ValueError as exc:
+                    title = metadata.get(book_id, {}).get("title") or "ohne Titel"
+                    raise ValueError(
+                        "Buch %s (%s): Format %s fehlt oder liefert keinen Pfad. %s" %
+                        (book_id, title, fmt, exc)
+                    ) from exc
                 cover_path = None
                 if settings["upload_covers"]:
                     cover = cover_bytes(self.gui.current_db, book_id)

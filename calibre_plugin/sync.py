@@ -4,6 +4,7 @@ import os
 import re
 import traceback
 import unicodedata
+from collections.abc import Iterable
 
 
 def iter_book_ids(database):
@@ -44,13 +45,23 @@ def _row_book_id(row):
 
 
 def normalize_formats(value):
-    """Return format names from Calibre's string, sequence, or empty values."""
+    """Return canonical format names from Calibre's string or iterable values."""
     if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
-    if isinstance(value, (tuple, list, set)):
-        return [str(part).strip() for part in value
-                if part is not None and str(part).strip()]
-    return []
+        values = value.split(",")
+    elif isinstance(value, (bytes, bytearray)):
+        values = [os.fsdecode(value)]
+    elif isinstance(value, Iterable):
+        values = value
+    else:
+        return []
+    formats = []
+    for part in values:
+        if part is None:
+            continue
+        text = str(part).strip().lstrip(".").upper()
+        if text and text not in formats:
+            formats.append(text)
+    return formats
 
 
 def selected_table_rows(table):
@@ -288,9 +299,16 @@ def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
         book_uuid = metadata.get("uuid")
         if not book_uuid:
             continue
-        available = {x.upper() for x in normalize_formats(metadata.get("formats"))}
-        selected = next((f for f in preferred_formats if f.upper() in available), None)
+        available = set(normalize_formats(metadata.get("formats")))
+        selected = next((f for f in preferred_formats if f in available), None)
         if not selected:
+            if upload_book_ids is not None and book_id in upload_book_ids:
+                title = metadata.get("title") or "ohne Titel"
+                requested = ", ".join(preferred_formats) or "kein bevorzugtes Format"
+                raise ValueError(
+                    "Buch %r (%s): kein bevorzugtes Format gefunden (gesucht: %s)." %
+                    (book_id, title, requested)
+                )
             continue
         fp = fingerprint(metadata, selected)
         current[book_uuid] = {"tolino_id": state.get(book_uuid, {}).get("tolino_id"),
@@ -471,10 +489,17 @@ def _diagnostic_formats(database, metadata):
 
 def _diagnostic_path(database, book_id, format_name):
     try:
-        value = database.format_abspath(book_id, format_name)
-        return {"type": type(value).__name__, "value": redact_sensitive(value)}
+        path = safe_format_path(database, book_id, format_name)
+        return {
+            "status": "found" if os.path.isfile(path) else "missing",
+            "path": redact_sensitive(path),
+        }
     except Exception as exc:
-        return {"type": type(exc).__name__, "error": str(exc)}
+        return {
+            "status": "missing",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
 
 
 def _diagnostic_covers(database, book_ids):
@@ -491,12 +516,13 @@ def _diagnostic_covers(database, book_ids):
 
 def _diagnostic_plan(metadata, state, preferred_formats):
     plan = plan_sync(metadata, state, preferred_formats)
+    uploads, removals, current = unpack_plan_result(plan)
     return {
         "type": type(plan).__name__,
         "length": len(plan),
-        "parts": [type(part).__name__ for part in plan],
+        "parts": [type(part).__name__ for part in (uploads, removals, current)],
         "upload_record_lengths": [
             len(record) if isinstance(record, (tuple, list)) else None
-            for record in plan[0]
+            for record in uploads
         ],
     }

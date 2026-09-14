@@ -10,7 +10,8 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    normalize_formats, plan_sync, safe_format_path,
                    selected_book_ids, selected_table_rows, sync_summary,
                    unpack_plan_result, unpack_upload_record, redact_sensitive,
-                   format_diagnostic_report, diagnose_preparation)
+                   format_diagnostic_report, diagnose_preparation,
+                   _diagnostic_formats)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
 
@@ -87,8 +88,31 @@ class SyncPlanTests(unittest.TestCase):
     def test_normalize_formats_handles_all_calibre_shapes(self):
         self.assertEqual(["EPUB", "PDF"], normalize_formats(("EPUB", "PDF")))
         self.assertEqual(["EPUB", "PDF"], normalize_formats("EPUB, PDF"))
+        class FormatsList:
+            def __iter__(self):
+                return iter((".epub", "PDF", "epub"))
+
+        self.assertEqual(["EPUB", "PDF"], normalize_formats(FormatsList()))
         self.assertEqual([], normalize_formats(None))
         self.assertEqual([], normalize_formats(("", None)))
+
+    def test_plan_sync_accepts_calibre_formats_list_and_normalizes_case(self):
+        class FormatsList:
+            def __iter__(self):
+                return iter((".epub",))
+
+        metadata = {"uuid": "u1", "title": "A", "formats": FormatsList()}
+        self.assertEqual(
+            [(1, "u1", "EPUB", None)],
+            plan_sync({1: metadata}, {}, (".EPUB",))[0],
+        )
+
+    def test_selected_book_without_preferred_format_has_contextual_warning(self):
+        with self.assertRaisesRegex(ValueError, r"Buch 1 \(A\).*kein bevorzugtes Format"):
+            plan_sync(
+                {1: {"uuid": "u1", "title": "A", "formats": ("MOBI",)}},
+                {}, ("EPUB",), upload_book_ids={1},
+            )
 
     def test_selected_rows_handles_qmodelindex_and_short_values(self):
         class Index:
@@ -151,6 +175,24 @@ class SyncPlanTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             safe_format_path(EmptyDatabase(), 1, "EPUB")
+
+    def test_diagnosis_reports_found_and_missing_format_paths(self):
+        with tempfile.NamedTemporaryFile(suffix=".epub") as book_file:
+            class FormatsList:
+                def __iter__(self):
+                    return iter((".EPUB", "pdf"))
+
+            class Database:
+                def format_abspath(self, book_id, format_name):
+                    if format_name == "EPUB":
+                        return book_file.name
+                    return ()
+
+            report = _diagnostic_formats(
+                Database(), {1: {"formats": FormatsList()}})
+            self.assertEqual(["EPUB", "PDF"], report["1"]["metadata_formats"])
+            self.assertEqual("found", report["1"]["paths"]["EPUB"]["status"])
+            self.assertEqual("missing", report["1"]["paths"]["PDF"]["status"])
 
     def test_cover_bytes_handles_bytes_paths_and_unexpected_values(self):
         class Database:
