@@ -1,8 +1,7 @@
 # Tolino Cloud Sync for Calibre
 
 Native Python plugin for synchronizing an open Calibre library with the
-Tolino Cloud. The plugin does not require Bun, Node.js, Docker, or a Calibre
-Content Server.
+Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
 
 ## Installation
 
