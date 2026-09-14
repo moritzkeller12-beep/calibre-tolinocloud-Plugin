@@ -6,11 +6,13 @@ from zipfile import ZIP_DEFLATED, ZipFile
 ROOT = Path(__file__).parent
 SOURCE = ROOT / "calibre_plugin"
 MARKER = "plugin-import-name-tolino_cloud_sync.txt"
-FILES = ("ui.py", "config.py", "sync.py", "tolino.py")
+FILES = ("ui.py", "config.py", "sync.py", "tolino.py", "icons.py")
+IMAGE_FILES = ("tolino_cloud_sync.png",)
 EXPECTED = {
     "__init__.py",
     MARKER,
     *FILES,
+    "images/tolino_cloud_sync.png",
 }
 
 with ZipFile(ROOT / "tolino_cloud_sync.zip", "w", ZIP_DEFLATED) as archive:
@@ -18,6 +20,8 @@ with ZipFile(ROOT / "tolino_cloud_sync.zip", "w", ZIP_DEFLATED) as archive:
     archive.writestr(MARKER, "")
     for name in FILES:
         archive.write(SOURCE / name, name)
+    # Add images directory
+    archive.write(SOURCE / "images" / "tolino_cloud_sync.png", "images/tolino_cloud_sync.png")
 
 with ZipFile(ROOT / "tolino_cloud_sync.zip") as archive:
     names = set(archive.namelist())

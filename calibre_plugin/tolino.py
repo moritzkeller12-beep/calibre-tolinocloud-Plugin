@@ -3,6 +3,8 @@ import mimetypes
 import os
 import platform
 import re
+import sqlite3
+import struct
 import threading
 import time
 import uuid
@@ -76,6 +78,7 @@ PARTNERS = {
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 OAUTH_STATE_TTL = 300
+TOLINO_READER_ORIGIN = "https://webreader.mytolino.com"
 
 
 _JWT_PATTERN = re.compile(
@@ -84,6 +87,186 @@ _JWT_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(
     r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"
 )
+
+
+def _find_browser_storage_paths():
+    """Find browser storage directories for Chrome, Edge, Firefox on current platform."""
+    paths = []
+    system = platform.system()
+    
+    if system == "Windows":
+        app_data = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local"))
+        chrome_paths = [
+            os.path.join(app_data, "Google", "Chrome", "User Data", "Default"),
+            os.path.join(app_data, "Microsoft", "Edge", "User Data", "Default"),
+            os.path.join(app_data, "BraveSoftware", "Brave-Browser", "User Data", "Default"),
+            os.path.join(app_data, "Opera Software", "Opera Stable"),
+        ]
+        firefox_paths = [
+            os.path.join(os.environ.get("APPDATA", os.path.expanduser("~/AppData/Roaming")), "Mozilla", "Firefox", "Profiles"),
+        ]
+        paths.extend(chrome_paths)
+        paths.extend(firefox_paths)
+    
+    elif system == "Darwin":  # macOS
+        chrome_paths = [
+            os.path.expanduser("~/Library/Application Support/Google/Chrome/Default"),
+            os.path.expanduser("~/Library/Application Support/Microsoft Edge/Default"),
+            os.path.expanduser("~/Library/Application Support/BraveSoftware/Brave-Browser/Default"),
+        ]
+        firefox_paths = [
+            os.path.expanduser("~/Library/Application Support/Firefox/Profiles"),
+        ]
+        paths.extend(chrome_paths)
+        paths.extend(firefox_paths)
+    
+    else:  # Linux and others
+        chrome_paths = [
+            os.path.expanduser("~/.config/google-chrome/Default"),
+            os.path.expanduser("~/.config/chromium/Default"),
+            os.path.expanduser("~/.config/microsoft-edge/Default"),
+            os.path.expanduser("~/.config/brave/Default"),
+            os.path.expanduser("~/.config/opera"),
+        ]
+        firefox_paths = [
+            os.path.expanduser("~/.mozilla/firefox"),
+            os.path.expanduser("~/.var/app/org.mozilla.firefox/.mozilla/firefox"),
+        ]
+        paths.extend(chrome_paths)
+        paths.extend(firefox_paths)
+    
+    return paths
+
+
+def _read_chromium_local_storage(storage_path):
+    """Read Local Storage data from Chromium-based browser (LevelDB format)."""
+    try:
+        import leveldb
+        db_path = os.path.join(storage_path, "Local Storage", "leveldb")
+        if not os.path.exists(db_path):
+            return {}
+        db = leveldb.LevelDB(db_path)
+        results = {}
+        for key, value in db.RangeIter():
+            try:
+                key_str = key.decode('utf-8')
+                value_str = value.decode('utf-8')
+                if key_str.startswith("https://webreader.mytolino.com"):
+                    results[key_str] = value_str
+            except (UnicodeDecodeError, AttributeError):
+                continue
+        return results
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return {}
+
+
+def _read_chromium_local_storage_sqlite(storage_path):
+    """Read Local Storage from Chromium SQLite backup (fallback method)."""
+    try:
+        db_path = os.path.join(storage_path, "Local Storage", "https_webreader.mytolino.com_0.localstorage")
+        if not os.path.exists(db_path):
+            db_path = os.path.join(storage_path, "Local Storage", "https_webreader.mytolino.com_0.localstorage-journal")
+        if not os.path.exists(db_path):
+            return {}
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        results = {}
+        cursor.execute("SELECT key, value FROM ItemTable")
+        for row in cursor.fetchall():
+            if row and len(row) >= 2:
+                results[row[0]] = row[1]
+        conn.close()
+        return results
+    except Exception:
+        return {}
+
+
+def _read_firefox_local_storage(profile_path):
+    """Read Local Storage from Firefox (SQLite format)."""
+    try:
+        db_path = os.path.join(profile_path, "webappsstore.sqlite")
+        if not os.path.exists(db_path):
+            return {}
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        results = {}
+        cursor.execute("SELECT origin, key, value FROM webappsstore2")
+        for row in cursor.fetchall():
+            if row and len(row) >= 3:
+                origin, key, value = row[0], row[1], row[2]
+                if "webreader.mytolino.com" in origin:
+                    results[f"{origin}/{key}"] = value
+        conn.close()
+        return results
+    except Exception:
+        return {}
+
+
+def _extract_tokens_from_storage(storage_data):
+    """Extract refresh_token and hardware_id from browser storage data."""
+    refresh_token = None
+    hardware_id = None
+    
+    for key, value in storage_data.items():
+        try:
+            if isinstance(value, str):
+                if "refresh_token" in key:
+                    refresh_token = value
+                elif "hardware" in key.lower() or "hardware_id" in key.lower():
+                    hardware_id = value
+        except Exception:
+            continue
+    
+    return refresh_token, hardware_id
+
+
+def scrape_browser_tokens():
+    """
+    Scrape refresh_token and hardware_id from browser local storage.
+    Searches Chrome, Edge, Firefox and other Chromium-based browsers.
+    
+    Returns:
+        tuple: (refresh_token, hardware_id) or (None, None) if not found
+    """
+    storage_paths = _find_browser_storage_paths()
+    
+    for path in storage_paths:
+        if not os.path.exists(path):
+            continue
+        
+        storage_data = {}
+        
+        # Try Chromium LevelDB method
+        storage_data.update(_read_chromium_local_storage(path))
+        if storage_data:
+            refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
+            if refresh_token and hardware_id:
+                return refresh_token, hardware_id
+        
+        # Try Chromium SQLite fallback
+        storage_data.update(_read_chromium_local_storage_sqlite(path))
+        if storage_data:
+            refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
+            if refresh_token and hardware_id:
+                return refresh_token, hardware_id
+        
+        # Try Firefox method
+        if "firefox" in path.lower() or "mozilla" in path.lower():
+            profile_dirs = [path] if os.path.isdir(path) else []
+            if os.path.isdir(path):
+                for profile in os.listdir(path):
+                    profile_path = os.path.join(path, profile)
+                    if os.path.isdir(profile_path):
+                        storage_data.update(_read_firefox_local_storage(profile_path))
+                        if storage_data:
+                            refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
+                            if refresh_token and hardware_id:
+                                return refresh_token, hardware_id
+    
+    return None, None
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)\b(access[_-]?token|refresh[_-]?token|authorization|"
     r"t_auth_token|password|secret)\b\s*[:=]\s*"
@@ -196,13 +379,17 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
 
 def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
-    """Run an OAuth callback only for partners explicitly supporting loopback."""
+    """Run an OAuth callback for all partners with valid auth_url."""
     partner = PARTNERS.get(int(partner_id))
-    if not partner or not partner.get("local_callback"):
+    if not partner or not partner.get("auth_url"):
         raise TolinoAuthError(
-            "This Tolino partner only registers its Web Reader redirect URI. "
-            "A local browser callback is not supported. Use a Web Reader "
-            "refresh token in the configuration as fallback."
+            "This Tolino partner has no OAuth authorization URL configured. "
+            "Use a Web Reader refresh token in the configuration as fallback."
+        )
+    if not partner.get("token_url"):
+        raise TolinoAuthError(
+            "This Tolino partner has no token endpoint configured. "
+            "Use a Web Reader refresh token in the configuration as fallback."
         )
     state = uuid.uuid4().hex
     created_at = time.time()

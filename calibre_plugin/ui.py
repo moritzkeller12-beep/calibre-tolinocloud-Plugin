@@ -29,7 +29,8 @@ try:
                        metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN,
                        TOLINO_COLUMN_LABEL)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                         hardware_id, normalize_refresh_token, sanitize_error)
+                         hardware_id, normalize_refresh_token, sanitize_error,
+                         scrape_browser_tokens)
 except ImportError:
     from config import save_account, save_settings, settings
     from sync import (compare_inventory, format_error_details, iter_book_ids,
@@ -41,7 +42,8 @@ except ImportError:
                       metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN,
                       TOLINO_COLUMN_LABEL)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                        hardware_id, normalize_refresh_token, sanitize_error)
+                        hardware_id, normalize_refresh_token, sanitize_error,
+                        scrape_browser_tokens)
 
 
 def _metadata_value(item, name, default=""):
@@ -312,6 +314,8 @@ class SyncDashboard(QDialog):
         self.status = QLabel()
         self.browser = QPushButton("Im Browser anmelden / Sign in in browser")
         self.browser.clicked.connect(self.browser_login)
+        self.scrape_browser = QPushButton("Token aus Browser extrahieren / Extract from browser")
+        self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
         self.account_select.currentIndexChanged.connect(self.account_changed)
         self.account_new.clicked.connect(self.new_account)
         self.account_remove.clicked.connect(self.remove_account)
@@ -321,6 +325,7 @@ class SyncDashboard(QDialog):
         account_form.addRow("Hardware ID", self.hardware)
         account_form.addRow("Refresh token", self.refresh)
         account_form.addRow("", self.browser)
+        account_form.addRow("", self.scrape_browser)
         account_form.addRow("Status", self.status)
         root.addWidget(account)
 
@@ -463,6 +468,49 @@ class SyncDashboard(QDialog):
             "refresh_token": self.refresh.text(),
             "hardware_id": self.hardware.text().strip() or hardware_id(),
         }, active=self.account_name)
+
+    def scrape_browser_tokens(self):
+        """Extract refresh_token and hardware_id from browser local storage."""
+        try:
+            refresh_token, hardware_id = scrape_browser_tokens()
+            if refresh_token and hardware_id:
+                self.refresh.setText(refresh_token)
+                self.hardware.setText(hardware_id)
+                self.persist_refresh_token(refresh_token)
+                QMessageBox.information(
+                    self, "Token extrahiert / Tokens extracted",
+                    "Refresh-Token und Hardware-ID wurden aus dem Browser extrahiert "
+                    "und gespeichert. Bitte pr\u00fcfen Sie, ob der Partner "
+                    "\u00fcbereinstimmt."
+                )
+            elif refresh_token:
+                self.refresh.setText(refresh_token)
+                QMessageBox.information(
+                    self, "Teilerfolg / Partial success",
+                    "Nur der Refresh-Token wurde gefunden. Bitte pr\u00fcfen Sie die "
+                    "Hardware-ID und speichern Sie manuell."
+                )
+            elif hardware_id:
+                self.hardware.setText(hardware_id)
+                QMessageBox.information(
+                    self, "Teilerfolg / Partial success",
+                    "Nur die Hardware-ID wurde gefunden. Bitte pr\u00fcfen Sie den "
+                    "Refresh-Token und speichern Sie manuell."
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Keine Token gefunden / No tokens found",
+                    "Es wurden keine Tolino-Web-Reader-Tokens im Browser gefunden. "
+                    "Stellen Sie sicher, dass:\n"
+                    "1. Sie im Tolino Web Reader angemeldet sind\n"
+                    "2. Der Browser geschlossen ist\n"
+                    "3. Sie den richtigen Browser verwenden (Chrome, Edge, Firefox)"
+                )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Fehler / Error",
+                "Fehler beim Extrahieren der Tokens: %s" % sanitize_error(exc)
+            )
 
     def values(self):
         refresh_token, _ = normalize_refresh_token(self.refresh.text())

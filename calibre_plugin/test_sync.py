@@ -18,7 +18,8 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      TolinoClient, hardware_id, normalize_refresh_token,
-                     sanitize_error, validate_callback)
+                     sanitize_error, validate_callback, scrape_browser_tokens,
+                     browser_login)
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -966,6 +967,8 @@ class SyncPlanTests(unittest.TestCase):
                 "config.py",
                 "sync.py",
                 "tolino.py",
+                "icons.py",
+                "images/tolino_cloud_sync.png",
             }, set(plugin.namelist()))
             marker = next(name for name in plugin.namelist()
                           if name.startswith("plugin-import-name-") and name.endswith(".txt"))
@@ -982,6 +985,22 @@ class SyncPlanTests(unittest.TestCase):
                 and isinstance(node.value, ast.Constant)
             ]
             self.assertEqual(["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"], values)
+
+    def test_browser_login_works_for_all_partners_with_auth_url(self):
+        for partner_id in (3, 4, 8, 13, 23, 30):
+            partner = PARTNERS[partner_id]
+            if partner.get("auth_url") and partner.get("token_url"):
+                try:
+                    browser_login(partner_id, "test_hardware")
+                except TolinoAuthError as exc:
+                    error_msg = str(exc)
+                    self.assertNotIn("local browser callback is not supported", error_msg)
+                    self.assertNotIn("only registers its Web Reader redirect URI", error_msg)
+
+    def test_scrape_browser_tokens_returns_none_when_not_found(self):
+        refresh, hardware = scrape_browser_tokens()
+        self.assertIsNone(refresh)
+        self.assertIsNone(hardware)
 
 
 if __name__ == "__main__":
