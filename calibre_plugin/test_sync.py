@@ -57,12 +57,12 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual({"uploads": 2, "deletions": 1, "errors": 0, "total": 3},
                          sync_summary(2, 1))
 
-    def test_zip_entrypoint_uses_dedicated_flat_main_module(self):
+    def test_zip_entrypoint_uses_calibre_namespace_package(self):
         archive = Path(__file__).parent.parent / "tolino_cloud_sync.zip"
         if not archive.exists():
             self.skipTest("build_plugin.py has not been run")
         with zipfile.ZipFile(archive) as plugin:
-            self.assertIn("main.py", plugin.namelist())
+            self.assertIn("calibre_plugins/tolino_cloud_sync/ui.py", plugin.namelist())
             metadata = ast.parse(plugin.read("__init__.py").decode("utf-8"))
             values = [
                 node.value.value
@@ -72,9 +72,7 @@ class SyncPlanTests(unittest.TestCase):
                         for target in node.targets)
                 and isinstance(node.value, ast.Constant)
             ]
-            self.assertEqual(["main:TolinoSyncAction"], values)
-            self.assertIn("from ui import TolinoSyncAction",
-                          plugin.read("main.py").decode("utf-8"))
+            self.assertEqual(["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"], values)
 
 
 if __name__ == "__main__":

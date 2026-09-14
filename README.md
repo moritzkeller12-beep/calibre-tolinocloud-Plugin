@@ -17,33 +17,34 @@ its top level:
 
 ```text
 __init__.py
-main.py
-ui.py
-config.py
-sync.py
-tolino.py
+calibre_plugins/
+  __init__.py
+  tolino_cloud_sync/
+    __init__.py
+    ui.py
+    config.py
+    sync.py
+    tolino.py
 ```
 
 Calibre requires the top-level `__init__.py`; do not install the source
 directory itself.
 
-The plugin entry point is `TolinoSyncPlugin` in `__init__.py` with
-`actual_plugin = "main:TolinoSyncAction"`, the Calibre `InterfaceAction`
-type, supported desktop platforms, and lazy loading enabled. Calibre imports
-the dedicated top-level `main.py` adapter from its ZipPlugin context; it then
-loads `ui.py` and the other flat modules without package-relative imports.
+The plugin entry point is `TolinoSyncPlugin` in the root `__init__.py` with
+`actual_plugin =
+"calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"`. This follows
+Calibre's official InterfaceAction plugin layout: the metadata wrapper stays
+at the ZIP root while implementation modules live in a qualified
+`calibre_plugins.<plugin_name>` package. Relative imports are therefore
+resolved by a real package instead of relying on flat-module lookup.
 
 ### Calibre 7.6 import compatibility
 
-The ZIP is checked with a local importlib-style stub that loads the top-level
-plugin metadata and the `ui` module without a Calibre installation. The
-original failure did not include a Python traceback, so its final exception
-cannot be identified with certainty. The hardened entry point now declares
-all standard Calibre metadata and the UI accepts both Qt signal spellings
-(`pyqtSignal` and the Calibre-Qt `Signal` alias). If Calibre still reports
-`InvalidPlugin`, the complete traceback, especially the final `ImportError`
-line, is required to distinguish an environment/plugin-version issue from a
-remaining module error.
+The ZIP is checked with a local importlib-style stub that follows this
+qualified namespace. The previous `main`/flat-module layout was incorrect for
+Calibre's ZipPlugin loader and caused `ModuleNotFoundError: No module named
+'main'`. If Calibre still reports `InvalidPlugin`, provide the complete
+traceback, especially the final `ImportError` line.
 
 ## Configuration and use
 
