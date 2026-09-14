@@ -14,7 +14,7 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    unpack_plan_result, unpack_upload_record, redact_sensitive,
                    format_diagnostic_report, diagnose_preparation,
                    _diagnostic_formats, metadata_by_id, format_error_details,
-                   normalize_title)
+                   normalize_title, normalize_inventory_item)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      TolinoClient, hardware_id, normalize_refresh_token,
                      sanitize_error, validate_callback)
@@ -295,6 +295,68 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("t1", rows[0]["tolino_id"])
         self.assertEqual("only_tolino", rows[1]["status"])
         self.assertFalse(rows[1]["selected"])
+
+    def test_diagnostic_inventory_shape_uses_nested_metadata_and_keeps_id_technical(self):
+        item = {
+            "deliverableId": "bosh_8_543897186788677497438396920",
+            "epubMetaData": {
+                "title": "Der echte Tolino-Titel",
+                "author": [{"name": "Eine Autorin"}],
+                "isbn": "978-3-1234-5678-9",
+            },
+            "publicationId": "pub-1",
+            "resellerId": "8",
+        }
+        self.assertEqual({
+            "title": "Der echte Tolino-Titel",
+            "authors": "Eine Autorin",
+            "isbn": "978-3-1234-5678-9",
+            "tolino_id": "bosh_8_543897186788677497438396920",
+        }, normalize_inventory_item(item))
+        rows = compare_inventory(
+            {1: {"uuid": "u1", "title": "Der echte Tolino-Titel",
+                 "authors": "Eine Autorin", "isbn": "9783123456789",
+                 "formats": ["EPUB"]}},
+            {}, {"edata": [item]}, ["EPUB"],
+        )
+        self.assertEqual("identical", rows[0]["status"])
+        self.assertEqual("Der echte Tolino-Titel", rows[0]["title"])
+        self.assertEqual("bosh_8_543897186788677497438396920", rows[0]["tolino_id"])
+        self.assertFalse(rows[0]["selected"])
+
+    def test_inventory_without_title_is_not_matchable_and_does_not_show_id_as_title(self):
+        rows = compare_inventory(
+            {1: {"uuid": "u1", "title": "Local title", "formats": ["EPUB"]}},
+            {}, [{"deliverableId": "bosh_8_543897186788677497438396920",
+                  "epubMetaData": {"author": [{"name": "Author"}]}}],
+            ["EPUB"],
+        )
+        self.assertEqual("new_in_calibre", rows[0]["status"])
+        remote = rows[1]
+        self.assertEqual("not_matchable", remote["status"])
+        self.assertEqual("", remote["title"])
+        self.assertEqual("bosh_8_543897186788677497438396920", remote["tolino_id"])
+        self.assertIn("ohne Titel", remote["explanation"])
+
+    def test_inventory_normalization_accepts_ebook_and_deliverable_shapes(self):
+        rows = compare_inventory(
+            {1: {"uuid": "u1", "title": "Nested title", "formats": ["EPUB"]}},
+            {}, {"ebook": [{"deliverable": {
+                "deliverableId": "bosh_8_2",
+                "title": "Nested title",
+                "author": {"name": "Nested author"},
+                "isbn13": "978-1-2",
+            }}]}, ["EPUB"],
+        )
+        self.assertEqual("identical", rows[0]["status"])
+        self.assertEqual("Nested author", normalize_inventory_item({
+            "deliverable": {"author": {"name": "Nested author"},
+                            "isbn13": "978-1-2"}
+        })["authors"])
+        self.assertEqual("978-1-2", normalize_inventory_item({
+            "deliverable": {"author": {"name": "Nested author"},
+                            "isbn13": "978-1-2"}
+        })["isbn"])
 
     def test_title_matching_normalizes_unicode_punctuation_and_extension(self):
         self.assertEqual(normalize_title("Der „Überblick“ – Band 2.epub"),

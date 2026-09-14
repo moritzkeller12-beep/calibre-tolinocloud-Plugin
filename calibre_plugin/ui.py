@@ -92,6 +92,7 @@ class InventoryDialog(QDialog):
             "identical": "Identisch",
             "changed": "Geändert",
             "duplicate_tolino": "Doppelter Tolino-Titel",
+            "not_matchable": "Nicht matchbar",
         }
         for row_index, row in enumerate(rows):
             check = QCheckBox()

@@ -1,158 +1,74 @@
-# Tolino Cloud Sync for Calibre
+# Tolino Cloud Sync für Calibre
 
-Plugin version: **0.4.0**. Author: **moritzkeller12-beep**.
+Plugin-Version: **0.4.1**. Autor: **moritzkeller12-beep**.
 
-Native Python plugin for synchronizing an open Calibre library with the
-Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
+Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
+Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
+Calibre- und Tolino-Bestand. Titel, Autor und ISBN werden zum Abgleich
+angezeigt; die technische `deliverableId` steht separat als Tolino-ID.
+
+## Voraussetzungen
+
+- Calibre **7.6 oder neuer**
+- ein Tolino-Web-Reader-Refresh-Token
+- Netzwerkzugriff auf die Tolino-Dienste
 
 ## Installation
 
-From the repository root, run:
+Im Repository:
 
 ```text
 python3 build_plugin.py
 ```
-This creates `tolino_cloud_sync.zip`. In Calibre 7.6.0 or newer, choose
-**Preferences > Plugins > Load plugin from file**, select that ZIP, and
-restart Calibre. The archive contains the Calibre metadata and implementation
-files at its top level:
 
-```text
-__init__.py
-plugin-import-name-tolino_cloud_sync.txt
-ui.py
-config.py
-sync.py
-tolino.py
-```
+Die Datei `tolino_cloud_sync.zip` enthält die installierbare Calibre-
+Plugin-Struktur. In Calibre **Einstellungen > Plugins > Plugin aus Datei
+laden** auswählen und Calibre anschließend neu starten.
 
-Calibre requires the top-level `__init__.py`; do not install the source
-directory itself. The empty marker is required by Calibre's plugin loader to
-map the archive to the `tolino_cloud_sync` namespace. Calibre's
-`CalibrePluginFinder` then maps these root-relative files to
-`calibre_plugins.tolino_cloud_sync.*`, so the implementation's relative
-imports work normally.
+## Einrichtung
 
-The plugin entry point is `TolinoSyncPlugin` in the root `__init__.py` with
-`actual_plugin =
-"calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"`, matching the
-physical package path in the archive.
+Im Dialog **Tolino Cloud Sync**:
 
-## Configuration and use
+1. Partner **8 – Books.ch / Orell Füssli** auswählen.
+2. Eine stabile Hardware-ID übernehmen oder selbst festlegen.
+3. Den aktuellen `refresh_token` aus den Web-Reader-Netzwerkanfragen
+   einfügen. Umgebende Leerzeichen und äußere Anführungszeichen werden
+   entfernt.
+4. Bevorzugte Formate festlegen, normalerweise EPUB und PDF. Cover-Upload
+   und Löschungen sind optional.
 
-Open the **Tolino Cloud Sync** toolbar/menu action and configure:
+Der Refresh-Token wird von Calibre gespeichert und bei einer Token-Rotation
+sofort aktualisiert. Ein Access-Token ist kein Ersatz für einen
+Refresh-Token. Tokens niemals in Tickets, Screenshots, Logs oder
+Diagnoseausgaben veröffentlichen; alte offengelegte Tokens beim Partner
+widerrufen oder ersetzen.
 
-- Tolino partner ID
-- stable hardware ID (generated automatically when empty)
-- Web Reader refresh token
-- preferred formats, normally EPUB and PDF
-- optional cover upload
-- optional deletion of cloud books no longer present in Calibre
+## Nutzung
 
-The action opens a dashboard rather than a one-shot prompt. It shows partner
-and login status, masks the refresh token, offers **Im Browser anmelden /
-Sign in in browser**, and keeps the format, cover, and deletion settings
-together. **Synchronisierung starten / Start synchronization** prepares the
-library plan, then performs network work in a Qt worker thread with a live
-progress bar, status text, and **Abbrechen / Abort** button. Authentication,
-preparation, and API failures appear in visible bilingual error dialogs. No
-screenshots are included because the UI is rendered by Calibre's own Qt
-widgets and depends on the installed Calibre theme.
+**Synchronisierung starten** lädt den Tolino-Bestand und öffnet den
+Vergleich. Das Matching erfolgt in dieser Reihenfolge:
 
-Use **Debug / Diagnose** beside the synchronization button to inspect the
-preparation path locally without logging in or contacting Tolino. The
-copyable report includes the Calibre version, database type, book-ID count,
-metadata key/type shapes, format return values, optional cover type/size, and
-the `plan_sync` result shape. Each step records its exception type, message,
-and traceback while allowing later steps to continue. **Tolino-Antwort testen**
-is a separate explicit action in that dialog; it is the only diagnostic action
-that performs login/network access, and its response is redacted.
+1. gespeicherte Tolino-ID
+2. Calibre-UUID
+3. ISBN
+4. normalisierter Titel
 
-Before uploading, the plugin loads the Tolino inventory and shows a
-confirmation table with local and remote status (new in Calibre, Tolino-only,
-identical, changed, or duplicate Tolino title), title, authors, ISBN, Tolino
-ID, and an explanation. Matching priority is stored Tolino ID, Calibre UUID,
-ISBN, then a normalized title. Title normalization uses Unicode NFKC,
-casefolding, whitespace normalization, and Unicode punctuation/symbol
-normalization; only a clearly technical trailing ebook file extension is
-removed. It does not abbreviate or aggressively truncate titles. A unique
-normalized title is an existing book and is therefore unselected by default,
-even if its file fingerprint changed. Changed or duplicate-title books are
-uploaded only when explicitly selected; duplicate Tolino titles are paired
-conservatively and warned about in the table. A title match never invents a
-metadata update: the current Tolino API has no verified metadata-update
-endpoint. Actual uploads are ebook files in the selected format and,
-optionally, covers. Deletions remain a separate opt-in setting.
-When replacing an existing Tolino deliverable, its old ID is cleaned up after
-the replacement upload to prevent duplicates; the opt-in setting controls
-deleting books that are no longer present in Calibre.
+Verschachtelte Tolino-Antworten (`dict`, `list`, `edata`, `ebook`,
+`epubMetaData` und `deliverable`) werden normalisiert. Ein Tolino-Eintrag
+ohne sichtbaren Titel wird als **Nicht matchbar** markiert; seine technische
+ID wird nie als Buchtitel verwendet. Eindeutige Titel-Treffer sind
+standardmäßig nicht zum Upload ausgewählt. Neue oder ausdrücklich ausgewählte
+Bücher werden im gewählten Format hochgeladen; ein optionales Cover kann
+folgen. Löschungen bleiben eine separate, standardmäßig deaktivierte Option.
 
-The recommended authentication path is a refresh token obtained from the
-partner's Web Reader network requests. Tokens, credentials, and sync state are
-stored through Calibre's `JSONConfig` mechanism and are never logged.
-If the explicit Tolino test reports `HTTP 400 invalid_grant` / `Invalid refresh
-token`, the configured token is expired, invalid, or is not a refresh token. If
-it reports `Maximum allowed refresh token reuse exceeded`, the Web Reader has
-rotated and invalidated the previous token: sign in to the Web Reader again,
-copy its new `refresh_token`, paste it into the plugin, and do not repeatedly
-test the old token. The plugin never retries an `invalid_grant`/reuse failure.
-For partner 8 the verified browser refresh request contains exactly the
-URL-encoded form fields `client_id=webreader`, `grant_type=refresh_token`, and
-`refresh_token=<value>` — no `scope` field — sent to
-`https://www.orellfuessli.ch/auth/oauth2/token` with
-`Content-Type: application/x-www-form-urlencoded`, `Origin:
-https://webreader.mytolino.com`, and `Referer: https://webreader.mytolino.com/`.
-Authenticated API requests
-use `reseller_id=8`, `client_type=TOLINO_WEBREADER`, and
-`client_version=5.2.0`. The Web Reader authorization endpoint is
-`https://www.orellfuessli.ch/auth/oauth2/autologin` and its registered redirect
-URI is `https://webreader.mytolino.com/library/`; the authorization parameters
-also include `x_buchde.mandant_id=37` and `x_buchde.skin_id=17`.
-A Web Reader `access_token` cannot be used as a refresh-token fallback. Copy the Web Reader request's
-`refresh_token` value, including its complete value, and paste it; surrounding
-whitespace and outer quotes are removed automatically. A rotated refresh token
-returned by a successful grant is persisted immediately, before inventory,
-preparation, or upload work continues, including when a later step fails.
-Never include the token itself in a diagnostic report. The report shows only its
-category, length, a four-character prefix, normalization flags, partner
-configuration, and HTTP status/error text.
+## Bekannte Einschränkung
 
-**Security warning:** Treat refresh tokens that appeared in an old Calibre
-traceback, error dialog, or diagnostic report as compromised. Revoke or
-replace them at the partner and configure the new token. Current errors and
-tracebacks redact configured refresh/access tokens, authorization values,
-Bearer/JWT-shaped credentials, and token-like server echoes.
+Die Tolino-API ist inoffiziell und kann sich ohne Vorankündigung ändern.
+Das Plugin lädt Dateien und optional Cover hoch, bietet aber keinen
+verifizierten Metadaten-Upload. Partner-, Token- und Dienständerungen können
+eine erneute Einrichtung erfordern.
 
-The dialog also provides **Im Browser anmelden**. The Orell-Füssli reference
-flow uses the Web Reader redirect above, not a loopback redirect. Because that
-redirect is not registered for this local Calibre plugin, it deliberately
-refuses to pretend that the browser authorization-code flow can be completed
-locally; use the Web Reader refresh token instead. Loopback callback validation
-remains available only for a partner whose configuration explicitly proves
-support. No revoke endpoint is configured for partner 8 because neither
-reference supplies one.
-
-## Synchronization behavior
-
-Books are matched by stored Tolino ID/UUID, ISBN, and then normalized title;
-the first two identifiers take precedence. New supported-format books are
-selected for upload. Existing normalized-title matches are not selected,
-including when their fingerprint changed; explicitly selecting one replaces
-the existing deliverable. Covers are optional.
-Deletion is disabled by default and, when enabled, re-checks the Tolino
-inventory before deleting a recorded deliverable ID. Cancellation stops before
-the next operation; completed operations remain in the persisted state.
-
-The Tolino API is unofficial and partner-specific. The implementation is based
-on publicly documented web-reader behavior and compatibility testing.
-Metadata updates, collections, device registration, cloud downloads, and
-partner-specific browser OAuth are intentionally outside this one-way sync.
-Partner endpoint changes, token expiry, rate limits, and response-format
-changes remain possible.
-
-## Local validation
-
-The tests make no Tolino requests:
+## Lokale Validierung
 
 ```text
 python3 -m unittest calibre_plugin.test_sync

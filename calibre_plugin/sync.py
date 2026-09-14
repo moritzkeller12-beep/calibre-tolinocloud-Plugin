@@ -213,14 +213,66 @@ def _metadata_text(metadata, *names):
     return ""
 
 
-def _inventory_value(item, *names):
+def _inventory_records(value):
+    """Yield inventory records from dict/list, including edata/ebook wrappers."""
+    if isinstance(value, dict):
+        found_wrapper = False
+        for key in ("edata", "ebook"):
+            if key in value:
+                found_wrapper = True
+                yield from _inventory_records(value[key])
+        if not found_wrapper:
+            yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _inventory_records(item)
+
+
+def _nested_inventory_value(item, names):
+    """Find a value in a Tolino record without relying on response tuple indexes."""
     if not isinstance(item, dict):
         return ""
     for name in names:
         value = item.get(name)
-        if value:
+        if value not in (None, "", [], {}):
+            return value
+    for container in ("epubMetaData", "deliverable", "metadata", "ebook", "edata"):
+        nested = item.get(container)
+        value = _nested_inventory_value(nested, names)
+        if value not in (None, "", [], {}):
             return value
     return ""
+
+
+def _inventory_author(value):
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("displayName") or "").strip()
+    if isinstance(value, (list, tuple)):
+        names = [_inventory_author(item) for item in value]
+        return ", ".join(name for name in names if name)
+    return str(value or "").strip()
+
+
+def normalize_inventory_item(item):
+    """Return display and matching fields for one Tolino inventory record."""
+    title = _nested_inventory_value(
+        item, ("title", "bookTitle", "name")
+    )
+    author = _nested_inventory_value(
+        item, ("authors", "author", "creator")
+    )
+    isbn = _nested_inventory_value(
+        item, ("isbn", "ISBN", "isbn13", "isbn10", "identifier")
+    )
+    remote_id = _nested_inventory_value(
+        item, ("deliverableId", "deliverable_id", "id")
+    )
+    return {
+        "title": str(title or "").strip(),
+        "authors": _inventory_author(author),
+        "isbn": str(isbn or "").strip(),
+        "tolino_id": str(remote_id or "").strip(),
+    }
 
 
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
@@ -230,21 +282,17 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
         raise ValueError("Preparation requires metadata and sync state mappings.")
     preferred_formats = normalize_formats(preferred_formats)
     remote_rows = []
-    for item in inventory or ():
-        remote_id = _inventory_value(item, "id", "deliverableId", "deliverable_id")
-        if not remote_id:
+    for item in _inventory_records(inventory):
+        normalized = normalize_inventory_item(item)
+        if not normalized["tolino_id"]:
             continue
         remote_rows.append({
             "book_id": None,
-            "uuid": _inventory_value(item, "uuid", "calibreUuid", "calibre_uuid"),
-            "title": _inventory_value(item, "title", "bookTitle", "name"),
-            "authors": _inventory_value(item, "authors", "author", "creator"),
-            "isbn": _inventory_value(item, "isbn", "ISBN", "isbn13"),
-            "tolino_id": str(remote_id),
+            "uuid": _nested_inventory_value(item, ("uuid", "calibreUuid", "calibre_uuid")),
+            **normalized,
             "status": "only_tolino",
             "selected": False,
-            "normalized_title": normalize_title(_inventory_value(
-                item, "title", "bookTitle", "name")),
+            "normalized_title": normalize_title(normalized["title"]),
         })
     title_counts = {}
     for row in remote_rows:
@@ -340,7 +388,13 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
         })
     for i, row in enumerate(remote_rows):
         if i not in matched:
-            if title_counts.get(row["normalized_title"], 0) > 1:
+            if not row["title"]:
+                row = dict(row, status="not_matchable",
+                           explanation=(
+                               "Tolino-Datensatz ohne Titel; technische Tolino-ID "
+                               "wird nicht als Titel verwendet und ist nicht matchbar."
+                           ))
+            elif title_counts.get(row["normalized_title"], 0) > 1:
                 row = dict(row, status="duplicate_tolino",
                            explanation="Doppelter Tolino-Titel; nicht automatisch hochladen.")
             rows.append(row)

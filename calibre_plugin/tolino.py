@@ -422,14 +422,28 @@ class TolinoClient:
     def inventory(self):
         data = self._request(BASE_URL + "/inventory/delta?strip=true")
         inventory = data.get("PublicationInventory", {})
-        return inventory.get("edata", []) + inventory.get("ebook", [])
+        if isinstance(inventory, dict):
+            records = []
+            for key in ("edata", "ebook"):
+                value = inventory.get(key, [])
+                records.extend(value if isinstance(value, list) else [value])
+            return records
+        return inventory if isinstance(inventory, list) else []
 
     def inventory_ids(self):
         ids = set()
         for item in self.inventory():
             if not isinstance(item, dict):
                 continue
-            value = item.get("id") or item.get("deliverableId")
+            value = item.get("deliverableId") or item.get("deliverable_id") or item.get("id")
+            if not value:
+                for container in ("deliverable", "metadata", "ebook", "edata"):
+                    nested = item.get(container)
+                    if isinstance(nested, dict):
+                        value = (nested.get("deliverableId") or
+                                 nested.get("deliverable_id") or nested.get("id"))
+                        if value:
+                            break
             if value:
                 ids.add(str(value))
         return ids
