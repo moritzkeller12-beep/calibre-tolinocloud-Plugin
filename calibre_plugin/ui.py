@@ -20,7 +20,8 @@ except ImportError:
 
 try:
     from .config import save_settings, settings
-    from .sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
+    from .sync import (compare_inventory, format_error_details, iter_book_ids,
+                       load_state, metadata_by_id, plan_sync,
                        selected_book_ids, sync_summary, normalize_formats,
                        safe_format_path, cover_bytes, unpack_plan_result,
                        unpack_upload_record, diagnose_preparation,
@@ -29,7 +30,8 @@ try:
                          hardware_id, normalize_refresh_token, sanitize_error)
 except ImportError:
     from config import save_settings, settings
-    from sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
+    from sync import (compare_inventory, format_error_details, iter_book_ids,
+                      load_state, metadata_by_id, plan_sync,
                       selected_book_ids, sync_summary, normalize_formats,
                       safe_format_path, cover_bytes, unpack_plan_result,
                       unpack_upload_record, diagnose_preparation,
@@ -395,7 +397,7 @@ class SyncDashboard(QDialog):
         try:
             metadata = {}
             for book_id in iter_book_ids(self.gui.current_db):
-                item = self.gui.current_db.get_metadata(book_id)
+                item = metadata_by_id(self.gui.current_db, book_id)
                 metadata[book_id] = {
                     "uuid": _metadata_value(item, "uuid"),
                     "title": _metadata_value(item, "title"),
@@ -461,7 +463,7 @@ class SyncDashboard(QDialog):
         except Exception as exc:
             error_dialog(
                 self, "Vorbereitung fehlgeschlagen / Preparation failed",
-                sanitize_error(exc, (self.settings["refresh_token"],)),
+                format_error_details(exc, (settings.get("refresh_token"),)),
                 show=True,
             )
             return

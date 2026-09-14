@@ -12,7 +12,7 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    selected_book_ids, selected_table_rows, sync_summary,
                    unpack_plan_result, unpack_upload_record, redact_sensitive,
                    format_diagnostic_report, diagnose_preparation,
-                   _diagnostic_formats)
+                   _diagnostic_formats, metadata_by_id, format_error_details)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      TolinoClient, hardware_id, normalize_refresh_token,
                      sanitize_error, validate_callback)
@@ -51,6 +51,18 @@ class SyncPlanTests(unittest.TestCase):
 
         self.assertEqual([8, 3], list(iter_book_ids(Database())))
 
+    def test_iter_book_ids_uses_gui_all_book_ids_before_legacy_all_ids(self):
+        class Database:
+            data = object()
+
+            def all_book_ids(self):
+                return (18, 5, 18)
+
+            def all_ids(self):
+                raise AssertionError("must prefer all_book_ids")
+
+        self.assertEqual([18, 5], list(iter_book_ids(Database())))
+
     def test_iter_book_ids_uses_data_id_fallback_before_all_ids(self):
         class Data:
             def iterallids(self):
@@ -86,6 +98,38 @@ class SyncPlanTests(unittest.TestCase):
             data = Data()
 
         self.assertEqual([12, 13], list(iter_book_ids(Database())))
+
+    def test_metadata_by_id_uses_real_id_not_filtered_view_index(self):
+        class Data:
+            def iterall(self):
+                return iter(((41, "first"), (99, "second")))
+
+        class Database:
+            data = Data()
+
+            def has_id(self, book_id):
+                return book_id in {41, 99}
+
+            def get_metadata(self, book_id, index_is_id=False):
+                if not index_is_id:
+                    raise AssertionError("filtered-view index was passed")
+                return {"uuid": "u%d" % book_id}
+
+        database = Database()
+        ids = list(iter_book_ids(database))
+        self.assertEqual([41, 99], ids)
+        self.assertEqual({"uuid": "u41"}, metadata_by_id(database, ids[0]))
+
+    def test_metadata_by_id_rejects_missing_real_id(self):
+        class Database:
+            def has_id(self, book_id):
+                return False
+
+            def get_metadata(self, book_id, index_is_id=False):
+                raise AssertionError("must validate before reading")
+
+        with self.assertRaisesRegex(ValueError, "no book with id 7"):
+            metadata_by_id(Database(), 7)
 
     def test_normalize_formats_handles_all_calibre_shapes(self):
         self.assertEqual(["EPUB", "PDF"], normalize_formats(("EPUB", "PDF")))
@@ -420,7 +464,7 @@ class SyncPlanTests(unittest.TestCase):
         class Database:
             data = Data()
 
-            def get_metadata(self, book_id):
+            def get_metadata(self, book_id, index_is_id=False):
                 if book_id == 2:
                     raise IndexError("tuple index out of range")
                 return {"uuid": "u1", "formats": ("EPUB",)}
@@ -439,6 +483,15 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("tuple index out of range", report)
         self.assertIn("plan_sync-Ergebnisform", report)
 
+    def test_preparation_error_keeps_traceback_and_redacts_without_dashboard_settings(self):
+        try:
+            raise IndexError("tuple index out of range; refresh-secret")
+        except Exception as exc:
+            rendered = format_error_details(exc, ("refresh-secret",))
+        self.assertIn("IndexError", rendered)
+        self.assertIn("tuple index out of range", rendered)
+        self.assertIn("Traceback", rendered)
+        self.assertNotIn("refresh-secret", rendered)
     def test_empty_settings_are_migrated_without_calibre(self):
         original = config.PREFERENCES
         try:

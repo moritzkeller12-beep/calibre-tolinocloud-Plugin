@@ -12,6 +12,11 @@ except ImportError:
     from tolino import sanitize_error
 
 
+def format_error_details(exc, secrets=()):
+    """Render an exception and its traceback without exposing credentials."""
+    return sanitize_error("%s\n\n%s" % (exc, traceback.format_exc()), secrets)
+
+
 def iter_book_ids(database):
     """Yield each existing Calibre book id once, across supported DB APIs."""
     data = getattr(database, "data", None)
@@ -31,6 +36,11 @@ def iter_book_ids(database):
         yield from _unique_ids(iterallids() or ())
         return
 
+    all_book_ids = getattr(database, "all_book_ids", None)
+    if callable(all_book_ids):
+        yield from _unique_ids(all_book_ids() or ())
+        return
+
     all_ids = getattr(database, "all_ids", None)
     if callable(all_ids):
         yield from _unique_ids(all_ids() or ())
@@ -47,6 +57,17 @@ def _row_book_id(row):
         candidate = next(iter(row), None)
         return candidate if isinstance(candidate, int) and candidate > 0 else None
     return None
+
+
+def metadata_by_id(database, book_id):
+    """Read metadata by a real Calibre id, never by a filtered-view index."""
+    has_id = getattr(database, "has_id", None)
+    if callable(has_id) and not has_id(book_id):
+        raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    getter = getattr(database, "get_metadata", None)
+    if not callable(getter):
+        raise AttributeError("Calibre database does not provide get_metadata().")
+    return getter(book_id, index_is_id=True)
 
 
 def normalize_formats(value):
@@ -451,7 +472,7 @@ def _diagnostic_ids(database):
 
 
 def _diagnostic_metadata(database, book_id):
-    item = database.get_metadata(book_id)
+    item = metadata_by_id(database, book_id)
     metadata = {}
     for name in ("uuid", "title", "authors", "author", "isbn", "identifiers",
                  "formats", "last_modified"):
