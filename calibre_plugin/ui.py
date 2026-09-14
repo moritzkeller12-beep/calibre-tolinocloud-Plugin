@@ -551,6 +551,7 @@ class SyncDashboard(QDialog):
                 settings["enable_deletions"], selected_ids,
             ))
             jobs = []
+            skipped_uploads = []
             for upload in uploads:
                 record = unpack_upload_record(upload)
                 book_id = record["book_id"]
@@ -559,12 +560,13 @@ class SyncDashboard(QDialog):
                 old_id = record["old_id"]
                 try:
                     path = safe_format_path(self.gui.current_db, book_id, fmt)
+                    if not os.path.isfile(path):
+                        raise ValueError("Pfad existiert nicht / path does not exist: %s" % path)
                 except ValueError as exc:
                     title = metadata.get(book_id, {}).get("title") or "ohne Titel"
-                    raise ValueError(
-                        "Buch %s (%s): Format %s fehlt oder liefert keinen Pfad. %s" %
-                        (book_id, title, fmt, exc)
-                    ) from exc
+                    skipped_uploads.append(
+                        "Buch %s (%s), Format %s: %s" % (book_id, title, fmt, exc))
+                    continue
                 cover_path = None
                 if settings["upload_covers"]:
                     cover = cover_bytes(self.gui.current_db, book_id)
@@ -583,6 +585,11 @@ class SyncDashboard(QDialog):
                 show=True,
             )
             return
+        if skipped_uploads:
+            QMessageBox.warning(
+                self, "Tolino Cloud Sync",
+                "Einige Uploads wurden übersprungen / Some uploads were skipped:\n\n%s" %
+                "\n".join(skipped_uploads))
         summary = sync_summary(len(jobs), len(removals))
         self.progress.setRange(0, summary["total"] or 1)
         self.progress.setValue(0)

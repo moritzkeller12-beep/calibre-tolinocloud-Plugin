@@ -174,8 +174,32 @@ def unpack_upload_record(record):
 
 
 def safe_format_path(database, book_id, format_name):
-    """Call format_abspath without assuming a particular return container."""
-    path = database.format_abspath(book_id, format_name)
+    """Resolve a real Calibre id to a format path across DB API variants."""
+    if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
+        raise ValueError("Invalid Calibre book id: %r" % (book_id,))
+    if not isinstance(format_name, str):
+        raise ValueError("Invalid format name: %r" % (format_name,))
+    format_name = format_name.strip().lstrip(".").upper()
+    if not format_name or not re.match(r"^[A-Z0-9][A-Z0-9._-]*$", format_name):
+        raise ValueError("Invalid format name: %r" % (format_name,))
+    has_id = getattr(database, "has_id", None)
+    if callable(has_id) and not has_id(book_id):
+        raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    resolver = getattr(database, "format_abspath", None)
+    if not callable(resolver):
+        raise ValueError("Calibre database does not provide format_abspath().")
+    try:
+        path = resolver(book_id, format_name, index_is_id=True)
+    except TypeError:
+        # Older Calibre-compatible stubs and wrappers do not expose the keyword.
+        try:
+            path = resolver(book_id, format_name)
+        except (IndexError, KeyError, OSError, ValueError) as exc:
+            raise ValueError("Calibre returned no path for book %r format %s" %
+                             (book_id, format_name)) from exc
+    except (IndexError, KeyError, OSError, ValueError) as exc:
+        raise ValueError("Calibre returned no path for book %r format %s" %
+                         (book_id, format_name)) from exc
     if isinstance(path, (tuple, list)):
         path = next((item for item in path if isinstance(item, (str, bytes, os.PathLike))), None)
     if isinstance(path, bytes):

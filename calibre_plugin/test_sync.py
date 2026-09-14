@@ -213,10 +213,13 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_safe_format_path_accepts_wrapped_path_and_rejects_empty_result(self):
         class Database:
-            def format_abspath(self, book_id, format_name):
+            def format_abspath(self, book_id, format_name, index_is_id=False):
+                self.args = (book_id, format_name, index_is_id)
                 return ("/library/book.epub", format_name)
 
-        self.assertEqual("/library/book.epub", safe_format_path(Database(), 1, "EPUB"))
+        database = Database()
+        self.assertEqual("/library/book.epub", safe_format_path(database, 1, "EPUB"))
+        self.assertEqual((1, "EPUB", True), database.args)
 
         class EmptyDatabase:
             def format_abspath(self, book_id, format_name):
@@ -224,6 +227,41 @@ class SyncPlanTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             safe_format_path(EmptyDatabase(), 1, "EPUB")
+
+    def test_safe_format_path_uses_real_id_for_legacy_view_wrapper(self):
+        class Calibre76Database:
+            def format_abspath(self, book_id, format_name, index_is_id=False):
+                if not index_is_id:
+                    raise IndexError("tuple index out of range")
+                return "/library/book.epub"
+
+        self.assertEqual(
+            "/library/book.epub",
+            safe_format_path(Calibre76Database(), 42, ".epub"),
+        )
+
+    def test_safe_format_path_falls_back_for_old_signature_and_stale_ids(self):
+        class OldDatabase:
+            def format_abspath(self, book_id, format_name):
+                return ("/library/book.epub", format_name)
+
+        self.assertEqual("/library/book.epub", safe_format_path(OldDatabase(), 2, "EPUB"))
+
+        class StaleDatabase:
+            def has_id(self, book_id):
+                return False
+
+            def format_abspath(self, book_id, format_name, index_is_id=False):
+                raise AssertionError("stale ids must be rejected before lookup")
+
+        with self.assertRaisesRegex(ValueError, "no book with id"):
+            safe_format_path(StaleDatabase(), 99, "EPUB")
+
+        for invalid_id in (None, 0, -1, True, "42"):
+            with self.subTest(invalid_id=invalid_id), self.assertRaises(ValueError):
+                safe_format_path(OldDatabase(), invalid_id, "EPUB")
+        with self.assertRaises(ValueError):
+            safe_format_path(OldDatabase(), 2, "../EPUB")
 
     def test_diagnosis_reports_found_and_missing_format_paths(self):
         with tempfile.NamedTemporaryFile(suffix=".epub") as book_file:
