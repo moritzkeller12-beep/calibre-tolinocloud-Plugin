@@ -672,6 +672,11 @@ class SyncDashboard(QDialog):
             self.cancel.setEnabled(False)
 
     def sync_completed(self, state, refresh, updates):
+        # CRITICAL: Update UI with the latest refresh token from worker
+        # This prevents "invalid token" errors on subsequent sync attempts
+        if refresh and refresh != self.refresh.text().strip():
+            self.set_refresh_token(refresh)
+            self.persist_refresh_token(refresh)
         update_tolino_ids(self.gui.current_db, updates, enabled=self.sync_column_enabled)
         save_account(self.account_name, {
             "state": state, "refresh_token": refresh,
