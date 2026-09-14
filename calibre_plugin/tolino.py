@@ -381,6 +381,33 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     """Run an OAuth callback for all partners with valid auth_url."""
     partner = PARTNERS.get(int(partner_id))
+    
+    # Special handling for Orell Fussli (partner 8) - uses Keycloak
+    # Keycloak redirects to webreader.mytolino.com, not back to localhost callback
+    if int(partner_id) == 8:
+        if not partner or not partner.get("auth_url"):
+            raise TolinoAuthError(
+                "Orell F\u00fcssli authentication requires manual token extraction. "
+                "Use 'Token aus Browser extrahieren' instead."
+            )
+        params = {
+            "client_id": partner["client_id"],
+            "response_type": "code",
+            "scope": partner["scope"],
+        }
+        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+            if partner.get(key):
+                params[key] = partner[key]
+        auth_url = partner["auth_url"] + "?" + urlencode(params)
+        if not webbrowser.open(auth_url):
+            raise TolinoAuthError("Could not open the system browser.")
+        raise TolinoAuthError(
+            "Orell F\u00fcssli authentication completed in browser. "
+            "Please: 1) Sign in in the browser that just opened, "
+            "2) Close the browser when done, "
+            "3) Click 'Token aus Browser extrahieren' to get your tokens."
+        )
+    
     if not partner or not partner.get("auth_url"):
         raise TolinoAuthError(
             "This Tolino partner has no OAuth authorization URL configured. "
@@ -397,33 +424,18 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     server.timeout = timeout
     redirect_uri = callback_redirect_uri(server.server_port)
     
-    # Special handling for Orell Fussli (partner 8) - autologin endpoint
-    # does NOT accept redirect_uri in query parameters
-    if int(partner_id) == 8:
-        params = {
-            "client_id": partner["client_id"],
-            "response_type": "code",
-            "scope": partner["scope"],
-            "state": state,
-        }
-        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
-            if partner.get(key):
-                params[key] = partner[key]
-        auth_url = partner["auth_url"]
-    else:
-        params = {
-            "client_id": partner["client_id"],
-            "response_type": "code",
-            "scope": partner["scope"],
-            "redirect_uri": redirect_uri,
-            "state": state,
-        }
-        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
-            if partner.get(key):
-                params[key] = partner[key]
-        auth_url = partner["auth_url"]
+    params = {
+        "client_id": partner["client_id"],
+        "response_type": "code",
+        "scope": partner["scope"],
+        "redirect_uri": redirect_uri,
+        "state": state,
+    }
+    for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+        if partner.get(key):
+            params[key] = partner[key]
     
-    if not webbrowser.open(auth_url + "?" + urlencode(params)):
+    if not webbrowser.open(partner["auth_url"] + "?" + urlencode(params)):
         server.server_close()
         raise TolinoAuthError("Could not open the system browser.")
     while not hasattr(server, "query") and time.time() - created_at < timeout:
