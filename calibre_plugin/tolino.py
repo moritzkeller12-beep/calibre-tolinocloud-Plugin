@@ -45,6 +45,10 @@ PARTNERS = {
         "token_url": "https://www.orellfuessli.ch/auth/oauth2/token",
         "auth_url": "https://www.orellfuessli.ch/auth/oauth2/autologin",
         "reader_url": "https://webreader.mytolino.com/library/",
+        "token_headers": {
+            "Origin": "https://webreader.mytolino.com",
+            "Referer": "https://webreader.mytolino.com/",
+        },
         "x_buchde.mandant_id": "37",
         "x_buchde.skin_id": "17",
         "client_type": "TOLINO_WEBREADER",
@@ -223,13 +227,16 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     server.server_close()
     code = validate_callback(query, state, created_at)
     client = TolinoClient(partner_id, hardware)
-    data = client._request(partner["token_url"], "POST", {
+    payload = {
         "client_id": partner["client_id"],
         "grant_type": "authorization_code",
         "code": code,
-        "scope": partner["scope"],
         "redirect_uri": redirect_uri,
-    }, form=True, authenticated=False)
+    }
+    if partner_id != 8:
+        payload["scope"] = partner["scope"]
+    data = client._request(partner["token_url"], "POST", payload,
+                           form=True, authenticated=False)
     if not data.get("access_token") or not data.get("refresh_token"):
         raise TolinoAuthError("Browser login returned an incomplete token response.")
     return data["refresh_token"], client.hardware
@@ -286,8 +293,9 @@ class TolinoClient:
                 "client_id": self.partner["client_id"],
                 "grant_type": "refresh_token",
                 "refresh_token": self.refresh,
-                "scope": self.partner["scope"],
             }
+            if self.partner_id != 8:
+                payload["scope"] = self.partner["scope"]
         elif self.username and self.password:
             raise TolinoAuthError(
                 "Username/password login requires the partner's browser OAuth flow. "
@@ -329,6 +337,8 @@ class TolinoClient:
             for key in ("client_type", "client_version"):
                 if self.partner.get(key):
                     headers[key] = self.partner[key]
+        elif url == self.partner.get("token_url"):
+            headers.update(self.partner.get("token_headers", {}))
         if data is not None:
             if form:
                 body = urlencode(data).encode("utf-8")

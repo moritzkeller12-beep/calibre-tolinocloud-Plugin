@@ -334,6 +334,10 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("17", PARTNERS[8]["x_buchde.skin_id"])
         self.assertEqual("TOLINO_WEBREADER", PARTNERS[8]["client_type"])
         self.assertEqual("5.2.0", PARTNERS[8]["client_version"])
+        self.assertEqual("https://webreader.mytolino.com",
+                         PARTNERS[8]["token_headers"]["Origin"])
+        self.assertEqual("https://webreader.mytolino.com/",
+                         PARTNERS[8]["token_headers"]["Referer"])
 
     def test_refresh_token_normalization_reports_only_safe_metadata(self):
         token, info = normalize_refresh_token('  "refresh-secret-value"  ')
@@ -392,6 +396,7 @@ class SyncPlanTests(unittest.TestCase):
             captured["url"] = request.full_url
             captured["body"] = request.data.decode("utf-8")
             captured["content_type"] = request.headers["Content-type"]
+            captured["headers"] = request.headers
             return Response()
 
         with patch("calibre_plugin.tolino.urlopen", request):
@@ -401,12 +406,48 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(PARTNERS[8]["token_url"], captured["url"])
         self.assertEqual(
             "client_id=webreader&grant_type=refresh_token&"
-            "refresh_token=refresh-token&scope=SCOPE_BOSH",
+            "refresh_token=refresh-token",
             captured["body"])
         self.assertEqual("application/x-www-form-urlencoded",
                          captured["content_type"])
+        headers = {key.casefold(): value for key, value in captured["headers"].items()}
+        self.assertEqual("https://webreader.mytolino.com", headers["origin"])
+        self.assertEqual("https://webreader.mytolino.com/", headers["referer"])
+        self.assertNotIn("scope=", captured["body"])
+        self.assertNotIn("client_type", headers)
+        self.assertNotIn("client_version", headers)
+        self.assertNotIn("reseller_id", headers)
+        self.assertNotIn("cookie", headers)
+        self.assertNotIn("authorization", headers)
         self.assertEqual("refresh-token", client.refresh)
         self.assertNotEqual("access-secret", client.refresh)
+
+    def test_other_partner_refresh_payload_keeps_configured_scope(self):
+        captured = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"access_token":"access-secret","expires_in":3600}'
+
+        def request(request, timeout):
+            captured["body"] = request.data.decode("utf-8")
+            return Response()
+
+        with patch("calibre_plugin.tolino.urlopen", request):
+            TolinoClient(3, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+                         "refresh-token").login()
+        self.assertEqual(
+            "client_id=webreader&grant_type=refresh_token&"
+            "refresh_token=refresh-token&scope=SCOPE_BOSH",
+            captured["body"])
 
     def test_auth_diagnostics_redacts_token_content(self):
         client = TolinoClient(8, "", '"secret-refresh"')

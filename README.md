@@ -1,6 +1,6 @@
 # Tolino Cloud Sync for Calibre
 
-Plugin version: **0.3.5**. Author: **moritzkeller12-beep**.
+Plugin version: **0.3.6**. Author: **moritzkeller12-beep**.
 
 Native Python plugin for synchronizing an open Calibre library with the
 Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
@@ -87,11 +87,13 @@ partner's Web Reader network requests. Tokens, credentials, and sync state are
 stored through Calibre's `JSONConfig` mechanism and are never logged.
 If the explicit Tolino test reports `HTTP 400 invalid_grant` / `Invalid refresh
 token`, the configured token is expired, invalid, or is not a refresh token.
-For partner 8 the verified refresh request is an URL-encoded form with exactly
-`client_id=webreader`, `grant_type=refresh_token`, `refresh_token=<value>`,
-and `scope=SCOPE_BOSH` sent to
+For partner 8 the verified browser refresh request contains exactly the
+URL-encoded form fields `client_id=webreader`, `grant_type=refresh_token`, and
+`refresh_token=<value>` — no `scope` field — sent to
 `https://www.orellfuessli.ch/auth/oauth2/token` with
-`Content-Type: application/x-www-form-urlencoded`. Authenticated API requests
+`Content-Type: application/x-www-form-urlencoded`, `Origin:
+https://webreader.mytolino.com`, and `Referer: https://webreader.mytolino.com/`.
+Authenticated API requests
 use `reseller_id=8`, `client_type=TOLINO_WEBREADER`, and
 `client_version=5.2.0`. The Web Reader authorization endpoint is
 `https://www.orellfuessli.ch/auth/oauth2/autologin` and its registered redirect
