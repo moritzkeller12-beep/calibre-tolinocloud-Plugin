@@ -9,7 +9,8 @@ from . import config
 from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    normalize_formats, plan_sync, safe_format_path,
                    selected_book_ids, selected_table_rows, sync_summary,
-                   unpack_plan_result, unpack_upload_record)
+                   unpack_plan_result, unpack_upload_record, redact_sensitive,
+                   format_diagnostic_report, diagnose_preparation)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
 
@@ -252,6 +253,51 @@ class SyncPlanTests(unittest.TestCase):
     def test_sync_summary_is_deterministic_for_dashboard(self):
         self.assertEqual({"uploads": 2, "deletions": 1, "errors": 0, "total": 3},
                          sync_summary(2, 1))
+
+    def test_diagnostic_redaction_removes_credentials_and_headers(self):
+        value = redact_sensitive({
+            "refresh_token": "refresh-secret",
+            "password": "password-secret",
+            "headers": "Authorization: Bearer access-secret",
+            "nested": {"access_token": "access-secret"},
+        })
+        rendered = format_diagnostic_report([{"step": "response", "status": "ok",
+                                              "value": value}])
+        self.assertNotIn("refresh-secret", rendered)
+        self.assertNotIn("password-secret", rendered)
+        self.assertNotIn("access-secret", rendered)
+        self.assertIn("[REDACTED]", rendered)
+
+    def test_diagnosis_reports_steps_and_continues_after_metadata_error(self):
+        class Row:
+            def __init__(self, book_id):
+                self.book_id = book_id
+
+        class Data:
+            def iterall(self):
+                return (Row(1), Row(2))
+
+        class Database:
+            data = Data()
+
+            def get_metadata(self, book_id):
+                if book_id == 2:
+                    raise IndexError("tuple index out of range")
+                return {"uuid": "u1", "formats": ("EPUB",)}
+
+            def format_abspath(self, book_id, format_name):
+                return "/library/book.epub"
+
+            def cover(self, book_id, as_file=False):
+                return b"cover"
+
+        results = diagnose_preparation(Database(), ["EPUB"], upload_covers=True)
+        report = format_diagnostic_report(results)
+        self.assertIn("Calibre-Version", report)
+        self.assertIn("Erkannte Buch-ID-Anzahl", report)
+        self.assertIn("IndexError", report)
+        self.assertIn("tuple index out of range", report)
+        self.assertIn("plan_sync-Ergebnisform", report)
 
     def test_empty_settings_are_migrated_without_calibre(self):
         original = config.PREFERENCES

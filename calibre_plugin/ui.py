@@ -1,5 +1,6 @@
 import os
 import tempfile
+import traceback
 
 from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
@@ -8,28 +9,30 @@ try:
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
                          QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QObject, pyqtSignal)
+                         QTextEdit, QObject, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
                          QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QObject, Signal as pyqtSignal)
+                         QTextEdit, QObject, Signal as pyqtSignal)
 
 try:
     from .config import save_settings, settings
     from .sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
                        selected_book_ids, sync_summary, normalize_formats,
                        safe_format_path, cover_bytes, unpack_plan_result,
-                       unpack_upload_record)
+                       unpack_upload_record, diagnose_preparation,
+                       format_diagnostic_report)
     from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 except ImportError:
     from config import save_settings, settings
     from sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
                       selected_book_ids, sync_summary, normalize_formats,
                       safe_format_path, cover_bytes, unpack_plan_result,
-                      unpack_upload_record)
+                      unpack_upload_record, diagnose_preparation,
+                      format_diagnostic_report)
     from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
 
@@ -117,6 +120,68 @@ class InventoryDialog(QDialog):
         return selected_book_ids([
             dict(row, selected=check.isChecked()) for row, check in zip(rows, self.checks)
         ])
+
+
+class DiagnosticDialog(QDialog):
+    def __init__(self, dashboard, report, parent=None):
+        QDialog.__init__(self, parent)
+        self.dashboard = dashboard
+        self.setWindowTitle("Debug / Diagnose")
+        self.setMinimumSize(760, 560)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Die lokale Diagnose führt keinen Login und keine Tolino-Anfrage aus. "
+            "Der Tolino-Test startet Netzwerkzugriff erst nach ausdrücklichem Klick."))
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setPlainText(report)
+        layout.addWidget(self.output)
+        buttons = QHBoxLayout()
+        copy = QPushButton("Diagnose kopieren / Copy")
+        copy.clicked.connect(self.copy_report)
+        test = QPushButton("Tolino-Antwort testen")
+        test.clicked.connect(self.test_tolino)
+        close = QPushButton("Schließen / Close")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(copy)
+        buttons.addWidget(test)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def copy_report(self):
+        self.output.selectAll()
+        self.output.copy()
+
+    def test_tolino(self):
+        values = self.dashboard.values()
+        if not values["refresh_token"]:
+            QMessageBox.warning(self, "Tolino-Antwort testen",
+                                "Kein Refresh-Token konfiguriert.")
+            return
+        try:
+            client = TolinoClient(values["partner_id"], values["hardware_id"],
+                                  values["refresh_token"], values["username"],
+                                  values["password"])
+            client.login()
+            inventory = client.inventory()
+            result = {
+                "step": "Tolino-Antwort testen",
+                "status": "ok",
+                "value": {
+                    "response_type": type(inventory).__name__,
+                    "item_count": len(inventory),
+                    "sample": inventory[:3],
+                },
+            }
+        except Exception as exc:
+            result = {
+                "step": "Tolino-Antwort testen",
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        self.output.append("\n" + format_diagnostic_report([result]))
 
 
 class SyncWorker(QObject):
@@ -232,18 +297,33 @@ class SyncDashboard(QDialog):
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.start = QPushButton("Synchronisierung starten / Start synchronization")
+        self.debug = QPushButton("Debug / Diagnose")
         self.cancel = QPushButton("Abbrechen / Abort")
         self.cancel.setEnabled(False)
         self.start.clicked.connect(self.start_sync)
+        self.debug.clicked.connect(self.debug_diagnose)
         self.cancel.clicked.connect(self.cancel_sync)
         root.addWidget(self.progress_label)
         root.addWidget(self.progress)
+        action_buttons = QHBoxLayout()
+        action_buttons.addWidget(self.debug)
+        action_buttons.addWidget(self.start)
+        root.addLayout(action_buttons)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.close)
-        root.addWidget(self.start)
         root.addWidget(self.cancel)
         root.addWidget(buttons)
         self.load_values()
+
+    def debug_diagnose(self):
+        values = self.values()
+        results = diagnose_preparation(
+            self.gui.current_db,
+            values["preferred_formats"],
+            values["upload_covers"],
+            load_state(values["state"]),
+        )
+        DiagnosticDialog(self, format_diagnostic_report(results), self).exec()
 
     def load_values(self):
         values = settings()

@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import traceback
 import unicodedata
 
 
@@ -324,4 +325,178 @@ def sync_summary(upload_count, delete_count, error_count=0):
         "deletions": int(delete_count),
         "errors": int(error_count),
         "total": int(upload_count) + int(delete_count),
+    }
+
+
+_SECRET_KEYS = {
+    "access_token", "authorization", "password", "refresh", "refresh_token",
+    "secret", "token", "t_auth_token",
+}
+
+
+def redact_sensitive(value):
+    """Return a printable copy with credentials and authorization data removed."""
+    if isinstance(value, dict):
+        return {
+            str(key): "[REDACTED]" if (
+                str(key).casefold() in _SECRET_KEYS or
+                "token" in str(key).casefold() or
+                "password" in str(key).casefold()
+            ) else redact_sensitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [redact_sensitive(item) for item in value]
+    if isinstance(value, bytes):
+        return "[%d bytes]" % len(value)
+    text = str(value)
+    text = re.sub(r"(?i)(authorization\s*:\s*)([^,;]+)", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)((?:access|refresh)[_-]?token|password|secret)\s*[=:]\s*[^\s,;]+",
+                  r"\1=[REDACTED]", text)
+    return text
+
+
+def format_diagnostic_report(results):
+    """Format diagnostic step dictionaries as copyable, stable text."""
+    lines = ["Tolino Cloud Sync Diagnose", "===========================", ""]
+    for result in results:
+        lines.append("[%s] %s" % (result.get("status", "unknown").upper(),
+                                  result.get("step", "unnamed")))
+        if "value" in result:
+            value = redact_sensitive(result["value"])
+            lines.append(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                    default=str))
+        if result.get("error_type"):
+            lines.append("Fehlertyp: %s" % result["error_type"])
+            lines.append("Fehlermeldung: %s" % result.get("error_message", ""))
+            lines.append("Traceback:")
+            lines.extend(str(result.get("traceback", "")).rstrip().splitlines())
+        lines.append("")
+    return "\n".join(lines)
+
+
+def diagnose_preparation(database, preferred_formats=(), upload_covers=False, state=None):
+    """Inspect local preparation inputs without logging in or contacting Tolino."""
+    results = []
+
+    def step(name, action):
+        try:
+            results.append({"step": name, "status": "ok", "value": action()})
+        except Exception as exc:
+            results.append({
+                "step": name,
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "traceback": traceback.format_exc(),
+            })
+        return results[-1]
+
+    step("Calibre-Version", lambda: _calibre_version())
+    step("Datenbankobjekt-Typ", lambda: {
+        "type": type(database).__name__,
+        "module": type(database).__module__,
+    })
+    ids_result = step("Erkannte Buch-ID-Anzahl", lambda: _diagnostic_ids(database))
+    book_ids = ids_result.get("value", {}).get("ids", []) if ids_result.get("status") == "ok" else []
+
+    metadata = {}
+    for book_id in book_ids:
+        result = step("Metadaten Buch %s" % book_id,
+                      lambda book_id=book_id: _diagnostic_metadata(database, book_id))
+        if result.get("status") == "ok":
+            metadata[book_id] = result["value"]["metadata"]
+
+    step("Metadaten-Schlüssel/-Typen", lambda: _metadata_shapes(metadata))
+    step("Format-Rückgaben", lambda: _diagnostic_formats(database, metadata))
+    if upload_covers:
+        step("Cover-Typ/Größe", lambda: _diagnostic_covers(database, book_ids))
+    state_result = step("Lokaler Sync-Status", lambda: state if isinstance(state, dict) else {})
+    state = state_result.get("value", {}) if state_result.get("status") == "ok" else {}
+    step("plan_sync-Ergebnisform", lambda: _diagnostic_plan(metadata, state, preferred_formats))
+    return results
+
+
+def _calibre_version():
+    try:
+        import calibre
+        return getattr(calibre, "__version__", "unbekannt")
+    except ImportError:
+        return "Calibre-Modul nicht verfügbar (Diagnose außerhalb Calibre)"
+
+
+def _diagnostic_ids(database):
+    ids = list(iter_book_ids(database))
+    return {"count": len(ids), "ids": ids[:20], "truncated": len(ids) > 20}
+
+
+def _diagnostic_metadata(database, book_id):
+    item = database.get_metadata(book_id)
+    metadata = {}
+    for name in ("uuid", "title", "authors", "author", "isbn", "identifiers",
+                 "formats", "last_modified"):
+        value = getattr(item, name, None)
+        if value is None and hasattr(item, "get"):
+            value = item.get(name)
+        metadata[name] = value
+    return {
+        "type": type(item).__name__,
+        "keys": sorted(str(key) for key in metadata if metadata[key] is not None),
+        "types": {key: type(value).__name__ for key, value in metadata.items()
+                  if value is not None},
+        "metadata": metadata,
+    }
+
+
+def _metadata_shapes(metadata):
+    return {
+        str(book_id): {
+            "keys": sorted(value),
+            "types": {key: type(item).__name__ for key, item in value.items()},
+        }
+        for book_id, value in metadata.items()
+    }
+
+
+def _diagnostic_formats(database, metadata):
+    values = {}
+    for book_id, item in metadata.items():
+        formats = normalize_formats(item.get("formats"))
+        values[str(book_id)] = {
+            "metadata_formats": formats,
+            "paths": {fmt: _diagnostic_path(database, book_id, fmt) for fmt in formats},
+        }
+    return values
+
+
+def _diagnostic_path(database, book_id, format_name):
+    try:
+        value = database.format_abspath(book_id, format_name)
+        return {"type": type(value).__name__, "value": redact_sensitive(value)}
+    except Exception as exc:
+        return {"type": type(exc).__name__, "error": str(exc)}
+
+
+def _diagnostic_covers(database, book_ids):
+    result = {}
+    for book_id in book_ids[:20]:
+        value = database.cover(book_id, as_file=False)
+        data = cover_bytes(database, book_id)
+        result[str(book_id)] = {
+            "returned_type": type(value).__name__,
+            "size": len(data) if data is not None else None,
+        }
+    return result
+
+
+def _diagnostic_plan(metadata, state, preferred_formats):
+    plan = plan_sync(metadata, state, preferred_formats)
+    return {
+        "type": type(plan).__name__,
+        "length": len(plan),
+        "parts": [type(part).__name__ for part in plan],
+        "upload_record_lengths": [
+            len(record) if isinstance(record, (tuple, list)) else None
+            for record in plan[0]
+        ],
     }

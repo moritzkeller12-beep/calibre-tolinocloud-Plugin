@@ -1,6 +1,6 @@
 # Tolino Cloud Sync for Calibre
 
-Plugin version: **0.2.0**. Author: **moritzkeller12-beep**.
+Plugin version: **0.3.0**. Author: **moritzkeller12-beep**.
 
 Native Python plugin for synchronizing an open Calibre library with the
 Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
@@ -58,6 +58,15 @@ progress bar, status text, and **Abbrechen / Abort** button. Authentication,
 preparation, and API failures appear in visible bilingual error dialogs. No
 screenshots are included because the UI is rendered by Calibre's own Qt
 widgets and depends on the installed Calibre theme.
+
+Use **Debug / Diagnose** beside the synchronization button to inspect the
+preparation path locally without logging in or contacting Tolino. The
+copyable report includes the Calibre version, database type, book-ID count,
+metadata key/type shapes, format return values, optional cover type/size, and
+the `plan_sync` result shape. Each step records its exception type, message,
+and traceback while allowing later steps to continue. **Tolino-Antwort testen**
+is a separate explicit action in that dialog; it is the only diagnostic action
+that performs login/network access, and its response is redacted.
 
 Before uploading, the plugin loads the Tolino inventory and shows a
 confirmation table with local and remote status (new in Calibre, Tolino-only,
