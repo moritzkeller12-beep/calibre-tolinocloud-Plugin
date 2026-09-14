@@ -12,25 +12,24 @@ python3 build_plugin.py
 ```
 This creates `tolino_cloud_sync.zip`. In Calibre 7.6.0 or newer, choose
 **Preferences > Plugins > Load plugin from file**, select that ZIP, and
-restart Calibre. The archive contains the Calibre metadata at its top level
-and the implementation in the physical namespace package:
+restart Calibre. The archive contains the Calibre metadata and implementation
+files at its top level:
 
 ```text
 __init__.py
 plugin-import-name-tolino_cloud_sync.txt
-calibre_plugins/__init__.py
-calibre_plugins/tolino_cloud_sync/__init__.py
-calibre_plugins/tolino_cloud_sync/ui.py
-calibre_plugins/tolino_cloud_sync/config.py
-calibre_plugins/tolino_cloud_sync/sync.py
-calibre_plugins/tolino_cloud_sync/tolino.py
+ui.py
+config.py
+sync.py
+tolino.py
 ```
 
 Calibre requires the top-level `__init__.py`; do not install the source
-directory itself. The package's relative imports therefore resolve directly
-as `calibre_plugins.tolino_cloud_sync.*`. The empty marker is required by
-Calibre's plugin loader to map the archive to the `tolino_cloud_sync`
-namespace.
+directory itself. The empty marker is required by Calibre's plugin loader to
+map the archive to the `tolino_cloud_sync` namespace. Calibre's
+`CalibrePluginFinder` then maps these root-relative files to
+`calibre_plugins.tolino_cloud_sync.*`, so the implementation's relative
+imports work normally.
 
 The plugin entry point is `TolinoSyncPlugin` in the root `__init__.py` with
 `actual_plugin =

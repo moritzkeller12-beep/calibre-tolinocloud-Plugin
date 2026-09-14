@@ -65,12 +65,10 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual({
                 "__init__.py",
                 "plugin-import-name-tolino_cloud_sync.txt",
-                "calibre_plugins/__init__.py",
-                "calibre_plugins/tolino_cloud_sync/__init__.py",
-                "calibre_plugins/tolino_cloud_sync/ui.py",
-                "calibre_plugins/tolino_cloud_sync/config.py",
-                "calibre_plugins/tolino_cloud_sync/sync.py",
-                "calibre_plugins/tolino_cloud_sync/tolino.py",
+                "ui.py",
+                "config.py",
+                "sync.py",
+                "tolino.py",
             }, set(plugin.namelist()))
             marker = next(name for name in plugin.namelist()
                           if name.startswith("plugin-import-name-") and name.endswith(".txt"))
