@@ -317,7 +317,8 @@ def normalize_inventory_item(item):
 
 
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
-                      comparison_fields=("authors", "title", "isbn")):
+                      comparison_fields=("authors", "title", "isbn"),
+                      use_metadata_ids=True):
     """Return deterministic local/remote rows for the pre-sync confirmation view."""
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
@@ -352,7 +353,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
         isbn = _metadata_text(metadata, "isbn", "identifiers")
         old = state.get(book_uuid, {})
         stored_id = str(old.get("tolino_id") or
-                        metadata_tolino_id(metadata) or "")
+                        (metadata_tolino_id(metadata) if use_metadata_ids else "") or "")
         candidates = []
         if stored_id:
             candidates = [i for i, row in enumerate(remote_rows)

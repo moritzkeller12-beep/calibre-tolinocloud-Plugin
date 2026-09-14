@@ -534,6 +534,7 @@ class SyncDashboard(QDialog):
             comparison = compare_inventory(
                 metadata, state, client.inventory(), settings["preferred_formats"],
                 comparison_fields,
+                use_metadata_ids=len(settings()["accounts"]) == 1,
             )
             dialog = InventoryDialog(comparison, self)
             if dialog.exec() != QDialog.Accepted:
