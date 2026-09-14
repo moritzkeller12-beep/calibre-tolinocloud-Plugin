@@ -21,6 +21,60 @@ Synchronize your Calibre library with the Tolino Cloud.
       docker-compose up
       ```
 
+## Native Calibre plugin
+
+This repository also contains a native Python plugin in `calibre_plugin/`. It
+syncs directly with the open Calibre library and does not require the Docker,
+Bun, or Content Server setup above.
+
+1. Run `python build_plugin.py` from this repository.
+2. In Calibre choose **Preferences > Plugins > Load plugin from file** and
+   select `tolino_cloud_sync.zip`, then restart Calibre.
+3. Use the **Tolino Cloud Sync** toolbar/menu action to configure the partner,
+   a Tolino refresh token (recommended) or login, preferred EPUB/PDF formats,
+   cover uploads, and the optional deletion switch.
+
+Settings and the UUID-to-Tolino-ID state mapping are stored through Calibre's
+`JSONConfig` plugin configuration mechanism. Tokens are never written to logs;
+protect the Calibre configuration directory with normal OS permissions. The
+plugin matches books by Calibre UUID and records a content fingerprint so new
+and changed books are uploaded. Deletions are disabled by default and only
+run when explicitly enabled. **Abort** stops before the next operation; an
+already completed upload is retained in the state mapping.
+
+The Tolino endpoints are not officially documented and differ between
+partners. The plugin currently ships endpoint/auth settings for Thalia.de and
+the partner IDs documented by the reference client (Thalia, Thalia.at,
+Buch.de, books.ch/Orell Füssli, Hugendubel, Osiander, and Buecher.de);
+refresh-token login is the reliable path. Partner API changes,
+token expiry, rate limits, and server-side metadata differences remain known
+risks. No external Tolino calls are made by the local tests:
+
+```text
+python -m unittest calibre_plugin.test_sync
+```
+
+### Reference implementation comparison
+
+The native client was checked against
+[darkphoenix/tolino-calibre-sync](https://github.com/darkphoenix/tolino-calibre-sync)
+(`tolinocloud.py`) and this repository's
+[Node client](https://github.com/poesterlin/tolino-calibre-sync/blob/main/src/tolino-cloud.js).
+It uses the same `pageplace.de` inventory, upload, cover, and
+`deletecontent` endpoints, the same `t_auth_token`/`hardware_id`/`reseller_id`
+headers, multipart `file` uploads, `deliverableId` cover field, and refresh
+token grant. The state matcher intentionally improves on the legacy title
+matching by using Calibre UUID plus a fingerprint.
+
+The reference clients also expose metadata updates, collections, device
+registration, and cloud downloads. Those operations are deliberately not
+called by this one-way Calibre-to-cloud plugin; implementing them would add
+destructive or ambiguous behavior unrelated to library synchronization.
+Username/password browser OAuth is likewise not faked as an OAuth password
+grant: the native plugin requires a refresh token and reports this limitation
+explicitly. Deletion additionally re-checks Tolino inventory before issuing a
+delete request.
+
 ## Configuration (`.env` file)
 
 See the comments in the `.env.example` file for detailed explanations of each setting. Key sections include:
