@@ -75,6 +75,19 @@ grant: the native plugin requires a refresh token and reports this limitation
 explicitly. Deletion additionally re-checks Tolino inventory before issuing a
 delete request.
 
+The configuration dialog includes **Im Browser anmelden**. The browser
+assistant is deliberately disabled for the currently documented partners:
+the reference clients register the Web Reader URL as `redirect_uri`, not a
+loopback address, so redirecting to `127.0.0.1` would be an unverified and
+potentially broken OAuth flow. The implementation nevertheless contains the
+loopback-only callback validation (random state, five-minute expiry, provider
+error handling, and authorization-code validation) for a partner only when
+its configuration explicitly proves support with `local_callback`. Until a
+partner documents/registers that redirect, use the existing Web Reader
+refresh-token fallback. Hardware IDs are generated in the reference-shaped
+format, persisted through `JSONConfig`, and tokens are only stored after a
+validated token response; neither tokens nor callback values are logged.
+
 ## Configuration (`.env` file)
 
 See the comments in the `.env.example` file for detailed explanations of each setting. Key sections include:

@@ -3,11 +3,13 @@ from threading import Event
 
 from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
-from qt.core import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QProgressDialog
+from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                     QFormLayout, QLineEdit, QMessageBox, QProgressDialog,
+                     QPushButton)
 
 from .config import PREFERENCES, save_settings
 from .sync import load_state, plan_sync
-from .tolino import PARTNERS, TolinoClient
+from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
 
 class ConfigDialog(QDialog):
@@ -21,6 +23,8 @@ class ConfigDialog(QDialog):
             self.partner.addItem("%s - %s" % (pid, partner["name"]), pid)
         self.partner.setCurrentIndex(max(0, self.partner.findData(values["partner_id"])))
         self.hardware = QLineEdit(values["hardware_id"])
+        if not self.hardware.text():
+            self.hardware.setText(hardware_id())
         self.refresh = QLineEdit(values["refresh_token"])
         self.refresh.setEchoMode(QLineEdit.Password)
         self.username = QLineEdit(values["username"])
@@ -31,11 +35,14 @@ class ConfigDialog(QDialog):
         self.covers.setChecked(values["upload_covers"])
         self.deletions = QCheckBox()
         self.deletions.setChecked(values["enable_deletions"])
+        self.browser = QPushButton("Im Browser anmelden")
+        self.browser.clicked.connect(self.browser_login)
         for label, widget in (("Partner", self.partner), ("Hardware ID", self.hardware),
                               ("Refresh token", self.refresh), ("Username", self.username),
                               ("Password", self.password), ("Preferred formats", self.formats),
                               ("Upload covers", self.covers), ("Enable deletions (caution)", self.deletions)):
             form.addRow(label, widget)
+        form.addRow("", self.browser)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -47,6 +54,21 @@ class ConfigDialog(QDialog):
                 "password": self.password.text(), "preferred_formats":
                 [x.strip().upper() for x in self.formats.text().split(",") if x.strip()],
                 "upload_covers": self.covers.isChecked(), "enable_deletions": self.deletions.isChecked()}
+
+    def browser_login(self):
+        partner_id = self.partner.currentData()
+        try:
+            refresh, hardware = browser_login(partner_id, self.hardware.text().strip())
+        except TolinoAuthError as exc:
+            QMessageBox.warning(self, "Browser-Anmeldung nicht verfügbar", str(exc))
+            return
+        self.refresh.setText(refresh)
+        self.hardware.setText(hardware)
+        self.username.clear()
+        self.password.clear()
+        QMessageBox.information(self, "Browser-Anmeldung erfolgreich",
+                                "Der Refresh-Token wurde erhalten. Mit OK werden "
+                                "die Einstellungen in Calibre gespeichert.")
 
 
 class TolinoSyncAction(InterfaceAction):
@@ -123,7 +145,8 @@ class TolinoSyncAction(InterfaceAction):
                     continue
                 client.delete(tolino_id)
                 new_state.pop(book_uuid, None)
-            save_settings({"state": new_state, "refresh_token": client.refresh})
+            save_settings({"state": new_state, "refresh_token": client.refresh,
+                           "hardware_id": client.hardware})
             info_dialog(self.gui, "Tolino Cloud Sync", "Synchronization completed.", show_copy_button=False)
         except Exception as exc:
             error_dialog(self.gui, "Tolino Cloud Sync failed", str(exc), show=True)

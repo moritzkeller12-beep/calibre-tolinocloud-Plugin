@@ -4,8 +4,10 @@ import os
 import platform
 import time
 import uuid
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -27,35 +29,120 @@ PARTNERS = {
         "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.thalia.de/auth/oauth2/token",
+        "auth_url": "https://www.thalia.de/de.thalia.ecp.authservice.application/oauth2/authorize",
+        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles",
     },
     4: {"name": "Thalia.at", "client_id": "webshop01",
         "scope": "SCOPE_BOSH",
-        "token_url": "https://www.thalia.at/de.buch.appservices/api/4004/oauth2/token"},
+        "token_url": "https://www.thalia.at/de.buch.appservices/api/4004/oauth2/token",
+        "auth_url": "https://www.thalia.at/de.thalia.ecp.authservice.application/oauth2/authorize",
+        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
     6: {"name": "Buch.de", "client_id": "webshop01",
         "scope": "SCOPE_BOSH SCOPE_BUCHDE"},
     8: {"name": "Books.ch / orellfuessli.ch", "client_id": "webreader",
         "scope": "SCOPE_BOSH",
-        "token_url": "https://www.orellfuessli.ch/auth/oauth2/token"},
+        "token_url": "https://www.orellfuessli.ch/auth/oauth2/token",
+        "auth_url": "https://www.orellfuessli.ch/de.thalia.ecp.authservice.application/oauth2/authorize",
+        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
     13: {
         "name": "Hugendubel.de",
         "client_id": "4c20de744aa8b83b79b692524c7ec6ae",
         "scope": "ebook_library",
         "token_url": "https://api.hugendubel.de/rest/oauth2/token",
+        "auth_url": "https://www.hugendubel.de/oauth/authorize",
+        "reader_url": "https://webreader.hugendubel.de/library/index.html",
     },
     23: {"name": "Osiander.de", "client_id": "webreader",
         "scope": "SCOPE_BOSH",
-        "token_url": "https://www.osiander.de/auth/oauth2/token"},
+        "token_url": "https://www.osiander.de/auth/oauth2/token",
+        "auth_url": "https://www.osiander.de/de.thalia.ecp.authservice.application/oauth2/authorize",
+        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
     30: {"name": "Buecher.de", "client_id": "webshop01",
         "scope": "SCOPE_BOSH SCOPE_BUCHDE",
-        "token_url": "https://www.buecher.de/oauth2/token"},
+        "token_url": "https://www.buecher.de/oauth2/token",
+        "auth_url": "https://www.buecher.de/oauth2/authorize",
+        "reader_url": "https://webreader.mytolino.com/library/"},
 }
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
+OAUTH_STATE_TTL = 300
 
 
 def hardware_id():
     os_id = {"Windows": "1", "Darwin": "2", "Linux": "3"}.get(platform.system(), "x")
     return "%sxxA-00BCD-EFGHI-JKLMN-OPQRh" % os_id
+
+
+def callback_redirect_uri(port):
+    return "http://127.0.0.1:%d/callback" % int(port)
+
+
+def validate_callback(query, expected_state, created_at, now=None):
+    """Validate one OAuth callback without accepting tokens from the URL."""
+    now = time.time() if now is None else now
+    if now - created_at > OAUTH_STATE_TTL:
+        raise TolinoAuthError("Browser login expired. Please try again.")
+    if query.get("state", [None])[0] != expected_state:
+        raise TolinoAuthError("Browser login state did not match.")
+    if query.get("error", [None])[0]:
+        raise TolinoAuthError("Browser login was rejected by the partner.")
+    code = query.get("code", [None])[0]
+    if not code:
+        raise TolinoAuthError("Browser login returned no authorization code.")
+    return code
+
+
+class _CallbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.query = parse_qs(urlparse(self.path).query)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Login received. You can return to Calibre.")
+
+    def log_message(self, *_args):
+        return
+
+
+def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
+    """Run an OAuth callback only for partners explicitly supporting loopback."""
+    partner = PARTNERS.get(int(partner_id))
+    if not partner or not partner.get("local_callback"):
+        raise TolinoAuthError(
+            "This Tolino partner only registers its Web Reader redirect URI. "
+            "A local browser callback is not supported. Use a Web Reader "
+            "refresh token in the configuration as fallback."
+        )
+    state = uuid.uuid4().hex
+    created_at = time.time()
+    server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
+    server.timeout = timeout
+    redirect_uri = callback_redirect_uri(server.server_port)
+    params = {
+        "client_id": partner["client_id"],
+        "response_type": "code",
+        "scope": partner["scope"],
+        "redirect_uri": redirect_uri,
+        "state": state,
+    }
+    if not webbrowser.open(partner["auth_url"] + "?" + urlencode(params)):
+        server.server_close()
+        raise TolinoAuthError("Could not open the system browser.")
+    while not hasattr(server, "query") and time.time() - created_at < timeout:
+        server.handle_request()
+    query = getattr(server, "query", {})
+    server.server_close()
+    code = validate_callback(query, state, created_at)
+    client = TolinoClient(partner_id, hardware)
+    data = client._request(partner["token_url"], "POST", {
+        "client_id": partner["client_id"],
+        "grant_type": "authorization_code",
+        "code": code,
+        "scope": partner["scope"],
+        "redirect_uri": redirect_uri,
+    }, form=True, authenticated=False)
+    if not data.get("access_token") or not data.get("refresh_token"):
+        raise TolinoAuthError("Browser login returned an incomplete token response.")
+    return data["refresh_token"], client.hardware
 
 
 class TolinoClient:

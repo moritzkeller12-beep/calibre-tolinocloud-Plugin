@@ -1,7 +1,8 @@
 import unittest
 
 from .sync import fingerprint, plan_sync
-from .tolino import PARTNERS, hardware_id
+from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
+                     hardware_id, validate_callback)
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -31,6 +32,23 @@ class SyncPlanTests(unittest.TestCase):
         for partner_id in (3, 4, 6, 8, 13, 23, 30):
             self.assertIn(partner_id, PARTNERS)
         self.assertRegex(hardware_id(), r"^[123x]..A-00BCD-EFGHI-JKLMN-OPQRh$")
+
+    def test_callback_requires_matching_state_and_fresh_timestamp(self):
+        query = {"state": ["expected"], "code": ["opaque-code"]}
+        self.assertEqual("opaque-code", validate_callback(query, "expected", 100, 120))
+        with self.assertRaises(TolinoAuthError):
+            validate_callback(query, "wrong", 100, 120)
+        with self.assertRaises(TolinoAuthError):
+            validate_callback(query, "expected", 100, 401)
+
+    def test_callback_rejects_provider_errors_and_missing_code(self):
+        with self.assertRaises(TolinoAuthError):
+            validate_callback({"state": ["s"], "error": ["denied"]}, "s", 100, 101)
+        with self.assertRaises(TolinoAuthError):
+            validate_callback({"state": ["s"]}, "s", 100, 101)
+
+    def test_redirect_uri_is_loopback_only(self):
+        self.assertEqual("http://127.0.0.1:4321/callback", callback_redirect_uri(4321))
 
 
 if __name__ == "__main__":
