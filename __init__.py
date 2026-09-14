@@ -16,6 +16,3 @@ class TolinoSyncPlugin(InterfaceActionBase):
     actual_plugin = "calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"
     icon = "images/tolino_cloud_sync.png"
     has_html = False
-    
-    def initialize(self):
-        self.actual_plugin_ = self.load_actual_plugin(self.actual_plugin)
