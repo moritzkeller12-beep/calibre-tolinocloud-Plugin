@@ -13,7 +13,8 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    selected_book_ids, selected_table_rows, sync_summary,
                    unpack_plan_result, unpack_upload_record, redact_sensitive,
                    format_diagnostic_report, diagnose_preparation,
-                   _diagnostic_formats, metadata_by_id, format_error_details)
+                   _diagnostic_formats, metadata_by_id, format_error_details,
+                   normalize_title)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      TolinoClient, hardware_id, normalize_refresh_token,
                      sanitize_error, validate_callback)
@@ -277,7 +278,7 @@ class SyncPlanTests(unittest.TestCase):
             ["EPUB"],
         )
         self.assertEqual(["identical", "changed"], [row["status"] for row in rows])
-        self.assertEqual({2}, selected_book_ids(rows))
+        self.assertEqual(set(), selected_book_ids(rows))
 
     def test_inventory_comparison_uses_isbn_and_reports_remote_only(self):
         metadata = {
@@ -294,6 +295,40 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("t1", rows[0]["tolino_id"])
         self.assertEqual("only_tolino", rows[1]["status"])
         self.assertFalse(rows[1]["selected"])
+
+    def test_title_matching_normalizes_unicode_punctuation_and_extension(self):
+        self.assertEqual(normalize_title("Der „Überblick“ – Band 2.epub"),
+                         normalize_title("DER Überblick - Band 2"))
+        metadata = {1: {"uuid": "u1", "title": "Der „Überblick“ – Band 2",
+                        "authors": "Andere", "formats": ["EPUB"]}}
+        rows = compare_inventory(
+            metadata, {}, [{"id": "t1", "title": "DER Überblick - Band 2.pdf"}],
+            ["EPUB"],
+        )
+        self.assertEqual("identical", rows[0]["status"])
+        self.assertFalse(rows[0]["selected"])
+        self.assertEqual("title", rows[0]["match_reason"])
+
+    def test_title_match_is_used_without_author_and_duplicate_is_conservative(self):
+        metadata = {
+            1: {"uuid": "u1", "title": "The Book", "formats": ["EPUB"]},
+            2: {"uuid": "u2", "title": "The Book", "formats": ["EPUB"]},
+        }
+        state = {}
+        rows = compare_inventory(
+            metadata, state,
+            [{"id": "t1", "title": "the book"}, {"id": "t2", "title": "THE BOOK"}],
+            ["EPUB"],
+        )
+        self.assertEqual(["identical", "identical"], [row["status"] for row in rows])
+        self.assertEqual({"duplicate_title"}, {row["match_reason"] for row in rows})
+        self.assertFalse(any(row["selected"] for row in rows))
+        self.assertEqual({"t1", "t2"}, {state[key]["tolino_id"] for key in state})
+
+    def test_explicit_selection_gates_changed_uploads(self):
+        metadata = {1: dict(self.book)}
+        old = {"u1": {"tolino_id": "t1", "fingerprint": "old"}}
+        self.assertEqual([], plan_sync(metadata, old, ["EPUB"], upload_book_ids=set())[0])
 
     def test_unchanged_book_is_not_uploaded(self):
         old = {"u1": {"tolino_id": "t1", "fingerprint": fingerprint(self.book, "EPUB")}}

@@ -1,6 +1,6 @@
 # Tolino Cloud Sync for Calibre
 
-Plugin version: **0.3.7**. Author: **moritzkeller12-beep**.
+Plugin version: **0.4.0**. Author: **moritzkeller12-beep**.
 
 Native Python plugin for synchronizing an open Calibre library with the
 Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
@@ -70,13 +70,18 @@ that performs login/network access, and its response is redacted.
 
 Before uploading, the plugin loads the Tolino inventory and shows a
 confirmation table with local and remote status (new in Calibre, Tolino-only,
-identical, or changed), title, authors, ISBN, and Tolino ID. New and changed
-Calibre books are selected by default, while the user can adjust the upload
-selection. UUIDs and stored Tolino IDs are preferred for matching; ISBN and
-normalized author/title are readable fallback matches. Author, title, and ISBN
-checkboxes control comparison/filter matching only: the current Tolino API has
-no verified metadata-update endpoint, so these fields are never sent as fake
-metadata requests. Actual uploads are ebook files in the selected format and,
+identical, changed, or duplicate Tolino title), title, authors, ISBN, Tolino
+ID, and an explanation. Matching priority is stored Tolino ID, Calibre UUID,
+ISBN, then a normalized title. Title normalization uses Unicode NFKC,
+casefolding, whitespace normalization, and Unicode punctuation/symbol
+normalization; only a clearly technical trailing ebook file extension is
+removed. It does not abbreviate or aggressively truncate titles. A unique
+normalized title is an existing book and is therefore unselected by default,
+even if its file fingerprint changed. Changed or duplicate-title books are
+uploaded only when explicitly selected; duplicate Tolino titles are paired
+conservatively and warned about in the table. A title match never invents a
+metadata update: the current Tolino API has no verified metadata-update
+endpoint. Actual uploads are ebook files in the selected format and,
 optionally, covers. Deletions remain a separate opt-in setting.
 When replacing an existing Tolino deliverable, its old ID is cleaned up after
 the replacement upload to prevent duplicates; the opt-in setting controls
@@ -129,8 +134,11 @@ reference supplies one.
 
 ## Synchronization behavior
 
-Books are matched by Calibre UUID and a deterministic content fingerprint.
-New or changed supported-format books are uploaded. Covers are optional.
+Books are matched by stored Tolino ID/UUID, ISBN, and then normalized title;
+the first two identifiers take precedence. New supported-format books are
+selected for upload. Existing normalized-title matches are not selected,
+including when their fingerprint changed; explicitly selecting one replaces
+the existing deliverable. Covers are optional.
 Deletion is disabled by default and, when enabled, re-checks the Tolino
 inventory before deleting a recorded deliverable ID. Cancellation stops before
 the next operation; completed operations remain in the persisted state.

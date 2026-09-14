@@ -181,8 +181,24 @@ def _unique_ids(book_ids):
 
 
 def normalize_match_text(value):
+    """Normalize human-readable matching text without dropping Unicode letters."""
     value = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    return re.sub(r"[^0-9a-z]+", " ", value).strip()
+    parts = []
+    for character in value:
+        category = unicodedata.category(character)
+        if character.isspace() or category[0] in ("P", "S"):
+            parts.append(" ")
+        else:
+            parts.append(character)
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+def normalize_title(value):
+    """Normalize a title, ignoring only a clearly technical file extension."""
+    title = unicodedata.normalize("NFKC", str(value or "")).strip()
+    title = re.sub(r"\.(?:epub|pdf|mobi|azw3|azw|fb2|txt|html?)\s*$",
+                   "", title, flags=re.IGNORECASE)
+    return normalize_match_text(title)
 
 
 def _normalize_isbn(value):
@@ -227,7 +243,15 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             "tolino_id": str(remote_id),
             "status": "only_tolino",
             "selected": False,
+            "normalized_title": normalize_title(_inventory_value(
+                item, "title", "bookTitle", "name")),
         })
+    title_counts = {}
+    for row in remote_rows:
+        if row["normalized_title"]:
+            title_counts[row["normalized_title"]] = (
+                title_counts.get(row["normalized_title"], 0) + 1
+            )
     matched = set()
     rows = []
     for book_id, metadata in metadata_by_id.items():
@@ -250,12 +274,13 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             normalized_isbn = _normalize_isbn(isbn)
             candidates = [i for i, row in enumerate(remote_rows)
                           if normalized_isbn and _normalize_isbn(row["isbn"]) == normalized_isbn]
-        if not candidates and {"authors", "title"} <= set(comparison_fields) and title and authors:
-            key = (normalize_match_text(authors), normalize_match_text(title))
+        title_key = normalize_title(title)
+        matched_by_title = not candidates and bool(title_key)
+        if matched_by_title:
             candidates = [i for i, row in enumerate(remote_rows)
-                          if (normalize_match_text(row["authors"]),
-                              normalize_match_text(row["title"])) == key]
+                          if row["normalized_title"] == title_key]
         remote_index = next((i for i in candidates if i not in matched), None)
+        match_reason = ""
         selected_format = next(
             (fmt for fmt in preferred_formats
              if str(fmt).upper() in {x.upper() for x in normalize_formats(metadata.get("formats"))}),
@@ -278,9 +303,20 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                 )
                 for value, field in values if field in comparison_fields
             )
-            status = "identical" if (
+            title_match = bool(matched_by_title and title_key and
+                               normalize_title(remote["title"]) == title_key)
+            status = "identical" if title_match or (
                 old.get("fingerprint") and old.get("fingerprint") == current_fp
             ) or same_fields else "changed"
+            match_reason = (
+                "title" if title_match else
+                "stored_id_or_uuid" if stored_id or book_uuid == remote["uuid"] else
+                "isbn_or_metadata"
+            )
+            duplicate_title = title_counts.get(title_key, 0) > 1
+            if duplicate_title and title_match:
+                match_reason = "duplicate_title"
+            state.setdefault(book_uuid, {})["tolino_id"] = tolino_id
         rows.append({
             "book_id": book_id,
             "uuid": book_uuid,
@@ -289,9 +325,25 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             "isbn": isbn,
             "tolino_id": tolino_id,
             "status": status,
-            "selected": status in ("new_in_calibre", "changed"),
+            "selected": status == "new_in_calibre",
+            "match_reason": match_reason,
+            "duplicate_count": title_counts.get(title_key, 0),
+            "explanation": (
+                "Eindeutiger normalisierter Titel-Treffer; standardmäßig nicht hochgeladen."
+                if status == "identical" and match_reason == "title" else
+                "Gleicher Titel mehrfach in Tolino; Zuordnung konservativ, Auswahl prüfen."
+                if match_reason == "duplicate_title" else
+                "Kein vorhandener Titel-Treffer; Upload standardmäßig ausgewählt."
+                if status == "new_in_calibre" else
+                "Vorhandener Datensatz unterscheidet sich; Upload nur bei expliziter Auswahl."
+            ),
         })
-    rows.extend(row for i, row in enumerate(remote_rows) if i not in matched)
+    for i, row in enumerate(remote_rows):
+        if i not in matched:
+            if title_counts.get(row["normalized_title"], 0) > 1:
+                row = dict(row, status="duplicate_tolino",
+                           explanation="Doppelter Tolino-Titel; nicht automatisch hochladen.")
+            rows.append(row)
     return rows
 
 
@@ -340,8 +392,11 @@ def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
         current[book_uuid] = {"tolino_id": state.get(book_uuid, {}).get("tolino_id"),
                               "fingerprint": fp, "calibre_id": book_id}
         old = state.get(book_uuid, {})
-        if (not old.get("tolino_id") or old.get("fingerprint") != fp or
-                (upload_book_ids is not None and book_id in upload_book_ids)):
+        if upload_book_ids is not None:
+            should_upload = book_id in upload_book_ids
+        else:
+            should_upload = not old.get("tolino_id") or old.get("fingerprint") != fp
+        if should_upload:
             uploads.append((book_id, book_uuid, selected, old.get("tolino_id")))
     removals = []
     if deletions:

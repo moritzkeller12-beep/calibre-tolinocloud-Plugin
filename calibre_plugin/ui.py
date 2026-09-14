@@ -72,7 +72,7 @@ class SyncJob:
 
 class InventoryDialog(QDialog):
     HEADERS = ("Upload", "Status", "Titel / Title", "Autor / Author",
-               "ISBN", "Tolino-ID")
+               "ISBN", "Tolino-ID", "Hinweis / Explanation")
 
     def __init__(self, rows, parent=None):
         QDialog.__init__(self, parent)
@@ -91,6 +91,7 @@ class InventoryDialog(QDialog):
             "only_tolino": "Nur Tolino",
             "identical": "Identisch",
             "changed": "Geändert",
+            "duplicate_tolino": "Doppelter Tolino-Titel",
         }
         for row_index, row in enumerate(rows):
             check = QCheckBox()
@@ -104,6 +105,7 @@ class InventoryDialog(QDialog):
                 row.get("authors", ""),
                 row.get("isbn", ""),
                 row.get("tolino_id", ""),
+                row.get("explanation", ""),
             )
             for column, value in enumerate(values, 1):
                 self.table.setItem(row_index, column, QTableWidgetItem(str(value or "")))
