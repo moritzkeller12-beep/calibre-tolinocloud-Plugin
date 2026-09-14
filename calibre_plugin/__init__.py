@@ -9,5 +9,8 @@ class TolinoSyncPlugin(InterfaceActionBase):
     description = "Synchronize the Calibre library with Tolino Cloud"
     version = (0, 1, 0)
     author = "poesterlin"
+    type = "InterfaceAction"
+    supported_platforms = ["linux", "windows", "osx"]
     minimum_calibre_version = (5, 0, 0)
+    load_on_demand = True
     actual_plugin = "ui:TolinoSyncAction"

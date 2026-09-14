@@ -14,6 +14,6 @@ with ZipFile(ROOT / "tolino_cloud_sync.zip", "w", ZIP_DEFLATED) as archive:
 
 with ZipFile(ROOT / "tolino_cloud_sync.zip") as archive:
     names = set(archive.namelist())
-    if "__init__.py" not in names or any(name.startswith("calibre_plugin/") for name in names):
+    if names != {"__init__.py", "ui.py", "config.py", "sync.py", "tolino.py"}:
         raise RuntimeError("Plugin archive must contain flat top-level Python modules")
 print("Wrote tolino_cloud_sync.zip")

@@ -3,10 +3,17 @@ import tempfile
 
 from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
-from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                     QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
-                     QProgressBar, QPushButton, QThread, QVBoxLayout, QWidget,
-                     QObject, pyqtSignal)
+try:
+    from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                         QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
+                         QProgressBar, QPushButton, QThread, QVBoxLayout,
+                         QObject, pyqtSignal)
+except ImportError:
+    # Some Calibre Qt builds expose the signal type as Signal.
+    from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                         QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
+                         QProgressBar, QPushButton, QThread, QVBoxLayout,
+                         QObject, Signal as pyqtSignal)
 
 try:
     from .config import PREFERENCES, save_settings

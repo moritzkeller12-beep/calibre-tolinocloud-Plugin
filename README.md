@@ -26,6 +26,24 @@ tolino.py
 Calibre requires the top-level `__init__.py`; do not install the source
 directory itself.
 
+The plugin entry point is `TolinoSyncPlugin` in `__init__.py` with
+`actual_plugin = "ui:TolinoSyncAction"`, the Calibre `InterfaceAction` type,
+supported desktop platforms, and lazy loading enabled. The archive uses
+top-level imports for the flat layout and does not require a package-relative
+import context.
+
+### Calibre 7.6 import compatibility
+
+The ZIP is checked with a local importlib-style stub that loads the top-level
+plugin metadata and the `ui` module without a Calibre installation. The
+original failure did not include a Python traceback, so its final exception
+cannot be identified with certainty. The hardened entry point now declares
+all standard Calibre metadata and the UI accepts both Qt signal spellings
+(`pyqtSignal` and the Calibre-Qt `Signal` alias). If Calibre still reports
+`InvalidPlugin`, the complete traceback, especially the final `ImportError`
+line, is required to distinguish an environment/plugin-version issue from a
+remaining module error.
+
 ## Configuration and use
 
 Open the **Tolino Cloud Sync** toolbar/menu action and configure:
