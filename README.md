@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.7.2**. Autor: **moritzkeller12-beep**.
+Plugin-Version: **0.8.0**. Autor: **moritzkeller12-beep**.
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -44,11 +44,14 @@ Im Dialog **Tolino Cloud Sync**:
 1. Das aktive, benannte Konto auswählen (mit **Neues Konto** können weitere
    Konten angelegt werden). Pro Konto werden Partner, Hardware-ID und
    `refresh_token` getrennt gespeichert.
-2. Partner **8 – Books.ch / Orell Füssli** auswählen.
+2. Partner auswählen (z.B. **8 – Books.ch / Orell Füssli**).
 3. Eine stabile Hardware-ID übernehmen oder selbst festlegen.
-4. Den aktuellen `refresh_token` aus den Web-Reader-Netzwerkanfragen
-   einfügen. Umgebende Leerzeichen und äußere Anführungszeichen werden
-   entfernt.
+4. Den aktuellen `refresh_token` einfügen. Umgebende Leerzeichen und
+   äußere Anführungszeichen werden entfernt.
+   
+   **Für Orell Füssli (Partner 8):**
+   - Die Browser-Anmeldung funktioniert nicht mit Callback (Keycloak-Redirect)
+   - Bitte verwenden Sie stattdessen **"Token aus Browser extrahieren"**
 5. Bevorzugte Formate festlegen, normalerweise EPUB und PDF. Cover-Upload
    und Löschungen sind optional.
 
@@ -79,17 +82,60 @@ standardmäßig nicht zum Upload ausgewählt. Neue oder ausdrücklich ausgewähl
 Bücher werden im gewählten Format hochgeladen; ein optionales Cover kann
 folgen. Löschungen bleiben eine separate, standardmäßig deaktivierte Option.
 
-## Bekannte Einschränkung
+## Token-Extraktion aus dem Browser
 
-Die Tolino-API ist inoffiziell und kann sich ohne Vorankündigung ändern.
-Das Plugin lädt Dateien und optional Cover hoch, bietet aber keinen
-verifizierten Metadaten-Upload. Partner-, Token- und Dienständerungen können
-eine erneute Einrichtung erfordern.
+Das Plugin kann Refresh-Tokens und Hardware-IDs automatisch aus Ihrem Browser
+extrahieren, wenn Sie im Tolino Web Reader angemeldet sind:
 
-Das Plugin liest keine Browserprofile, Cookies oder LocalStorage-Daten und
-extrahiert keine Hardware-IDs oder Tokens heimlich. Die Anmeldung bleibt ein
-bewusst gestarteter Browser-/manueller Refresh-Token-Workflow; Tokenwerte
-werden nicht protokolliert.
+1. Melden Sie sich im [Tolino Web Reader](https://webreader.mytolino.com) an
+2. Schließen Sie den Browser **komplett**
+3. Klicken Sie im Plugin auf **"Token aus Browser extrahieren"**
+4. Die Tokens werden automatisch gefunden und gespeichert
+
+**Unterstützte Browser:**
+- Google Chrome / Chromium
+- Microsoft Edge
+- Brave
+- Firefox
+- Opera
+
+**Unterstützte Speicherorte:**
+- Local Storage
+- Session Storage (für Keycloak, z.B. Orell Füssli)
+
+**Unterstützte Origins:**
+- https://webreader.mytolino.com
+- https://www.orellfuessli.ch
+- https://orellfuessli.ch
+- https://bosh.pageplace.de
+- Und alle anderen Tolino-Partner
+
+## Browser-Anmeldung
+
+Für die meisten Partner (Thalia, Hugendubel, Bücher.de, etc.) funktioniert die
+automatische Browser-Anmeldung:
+
+1. Klicken Sie auf **"Im Browser anmelden"**
+2. Melden Sie sich im geöffneten Browser-Fenster an
+3. Nach erfolgreicher Anmeldung werden die Tokens automatisch extrahiert
+
+**Hinweis für Orell Füssli (Partner 8):**
+Die Browser-Anmeldung funktioniert nicht, da Orell Füssli Keycloak verwendet, das
+nach dem Login direkt zum Web Reader weiterleitet, ohne zu unserer Callback-URL
+zurückzukehren. Bitte verwenden Sie stattdessen **"Token aus Browser extrahieren"**.
+
+## Bekannte Einschränkungen
+
+- Die Tolino-API ist inoffiziell und kann sich ohne Vorankündigung ändern.
+- Das Plugin lädt Dateien und optional Cover hoch, bietet aber keinen
+  verifizierten Metadaten-Upload.
+- Partner-, Token- und Dienständerungen können eine erneute Einrichtung erfordern.
+- Für Orell Füssli (Partner 8) muss die Token-Extraktion manuell ausgelöst werden.
+
+Das Plugin liest keine Browserprofile, Cookies oder LocalStorage-Daten ohne
+explizite Nutzeraktion (Klick auf "Token aus Browser extrahieren"). Die
+Anmeldung bleibt ein bewusster Browser-/manueller Refresh-Token-Workflow;
+Tokenwerte werden nicht protokolliert.
 
 ## Lokale Validierung
 
@@ -98,3 +144,16 @@ python3 -m unittest calibre_plugin.test_sync
 python3 -m py_compile calibre_plugin/*.py build_plugin.py
 python3 build_plugin.py
 ```
+
+## Versionshistorie
+
+### 0.8.0 (2024-09-14)
+- Fix für Calibre 7.6: Cover- und Format-Pfad-Abfrage mit expliziten Buch-IDs
+- Erweiterte Token-Extraktion aus Browser (Local Storage + Session Storage)
+- Unterstützung für Keycloak (Orell Füssli) hinzugefügt
+- OAuth-Fix für alle Partner
+- Neues Plugin-Icon für die Calibre-Menüleiste
+- Token-Rotation wird jetzt korrekt gehandhabt (keine "reuse exceeded" Fehler)
+
+### 0.7.2 (2024-08-XX)
+- Initiale Version
