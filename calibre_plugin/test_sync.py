@@ -422,6 +422,42 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("refresh-token", client.refresh)
         self.assertNotEqual("access-secret", client.refresh)
 
+    def test_rotated_refresh_token_is_returned_and_persisted_before_followup_work(self):
+        captured = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return (b'{"access_token":"access-secret",'
+                        b'"refresh_token":"rotated-refresh","expires_in":3600}')
+
+        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+            client = TolinoClient(8, "hardware", "old-refresh",
+                                  token_callback=captured.append)
+            self.assertEqual("rotated-refresh", client.login())
+            self.assertEqual(["rotated-refresh"], captured)
+            self.assertEqual("rotated-refresh", client.refresh)
+            # A second call uses the cached access token and cannot reuse the old grant.
+            self.assertEqual("rotated-refresh", client.login())
+
+    def test_reuse_exceeded_is_not_retried_and_gives_user_action(self):
+        from urllib.error import HTTPError
+
+        body = b'{"error":"invalid_grant","error_description":"Maximum allowed refresh token reuse exceeded"}'
+        error = HTTPError("https://example.invalid/token", 400, "Bad Request", {}, None)
+        error.read = lambda: body
+        with patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
+            with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
+                TolinoClient(8, "", "old-refresh").login()
+        self.assertEqual(1, request.call_count)
+
     def test_other_partner_refresh_payload_keeps_configured_scope(self):
         captured = {}
 
@@ -527,7 +563,7 @@ class SyncPlanTests(unittest.TestCase):
         error.read = lambda: body
         client = TolinoClient(8, "", token)
         with patch("calibre_plugin.tolino.urlopen", side_effect=error):
-            with self.assertRaisesRegex(TolinoAuthError, "authentication failed"):
+            with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
                 client.login()
         self.assertIn("invalid_grant", client.last_error_text)
         self.assertIn("error_description", client.last_error_text)

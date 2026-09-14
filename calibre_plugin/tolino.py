@@ -3,6 +3,7 @@ import mimetypes
 import os
 import platform
 import re
+import threading
 import time
 import uuid
 import webbrowser
@@ -251,7 +252,7 @@ class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
     def __init__(self, partner_id, hardware, refresh=None, username=None,
-                 secret=None, timeout=45):
+                 secret=None, timeout=45, token_callback=None):
         if partner_id not in PARTNERS:
             raise TolinoError("Unsupported Tolino partner ID: %s" % partner_id)
         self.partner_id = int(partner_id)
@@ -265,6 +266,8 @@ class TolinoClient:
         self.expires_at = 0
         self.last_http_status = None
         self.last_error_text = None
+        self.token_callback = token_callback
+        self._login_lock = threading.Lock()
 
     def auth_diagnostics(self):
         """Return safe authentication context for the debug report."""
@@ -284,6 +287,15 @@ class TolinoClient:
         }
 
     def login(self):
+        # A valid access token avoids spending the rotating refresh token twice.
+        if self.access and time.time() < self.expires_at:
+            return self.refresh
+        with self._login_lock:
+            if self.access and time.time() < self.expires_at:
+                return self.refresh
+            return self._login()
+
+    def _login(self):
         if self.refresh:
             if not self.partner.get("token_url"):
                 raise TolinoAuthError(
@@ -314,11 +326,21 @@ class TolinoClient:
             data = self._request(self.partner["token_url"], "POST", payload,
                                  form=True, authenticated=False)
         except TolinoApiError as exc:
+            detail = str(exc)
+            if "invalid_grant" in detail.casefold() or "reuse exceeded" in detail.casefold():
+                raise TolinoAuthError(
+                    "Tolino rejected this refresh token because it was reused or invalid. "
+                    "Sign in to the Web Reader again, copy its new refresh token, and "
+                    "do not test this token repeatedly."
+                ) from exc
             raise TolinoAuthError("Tolino authentication failed: %s" % exc)
         if not data.get("access_token"):
             raise TolinoAuthError("Tolino token response did not contain access_token.")
+        previous_refresh = self.refresh
         self.access = data["access_token"]
         self.refresh = data.get("refresh_token", self.refresh)
+        if self.refresh != previous_refresh and self.token_callback:
+            self.token_callback(self.refresh)
         self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
         return self.refresh
 
@@ -373,7 +395,12 @@ class TolinoClient:
             self.last_error_text = sanitize_error(
                 detail, (self.refresh, self.access)
             )[:500]
-            if exc.code == 401 and authenticated and self.refresh and _retry:
+            retryable_auth = (
+                exc.code == 401 and authenticated and self.refresh and _retry
+                and "invalid_grant" not in self.last_error_text.casefold()
+                and "reuse exceeded" not in self.last_error_text.casefold()
+            )
+            if retryable_auth:
                 self.access = None
                 self.login()
                 return self._request(url, method, data, form, True,

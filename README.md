@@ -1,6 +1,6 @@
 # Tolino Cloud Sync for Calibre
 
-Plugin version: **0.3.6**. Author: **moritzkeller12-beep**.
+Plugin version: **0.3.7**. Author: **moritzkeller12-beep**.
 
 Native Python plugin for synchronizing an open Calibre library with the
 Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
@@ -86,7 +86,11 @@ The recommended authentication path is a refresh token obtained from the
 partner's Web Reader network requests. Tokens, credentials, and sync state are
 stored through Calibre's `JSONConfig` mechanism and are never logged.
 If the explicit Tolino test reports `HTTP 400 invalid_grant` / `Invalid refresh
-token`, the configured token is expired, invalid, or is not a refresh token.
+token`, the configured token is expired, invalid, or is not a refresh token. If
+it reports `Maximum allowed refresh token reuse exceeded`, the Web Reader has
+rotated and invalidated the previous token: sign in to the Web Reader again,
+copy its new `refresh_token`, paste it into the plugin, and do not repeatedly
+test the old token. The plugin never retries an `invalid_grant`/reuse failure.
 For partner 8 the verified browser refresh request contains exactly the
 URL-encoded form fields `client_id=webreader`, `grant_type=refresh_token`, and
 `refresh_token=<value>` — no `scope` field — sent to
@@ -101,10 +105,12 @@ URI is `https://webreader.mytolino.com/library/`; the authorization parameters
 also include `x_buchde.mandant_id=37` and `x_buchde.skin_id=17`.
 A Web Reader `access_token` cannot be used as a refresh-token fallback. Copy the Web Reader request's
 `refresh_token` value, including its complete value, and paste it; surrounding
-whitespace and outer quotes are removed automatically. Never include the token
-itself in a diagnostic report. The report shows only its category, length, a
-four-character prefix, normalization flags, partner configuration, and HTTP
-status/error text.
+whitespace and outer quotes are removed automatically. A rotated refresh token
+returned by a successful grant is persisted immediately, before inventory,
+preparation, or upload work continues, including when a later step fails.
+Never include the token itself in a diagnostic report. The report shows only its
+category, length, a four-character prefix, normalization flags, partner
+configuration, and HTTP status/error text.
 
 **Security warning:** Treat refresh tokens that appeared in an old Calibre
 traceback, error dialog, or diagnostic report as compromised. Revoke or

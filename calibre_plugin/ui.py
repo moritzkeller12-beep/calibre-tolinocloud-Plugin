@@ -165,8 +165,10 @@ class DiagnosticDialog(QDialog):
         try:
             client = TolinoClient(values["partner_id"], values["hardware_id"],
                                   values["refresh_token"], values["username"],
-                                  values["password"])
+                                  values["password"],
+                                  token_callback=self.dashboard.persist_refresh_token)
             client.login()
+            self.dashboard.set_refresh_token(client.refresh)
             inventory = client.inventory()
             result = {
                 "step": "Tolino-Antwort testen",
@@ -206,7 +208,7 @@ class DiagnosticDialog(QDialog):
 class SyncWorker(QObject):
     progress = pyqtSignal(int, int, str)
     completed = pyqtSignal(object, object)
-    failed = pyqtSignal(str)
+    failed = pyqtSignal(str, str)
 
     def __init__(self, settings, jobs, removals):
         QObject.__init__(self)
@@ -224,7 +226,8 @@ class SyncWorker(QObject):
         try:
             client = TolinoClient(self.settings["partner_id"], self.settings["hardware_id"],
                                   self.settings["refresh_token"], self.settings["username"],
-                                  self.settings["password"])
+                                  self.settings["password"],
+                                  token_callback=self.persist_refresh_token)
             client.login()
             needs_replacement_cleanup = any(job.old_id for job in self.jobs)
             remote_ids = (client.inventory_ids()
@@ -262,7 +265,11 @@ class SyncWorker(QObject):
         except Exception as exc:
             self.failed.emit(sanitize_error(
                 exc, (self.settings["refresh_token"], getattr(client, "access", None))
-            ))
+            ), client.refresh if client else self.settings["refresh_token"])
+
+    def persist_refresh_token(self, refresh):
+        self.settings["refresh_token"] = refresh
+        save_settings({"refresh_token": refresh, "hardware_id": self.settings["hardware_id"]})
 
 
 class SyncDashboard(QDialog):
@@ -360,6 +367,18 @@ class SyncDashboard(QDialog):
         self.status.setText("Angemeldet / configured" if self.refresh.text().strip()
                             else "Nicht angemeldet / not configured")
 
+    def set_refresh_token(self, refresh):
+        normalized, _ = normalize_refresh_token(refresh)
+        self.refresh.setText(normalized)
+        self.update_status()
+
+    def persist_refresh_token(self, refresh):
+        self.set_refresh_token(refresh)
+        save_settings({
+            "refresh_token": self.refresh.text(),
+            "hardware_id": self.hardware.text().strip() or hardware_id(),
+        })
+
     def values(self):
         refresh_token, _ = normalize_refresh_token(self.refresh.text())
         return {
@@ -380,11 +399,12 @@ class SyncDashboard(QDialog):
         except TolinoAuthError as exc:
             QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in", str(exc))
             return
-        self.refresh.setText(refresh)
+        self.set_refresh_token(refresh)
         self.hardware.setText(hardware)
+        self.persist_refresh_token(refresh)
         self.update_status()
         QMessageBox.information(self, "Anmeldung erfolgreich / Sign-in complete",
-                                "Der Refresh-Token wird erst beim Speichern verwendet.")
+                                "Der neue Refresh-Token wurde sofort gespeichert.")
 
     def start_sync(self):
         if self.thread is not None:
@@ -413,8 +433,10 @@ class SyncDashboard(QDialog):
             state = load_state(settings["state"])
             client = TolinoClient(settings["partner_id"], settings["hardware_id"],
                                   settings["refresh_token"], settings["username"],
-                                  settings["password"])
+                                  settings["password"],
+                                  token_callback=self.persist_refresh_token)
             client.login()
+            self.set_refresh_token(client.refresh)
             comparison_fields = [
                 name for name, checkbox in (
                     ("authors", self.compare_authors),
@@ -500,7 +522,8 @@ class SyncDashboard(QDialog):
         info_dialog(self, "Tolino Cloud Sync", "Synchronisierung abgeschlossen / Synchronization complete.",
                     show_copy_button=False)
 
-    def sync_failed(self, message):
+    def sync_failed(self, message, refresh):
+        self.set_refresh_token(refresh)
         self.finish_thread()
         error_dialog(
             self, "Synchronisierung fehlgeschlagen / Synchronization failed",
