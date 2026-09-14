@@ -532,6 +532,10 @@ class TolinoClient:
         except TolinoApiError as exc:
             detail = str(exc)
             if "invalid_grant" in detail.casefold() or "reuse exceeded" in detail.casefold():
+                # Invalidate the current refresh token to prevent reuse
+                self.refresh = None
+                self.access = None
+                self.expires_at = 0
                 raise TolinoAuthError(
                     "Tolino rejected this refresh token because it was reused or invalid. "
                     "Sign in to the Web Reader again, copy its new refresh token, and "
@@ -542,9 +546,18 @@ class TolinoClient:
             raise TolinoAuthError("Tolino token response did not contain access_token.")
         previous_refresh = self.refresh
         self.access = data["access_token"]
-        self.refresh = data.get("refresh_token", self.refresh)
-        if self.refresh != previous_refresh and self.token_callback:
-            self.token_callback(self.refresh)
+        new_refresh = data.get("refresh_token", self.refresh)
+        
+        # CRITICAL: Save the new refresh token IMMEDIATELY before any further use
+        # Tolino invalidates refresh tokens after single use, so we must persist
+        # the new token before making any authenticated requests with it
+        if new_refresh != previous_refresh:
+            self.refresh = new_refresh
+            if self.token_callback:
+                self.token_callback(self.refresh)
+        else:
+            self.refresh = new_refresh
+        
         self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
         return self.refresh
 
