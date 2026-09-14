@@ -4,7 +4,7 @@ import zipfile
 from pathlib import Path
 
 from . import config
-from .sync import fingerprint, plan_sync, sync_summary
+from .sync import fingerprint, iter_book_ids, plan_sync, sync_summary
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
 
@@ -18,6 +18,55 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual([(1, "u1", "EPUB", None)], uploads)
         self.assertFalse(removals)
         self.assertIn("u1", state)
+
+    def test_iter_book_ids_uses_rows_and_deduplicates(self):
+        class Row:
+            def __init__(self, book_id):
+                self.book_id = book_id
+
+        class Data:
+            def iterall(self):
+                return iter((Row(4), Row(2), Row(4), Row(9)))
+
+        class Database:
+            data = Data()
+
+        self.assertEqual([4, 2, 9], list(iter_book_ids(Database())))
+
+    def test_iter_book_ids_falls_back_to_library_database_all_ids(self):
+        class Database:
+            data = object()
+
+            def all_ids(self):
+                return (8, 3, 8)
+
+        self.assertEqual([8, 3], list(iter_book_ids(Database())))
+
+    def test_iter_book_ids_uses_data_id_fallback_before_all_ids(self):
+        class Data:
+            def iterallids(self):
+                return iter((7, 1, 7))
+
+        class Database:
+            data = Data()
+
+            def all_ids(self):
+                raise AssertionError("must prefer data.iterallids")
+
+        self.assertEqual([7, 1], list(iter_book_ids(Database())))
+
+    def test_iter_book_ids_ignores_rows_without_existing_book_id(self):
+        class Data:
+            def iterall(self):
+                return iter((object(), {"title": "not a book id"}))
+
+        class Database:
+            data = Data()
+
+            def all_ids(self):
+                raise AssertionError("must not use fallback after iterall")
+
+        self.assertEqual([], list(iter_book_ids(Database())))
 
     def test_unchanged_book_is_not_uploaded(self):
         old = {"u1": {"tolino_id": "t1", "fingerprint": fingerprint(self.book, "EPUB")}}

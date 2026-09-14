@@ -17,11 +17,11 @@ except ImportError:
 
 try:
     from .config import save_settings, settings
-    from .sync import load_state, plan_sync, sync_summary
+    from .sync import iter_book_ids, load_state, plan_sync, sync_summary
     from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 except ImportError:
     from config import save_settings, settings
-    from sync import load_state, plan_sync, sync_summary
+    from sync import iter_book_ids, load_state, plan_sync, sync_summary
     from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
 
@@ -197,7 +197,7 @@ class SyncDashboard(QDialog):
             return
         try:
             metadata = {}
-            for book_id in self.gui.current_db.all_book_ids():
+            for book_id in iter_book_ids(self.gui.current_db):
                 item = self.gui.current_db.get_metadata(book_id)
                 metadata[book_id] = {
                     "uuid": _metadata_value(item, "uuid"),

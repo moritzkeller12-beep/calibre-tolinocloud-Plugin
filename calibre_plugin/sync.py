@@ -2,6 +2,44 @@ import hashlib
 import json
 
 
+def iter_book_ids(database):
+    """Yield each existing Calibre book id once, across supported DB APIs."""
+    data = getattr(database, "data", None)
+    iterall = getattr(data, "iterall", None)
+    if callable(iterall):
+        rows = iterall()
+        book_ids = []
+        for row in rows:
+            book_id = getattr(row, "book_id", None)
+            if book_id is None and isinstance(row, dict):
+                book_id = row.get("book_id")
+            if book_id is not None:
+                book_ids.append(book_id)
+        yield from _unique_ids(book_ids)
+        return
+
+    iterallids = getattr(data, "iterallids", None)
+    if callable(iterallids):
+        yield from _unique_ids(iterallids())
+        return
+
+    all_ids = getattr(database, "all_ids", None)
+    if callable(all_ids):
+        yield from _unique_ids(all_ids())
+
+
+def _unique_ids(book_ids):
+    seen = set()
+    for book_id in book_ids:
+        try:
+            duplicate = book_id in seen
+        except TypeError:
+            continue
+        if not duplicate:
+            seen.add(book_id)
+            yield book_id
+
+
 def fingerprint(metadata, format_name):
     value = "%s|%s|%s|%s" % (
         metadata.get("uuid", ""),
