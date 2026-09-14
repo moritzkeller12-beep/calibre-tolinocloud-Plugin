@@ -68,6 +68,19 @@ BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 OAUTH_STATE_TTL = 300
 
 
+def _query_value(query, name):
+    if not isinstance(query, dict):
+        raise TolinoAuthError("Browser login returned invalid callback data.")
+    values = query.get(name)
+    if values is None:
+        return None
+    if isinstance(values, (str, bytes)):
+        return values
+    if isinstance(values, (tuple, list)):
+        return next(iter(values), None)
+    raise TolinoAuthError("Browser login returned invalid %s data." % name)
+
+
 def hardware_id():
     os_id = {"Windows": "1", "Darwin": "2", "Linux": "3"}.get(platform.system(), "x")
     return "%sxxA-00BCD-EFGHI-JKLMN-OPQRh" % os_id
@@ -82,11 +95,11 @@ def validate_callback(query, expected_state, created_at, now=None):
     now = time.time() if now is None else now
     if now - created_at > OAUTH_STATE_TTL:
         raise TolinoAuthError("Browser login expired. Please try again.")
-    if query.get("state", [None])[0] != expected_state:
+    if _query_value(query, "state") != expected_state:
         raise TolinoAuthError("Browser login state did not match.")
-    if query.get("error", [None])[0]:
+    if _query_value(query, "error"):
         raise TolinoAuthError("Browser login was rejected by the partner.")
-    code = query.get("code", [None])[0]
+    code = _query_value(query, "code")
     if not code:
         raise TolinoAuthError("Browser login returned no authorization code.")
     return code
@@ -205,7 +218,7 @@ class TolinoClient:
         if authenticated and (not self.access or time.time() >= self.expires_at):
             self.login()
         body = None
-        headers = {"User-Agent": "Calibre-Tolino-Plugin/0.1"}
+        headers = {"User-Agent": "Calibre-Tolino-Plugin/0.2"}
         if authenticated:
             headers.update({
                 "t_auth_token": self.access,
@@ -270,7 +283,8 @@ class TolinoClient:
                            ("Content-Disposition: form-data; name=\"%s\"\r\n\r\n" % key).encode(),
                            str(value).encode(), b"\r\n"])
         name = os.path.basename(file_path)
-        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        guessed_type = mimetypes.guess_type(name)
+        mime = next(iter(guessed_type), None) or "application/octet-stream"
         chunks.extend([b"--" + boundary + b"\r\n",
                        ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field, name)).encode(),
                        ("Content-Type: %s\r\n\r\n" % mime).encode(),

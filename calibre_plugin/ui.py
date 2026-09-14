@@ -21,13 +21,15 @@ try:
     from .config import save_settings, settings
     from .sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
                        selected_book_ids, sync_summary, normalize_formats,
-                       safe_format_path, cover_bytes)
+                       safe_format_path, cover_bytes, unpack_plan_result,
+                       unpack_upload_record)
     from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 except ImportError:
     from config import save_settings, settings
     from sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
                       selected_book_ids, sync_summary, normalize_formats,
-                      safe_format_path, cover_bytes)
+                      safe_format_path, cover_bytes, unpack_plan_result,
+                      unpack_upload_record)
     from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
 
@@ -110,6 +112,8 @@ class InventoryDialog(QDialog):
         layout.addLayout(buttons)
 
     def selected_ids(self, rows):
+        if len(rows) != len(self.checks):
+            raise ValueError("Inventory table and selection controls have different row counts.")
         return selected_book_ids([
             dict(row, selected=check.isChecked()) for row, check in zip(rows, self.checks)
         ])
@@ -325,12 +329,17 @@ class SyncDashboard(QDialog):
             if dialog.exec() != QDialog.Accepted:
                 return
             selected_ids = dialog.selected_ids(comparison)
-            uploads, removals, current = plan_sync(
+            uploads, removals, current = unpack_plan_result(plan_sync(
                 metadata, state, settings["preferred_formats"],
                 settings["enable_deletions"], selected_ids,
-            )
+            ))
             jobs = []
-            for book_id, book_uuid, fmt, old_id in uploads:
+            for upload in uploads:
+                record = unpack_upload_record(upload)
+                book_id = record["book_id"]
+                book_uuid = record["book_uuid"]
+                fmt = record["format_name"]
+                old_id = record["old_id"]
                 path = safe_format_path(self.gui.current_db, book_id, fmt)
                 cover_path = None
                 if settings["upload_covers"]:

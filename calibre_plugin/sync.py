@@ -37,7 +37,7 @@ def _row_book_id(row):
     if isinstance(row, dict):
         return row.get("book_id")
     if isinstance(row, (tuple, list)) and row:
-        candidate = row[0]
+        candidate = next(iter(row), None)
         return candidate if isinstance(candidate, int) and candidate > 0 else None
     return None
 
@@ -50,6 +50,48 @@ def normalize_formats(value):
         return [str(part).strip() for part in value
                 if part is not None and str(part).strip()]
     return []
+
+
+def selected_table_rows(table):
+    """Return valid selected Qt row numbers without assuming QModelIndex shape."""
+    selection_model = getattr(table, "selectionModel", None)
+    selected = selection_model().selectedRows() if callable(selection_model) else ()
+    rows = []
+    for index in selected or ():
+        row_value = getattr(index, "row", None)
+        row = row_value() if callable(row_value) else row_value
+        if isinstance(row, int) and row >= 0:
+            rows.append(row)
+    return rows
+
+
+def unpack_plan_result(result):
+    """Validate the three named parts returned by plan_sync."""
+    if not isinstance(result, (tuple, list)) or len(result) != 3:
+        raise ValueError("Preparation returned an invalid sync plan (expected uploads, removals, state).")
+    uploads, removals, current = result
+    if not isinstance(uploads, (tuple, list)):
+        raise ValueError("Preparation returned invalid upload entries.")
+    if not isinstance(removals, (tuple, list)):
+        raise ValueError("Preparation returned invalid removal entries.")
+    if not isinstance(current, dict):
+        raise ValueError("Preparation returned invalid sync state.")
+    return uploads, removals, current
+
+
+def unpack_upload_record(record):
+    """Read one upload plan record with a contextual validation error."""
+    if not isinstance(record, (tuple, list)) or len(record) != 4:
+        raise ValueError("Preparation returned an invalid upload record: %r" % (record,))
+    book_id, book_uuid, format_name, old_id = record
+    if book_id is None or not book_uuid or not format_name:
+        raise ValueError("Preparation returned an incomplete upload record: %r" % (record,))
+    return {
+        "book_id": book_id,
+        "book_uuid": str(book_uuid),
+        "format_name": str(format_name),
+        "old_id": old_id,
+    }
 
 
 def safe_format_path(database, book_id, format_name):
@@ -130,6 +172,9 @@ def _inventory_value(item, *names):
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                       comparison_fields=("authors", "title", "isbn")):
     """Return deterministic local/remote rows for the pre-sync confirmation view."""
+    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
+        raise ValueError("Preparation requires metadata and sync state mappings.")
+    preferred_formats = normalize_formats(preferred_formats)
     remote_rows = []
     for item in inventory or ():
         remote_id = _inventory_value(item, "id", "deliverableId", "deliverable_id")
@@ -148,6 +193,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     matched = set()
     rows = []
     for book_id, metadata in metadata_by_id.items():
+        if not isinstance(metadata, dict):
+            raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
         book_uuid = str(metadata.get("uuid") or "")
         title = _metadata_text(metadata, "title")
         authors = _metadata_text(metadata, "authors", "author")
@@ -229,9 +276,14 @@ def fingerprint(metadata, format_name):
 
 def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
               upload_book_ids=None):
+    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
+        raise ValueError("Preparation requires metadata and sync state mappings.")
+    preferred_formats = normalize_formats(preferred_formats)
     current = {}
     uploads = []
     for book_id, metadata in metadata_by_id.items():
+        if not isinstance(metadata, dict):
+            raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
         book_uuid = metadata.get("uuid")
         if not book_uuid:
             continue

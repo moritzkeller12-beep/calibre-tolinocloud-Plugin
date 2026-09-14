@@ -8,7 +8,8 @@ from pathlib import Path
 from . import config
 from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    normalize_formats, plan_sync, safe_format_path,
-                   selected_book_ids, sync_summary)
+                   selected_book_ids, selected_table_rows, sync_summary,
+                   unpack_plan_result, unpack_upload_record)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
 
@@ -87,6 +88,54 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(["EPUB", "PDF"], normalize_formats("EPUB, PDF"))
         self.assertEqual([], normalize_formats(None))
         self.assertEqual([], normalize_formats(("", None)))
+
+    def test_selected_rows_handles_qmodelindex_and_short_values(self):
+        class Index:
+            def __init__(self, value):
+                self.value = value
+
+            def row(self):
+                return self.value
+
+        class Selection:
+            def selectedRows(self):
+                return (Index(2), Index(-1), object(), Index(0))
+
+        class Table:
+            def selectionModel(self):
+                return Selection()
+
+        self.assertEqual([2, 0], selected_table_rows(Table()))
+
+    def test_plan_result_helpers_reject_short_records_with_context(self):
+        with self.assertRaisesRegex(ValueError, "invalid sync plan"):
+            unpack_plan_result(([], {}))
+        with self.assertRaisesRegex(ValueError, "invalid upload record"):
+            unpack_upload_record((1, "uuid"))
+        self.assertEqual(
+            {"book_id": 1, "book_uuid": "u1", "format_name": "EPUB", "old_id": None},
+            unpack_upload_record((1, "u1", "EPUB", None)),
+        )
+
+    def test_complete_preparation_path_handles_empty_single_and_short_data(self):
+        cases = (
+            ({}, [], []),
+            ({1: dict(self.book)}, [], [(1, "u1", "EPUB", None)]),
+            ({2: {"uuid": "u2", "formats": ("EPUB",)}}, [], [(2, "u2", "EPUB", None)]),
+        )
+        for metadata, inventory, expected_uploads in cases:
+            comparison = compare_inventory(metadata, {}, inventory, ("EPUB",))
+            selected = selected_book_ids(comparison)
+            plan = unpack_plan_result(
+                plan_sync(metadata, {}, ("EPUB",), upload_book_ids=selected)
+            )
+            uploads, removals, current = plan
+            self.assertEqual(expected_uploads, uploads)
+            self.assertEqual([], removals)
+            self.assertEqual(set(metadata), {item["calibre_id"] for item in current.values()})
+            for record in uploads:
+                self.assertEqual(expected_uploads[0][0] if expected_uploads else None,
+                                 unpack_upload_record(record)["book_id"])
 
     def test_safe_format_path_accepts_wrapped_path_and_rejects_empty_result(self):
         class Database:
@@ -194,6 +243,8 @@ class SyncPlanTests(unittest.TestCase):
             validate_callback({"state": ["s"], "error": ["denied"]}, "s", 100, 101)
         with self.assertRaises(TolinoAuthError):
             validate_callback({"state": ["s"]}, "s", 100, 101)
+        with self.assertRaises(TolinoAuthError):
+            validate_callback({"state": [], "code": ["c"]}, "s", 100, 101)
 
     def test_redirect_uri_is_loopback_only(self):
         self.assertEqual("http://127.0.0.1:4321/callback", callback_redirect_uri(4321))

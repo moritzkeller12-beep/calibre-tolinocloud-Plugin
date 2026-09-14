@@ -1,5 +1,7 @@
 # Tolino Cloud Sync for Calibre
 
+Plugin version: **0.2.0**. Author: **moritzkeller12-beep**.
+
 Native Python plugin for synchronizing an open Calibre library with the
 Tolino Cloud. It runs directly inside Calibre as a standalone plugin.
 
@@ -92,9 +94,7 @@ inventory before deleting a recorded deliverable ID. Cancellation stops before
 the next operation; completed operations remain in the persisted state.
 
 The Tolino API is unofficial and partner-specific. The implementation is based
-on the reference projects
-[darkphoenix/tolino-calibre-sync](https://github.com/darkphoenix/tolino-calibre-sync)
-and [poesterlin/tolino-calibre-sync](https://github.com/poesterlin/tolino-calibre-sync).
+on publicly documented web-reader behavior and compatibility testing.
 Metadata updates, collections, device registration, cloud downloads, and
 partner-specific browser OAuth are intentionally outside this one-way sync.
 Partner endpoint changes, token expiry, rate limits, and response-format
