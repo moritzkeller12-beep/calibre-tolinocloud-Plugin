@@ -17,14 +17,11 @@ its top level:
 
 ```text
 __init__.py
-calibre_plugins/
-  __init__.py
-  tolino_cloud_sync/
-    __init__.py
-    ui.py
-    config.py
-    sync.py
-    tolino.py
+plugin-import-name-tolino_cloud_sync.txt
+ui.py
+config.py
+sync.py
+tolino.py
 ```
 
 Calibre requires the top-level `__init__.py`; do not install the source
@@ -33,18 +30,20 @@ directory itself.
 The plugin entry point is `TolinoSyncPlugin` in the root `__init__.py` with
 `actual_plugin =
 "calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"`. This follows
-Calibre's official InterfaceAction plugin layout: the metadata wrapper stays
-at the ZIP root while implementation modules live in a qualified
-`calibre_plugins.<plugin_name>` package. Relative imports are therefore
-resolved by a real package instead of relying on flat-module lookup.
+Calibre's official multi-file InterfaceAction layout: the metadata wrapper and
+implementation modules are at the ZIP root. The empty
+`plugin-import-name-tolino_cloud_sync.txt` marker makes Calibre's loader expose
+them through the qualified `calibre_plugins.tolino_cloud_sync` namespace.
+There is intentionally no physical `calibre_plugins/` directory in the ZIP.
 
 ### Calibre 7.6 import compatibility
 
-The ZIP is checked with a local importlib-style stub that follows this
-qualified namespace. The previous `main`/flat-module layout was incorrect for
-Calibre's ZipPlugin loader and caused `ModuleNotFoundError: No module named
-'main'`. If Calibre still reports `InvalidPlugin`, provide the complete
-traceback, especially the final `ImportError` line.
+The ZIP is checked with a local reproduction of Calibre's
+`CalibrePluginFinder` mapping: it registers the marker name, imports the root
+`__init__.py` as `calibre_plugins.tolino_cloud_sync`, and imports `ui.py` as
+`calibre_plugins.tolino_cloud_sync.ui`. If Calibre still reports
+`InvalidPlugin`, provide the complete traceback, especially the final
+`ImportError` line.
 
 ## Configuration and use
 
