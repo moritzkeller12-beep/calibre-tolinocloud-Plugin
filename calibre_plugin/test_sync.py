@@ -64,6 +64,7 @@ class SyncPlanTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as plugin:
             self.assertEqual({
                 "__init__.py",
+                "plugin-import-name-tolino_cloud_sync.txt",
                 "calibre_plugins/__init__.py",
                 "calibre_plugins/tolino_cloud_sync/__init__.py",
                 "calibre_plugins/tolino_cloud_sync/ui.py",
@@ -71,6 +72,11 @@ class SyncPlanTests(unittest.TestCase):
                 "calibre_plugins/tolino_cloud_sync/sync.py",
                 "calibre_plugins/tolino_cloud_sync/tolino.py",
             }, set(plugin.namelist()))
+            marker = next(name for name in plugin.namelist()
+                          if name.startswith("plugin-import-name-") and name.endswith(".txt"))
+            self.assertEqual("tolino_cloud_sync",
+                             marker[len("plugin-import-name-"):-len(".txt")])
+            self.assertEqual(b"", plugin.read(marker))
             metadata = ast.parse(plugin.read("__init__.py").decode("utf-8"))
             values = [
                 node.value.value

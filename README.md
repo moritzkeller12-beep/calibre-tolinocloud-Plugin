@@ -17,6 +17,7 @@ and the implementation in the physical namespace package:
 
 ```text
 __init__.py
+plugin-import-name-tolino_cloud_sync.txt
 calibre_plugins/__init__.py
 calibre_plugins/tolino_cloud_sync/__init__.py
 calibre_plugins/tolino_cloud_sync/ui.py
@@ -27,7 +28,9 @@ calibre_plugins/tolino_cloud_sync/tolino.py
 
 Calibre requires the top-level `__init__.py`; do not install the source
 directory itself. The package's relative imports therefore resolve directly
-as `calibre_plugins.tolino_cloud_sync.*`.
+as `calibre_plugins.tolino_cloud_sync.*`. The empty marker is required by
+Calibre's plugin loader to map the archive to the `tolino_cloud_sync`
+namespace.
 
 The plugin entry point is `TolinoSyncPlugin` in the root `__init__.py` with
 `actual_plugin =
