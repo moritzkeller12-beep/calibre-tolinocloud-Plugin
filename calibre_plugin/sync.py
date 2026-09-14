@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import unicodedata
 
@@ -9,12 +10,10 @@ def iter_book_ids(database):
     data = getattr(database, "data", None)
     iterall = getattr(data, "iterall", None)
     if callable(iterall):
-        rows = iterall()
+        rows = iterall() or ()
         book_ids = []
         for row in rows:
-            book_id = getattr(row, "book_id", None)
-            if book_id is None and isinstance(row, dict):
-                book_id = row.get("book_id")
+            book_id = _row_book_id(row)
             if book_id is not None:
                 book_ids.append(book_id)
         yield from _unique_ids(book_ids)
@@ -22,12 +21,71 @@ def iter_book_ids(database):
 
     iterallids = getattr(data, "iterallids", None)
     if callable(iterallids):
-        yield from _unique_ids(iterallids())
+        yield from _unique_ids(iterallids() or ())
         return
 
     all_ids = getattr(database, "all_ids", None)
     if callable(all_ids):
-        yield from _unique_ids(all_ids())
+        yield from _unique_ids(all_ids() or ())
+
+
+def _row_book_id(row):
+    """Read a book id from Calibre row objects, mappings, or row sequences."""
+    book_id = getattr(row, "book_id", None)
+    if book_id is not None:
+        return book_id
+    if isinstance(row, dict):
+        return row.get("book_id")
+    if isinstance(row, (tuple, list)) and row:
+        candidate = row[0]
+        return candidate if isinstance(candidate, int) and candidate > 0 else None
+    return None
+
+
+def normalize_formats(value):
+    """Return format names from Calibre's string, sequence, or empty values."""
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (tuple, list, set)):
+        return [str(part).strip() for part in value
+                if part is not None and str(part).strip()]
+    return []
+
+
+def safe_format_path(database, book_id, format_name):
+    """Call format_abspath without assuming a particular return container."""
+    path = database.format_abspath(book_id, format_name)
+    if isinstance(path, (tuple, list)):
+        path = next((item for item in path if isinstance(item, (str, bytes, os.PathLike))), None)
+    if isinstance(path, bytes):
+        path = os.fsdecode(path)
+    if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
+        raise ValueError("Calibre returned no path for book %r format %s" %
+                         (book_id, format_name))
+    return os.fspath(path)
+
+
+def cover_bytes(database, book_id):
+    """Normalize cover() results from bytes, paths, or wrapped Calibre values."""
+    cover = database.cover(book_id, as_file=False)
+    if isinstance(cover, (bytes, bytearray, memoryview)):
+        return bytes(cover)
+    if isinstance(cover, (str, os.PathLike)):
+        path = os.fspath(cover)
+        if os.path.isfile(path):
+            with open(path, "rb") as cover_file:
+                return cover_file.read()
+        return None
+    if isinstance(cover, (tuple, list)):
+        for value in cover:
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                return bytes(value)
+            if isinstance(value, (str, os.PathLike)):
+                path = os.fspath(value)
+                if os.path.isfile(path):
+                    with open(path, "rb") as cover_file:
+                        return cover_file.read()
+    return None
 
 
 def _unique_ids(book_ids):
@@ -115,7 +173,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
         remote_index = next((i for i in candidates if i not in matched), None)
         selected_format = next(
             (fmt for fmt in preferred_formats
-             if str(fmt).upper() in {str(x).upper() for x in metadata.get("formats", ())}),
+             if str(fmt).upper() in {x.upper() for x in normalize_formats(metadata.get("formats"))}),
             None,
         )
         if remote_index is None:
@@ -177,7 +235,7 @@ def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
         book_uuid = metadata.get("uuid")
         if not book_uuid:
             continue
-        available = {str(x).upper() for x in metadata.get("formats", [])}
+        available = {x.upper() for x in normalize_formats(metadata.get("formats"))}
         selected = next((f for f in preferred_formats if f.upper() in available), None)
         if not selected:
             continue

@@ -20,12 +20,14 @@ except ImportError:
 try:
     from .config import save_settings, settings
     from .sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
-                       selected_book_ids, sync_summary)
+                       selected_book_ids, sync_summary, normalize_formats,
+                       safe_format_path, cover_bytes)
     from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 except ImportError:
     from config import save_settings, settings
     from sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
-                      selected_book_ids, sync_summary)
+                      selected_book_ids, sync_summary, normalize_formats,
+                      safe_format_path, cover_bytes)
     from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
 
@@ -45,6 +47,18 @@ def _display_value(value):
     if isinstance(value, dict):
         return ", ".join("%s: %s" % (key, val) for key, val in sorted(value.items()))
     return str(value or "")
+
+
+class SyncJob:
+    __slots__ = ("book_id", "book_uuid", "format_name", "old_id", "path", "cover_path")
+
+    def __init__(self, book_id, book_uuid, format_name, old_id, path, cover_path):
+        self.book_id = book_id
+        self.book_uuid = book_uuid
+        self.format_name = format_name
+        self.old_id = old_id
+        self.path = path
+        self.cover_path = cover_path
 
 
 class InventoryDialog(QDialog):
@@ -124,7 +138,7 @@ class SyncWorker(QObject):
                                   self.settings["refresh_token"], self.settings["username"],
                                   self.settings["password"])
             client.login()
-            needs_replacement_cleanup = any(job[3] for job in self.jobs)
+            needs_replacement_cleanup = any(job.old_id for job in self.jobs)
             remote_ids = (client.inventory_ids()
                           if self.settings["enable_deletions"] or needs_replacement_cleanup
                           else set())
@@ -133,20 +147,20 @@ class SyncWorker(QObject):
             for job in self.jobs:
                 if self.cancelled:
                     raise RuntimeError("Synchronization aborted by user.")
-                book_id, book_uuid, fmt, old_id, path, cover_path = job
-                self.progress.emit(done, total, "Uploading %s (%s)" % (book_uuid, fmt))
-                new_id = client.upload(path)
-                state[book_uuid] = {
+                self.progress.emit(done, total, "Uploading %s (%s)" %
+                                   (job.book_uuid, job.format_name))
+                new_id = client.upload(job.path)
+                state[job.book_uuid] = {
                     "tolino_id": new_id,
-                    "fingerprint": state.get(book_uuid, {}).get("fingerprint", ""),
-                    "calibre_id": book_id,
+                    "fingerprint": state.get(job.book_uuid, {}).get("fingerprint", ""),
+                    "calibre_id": job.book_id,
                 }
-                if cover_path:
-                    client.upload_cover(new_id, cover_path)
-                if old_id and str(old_id) in remote_ids:
-                    client.delete(old_id)
+                if job.cover_path:
+                    client.upload_cover(new_id, job.cover_path)
+                if job.old_id and str(job.old_id) in remote_ids:
+                    client.delete(job.old_id)
                 done += 1
-                self.progress.emit(done, total, "Uploaded %s" % book_uuid)
+                self.progress.emit(done, total, "Uploaded %s" % job.book_uuid)
             for book_uuid, tolino_id in self.removals:
                 if self.cancelled:
                     raise RuntimeError("Synchronization aborted by user.")
@@ -290,7 +304,7 @@ class SyncDashboard(QDialog):
                 }
             for item in metadata.values():
                 if isinstance(item["formats"], str):
-                    item["formats"] = item["formats"].split(",")
+                    item["formats"] = normalize_formats(item["formats"])
             state = load_state(settings["state"])
             client = TolinoClient(settings["partner_id"], settings["hardware_id"],
                                   settings["refresh_token"], settings["username"],
@@ -317,17 +331,17 @@ class SyncDashboard(QDialog):
             )
             jobs = []
             for book_id, book_uuid, fmt, old_id in uploads:
-                path = self.gui.current_db.format_abspath(book_id, fmt)
+                path = safe_format_path(self.gui.current_db, book_id, fmt)
                 cover_path = None
                 if settings["upload_covers"]:
-                    cover = self.gui.current_db.cover(book_id, as_file=False)
+                    cover = cover_bytes(self.gui.current_db, book_id)
                     if cover:
                         temp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
                         temp.write(cover)
                         temp.close()
                         cover_path = temp.name
                         self.temp_files.append(cover_path)
-                jobs.append((book_id, book_uuid, fmt, old_id, path, cover_path))
+                jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path, cover_path))
             settings["state"] = current
         except Exception as exc:
             error_dialog(self, "Vorbereitung fehlgeschlagen / Preparation failed", str(exc), show=True)

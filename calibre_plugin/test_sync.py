@@ -1,10 +1,13 @@
 import unittest
 import ast
+import os
+import tempfile
 import zipfile
 from pathlib import Path
 
 from . import config
-from .sync import (compare_inventory, fingerprint, iter_book_ids, plan_sync,
+from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
+                   normalize_formats, plan_sync, safe_format_path,
                    selected_book_ids, sync_summary)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
@@ -68,6 +71,54 @@ class SyncPlanTests(unittest.TestCase):
                 raise AssertionError("must not use fallback after iterall")
 
         self.assertEqual([], list(iter_book_ids(Database())))
+
+    def test_iter_book_ids_accepts_calibre_tuple_rows_and_skips_short_rows(self):
+        class Data:
+            def iterall(self):
+                return iter(((12, "title"), (), (13,), ("not-an-id", "title")))
+
+        class Database:
+            data = Data()
+
+        self.assertEqual([12, 13], list(iter_book_ids(Database())))
+
+    def test_normalize_formats_handles_all_calibre_shapes(self):
+        self.assertEqual(["EPUB", "PDF"], normalize_formats(("EPUB", "PDF")))
+        self.assertEqual(["EPUB", "PDF"], normalize_formats("EPUB, PDF"))
+        self.assertEqual([], normalize_formats(None))
+        self.assertEqual([], normalize_formats(("", None)))
+
+    def test_safe_format_path_accepts_wrapped_path_and_rejects_empty_result(self):
+        class Database:
+            def format_abspath(self, book_id, format_name):
+                return ("/library/book.epub", format_name)
+
+        self.assertEqual("/library/book.epub", safe_format_path(Database(), 1, "EPUB"))
+
+        class EmptyDatabase:
+            def format_abspath(self, book_id, format_name):
+                return ()
+
+        with self.assertRaises(ValueError):
+            safe_format_path(EmptyDatabase(), 1, "EPUB")
+
+    def test_cover_bytes_handles_bytes_paths_and_unexpected_values(self):
+        class Database:
+            def __init__(self, value):
+                self.value = value
+
+            def cover(self, book_id, as_file=False):
+                return self.value
+
+        self.assertEqual(b"cover", cover_bytes(Database((b"cover", "jpg")), 1))
+        self.assertIsNone(cover_bytes(Database(("missing.jpg",)), 1))
+        with tempfile.NamedTemporaryFile(delete=False) as cover_file:
+            cover_file.write(b"cover-file")
+            path = cover_file.name
+        try:
+            self.assertEqual(b"cover-file", cover_bytes(Database((path, "jpg")), 1))
+        finally:
+            os.remove(path)
 
     def test_inventory_comparison_matches_uuid_and_marks_changed(self):
         metadata = {
