@@ -57,6 +57,20 @@ preparation, and API failures appear in visible bilingual error dialogs. No
 screenshots are included because the UI is rendered by Calibre's own Qt
 widgets and depends on the installed Calibre theme.
 
+Before uploading, the plugin loads the Tolino inventory and shows a
+confirmation table with local and remote status (new in Calibre, Tolino-only,
+identical, or changed), title, authors, ISBN, and Tolino ID. New and changed
+Calibre books are selected by default, while the user can adjust the upload
+selection. UUIDs and stored Tolino IDs are preferred for matching; ISBN and
+normalized author/title are readable fallback matches. Author, title, and ISBN
+checkboxes control comparison/filter matching only: the current Tolino API has
+no verified metadata-update endpoint, so these fields are never sent as fake
+metadata requests. Actual uploads are ebook files in the selected format and,
+optionally, covers. Deletions remain a separate opt-in setting.
+When replacing an existing Tolino deliverable, its old ID is cleaned up after
+the replacement upload to prevent duplicates; the opt-in setting controls
+deleting books that are no longer present in Calibre.
+
 The recommended authentication path is a refresh token obtained from the
 partner's Web Reader network requests. Tokens, credentials, and sync state are
 stored through Calibre's `JSONConfig` mechanism and are never logged.

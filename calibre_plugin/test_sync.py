@@ -4,7 +4,8 @@ import zipfile
 from pathlib import Path
 
 from . import config
-from .sync import fingerprint, iter_book_ids, plan_sync, sync_summary
+from .sync import (compare_inventory, fingerprint, iter_book_ids, plan_sync,
+                   selected_book_ids, sync_summary)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
 
@@ -68,9 +69,52 @@ class SyncPlanTests(unittest.TestCase):
 
         self.assertEqual([], list(iter_book_ids(Database())))
 
+    def test_inventory_comparison_matches_uuid_and_marks_changed(self):
+        metadata = {
+            1: {"uuid": "u1", "title": "A", "authors": "Author",
+                "isbn": "123", "formats": ["EPUB"], "last_modified": "2"},
+            2: {"uuid": "u2", "title": "B", "authors": "Writer",
+                "isbn": "456", "formats": ["EPUB"], "last_modified": "1"},
+        }
+        state = {
+            "u1": {"tolino_id": "t1", "fingerprint": fingerprint(metadata[1], "EPUB")},
+            "u2": {"tolino_id": "t2", "fingerprint": "old"},
+        }
+        rows = compare_inventory(
+            metadata, state,
+            [{"deliverableId": "t2", "uuid": "u2", "title": "B", "authors": "Writer"},
+             {"deliverableId": "t1", "uuid": "u1", "title": "A", "authors": "Author"}],
+            ["EPUB"],
+        )
+        self.assertEqual(["identical", "changed"], [row["status"] for row in rows])
+        self.assertEqual({2}, selected_book_ids(rows))
+
+    def test_inventory_comparison_uses_isbn_and_reports_remote_only(self):
+        metadata = {
+            1: {"uuid": "u1", "title": "Local", "authors": "Author",
+                "isbn": "978-1-2", "formats": ["EPUB"]},
+        }
+        rows = compare_inventory(
+            metadata, {},
+            [{"id": "t1", "title": "Remote title", "authors": "Other",
+              "isbn": "97812"}, {"id": "t2", "title": "Cloud only"}],
+            ["EPUB"],
+        )
+        self.assertEqual("changed", rows[0]["status"])
+        self.assertEqual("t1", rows[0]["tolino_id"])
+        self.assertEqual("only_tolino", rows[1]["status"])
+        self.assertFalse(rows[1]["selected"])
+
     def test_unchanged_book_is_not_uploaded(self):
         old = {"u1": {"tolino_id": "t1", "fingerprint": fingerprint(self.book, "EPUB")}}
         self.assertEqual([], plan_sync({1: self.book}, old, ["EPUB"])[0])
+
+    def test_selected_unchanged_book_can_be_uploaded_again(self):
+        old = {"u1": {"tolino_id": "t1", "fingerprint": fingerprint(self.book, "EPUB")}}
+        self.assertEqual(
+            [(1, "u1", "EPUB", "t1")],
+            plan_sync({1: self.book}, old, ["EPUB"], upload_book_ids={1})[0],
+        )
 
     def test_changed_book_is_uploaded(self):
         old = {"u1": {"tolino_id": "t1", "fingerprint": "old"}}

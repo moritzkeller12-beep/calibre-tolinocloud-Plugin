@@ -7,21 +7,25 @@ try:
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
+                         QHBoxLayout, QTableWidget, QTableWidgetItem,
                          QObject, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
+                         QHBoxLayout, QTableWidget, QTableWidgetItem,
                          QObject, Signal as pyqtSignal)
 
 try:
     from .config import save_settings, settings
-    from .sync import iter_book_ids, load_state, plan_sync, sync_summary
+    from .sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
+                       selected_book_ids, sync_summary)
     from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 except ImportError:
     from config import save_settings, settings
-    from sync import iter_book_ids, load_state, plan_sync, sync_summary
+    from sync import (compare_inventory, iter_book_ids, load_state, plan_sync,
+                      selected_book_ids, sync_summary)
     from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
 
@@ -33,6 +37,68 @@ def _metadata_value(item, name, default=""):
             return item.get(name, default)
         except AttributeError:
             return default
+
+
+def _display_value(value):
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(x) for x in value)
+    if isinstance(value, dict):
+        return ", ".join("%s: %s" % (key, val) for key, val in sorted(value.items()))
+    return str(value or "")
+
+
+class InventoryDialog(QDialog):
+    HEADERS = ("Upload", "Status", "Titel / Title", "Autor / Author",
+               "ISBN", "Tolino-ID")
+
+    def __init__(self, rows, parent=None):
+        QDialog.__init__(self, parent)
+        self.setWindowTitle("Bestandsvergleich / Inventory comparison")
+        self.setMinimumSize(900, 420)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Autor, Titel und ISBN dienen nur zum Vergleichen/Filtern; "
+            "die Tolino-API schreibt keine Metadaten. Uploadbar sind Datei/Format "
+            "und optional Cover."))
+        self.table = QTableWidget(len(rows), len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.checks = []
+        status_text = {
+            "new_in_calibre": "Neu in Calibre",
+            "only_tolino": "Nur Tolino",
+            "identical": "Identisch",
+            "changed": "Geändert",
+        }
+        for row_index, row in enumerate(rows):
+            check = QCheckBox()
+            check.setChecked(bool(row.get("selected")))
+            check.setEnabled(row.get("book_id") is not None)
+            self.checks.append(check)
+            self.table.setCellWidget(row_index, 0, check)
+            values = (
+                status_text.get(row["status"], row["status"]),
+                row.get("title", ""),
+                row.get("authors", ""),
+                row.get("isbn", ""),
+                row.get("tolino_id", ""),
+            )
+            for column, value in enumerate(values, 1):
+                self.table.setItem(row_index, column, QTableWidgetItem(str(value or "")))
+        self.table.resizeColumnsToContents()
+        layout.addWidget(self.table)
+        buttons = QHBoxLayout()
+        confirm = QPushButton("Auswahl übernehmen / Confirm selection")
+        cancel = QPushButton("Abbrechen / Cancel")
+        confirm.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(confirm)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+    def selected_ids(self, rows):
+        return selected_book_ids([
+            dict(row, selected=check.isChecked()) for row, check in zip(rows, self.checks)
+        ])
 
 
 class SyncWorker(QObject):
@@ -58,7 +124,10 @@ class SyncWorker(QObject):
                                   self.settings["refresh_token"], self.settings["username"],
                                   self.settings["password"])
             client.login()
-            remote_ids = client.inventory_ids() if self.settings["enable_deletions"] else set()
+            needs_replacement_cleanup = any(job[3] for job in self.jobs)
+            remote_ids = (client.inventory_ids()
+                          if self.settings["enable_deletions"] or needs_replacement_cleanup
+                          else set())
             total = len(self.jobs) + len(self.removals)
             done = 0
             for job in self.jobs:
@@ -74,7 +143,7 @@ class SyncWorker(QObject):
                 }
                 if cover_path:
                     client.upload_cover(new_id, cover_path)
-                if old_id and self.settings["enable_deletions"] and str(old_id) in remote_ids:
+                if old_id and str(old_id) in remote_ids:
                     client.delete(old_id)
                 done += 1
                 self.progress.emit(done, total, "Uploaded %s" % book_uuid)
@@ -126,8 +195,18 @@ class SyncDashboard(QDialog):
         self.formats = QLineEdit()
         self.covers = QCheckBox("Covers hochladen / Upload covers")
         self.deletions = QCheckBox("Löschungen erlauben / Allow deletions")
+        self.compare_authors = QCheckBox("Autor / Author (nur Vergleich/Filter)")
+        self.compare_title = QCheckBox("Buchtitel / Title (nur Vergleich/Filter)")
+        self.compare_isbn = QCheckBox("ISBN (nur Vergleich/Filter)")
+        for field in (self.compare_authors, self.compare_title, self.compare_isbn):
+            field.setChecked(True)
+        self.upload_format = QLabel("Datei/Format wird hochgeladen / File/format is uploadable")
         option_form.addRow("Formate / Formats", self.formats)
+        option_form.addRow("", self.upload_format)
         option_form.addRow("", self.covers)
+        option_form.addRow("", self.compare_authors)
+        option_form.addRow("", self.compare_title)
+        option_form.addRow("", self.compare_isbn)
         option_form.addRow("", self.deletions)
         root.addWidget(options)
 
@@ -202,6 +281,10 @@ class SyncDashboard(QDialog):
                 metadata[book_id] = {
                     "uuid": _metadata_value(item, "uuid"),
                     "title": _metadata_value(item, "title"),
+                    "authors": _display_value(_metadata_value(item, "authors",
+                                                               _metadata_value(item, "author"))),
+                    "isbn": _display_value(_metadata_value(item, "isbn",
+                                                            _metadata_value(item, "identifiers"))),
                     "formats": _metadata_value(item, "formats"),
                     "last_modified": str(_metadata_value(item, "last_modified")),
                 }
@@ -209,8 +292,29 @@ class SyncDashboard(QDialog):
                 if isinstance(item["formats"], str):
                     item["formats"] = item["formats"].split(",")
             state = load_state(settings["state"])
-            uploads, removals, current = plan_sync(metadata, state, settings["preferred_formats"],
-                                                    settings["enable_deletions"])
+            client = TolinoClient(settings["partner_id"], settings["hardware_id"],
+                                  settings["refresh_token"], settings["username"],
+                                  settings["password"])
+            client.login()
+            comparison_fields = [
+                name for name, checkbox in (
+                    ("authors", self.compare_authors),
+                    ("title", self.compare_title),
+                    ("isbn", self.compare_isbn),
+                ) if checkbox.isChecked()
+            ]
+            comparison = compare_inventory(
+                metadata, state, client.inventory(), settings["preferred_formats"],
+                comparison_fields,
+            )
+            dialog = InventoryDialog(comparison, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            selected_ids = dialog.selected_ids(comparison)
+            uploads, removals, current = plan_sync(
+                metadata, state, settings["preferred_formats"],
+                settings["enable_deletions"], selected_ids,
+            )
             jobs = []
             for book_id, book_uuid, fmt, old_id in uploads:
                 path = self.gui.current_db.format_abspath(book_id, fmt)

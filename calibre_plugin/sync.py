@@ -1,5 +1,7 @@
 import hashlib
 import json
+import re
+import unicodedata
 
 
 def iter_book_ids(database):
@@ -40,6 +42,123 @@ def _unique_ids(book_ids):
             yield book_id
 
 
+def normalize_match_text(value):
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[^0-9a-z]+", " ", value).strip()
+
+
+def _normalize_isbn(value):
+    return re.sub(r"[^0-9x]+", "", str(value or "").casefold())
+
+
+def _metadata_text(metadata, *names):
+    for name in names:
+        value = metadata.get(name, "")
+        if value:
+            return str(value)
+    return ""
+
+
+def _inventory_value(item, *names):
+    if not isinstance(item, dict):
+        return ""
+    for name in names:
+        value = item.get(name)
+        if value:
+            return value
+    return ""
+
+
+def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
+                      comparison_fields=("authors", "title", "isbn")):
+    """Return deterministic local/remote rows for the pre-sync confirmation view."""
+    remote_rows = []
+    for item in inventory or ():
+        remote_id = _inventory_value(item, "id", "deliverableId", "deliverable_id")
+        if not remote_id:
+            continue
+        remote_rows.append({
+            "book_id": None,
+            "uuid": _inventory_value(item, "uuid", "calibreUuid", "calibre_uuid"),
+            "title": _inventory_value(item, "title", "bookTitle", "name"),
+            "authors": _inventory_value(item, "authors", "author", "creator"),
+            "isbn": _inventory_value(item, "isbn", "ISBN", "isbn13"),
+            "tolino_id": str(remote_id),
+            "status": "only_tolino",
+            "selected": False,
+        })
+    matched = set()
+    rows = []
+    for book_id, metadata in metadata_by_id.items():
+        book_uuid = str(metadata.get("uuid") or "")
+        title = _metadata_text(metadata, "title")
+        authors = _metadata_text(metadata, "authors", "author")
+        isbn = _metadata_text(metadata, "isbn", "identifiers")
+        old = state.get(book_uuid, {})
+        stored_id = str(old.get("tolino_id") or "")
+        candidates = []
+        if stored_id:
+            candidates = [i for i, row in enumerate(remote_rows)
+                          if row["tolino_id"] == stored_id]
+        if not candidates and book_uuid:
+            candidates = [i for i, row in enumerate(remote_rows)
+                          if str(row["uuid"]) == book_uuid]
+        if not candidates and "isbn" in comparison_fields and isbn:
+            normalized_isbn = _normalize_isbn(isbn)
+            candidates = [i for i, row in enumerate(remote_rows)
+                          if normalized_isbn and _normalize_isbn(row["isbn"]) == normalized_isbn]
+        if not candidates and {"authors", "title"} <= set(comparison_fields) and title and authors:
+            key = (normalize_match_text(authors), normalize_match_text(title))
+            candidates = [i for i, row in enumerate(remote_rows)
+                          if (normalize_match_text(row["authors"]),
+                              normalize_match_text(row["title"])) == key]
+        remote_index = next((i for i in candidates if i not in matched), None)
+        selected_format = next(
+            (fmt for fmt in preferred_formats
+             if str(fmt).upper() in {str(x).upper() for x in metadata.get("formats", ())}),
+            None,
+        )
+        if remote_index is None:
+            status = "new_in_calibre"
+            tolino_id = stored_id
+        else:
+            matched.add(remote_index)
+            remote = remote_rows[remote_index]
+            tolino_id = remote["tolino_id"]
+            current_fp = fingerprint(metadata, selected_format) if selected_format else ""
+            values = ((title, "title"), (authors, "authors"), (isbn, "isbn"))
+            same_fields = bool(comparison_fields) and all(
+                not value or (
+                    _normalize_isbn(value) == _normalize_isbn(remote[field])
+                    if field == "isbn" else
+                    normalize_match_text(value) == normalize_match_text(remote[field])
+                )
+                for value, field in values if field in comparison_fields
+            )
+            status = "identical" if (
+                old.get("fingerprint") and old.get("fingerprint") == current_fp
+            ) or same_fields else "changed"
+        rows.append({
+            "book_id": book_id,
+            "uuid": book_uuid,
+            "title": title,
+            "authors": authors,
+            "isbn": isbn,
+            "tolino_id": tolino_id,
+            "status": status,
+            "selected": status in ("new_in_calibre", "changed"),
+        })
+    rows.extend(row for i, row in enumerate(remote_rows) if i not in matched)
+    return rows
+
+
+def selected_book_ids(comparison_rows):
+    return {
+        row["book_id"] for row in comparison_rows
+        if row.get("selected") and row.get("book_id") is not None
+    }
+
+
 def fingerprint(metadata, format_name):
     value = "%s|%s|%s|%s" % (
         metadata.get("uuid", ""),
@@ -50,7 +169,8 @@ def fingerprint(metadata, format_name):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def plan_sync(metadata_by_id, state, preferred_formats, deletions=False):
+def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
+              upload_book_ids=None):
     current = {}
     uploads = []
     for book_id, metadata in metadata_by_id.items():
@@ -65,7 +185,8 @@ def plan_sync(metadata_by_id, state, preferred_formats, deletions=False):
         current[book_uuid] = {"tolino_id": state.get(book_uuid, {}).get("tolino_id"),
                               "fingerprint": fp, "calibre_id": book_id}
         old = state.get(book_uuid, {})
-        if not old.get("tolino_id") or old.get("fingerprint") != fp:
+        if (not old.get("tolino_id") or old.get("fingerprint") != fp or
+                (upload_book_ids is not None and book_id in upload_book_ids)):
             uploads.append((book_id, book_uuid, selected, old.get("tolino_id")))
     removals = []
     if deletions:
