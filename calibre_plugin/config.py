@@ -26,6 +26,7 @@ DEFAULTS = {
     "preferred_formats": ["EPUB", "PDF"],
     "upload_covers": True,
     "enable_deletions": False,
+    "tolino_column_notice_shown": False,
     "state": {},
 }
 PREFERENCES.defaults = DEFAULTS

@@ -12,6 +12,47 @@ except ImportError:
     from tolino import sanitize_error
 
 
+TOLINO_COLUMN = "#tolino_id"
+TOLINO_COLUMN_LABEL = "Tolino ID"
+
+
+def metadata_tolino_id(metadata):
+    """Read the custom column from Calibre metadata without requiring Calibre."""
+    if not isinstance(metadata, dict):
+        value = getattr(metadata, "get", lambda *_args: "")(TOLINO_COLUMN, "")
+        return str(value or "").strip()
+    for key in (TOLINO_COLUMN, "tolino_id"):
+        value = metadata.get(key)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def custom_column_available(database):
+    """Check Calibre's public field metadata for the configured custom column."""
+    fields = getattr(database, "field_metadata", None)
+    if callable(fields):
+        fields = fields()
+    if not isinstance(fields, dict):
+        return False
+    return TOLINO_COLUMN in fields
+
+
+def update_tolino_ids(database, updates):
+    """Persist IDs through Calibre's supported set_field API, never SQL."""
+    if not updates:
+        return 0
+    setter = getattr(database, "set_field", None)
+    if not callable(setter):
+        raise AttributeError("Calibre database does not provide set_field().")
+    values = {book_id: str(tolino_id) for book_id, tolino_id in updates
+              if book_id is not None and tolino_id}
+    if not values:
+        return 0
+    setter(TOLINO_COLUMN, values)
+    return len(values)
+
+
 def format_error_details(exc, secrets=()):
     """Render an exception and its traceback without exposing credentials."""
     return sanitize_error("%s\n\n%s" % (exc, traceback.format_exc()), secrets)
@@ -310,7 +351,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
         authors = _metadata_text(metadata, "authors", "author")
         isbn = _metadata_text(metadata, "isbn", "identifiers")
         old = state.get(book_uuid, {})
-        stored_id = str(old.get("tolino_id") or "")
+        stored_id = str(old.get("tolino_id") or
+                        metadata_tolino_id(metadata) or "")
         candidates = []
         if stored_id:
             candidates = [i for i, row in enumerate(remote_rows)

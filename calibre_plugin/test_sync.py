@@ -14,7 +14,8 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    unpack_plan_result, unpack_upload_record, redact_sensitive,
                    format_diagnostic_report, diagnose_preparation,
                    _diagnostic_formats, metadata_by_id, format_error_details,
-                   normalize_title, normalize_inventory_item)
+                   normalize_title, normalize_inventory_item, custom_column_available,
+                   metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      TolinoClient, hardware_id, normalize_refresh_token,
                      sanitize_error, validate_callback)
@@ -279,6 +280,41 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual(["identical", "changed"], [row["status"] for row in rows])
         self.assertEqual(set(), selected_book_ids(rows))
+
+    def test_custom_column_value_is_a_matching_fallback(self):
+        metadata = {1: {"uuid": "u1", "title": "Changed title",
+                        "formats": ["EPUB"], "#tolino_id": "bosh_8_saved"}}
+        rows = compare_inventory(
+            metadata, {}, [{"deliverableId": "bosh_8_saved", "title": "Remote title"}],
+            ["EPUB"],
+        )
+        self.assertEqual("changed", rows[0]["status"])
+        self.assertEqual("bosh_8_saved", rows[0]["tolino_id"])
+        self.assertEqual("stored_id_or_uuid", rows[0]["match_reason"])
+
+    def test_custom_column_uses_supported_set_field_api(self):
+        class Database:
+            field_metadata = {TOLINO_COLUMN: {"datatype": "text"}}
+
+            def set_field(self, field, values):
+                self.field, self.values = field, values
+
+        database = Database()
+        self.assertTrue(custom_column_available(database))
+        self.assertEqual(1, update_tolino_ids(database, [(7, "bosh_8_new")]))
+        self.assertEqual(TOLINO_COLUMN, database.field)
+        self.assertEqual({7: "bosh_8_new"}, database.values)
+
+    def test_custom_column_missing_does_not_use_sql_fallback(self):
+        class Database:
+            field_metadata = {}
+
+        self.assertFalse(custom_column_available(Database()))
+        with self.assertRaises(AttributeError):
+            update_tolino_ids(Database(), [(7, "bosh_8_new")])
+
+    def test_metadata_tolino_id_accepts_calibre_style_mapping(self):
+        self.assertEqual("bosh_8_id", metadata_tolino_id({"#tolino_id": " bosh_8_id "}))
 
     def test_inventory_comparison_uses_isbn_and_reports_remote_only(self):
         metadata = {

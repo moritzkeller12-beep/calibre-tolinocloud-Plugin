@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.4.1**. Autor: **moritzkeller12-beep**.
+Plugin-Version: **0.5.0**. Autor: **moritzkeller12-beep**.
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -26,6 +26,14 @@ Plugin-Struktur. In Calibre **Einstellungen > Plugins > Plugin aus Datei
 laden** auswählen und Calibre anschließend neu starten.
 
 ## Einrichtung
+
+Lege in Calibre einmalig unter **Einstellungen > Eigene Spalten** eine
+Text-Spalte mit Bezeichnung **Tolino ID** und Lookup-Namen **`#tolino_id`** an.
+Das Plugin prüft diese Spalte über die öffentliche Calibre-API und verändert
+kein Datenbankschema direkt. Nach erfolgreichen Uploads wird die jeweilige
+`bosh_...`-`deliverableId` dort gespeichert; vorhandene Werte werden beim
+Matching zuerst als Fallback verwendet. Die Vergleichstabelle zeigt die
+technische ID separat.
 
 Im Dialog **Tolino Cloud Sync**:
 
@@ -67,6 +75,11 @@ Die Tolino-API ist inoffiziell und kann sich ohne Vorankündigung ändern.
 Das Plugin lädt Dateien und optional Cover hoch, bietet aber keinen
 verifizierten Metadaten-Upload. Partner-, Token- und Dienständerungen können
 eine erneute Einrichtung erfordern.
+
+Das Plugin liest keine Browserprofile, Cookies oder LocalStorage-Daten und
+extrahiert keine Hardware-IDs oder Tokens heimlich. Die Anmeldung bleibt ein
+bewusst gestarteter Browser-/manueller Refresh-Token-Workflow; Tokenwerte
+werden nicht protokolliert.
 
 ## Lokale Validierung
 

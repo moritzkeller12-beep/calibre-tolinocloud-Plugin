@@ -25,7 +25,9 @@ try:
                        selected_book_ids, sync_summary, normalize_formats,
                        safe_format_path, cover_bytes, unpack_plan_result,
                        unpack_upload_record, diagnose_preparation,
-                       format_diagnostic_report)
+                       format_diagnostic_report, custom_column_available,
+                       metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN,
+                       TOLINO_COLUMN_LABEL)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error)
 except ImportError:
@@ -35,7 +37,9 @@ except ImportError:
                       selected_book_ids, sync_summary, normalize_formats,
                       safe_format_path, cover_bytes, unpack_plan_result,
                       unpack_upload_record, diagnose_preparation,
-                      format_diagnostic_report)
+                      format_diagnostic_report, custom_column_available,
+                      metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN,
+                      TOLINO_COLUMN_LABEL)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         hardware_id, normalize_refresh_token, sanitize_error)
 
@@ -210,7 +214,7 @@ class DiagnosticDialog(QDialog):
 
 class SyncWorker(QObject):
     progress = pyqtSignal(int, int, str)
-    completed = pyqtSignal(object, object)
+    completed = pyqtSignal(object, object, object)
     failed = pyqtSignal(str, str)
 
     def __init__(self, settings, jobs, removals):
@@ -226,6 +230,7 @@ class SyncWorker(QObject):
     def run(self):
         state = load_state(self.settings["state"])
         client = None
+        updates = []
         try:
             client = TolinoClient(self.settings["partner_id"], self.settings["hardware_id"],
                                   self.settings["refresh_token"], self.settings["username"],
@@ -249,6 +254,7 @@ class SyncWorker(QObject):
                     "fingerprint": state.get(job.book_uuid, {}).get("fingerprint", ""),
                     "calibre_id": job.book_id,
                 }
+                updates.append((job.book_id, new_id))
                 if job.cover_path:
                     client.upload_cover(new_id, job.cover_path)
                 if job.old_id and str(job.old_id) in remote_ids:
@@ -264,7 +270,7 @@ class SyncWorker(QObject):
                 state.pop(book_uuid, None)
                 done += 1
                 self.progress.emit(done, total, "Processed %s" % book_uuid)
-            self.completed.emit(state, client.refresh)
+            self.completed.emit(state, client.refresh, updates)
         except Exception as exc:
             self.failed.emit(sanitize_error(
                 exc, (self.settings["refresh_token"], getattr(client, "access", None))
@@ -417,6 +423,18 @@ class SyncDashboard(QDialog):
             QMessageBox.warning(self, "Konfiguration / Configuration",
                                 "Bitte zuerst einen Refresh-Token konfigurieren.")
             return
+        if not custom_column_available(self.gui.current_db):
+            message = (
+                "Die benutzerdefinierte Calibre-Spalte %s fehlt.\n\n"
+                "Bitte einmalig unter Einstellungen > Eigene Spalten eine "
+                "Text-Spalte mit Bezeichnung „%s“ und Lookup-Namen %s anlegen. "
+                "Danach die Synchronisierung erneut starten. Es werden keine "
+                "Tabellen direkt verändert."
+            ) % (TOLINO_COLUMN, TOLINO_COLUMN_LABEL, TOLINO_COLUMN)
+            QMessageBox.information(self, "Tolino-ID-Spalte einrichten", message)
+            if not settings["tolino_column_notice_shown"]:
+                save_settings({"tolino_column_notice_shown": True})
+            return
         try:
             metadata = {}
             for book_id in iter_book_ids(self.gui.current_db):
@@ -430,6 +448,7 @@ class SyncDashboard(QDialog):
                                                             _metadata_value(item, "identifiers"))),
                     "formats": _metadata_value(item, "formats"),
                     "last_modified": str(_metadata_value(item, "last_modified")),
+                    "tolino_id": metadata_tolino_id(item),
                 }
             for item in metadata.values():
                 item["formats"] = normalize_formats(item["formats"])
@@ -519,7 +538,8 @@ class SyncDashboard(QDialog):
             self.progress_label.setText("Abbruch angefordert / Abort requested")
             self.cancel.setEnabled(False)
 
-    def sync_completed(self, state, refresh):
+    def sync_completed(self, state, refresh, updates):
+        update_tolino_ids(self.gui.current_db, updates)
         save_settings({"state": state, "refresh_token": refresh, "hardware_id": self.hardware.text().strip()})
         self.finish_thread()
         info_dialog(self, "Tolino Cloud Sync", "Synchronisierung abgeschlossen / Synchronization complete.",
