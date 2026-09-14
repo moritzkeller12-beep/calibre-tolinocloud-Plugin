@@ -318,7 +318,10 @@ class SyncPlanTests(unittest.TestCase):
             def __init__(self, value):
                 self.value = value
 
-            def cover(self, book_id, as_file=False):
+            def has_id(self, book_id):
+                return True
+
+            def cover(self, book_id, as_file=False, index_is_id=False):
                 return self.value
 
         self.assertEqual(b"cover", cover_bytes(Database((b"cover", "jpg")), 1))
@@ -330,6 +333,58 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual(b"cover-file", cover_bytes(Database((path, "jpg")), 1))
         finally:
             os.remove(path)
+
+    def test_cover_bytes_uses_real_id_for_legacy_view_wrapper(self):
+        class Calibre76Database:
+            def cover(self, book_id, as_file=False, index_is_id=False):
+                if not index_is_id:
+                    raise IndexError("tuple index out of range")
+                return b"cover-data"
+
+        self.assertEqual(
+            b"cover-data",
+            cover_bytes(Calibre76Database(), 42),
+        )
+
+    def test_cover_bytes_falls_back_for_old_signature_and_stale_ids(self):
+        class OldDatabase:
+            def __init__(self):
+                self.calls = []
+
+            def cover(self, book_id, as_file=False):
+                self.calls.append((book_id, as_file))
+                raise AssertionError("view-index resolver must not be called")
+
+        class NewApi:
+            def __init__(self):
+                self.calls = []
+
+            def cover(self, book_id, as_file=False):
+                self.calls.append((book_id, as_file))
+                return b"cover-data"
+
+        database = OldDatabase()
+        database.new_api = NewApi()
+        self.assertEqual(b"cover-data", cover_bytes(database, 2))
+        self.assertEqual([], database.calls)
+        self.assertEqual([(2, False)], database.new_api.calls)
+
+        with self.assertRaisesRegex(ValueError, "ID-safe resolver"):
+            cover_bytes(OldDatabase(), 2)
+
+        class StaleDatabase:
+            def has_id(self, book_id):
+                return False
+
+            def cover(self, book_id, as_file=False, index_is_id=False):
+                raise AssertionError("stale ids must be rejected before lookup")
+
+        with self.assertRaisesRegex(ValueError, "no book with id"):
+            cover_bytes(StaleDatabase(), 99)
+
+        for invalid_id in (None, 0, -1, True, "42"):
+            with self.subTest(invalid_id=invalid_id), self.assertRaises(ValueError):
+                cover_bytes(OldDatabase(), invalid_id)
 
     def test_inventory_comparison_matches_uuid_and_marks_changed(self):
         metadata = {

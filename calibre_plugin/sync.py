@@ -223,7 +223,28 @@ def safe_format_path(database, book_id, format_name):
 
 def cover_bytes(database, book_id):
     """Normalize cover() results from bytes, paths, or wrapped Calibre values."""
-    cover = database.cover(book_id, as_file=False)
+    if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
+        raise ValueError("Invalid Calibre book id: %r" % (book_id,))
+    has_id = getattr(database, "has_id", None)
+    if callable(has_id) and not has_id(book_id):
+        raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    try:
+        parameters = inspect.signature(database.cover).parameters
+    except (TypeError, ValueError):
+        parameters = None
+    supports_id_flag = parameters is None or "index_is_id" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in (parameters.values() if parameters is not None else ())
+    )
+    if supports_id_flag:
+        cover = database.cover(book_id, as_file=False, index_is_id=True)
+    else:
+        direct_api = getattr(getattr(database, "new_api", None), "cover", None)
+        if callable(direct_api):
+            cover = direct_api(book_id, as_file=False)
+        else:
+            raise ValueError(
+                "Calibre cover API does not expose an ID-safe resolver.")
     if isinstance(cover, (bytes, bytearray, memoryview)):
         return bytes(cover)
     if isinstance(cover, (str, os.PathLike)):
