@@ -62,8 +62,15 @@ class SyncPlanTests(unittest.TestCase):
         if not archive.exists():
             self.skipTest("build_plugin.py has not been run")
         with zipfile.ZipFile(archive) as plugin:
-            self.assertIn("plugin-import-name-tolino_cloud_sync.txt", plugin.namelist())
-            self.assertIn("ui.py", plugin.namelist())
+            self.assertEqual({
+                "__init__.py",
+                "calibre_plugins/__init__.py",
+                "calibre_plugins/tolino_cloud_sync/__init__.py",
+                "calibre_plugins/tolino_cloud_sync/ui.py",
+                "calibre_plugins/tolino_cloud_sync/config.py",
+                "calibre_plugins/tolino_cloud_sync/sync.py",
+                "calibre_plugins/tolino_cloud_sync/tolino.py",
+            }, set(plugin.namelist()))
             metadata = ast.parse(plugin.read("__init__.py").decode("utf-8"))
             values = [
                 node.value.value

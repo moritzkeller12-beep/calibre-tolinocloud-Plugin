@@ -12,38 +12,27 @@ python3 build_plugin.py
 ```
 This creates `tolino_cloud_sync.zip`. In Calibre 7.6.0 or newer, choose
 **Preferences > Plugins > Load plugin from file**, select that ZIP, and
-restart Calibre. The archive intentionally contains these files directly at
-its top level:
+restart Calibre. The archive contains the Calibre metadata at its top level
+and the implementation in the physical namespace package:
 
 ```text
 __init__.py
-plugin-import-name-tolino_cloud_sync.txt
-ui.py
-config.py
-sync.py
-tolino.py
+calibre_plugins/__init__.py
+calibre_plugins/tolino_cloud_sync/__init__.py
+calibre_plugins/tolino_cloud_sync/ui.py
+calibre_plugins/tolino_cloud_sync/config.py
+calibre_plugins/tolino_cloud_sync/sync.py
+calibre_plugins/tolino_cloud_sync/tolino.py
 ```
 
 Calibre requires the top-level `__init__.py`; do not install the source
-directory itself.
+directory itself. The package's relative imports therefore resolve directly
+as `calibre_plugins.tolino_cloud_sync.*`.
 
 The plugin entry point is `TolinoSyncPlugin` in the root `__init__.py` with
 `actual_plugin =
-"calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"`. This follows
-Calibre's official multi-file InterfaceAction layout: the metadata wrapper and
-implementation modules are at the ZIP root. The empty
-`plugin-import-name-tolino_cloud_sync.txt` marker makes Calibre's loader expose
-them through the qualified `calibre_plugins.tolino_cloud_sync` namespace.
-There is intentionally no physical `calibre_plugins/` directory in the ZIP.
-
-### Calibre 7.6 import compatibility
-
-The ZIP is checked with a local reproduction of Calibre's
-`CalibrePluginFinder` mapping: it registers the marker name, imports the root
-`__init__.py` as `calibre_plugins.tolino_cloud_sync`, and imports `ui.py` as
-`calibre_plugins.tolino_cloud_sync.ui`. If Calibre still reports
-`InvalidPlugin`, provide the complete traceback, especially the final
-`ImportError` line.
+"calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"`, matching the
+physical package path in the archive.
 
 ## Configuration and use
 
