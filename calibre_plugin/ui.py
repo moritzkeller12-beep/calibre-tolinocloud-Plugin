@@ -16,11 +16,11 @@ except ImportError:
                          QObject, Signal as pyqtSignal)
 
 try:
-    from .config import PREFERENCES, save_settings
+    from .config import save_settings, settings
     from .sync import load_state, plan_sync, sync_summary
     from .tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 except ImportError:
-    from config import PREFERENCES, save_settings
+    from config import save_settings, settings
     from sync import load_state, plan_sync, sync_summary
     from tolino import PARTNERS, TolinoAuthError, TolinoClient, browser_login, hardware_id
 
@@ -149,7 +149,7 @@ class SyncDashboard(QDialog):
         self.load_values()
 
     def load_values(self):
-        values = dict(PREFERENCES)
+        values = settings()
         self.partner.setCurrentIndex(max(0, self.partner.findData(values["partner_id"])))
         self.hardware.setText(values["hardware_id"] or hardware_id())
         self.refresh.setText(values["refresh_token"])
@@ -167,12 +167,12 @@ class SyncDashboard(QDialog):
             "partner_id": self.partner.currentData(),
             "hardware_id": self.hardware.text().strip() or hardware_id(),
             "refresh_token": self.refresh.text().strip(),
-            "username": PREFERENCES["username"],
-            "password": PREFERENCES["password"],
+            "username": settings()["username"],
+            "password": settings()["password"],
             "preferred_formats": [x.strip().upper() for x in self.formats.text().split(",") if x.strip()],
             "upload_covers": self.covers.isChecked(),
             "enable_deletions": self.deletions.isChecked(),
-            "state": PREFERENCES["state"],
+            "state": settings()["state"],
         }
 
     def browser_login(self):

@@ -3,6 +3,7 @@ import ast
 import zipfile
 from pathlib import Path
 
+from . import config
 from .sync import fingerprint, plan_sync, sync_summary
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      hardware_id, validate_callback)
@@ -56,6 +57,31 @@ class SyncPlanTests(unittest.TestCase):
     def test_sync_summary_is_deterministic_for_dashboard(self):
         self.assertEqual({"uploads": 2, "deletions": 1, "errors": 0, "total": 3},
                          sync_summary(2, 1))
+
+    def test_empty_settings_are_migrated_without_calibre(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            values = config.settings()
+            self.assertEqual(config.DEFAULTS["partner_id"], values["partner_id"])
+            self.assertEqual(config.DEFAULTS["preferred_formats"], values["preferred_formats"])
+            self.assertEqual(config.DEFAULTS["state"], values["state"])
+            self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
+        finally:
+            config.PREFERENCES = original
+
+    def test_partial_settings_get_missing_defaults(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.PREFERENCES["refresh_token"] = "configured-token"
+            values = config.settings()
+            self.assertEqual("configured-token", values["refresh_token"])
+            self.assertEqual("", values["hardware_id"])
+            self.assertFalse(values["enable_deletions"])
+            self.assertIsInstance(values["state"], dict)
+        finally:
+            config.PREFERENCES = original
 
     def test_zip_entrypoint_uses_calibre_namespace_package(self):
         archive = Path(__file__).parent.parent / "tolino_cloud_sync.zip"
