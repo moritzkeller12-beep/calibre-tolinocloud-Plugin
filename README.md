@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.3**
+Plugin-Version: **0.8.4**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -159,6 +159,12 @@ python3 build_plugin.py
 ```
 
 ## Versionshistorie
+
+### 0.8.4 (2026-09-18)
+- Bot-Schutz-Fix: Der User-Agent des eingebetteten Browsers enthält kein
+  "QtWebEngine"-Token mehr (Chrome-ähnlicher UA), damit DataDome & Co. den
+  Anmelde-Dialog nicht blockieren; Sicherheits-Checks lassen sich einmalig
+  direkt im Fenster lösen, Hinweistext im Dialog ergänzt
 
 ### 0.8.3 (2026-09-18)
 - Stille WebEngine-Konsole: harmlose Seiten-Warnungen (Permissions-Policy,
