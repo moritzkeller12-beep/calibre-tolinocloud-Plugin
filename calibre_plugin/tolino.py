@@ -404,6 +404,34 @@ def _scan_chromium_leveldb(db_dir):
 # --- Firefox (LSNG): webappsstore.sqlite ----------------------------------
 
 
+def _lsng_value_text(value):
+    """Decode one LSNG value (BLOB with 0x01/0x02 prefix, or str)."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return None
+    blob = bytes(value)
+    if not blob:
+        return ""
+    prefix, body = blob[:1], blob[1:]
+    # LSNG spec: 0x01 prefix = UTF-16LE string, 0x02 prefix = UTF-8 string.
+    if prefix == b"\x01":
+        try:
+            return body.decode("utf-16-le")
+        except UnicodeDecodeError:
+            return body.decode("utf-8", "replace")
+    if prefix == b"\x02":
+        return body.decode("utf-8", "replace")
+    # Legacy row without prefix: try UTF-8, fall back to UTF-16LE heuristic.
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return blob.decode("utf-16-le")
+        except UnicodeDecodeError:
+            return blob.decode("utf-8", "replace")
+
+
 def _read_firefox_storage(profile_path):
     """Read localStorage from Firefox LSNG webappsstore.sqlite (BLOB values)."""
     results = {}
@@ -416,20 +444,8 @@ def _read_firefox_storage(profile_path):
             cursor = conn.cursor()
             cursor.execute("SELECT originKey, key, value FROM data")
             for origin_key, key, value in cursor.fetchall():
-                origin_text = origin_key if isinstance(origin_key, str) else \
-                    (origin_key or b"").decode("utf-8", "replace")
-                if isinstance(value, (bytes, bytearray, memoryview)):
-                    # LSNG stores utf16 strings as \x01<bytes>, utf8 as \x02<bytes>.
-                    blob = bytes(value)
-                    if blob[:1] == b"\x01":
-                        try:
-                            value = blob[1:].decode("utf-16")
-                        except UnicodeDecodeError:
-                            value = blob[1:].decode("utf-8", "replace")
-                    elif blob[:1] == b"\x02":
-                        value = blob[1:].decode("utf-8", "replace")
-                    else:
-                        value = blob.decode("utf-8", "replace")
+                origin_text = _lsng_value_text(origin_key)
+                value = _lsng_value_text(value)
                 if not isinstance(key, str):
                     key = str(key)
                 results["%s/%s" % (origin_text, key)] = value
@@ -454,19 +470,8 @@ def _read_firefox_session_storage(profile_path):
             for origin_key, key, value, conversion in cursor.fetchall():
                 if (conversion or 0) & 1:  # sessionStorage flag (1 << 0)
                     continue
-                origin_text = origin_key if isinstance(origin_key, str) else \
-                    (origin_key or b"").decode("utf-8", "replace")
-                if isinstance(value, (bytes, bytearray, memoryview)):
-                    blob = bytes(value)
-                    if blob[:1] == b"\x01":
-                        try:
-                            value = blob[1:].decode("utf-16")
-                        except UnicodeDecodeError:
-                            value = blob[1:].decode("utf-8", "replace")
-                    elif blob[:1] == b"\x02":
-                        value = blob[1:].decode("utf-8", "replace")
-                    else:
-                        value = blob.decode("utf-8", "replace")
+                origin_text = _lsng_value_text(origin_key)
+                value = _lsng_value_text(value)
                 results["%s/%s" % (origin_text, key)] = value
         finally:
             conn.close()

@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.8**
+Plugin-Version: **0.8.9**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -166,6 +166,19 @@ python3 build_plugin.py
 
 ## Versionshistorie
 
+### 0.8.9 (2026-09-18)
+- **OAuth-Code-Abfangen (neuer Hauptweg):** Die eingebettete Anmeldung fängt
+  den Autorisierungs-Code aus dem OAuth-Redirect ab und tauscht ihn direkt
+  am Token-Endpoint des Partners ein – unabhängig davon, ob der Web Reader
+  localStorage beschreibbar/lesbar macht. Scheitert der Austausch,
+  läuft die Storage-Übernahme weiter
+- **Firefox-Dekodierung repariert:** LSNG-Werte mit `\x01`-Präfix werden
+  jetzt korrekt als UTF-16LE gelesen (vorher verkehrt herum – deshalb
+  blieben die Tokens in Firefox-Profilen unsichtbar); `\x02` = UTF-8
+- Qt-Warnung "Invalid ButtonRole" endgültig entfernt: keine
+  QDialogButtonBox mehr, einfache Buttons mit Close-Fallback
+
+### 0.8.8 (2026-09-18)
 ### 0.8.8 (2026-09-18)
 - **"Keine Browser-Profile gefunden" behoben:** Die Speicherort-Erkennung
   läuft jetzt als durchsuchender Walk über alle Kandidatenverzeichnisse und
