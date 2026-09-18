@@ -38,6 +38,36 @@ _STORAGE_JS = """
 """
 
 
+def _resolve_enum(owner, *paths):
+    """Resolve a Qt constant across Qt5 and Qt6 enum naming schemes.
+
+    Qt6 scopes enums (e.g. PersistentCookiesPolicy.ForcePersistentCookies)
+    while Qt5 exposed flat names; PyQt6 builds vary in which shortcut exists.
+    Returns None when no variant is available.
+    """
+    if owner is None:
+        return None
+    for path in paths:
+        current = owner
+        for part in path.split("."):
+            current = getattr(current, part, None)
+            if current is None:
+                break
+        else:
+            return current
+    return None
+
+
+_FORCE_PERSISTENT_COOKIES = (
+    "PersistentCookiesPolicy.ForcePersistentCookies",  # Qt6 scoped
+    "ForcePersistentCookies",  # Qt5 flat
+)
+_CLOSE_BUTTON = (
+    "StandardButton.Close",  # Qt6 scoped
+    "Close",  # Qt5 flat
+)
+
+
 def _on_reader(url):
     host = (url.host() or "").casefold()
     return any(host == name or host.endswith("." + name) for name in READER_HOSTS)
@@ -66,14 +96,17 @@ class EmbeddedLoginDialog(QDialog):
         layout.addWidget(self.status)
 
         self.profile = QWebEngineProfile(self)
-        self.profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.ForcePersistentCookies)
+        policy = _resolve_enum(QWebEngineProfile, *_FORCE_PERSISTENT_COOKIES)
+        if policy is not None:
+            self.profile.setPersistentCookiesPolicy(policy)
         self.page = QWebEnginePage(self.profile, self)
         self.view = QWebEngineView(self)
         self.view.setPage(self.page)
         layout.addWidget(self.view)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        close_role = _resolve_enum(QDialogButtonBox, *_CLOSE_BUTTON)
+        buttons = QDialogButtonBox(close_role) if close_role is not None \
+            else QDialogButtonBox()
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -111,7 +144,7 @@ class EmbeddedLoginDialog(QDialog):
             return
         if not _on_reader(self.page.url()):
             return
-        self.page.runJavaScript(_STORAGE_JS, 0, self._storage_ready)
+        self.page.runJavaScript(_STORAGE_JS, self._storage_ready)
 
     def _storage_ready(self, payload):
         if self.completed or not isinstance(payload, str):

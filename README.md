@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.1**
+Plugin-Version: **0.8.2**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -160,11 +160,18 @@ python3 build_plugin.py
 
 ## Versionshistorie
 
+### 0.8.2 (2026-09-18)
+- Fix: Qt6/PyQt6-kompatible Qt-Enums in der eingebetteten Anmeldung
+  (PersistentCookiesPolicy, Dialog-Button, runJavaScript) – behebt
+  "AttributeError: type object 'QWebEngineProfile' has no attribute
+  'ForcePersistentCookies'" unter Calibre 7.x
+
 ### 0.8.1 (2026-09-18)
 - Eingebettete Browser-Anmeldung (QtWebEngine) für alle Partner, inklusive
   Orell Füssli/Keycloak: Tokens werden nach dem Login direkt aus dem
   Web-Reader-Storage übernommen
 - Externer OAuth-Callback-Flow bleibt als Fallback erhalten
+
 ### 0.8.0 (2024-09-14)
 - Fix für Calibre 7.6: Cover- und Format-Pfad-Abfrage mit expliziten Buch-IDs
 - Erweiterte Token-Extraktion aus Browser (Local Storage + Session Storage)
