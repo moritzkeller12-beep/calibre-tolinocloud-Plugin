@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.6**
+Plugin-Version: **0.8.7**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -52,11 +52,17 @@ Im Dialog **Tolino Cloud Sync**:
    
    **Für Orell Füssli (Partner 8):**
    - Die externe Browser-Anmeldung mit Callback funktioniert nicht
-     (Keycloak-Redirect)
-   - Verwenden Sie die **eingebettete Browser-Anmeldung** (Standard) oder
-     **"Token aus Browser extrahieren"**
+     (Keycloak-Redirect)  - Verwenden Sie die **eingebettete Browser-Anmeldung** (Standard) oder
+    **"Token aus Browser extrahieren"**
 5. Bevorzugte Formate festlegen, normalerweise EPUB und PDF. Cover-Upload
    und Löschungen sind optional.
+
+> **Hinweis (Pop!_OS/Ubuntu 24.04):** Erscheint beim Öffnen des
+> Anmeldefensters `Sandbox: CanCreateUserNamespace() clone() failure:
+> EPERM`, blockiert das System unprivilegierte User-Namespaces. Das Plugin
+> umgeht das automatisch, indem es die WebEngine-Sandbox für den
+> Anmelde-Dialog deaktiviert; an der normalen Browsernutzung ändert sich
+> nichts.
 
 Der Refresh-Token wird kontenbezogen von Calibre gespeichert und bei einer
 Token-Rotation sofort aktualisiert. Auch der Synchronisationsstatus und die
@@ -160,6 +166,26 @@ python3 build_plugin.py
 
 ## Versionshistorie
 
+### 0.8.7 (2026-09-18)
+- **Token-Extraktion komplett neu**: moderne Chromium-Browser (Chrome, Edge,
+  Brave, Chromium, Vivaldi, Opera) speichern Local Storage als LevelDB;
+  die bisherige Implementierung benötigte dafür das nie installierte
+  Python-Modul `leveldb` und fand deshalb nichts ("Es wurden keine Tokens
+  gefunden"). Jetzt: eigener, abhängigkeitsfreier LevelDB-Reader (Log- und
+  Tabellendateien, Origin-/Schlüssel-Matching inkl. neuem
+  `_https://origin\x00\x01key`-Schema)
+- Firefox: moderner LSNG-Speicher (webappsstore.sqlite, BLOB-Werte mit
+  utf8/utf16-Präfix) wird jetzt gelesen; alte `webappsstore2`-Abfragen
+  entfernt
+- Diagnose: bei Fehlschlag zeigt der Dialog durchsuchte Speicherorte an,
+  detaillierter Hinweistext (Web Reader statt Shop, Browser vollständig
+  beenden)
+- Qt-Warnung "Release of profile requested…" endgültig behoben (Page vor
+  Profil, ohne Parent, deleteLater nach Dialogende)
+- "Sandbox: CanCreateUserNamespace() clone() failure: EPERM" unter
+  Pop!_OS/Ubuntu 24.04: QtWebEngine-Sandbox wird für das Anmeldefenster
+  deaktiviert (bekannte Systemrichtlinie gegen unprivilegierte
+  User-Namespaces, kein Plugin-Fehler)
 ### 0.8.6 (2026-09-18)
 - Konsistente Client Hints: Sec-CH-UA-Header und navigator.userAgentData
   stimmen jetzt mit dem bereinigten User-Agent überein (fehlende Hints waren

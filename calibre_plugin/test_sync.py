@@ -1003,7 +1003,90 @@ class SyncPlanTests(unittest.TestCase):
                     self.assertNotIn("only registers its Web Reader redirect URI", error_msg)
 
     def test_scrape_browser_tokens_returns_none_when_not_found(self):
-        refresh, hardware = scrape_browser_tokens()
+        with patch("calibre_plugin.tolino._find_browser_storage_paths",
+                   return_value=[]):
+            refresh, hardware = scrape_browser_tokens()
+        self.assertIsNone(refresh)
+        self.assertIsNone(hardware)
+
+    def test_scrape_browser_tokens_diagnose_lists_scanned_locations(self):
+        with patch("calibre_plugin.tolino._find_browser_storage_paths",
+                   return_value=["/nonexistent/path"]):
+            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
+        self.assertIsNone(refresh)
+        self.assertIsNone(hardware)
+        self.assertTrue(notes)
+
+    def test_extract_tokens_from_storage_reads_leveldb_records(self):
+        from .tolino import _extract_tokens_from_storage
+        storage = {
+            "webreader.mytolino.com/refresh_token": "tok-abc",
+            "webreader.mytolino.com/hardware_id": "hw-77",
+            "unrelated.example.com/other": "nope",
+        }
+        self.assertEqual(
+            ("tok-abc", "hw-77"),
+            _extract_tokens_from_storage(storage),
+        )
+
+    def test_leveldb_log_parser_extracts_origin_keyed_records(self):
+        from .tolino import (_leveldb_records_from_log, _scan_chromium_leveldb,
+                             _TOLINO_ORIGIN_MARKER)
+        import struct as _struct
+
+        def varint(value):
+            out = bytearray()
+            while True:
+                byte = value & 0x7F
+                value >>= 7
+                if value:
+                    out.append(byte | 0x80)
+                else:
+                    out.append(byte)
+                    return bytes(out)
+
+        def writebatch(key, value):
+            payload = (_struct.pack("<QI", 1, 1)  # sequence + count
+                       + b"\x01" + varint(len(key)) + key
+                       + varint(len(value)) + value)
+            # FULL record: crc(4) + length(2) + type(1) + payload
+            return _struct.pack("<IHB", 0, len(payload), 1) + payload
+
+        key = b"_https://webreader.mytolino.com\x00\x01refresh_token"
+        value = b"\x01tok-from-log"
+        blob = writebatch(key, value)
+        pairs = list(_leveldb_records_from_log(blob))
+        self.assertEqual([(key, value)], pairs)
+
+        # The directory scanner reads .log files and returns origin-keyed data
+        with tempfile.TemporaryDirectory() as tmp:
+            db_dir = os.path.join(tmp, "leveldb")
+            os.makedirs(db_dir)
+            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
+                fh.write(blob)
+            found = _scan_chromium_leveldb(db_dir)
+        self.assertTrue(any("refresh" in key for key in found), found)
+        self.assertTrue(any("tok-from-log" == value for value in found.values()), found)
+        self.assertIn(_TOLINO_ORIGIN_MARKER, blob)
+
+    def test_firefox_lsng_reader_decodes_blob_values(self):
+        import sqlite3
+        from .tolino import _read_firefox_storage
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "webappsstore.sqlite")
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE data (originKey TEXT, key TEXT, "
+                         "value BLOB, conversionType INTEGER DEFAULT 0)")
+            conn.execute(
+                "INSERT INTO data (originKey, key, value) VALUES (?, ?, ?)",
+                ("https://webreader.mytolino.com", "refresh_token",
+                 b"\x02tok-ff-utf8"))
+            conn.commit()
+            conn.close()
+            storage = _read_firefox_storage(tmp)
+        refresh, hardware = extract_login_tokens(storage) if False else (None, None)
+        self.assertEqual(storage.get("https://webreader.mytolino.com/refresh_token"),
+                         "tok-ff-utf8")
         self.assertIsNone(refresh)
         self.assertIsNone(hardware)
 

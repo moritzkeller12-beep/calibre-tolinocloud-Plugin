@@ -13,9 +13,16 @@ Bot-protection hardening history:
   harvests the tokens from its storage when a provider still blocks the view.
 """
 import json
+import os
 import re
 import urllib.parse
 import webbrowser
+
+# Pop!_OS/Ubuntu 24.04 deny unprivileged user namespaces, which makes
+# QtWebEngine log "Sandbox: CanCreateUserNamespace() clone() failure: EPERM"
+# and can break page rendering. Running without the Chromium sandbox is the
+# documented workaround for such systems; the login window is our own dialog.
+os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 try:
     from qt.core import (QDialog, QDialogButtonBox, QLabel, QMessageBox,
@@ -285,7 +292,8 @@ class EmbeddedLoginDialog(QDialog):
             "unten 'Im Standardbrowser öffnen', der zuverlässig durchgelassen wird.")
         layout.addWidget(self.status)
 
-        self.profile = QWebEngineProfile(LOGIN_PROFILE_STORAGE, self)
+        self.profile = QWebEngineProfile(LOGIN_PROFILE_STORAGE, None)
+        self.profile.setParent(self)
         # A named profile persists cookies across login attempts; DataDome's
         # validation cookie then survives reloads and new dialog sessions.
         user_agent = ""
@@ -300,7 +308,8 @@ class EmbeddedLoginDialog(QDialog):
         policy = _resolve_enum(QWebEngineProfile, *_FORCE_PERSISTENT_COOKIES)
         if policy is not None:
             self.profile.setPersistentCookiesPolicy(policy)
-        self.page = _QuietWebEnginePage(self.profile, self)
+        self.page = _QuietWebEnginePage(self.profile, None)
+        self.page.setParent(self)
         self.view = QWebEngineView(self)
         self.view.setPage(self.page)
         layout.addWidget(self.view)
@@ -478,23 +487,33 @@ class EmbeddedLoginDialog(QDialog):
             box.setStandardButtons(ok | cancel)
         accepted = (box.exec() == ok) if ok is not None else True
         if accepted:
-            refresh, hardware = scrape_browser_tokens()
+            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
             if self._apply_external_tokens(refresh, hardware):
                 self.accept()
                 return
-            QMessageBox.warning(
+            detail = "\n".join("- %s" % note for note in notes) or \
+                "- Kein Browserprofil gefunden"
+            retry = QMessageBox.question(
                 self, "Keine Tokens gefunden / No tokens found",
-                "Es wurden keine Tokens gefunden. Stellen Sie sicher, dass Sie "
-                "im Web Reader angemeldet waren und den Browser vollständig "
-                "geschlossen haben, und versuchen Sie es erneut.")
-        self.show()
-        try:
-            self._timer.start()
-        except Exception:
-            pass
+                "Es wurden keine Tokens gefunden. Wichtig:\n"
+                "- Im Tolino **Web Reader** (Bibliothek) angemeldet sein, "
+                "nicht nur im Shop.\n"
+                "- Den Browser danach **komplett beenden** (alle Fenster) "
+                "und ein paar Sekunden warten, damit er die Daten auf die "
+                "Platte schreibt.\n\n"
+                "Durchsuchte Speicherorte:\n%s\n\n"
+                "Erneut versuchen?" % detail,
+                defaultButton=cancel,
+            )
+            if retry:
+                self.show()
+                try:
+                    self._timer.start()
+                except Exception:
+                    pass
 
     def _teardown_webengine(self):
-        """Delete the page before the profile to avoid Qt lifetime warnings."""
+        """Delete page, then profile; defer to the event loop after dialog close."""
         if getattr(self, "_torn_down", True):
             return
         self._torn_down = True
@@ -507,15 +526,23 @@ class EmbeddedLoginDialog(QDialog):
                 view.setPage(None)
             except RuntimeError:
                 pass
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
         if page is not None:
             try:
+                if hasattr(page, "setParent"):
+                    page.setParent(None)
                 page.deleteLater()
-            except RuntimeError:
+            except (RuntimeError, AttributeError):
                 pass
         if profile is not None:
             try:
+                if hasattr(profile, "setParent"):
+                    profile.setParent(None)
                 profile.deleteLater()
-            except RuntimeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def accept(self):

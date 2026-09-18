@@ -90,155 +90,494 @@ _BEARER_PATTERN = re.compile(
 
 
 def _find_browser_storage_paths():
-    """Find browser storage directories for Chrome, Edge, Firefox on current platform."""
+    """Return candidate browser profile directories for the current platform.
+
+    Chromium profiles point at the profile root (parent of "Local Storage");
+    Firefox entries point at the profiles root directory (children are
+    profile directories).
+    """
     paths = []
     system = platform.system()
-    
+
     if system == "Windows":
-        app_data = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local"))
-        chrome_paths = [
-            os.path.join(app_data, "Google", "Chrome", "User Data", "Default"),
-            os.path.join(app_data, "Microsoft", "Edge", "User Data", "Default"),
-            os.path.join(app_data, "BraveSoftware", "Brave-Browser", "User Data", "Default"),
-            os.path.join(app_data, "Opera Software", "Opera Stable"),
+        local = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local"))
+        roaming = os.environ.get("APPDATA", os.path.expanduser("~/AppData/Roaming"))
+        for vendor in ("Google", "Chromium", "Microsoft", "BraveSoftware",
+                       "Yandex", "Vivaldi"):
+            for root in (os.path.join(local, vendor),):
+                if os.path.isdir(root):
+                    paths.append(root)
+        paths.extend([
+            os.path.join(local, "Google", "Chrome", "User Data"),
+            os.path.join(local, "Microsoft", "Edge", "User Data"),
+            os.path.join(local, "BraveSoftware", "Brave-Browser", "User Data"),
+            os.path.join(local, "Chromium", "User Data"),
+            os.path.join(local, "Vivaldi", "User Data"),
+            os.path.join(local, "Yandex", "YandexBrowser", "User Data"),
+            os.path.join(local, "Opera Software", "Opera Stable"),
+        ])
+        paths.append(os.path.join(roaming, "Mozilla", "Firefox", "Profiles"))
+
+    elif system == "Darwin":
+        support = os.path.expanduser("~/Library/Application Support")
+        paths.extend([
+            os.path.join(support, "Google", "Chrome"),
+            os.path.join(support, "Microsoft Edge"),
+            os.path.join(support, "BraveSoftware", "Brave-Browser"),
+            os.path.join(support, "Chromium"),
+            os.path.join(support, "Vivaldi"),
+            os.path.join(support, "com.operasoftware.Opera"),
+            os.path.join(support, "Firefox", "Profiles"),
+        ])
+
+    else:  # Linux and other Unix
+        home = os.path.expanduser("~")
+        xdg = os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config"))
+        flatpak = os.path.join(home, ".var", "app")
+        snap = os.path.join(home, "snap")
+        chromium_apps = [
+            os.path.join(xdg, "google-chrome"),
+            os.path.join(xdg, "google-chrome-beta"),
+            os.path.join(xdg, "google-chrome-unstable"),
+            os.path.join(xdg, "chromium"),
+            os.path.join(xdg, "chromium-browser"),
+            os.path.join(xdg, "microsoft-edge"),
+            os.path.join(xdg, "BraveSoftware", "Brave-Browser"),
+            os.path.join(xdg, "vivaldi"),
+            os.path.join(xdg, "opera"),
+            os.path.join(xdg, "yandex-browser"),
         ]
-        firefox_paths = [
-            os.path.join(os.environ.get("APPDATA", os.path.expanduser("~/AppData/Roaming")), "Mozilla", "Firefox", "Profiles"),
-        ]
-        paths.extend(chrome_paths)
-        paths.extend(firefox_paths)
-    
-    elif system == "Darwin":  # macOS
-        chrome_paths = [
-            os.path.expanduser("~/Library/Application Support/Google/Chrome/Default"),
-            os.path.expanduser("~/Library/Application Support/Microsoft Edge/Default"),
-            os.path.expanduser("~/Library/Application Support/BraveSoftware/Brave-Browser/Default"),
-        ]
-        firefox_paths = [
-            os.path.expanduser("~/Library/Application Support/Firefox/Profiles"),
-        ]
-        paths.extend(chrome_paths)
-        paths.extend(firefox_paths)
-    
-    else:  # Linux and others
-        chrome_paths = [
-            os.path.expanduser("~/.config/google-chrome/Default"),
-            os.path.expanduser("~/.config/chromium/Default"),
-            os.path.expanduser("~/.config/microsoft-edge/Default"),
-            os.path.expanduser("~/.config/brave/Default"),
-            os.path.expanduser("~/.config/opera"),
-        ]
-        firefox_paths = [
-            os.path.expanduser("~/.mozilla/firefox"),
-            os.path.expanduser("~/.var/app/org.mozilla.firefox/.mozilla/firefox"),
-        ]
-        paths.extend(chrome_paths)
-        paths.extend(firefox_paths)
-    
-    return paths
+        for base in ("", flatpak):
+            for app in chromium_apps:
+                paths.append(os.path.join(base, app) if base else app)
+        snap_names = ("chromium", "opera", "firefox")
+        for name in snap_names:
+            common = os.path.join(snap, name, "common")
+            if name == "firefox":
+                paths.append(os.path.join(common, ".mozilla", "firefox"))
+            else:
+                paths.append(os.path.join(common, name))
+        paths.append(os.path.join(home, ".mozilla", "firefox"))
+        paths.append(os.path.join(flatpak, "org.mozilla.firefox", ".mozilla", "firefox"))
+
+    return [os.path.normpath(p) for p in paths]
 
 
-def _read_chromium_local_storage(storage_path):
-    """Read Local Storage data from Chromium-based browser (LevelDB format)."""
+# Origins (scheme+host, no trailing path) that may hold Tolino credentials.
+TOLINO_STORAGE_ORIGINS = (
+    "webreader.mytolino.com",
+    "pageplace.de",
+    "orellfuessli.ch",
+    "thalia.de", "thalia.at",
+    "buch.de", "books.ch",
+    "hugendubel.de", "osiander.de", "buecher.de",
+    "buchhaus.ch", "wolters-mauritz.de", "book-club-family.de",
+    "delibur.com", "thienemueller.de", "ohlala.ch",
+    "keycloak", "auth",  # generic IdP path hints
+)
+
+
+def _origin_matches(host_text):
+    text = str(host_text).casefold()
+    return any(origin in text for origin in TOLINO_STORAGE_ORIGINS)
+
+
+def _iter_candidate_files(directory, max_depth=3):
+    """Yield files under directory (bounded depth, silently skipping errors)."""
+    if not os.path.isdir(directory):
+        return
+    base_depth = directory.rstrip(os.sep).count(os.sep)
     try:
-        import leveldb
-        db_path = os.path.join(storage_path, "Local Storage", "leveldb")
-        if not os.path.exists(db_path):
-            return {}
-        db = leveldb.LevelDB(db_path)
-        results = {}
-        for key, value in db.RangeIter():
-            try:
-                key_str = key.decode('utf-8')
-                value_str = value.decode('utf-8')
-                if key_str.startswith("https://webreader.mytolino.com"):
-                    results[key_str] = value_str
-            except (UnicodeDecodeError, AttributeError):
+        for root, dirs, files in os.walk(directory):
+            depth = root.rstrip(os.sep).count(os.sep) - base_depth
+            if depth >= max_depth:
+                dirs[:] = []
+            for name in files:
+                yield os.path.join(root, name)
+    except OSError:
+        return
+
+
+# --- Chromium LevelDB: raw, dependency-free readers -----------------------
+#
+# Modern Chromium stores localStorage in LevelDB files (Local Storage/
+# leveldb/*.ldb + *.log). Keys are <origin>\x00\x01<key>, values are
+# \x01<utf8> or \x00<uint8 length><utf16le>. We simply scan the raw bytes of
+# every record and pull out the UTF-8 keys/values belonging to Tolino
+# origins, which is robust across record encodings.
+
+_LEVELDB_BLOCK_SIZE = 32768
+_LEVELDB_HEADER_SIZE = 7
+_LEVELDB_MAGIC = b"\xf7\xcf\xf0\x9c\x96\x5d\xb6\x8b"
+
+
+def _varint(data, pos):
+    """Decode a LevelDB varint; returns (value, next_pos) or (None, pos)."""
+    result = 0
+    shift = 0
+    while pos < len(data):
+        byte = data[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, pos
+        shift += 7
+        if shift > 63:
+            return None, pos
+    return None, pos
+
+
+def _leveldb_log_payloads(data):
+    """Yield record payloads from LevelDB log physical blocks.
+
+    Format: 32 KiB blocks of [crc32(4), length(2), type(1), payload];
+    type 1 = FULL, 2/3/4 = FIRST/MIDDLE/LAST fragments.
+    """
+    pos = 0
+    n = len(data)
+    pending = b""
+    while pos + _LEVELDB_HEADER_SIZE <= n:
+        block_pos = pos % _LEVELDB_BLOCK_SIZE
+        if block_pos + _LEVELDB_HEADER_SIZE > _LEVELDB_BLOCK_SIZE:
+            # block trailer padding; skip to the next block boundary
+            pos += _LEVELDB_BLOCK_SIZE - block_pos
+            continue
+        length, record_type = struct.unpack_from("<HB", data, pos + 4)
+        if record_type == 0 or length > _LEVELDB_BLOCK_SIZE:
+            break  # zero padding or corrupt block
+        pos += _LEVELDB_HEADER_SIZE
+        if length > n - pos:
+            break
+        payload = data[pos:pos + length]
+        pos += length
+        if record_type == 1:  # FULL
+            if pending:
+                pending = b""
+            yield payload
+        elif record_type == 2:  # FIRST
+            pending = payload
+        elif record_type == 3:  # MIDDLE
+            pending += payload
+        elif record_type == 4:  # LAST
+            yield pending + payload
+            pending = b""
+
+
+def _leveldb_writebatch_pairs(payload):
+    """Yield (key, value) pairs from one WriteBatch payload.
+
+    Layout: sequence(8 LE) + count(4 LE), then entries:
+    type(1: 1=put, 0=delete) klen(varint) key vlen(varint) value.
+    """
+    if len(payload) < 12:
+        return
+    pos = 12
+    n = len(payload)
+    while pos < n:
+        op = payload[pos]
+        pos += 1
+        if op == 0:  # delete
+            _, pos = _varint(payload, pos)
+            continue
+        if op != 1:  # unknown op; cannot resync safely
+            return
+        klen, pos = _varint(payload, pos)
+        if klen is None or pos + klen > n:
+            return
+        key = payload[pos:pos + klen]
+        pos += klen
+        vlen, pos = _varint(payload, pos)
+        if vlen is None or pos + vlen > n:
+            return
+        value = payload[pos:pos + vlen]
+        pos += vlen
+        yield key, value
+
+
+def _leveldb_records_from_log(data):
+    """Yield (key, value) pairs from a Chromium localStorage LevelDB log."""
+    for payload in _leveldb_log_payloads(data):
+        for key, value in _leveldb_writebatch_pairs(payload):
+            yield key, value
+
+
+def _leveldb_records_from_ldb(data):
+    """Yield (key, value) pairs from an .ldb/.sst table file (simplified scan)."""
+    # .ldb files contain data blocks prefixed by 5-byte trailer handles. A full
+    # parser needs block restarts/compression; scanning for the origin marker
+    # plus a following value byte is far simpler and good enough for finding
+    # token-shaped records.
+    marker = _TOLINO_ORIGIN_MARKER
+    pos = 0
+    n = len(data)
+    while True:
+        idx = data.find(marker, pos)
+        if idx < 0:
+            return
+        # The key continues until a control byte (0x01/0x02) or value marker.
+        end = idx + len(marker)
+        key_end = end
+        while key_end < n and data[key_end] not in (0x00, 0x01, 0x02):
+            key_end += 1
+        key = data[idx:key_end]
+        value_start = key_end
+        if value_start < n and data[value_start] in (0x01, 0x02):
+            value_start += 1
+        value_end = value_start
+        while value_end < n and data[value_end] not in (0x00, 0x01, 0x02):
+            value_end += 1
+        value = data[value_start:value_end]
+        yield key, value
+        pos = idx + len(marker)
+
+
+_TOLINO_ORIGIN_MARKER = b"webreader.mytolino.com"
+
+
+def _decode_leveldb_text(raw):
+    """Decode a LevelDB key/value blob to text when it looks like UTF-8."""
+    if not raw:
+        return ""
+    # Chromium prepends a scheme marker like _https:// or https://; keep it.
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    return text
+
+
+def _leveldb_pair_has_token_shape(key_text, value_text):
+    lowered = key_text.casefold()
+    for name in ("refresh", "t_auth", "hardware"):
+        if name in lowered:
+            return True
+    return False
+
+
+def _leveldb_value_text(raw):
+    """Decode a Chromium localStorage value blob (\x01utf8 / \x00len utf16)."""
+    if not raw:
+        return ""
+    if raw[0] == 0x01:
+        return _decode_leveldb_text(raw[1:])
+    if raw[0] == 0x00 and len(raw) >= 3:
+        # \x00 + uint8 length + UTF-16LE bytes
+        size = raw[1]
+        blob = raw[2:2 + size * 2]
+        try:
+            return blob.decode("utf-16-le")
+        except UnicodeDecodeError:
+            return ""
+    return _decode_leveldb_text(raw)
+
+
+def _scan_chromium_leveldb(db_dir):
+    """Scan a Chromium Local/Session Storage LevelDB directory for Tolino keys."""
+    found = {}
+    for file_name in sorted(os.listdir(db_dir)):
+        if not file_name.endswith((".log", ".ldb")):
+            continue
+        file_path = os.path.join(db_dir, file_name)
+        try:
+            with open(file_path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            continue
+        if _TOLINO_ORIGIN_MARKER not in data:
+            continue
+        if file_name.endswith(".log"):
+            iterator = _leveldb_records_from_log(data)
+        else:
+            iterator = _leveldb_records_from_ldb(data)
+        for key, value in iterator:
+            key_text = _decode_leveldb_text(key)
+            value_text = _leveldb_value_text(value)
+            if not _origin_matches(key_text) or not value_text:
                 continue
-        return results
-    except ImportError:
-        pass
-    except Exception:
-        pass
-    return {}
-
-
-def _read_chromium_local_storage_sqlite(storage_path):
-    """Read Local Storage from Chromium SQLite backup (fallback method)."""
-    try:
-        db_path = os.path.join(storage_path, "Local Storage", "https_webreader.mytolino.com_0.localstorage")
-        if not os.path.exists(db_path):
-            db_path = os.path.join(storage_path, "Local Storage", "https_webreader.mytolino.com_0.localstorage-journal")
-        if not os.path.exists(db_path):
-            return {}
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        results = {}
-        cursor.execute("SELECT key, value FROM ItemTable")
-        for row in cursor.fetchall():
-            if row and len(row) >= 2:
-                results[row[0]] = row[1]
-        conn.close()
-        return results
-    except Exception:
-        return {}
-
-
-def _read_firefox_local_storage(profile_path):
-    """Read Local Storage from Firefox (SQLite format)."""
-    try:
-        db_path = os.path.join(profile_path, "webappsstore.sqlite")
-        if not os.path.exists(db_path):
-            return {}
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        results = {}
-        cursor.execute("SELECT origin, key, value FROM webappsstore2")
-        for row in cursor.fetchall():
-            if row and len(row) >= 3:
-                origin, key, value = row[0], row[1], row[2]
-                if "webreader.mytolino.com" in origin:
-                    results[f"{origin}/{key}"] = value
-        conn.close()
-        return results
-    except Exception:
-        return {}
-
-
-
-
-def _read_chromium_session_storage(storage_path):
-    """Read Session Storage data from Chromium-based browser (LevelDB format)."""
-    try:
-        import leveldb
-        # Session Storage is in a separate directory
-        session_path = os.path.join(storage_path, "Session Storage", "leveldb")
-        if not os.path.exists(session_path):
-            return {}
-        db = leveldb.LevelDB(session_path)
-        results = {}
-        for key, value in db.RangeIter():
-            try:
-                key_str = key.decode('utf-8')
-                value_str = value.decode('utf-8')
-                results[key_str] = value_str
-            except (UnicodeDecodeError, AttributeError):
+            if not _leveldb_pair_has_token_shape(key_text, value_text):
                 continue
+            # Drop the scheme prefix and the 0x00/0x01 separator from the key
+            storage_key = key_text
+            for prefix in ("_https://", "https://", "_http://", "http://"):
+                if storage_key.casefold().startswith(prefix.casefold()):
+                    storage_key = storage_key[len(prefix):]
+                    break
+            found[storage_key.lstrip("\x00\x01\x02")] = value_text
+    return found
+
+
+# --- Firefox (LSNG): webappsstore.sqlite ----------------------------------
+
+
+def _read_firefox_storage(profile_path):
+    """Read localStorage from Firefox LSNG webappsstore.sqlite (BLOB values)."""
+    results = {}
+    db_path = os.path.join(profile_path, "webappsstore.sqlite")
+    if not os.path.exists(db_path):
         return results
-    except ImportError:
-        pass
+    try:
+        conn = sqlite3.connect("file:%s?immutable=1" % db_path, uri=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT originKey, key, value FROM data")
+            for origin_key, key, value in cursor.fetchall():
+                origin_text = origin_key if isinstance(origin_key, str) else \
+                    (origin_key or b"").decode("utf-8", "replace")
+                if isinstance(value, (bytes, bytearray, memoryview)):
+                    # LSNG stores utf16 strings as \x01<bytes>, utf8 as \x02<bytes>.
+                    blob = bytes(value)
+                    if blob[:1] == b"\x01":
+                        try:
+                            value = blob[1:].decode("utf-16")
+                        except UnicodeDecodeError:
+                            value = blob[1:].decode("utf-8", "replace")
+                    elif blob[:1] == b"\x02":
+                        value = blob[1:].decode("utf-8", "replace")
+                    else:
+                        value = blob.decode("utf-8", "replace")
+                if not isinstance(key, str):
+                    key = str(key)
+                results["%s/%s" % (origin_text, key)] = value
+        finally:
+            conn.close()
     except Exception:
-        pass
-    return {}
+        return results
+    return results
 
 
 def _read_firefox_session_storage(profile_path):
-    """Read Session Storage from Firefox."""
+    """Firefox sessionStorage lives in the same LSNG database (scoped column)."""
+    results = {}
+    db_path = os.path.join(profile_path, "webappsstore.sqlite")
+    if not os.path.exists(db_path):
+        return results
     try:
-        # Firefox session storage is more complex, but we can try the same database
-        return _read_firefox_local_storage(profile_path)
+        conn = sqlite3.connect("file:%s?immutable=1" % db_path, uri=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT originKey, key, value, conversionType FROM data")
+            for origin_key, key, value, conversion in cursor.fetchall():
+                if (conversion or 0) & 1:  # sessionStorage flag (1 << 0)
+                    continue
+                origin_text = origin_key if isinstance(origin_key, str) else \
+                    (origin_key or b"").decode("utf-8", "replace")
+                if isinstance(value, (bytes, bytearray, memoryview)):
+                    blob = bytes(value)
+                    if blob[:1] == b"\x01":
+                        try:
+                            value = blob[1:].decode("utf-16")
+                        except UnicodeDecodeError:
+                            value = blob[1:].decode("utf-8", "replace")
+                    elif blob[:1] == b"\x02":
+                        value = blob[1:].decode("utf-8", "replace")
+                    else:
+                        value = blob.decode("utf-8", "replace")
+                results["%s/%s" % (origin_text, key)] = value
+        finally:
+            conn.close()
     except Exception:
-        return {}
+        return results
+    return results
+
+
+def _candidate_browser_storage_dirs(profile_dir):
+    """Yield Chromium Local Storage and Session Storage directories."""
+    yield os.path.join(profile_dir, "Default", "Local Storage", "leveldb")
+    yield os.path.join(profile_dir, "Local Storage", "leveldb")
+    yield os.path.join(profile_dir, "Default", "Session Storage", "leveldb")
+    yield os.path.join(profile_dir, "Session Storage", "leveldb")
+
+
+def _collect_chromium_storage(profile_dir):
+    """Collect Tolino storage entries from one Chromium User Data directory."""
+    found = {}
+    scanned = []
+    for db_dir in _candidate_browser_storage_dirs(profile_dir):
+        if os.path.isdir(db_dir):
+            scanned.append(db_dir)
+            found.update(_scan_chromium_leveldb(db_dir))
+    return found, scanned
+
+
+def _is_chromium_profile_root(path):
+    """True when path looks like a Chromium User Data dir (has profile dirs)."""
+    if not os.path.isdir(path):
+        return False
+    if os.path.isdir(os.path.join(path, "Local Storage", "leveldb")):
+        return True
+    for profile in ("Default", "Profile 1", "Profile 2", "Profile 3"):
+        if os.path.isdir(os.path.join(path, profile, "Local Storage", "leveldb")):
+            return True
+    return False
+
+
+def _is_firefox_profiles_root(path):
+    """True when path looks like a Firefox profiles root (contains *.default*)."""
+    if not os.path.isdir(path):
+        return False
+    try:
+        for entry in os.listdir(path):
+            if (entry.endswith(".default") or entry.endswith(".default-release")
+                    or "default" in entry.casefold() and
+                    os.path.isdir(os.path.join(path, entry, "webappsstore.sqlite"))):
+                return True
+            if os.path.isfile(os.path.join(path, entry, "webappsstore.sqlite")):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _extract_tokens_from_storage(storage_data):
+    """Extract refresh_token and hardware_id from a storage snapshot.
+
+    Works on string, bytes or JSON-bundle values; never logs token values.
+    """
+    refresh_token = None
+    hardware_id = None
+
+    def value_text(value):
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value).decode("utf-8", "replace")
+        return str(value)
+
+    def usable(text):
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return text
+        if isinstance(parsed, dict):
+            for name in TOKEN_VALUE_KEYS:
+                nested = parsed.get(name)
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+        return None
+
+    for key, value in storage_data.items():
+        key_lower = str(key).casefold()
+        text = value_text(value)
+        if refresh_token is None:
+            if any(name in key_lower for name in ("refresh", "t_auth")):
+                refresh_token = usable(text)
+        if hardware_id is None:
+            if any(name in key_lower for name in ("hardware", "device")):
+                hardware_id = usable(text)
+
+    if refresh_token is None:
+        for value in storage_data.values():
+            candidate = usable(value_text(value))
+            if candidate:
+                refresh_token = candidate
+                break
+
+    if refresh_token is not None and not isinstance(refresh_token, str):
+        refresh_token = str(refresh_token)
+    if hardware_id is not None and not isinstance(hardware_id, str):
+        hardware_id = str(hardware_id)
+    return refresh_token, hardware_id
 
 
 TOKEN_VALUE_KEYS = ("refresh_token", "t_auth_token", "refreshToken", "refresh-token")
@@ -249,7 +588,7 @@ def extract_login_tokens(storage):
     """Extract refresh token and hardware ID from one login storage snapshot.
 
     Accepts a mapping of storage keys to values (from an embedded browser's
-    Local Storage or the page's localStorage/sessionStorage). Values may be
+    Local Storage or the page's sessionStorage/localStorage). Values may be
     plain strings or JSON strings; credential values are never logged.
     """
     refresh = None
@@ -309,121 +648,55 @@ def extract_login_tokens(storage):
     return refresh, hardware
 
 
-def _extract_tokens_from_storage(storage_data):
-    """Extract refresh_token and hardware_id from browser storage data.
-    
-    Searches for various key names used by different Tolino partners
-    and authentication systems (including Keycloak).
+def scrape_browser_tokens(diagnose=False):
+    """Read Tolino refresh_token/hardware_id from installed browsers.
+
+    Supports modern Chromium LevelDB stores (Chrome, Edge, Brave, Chromium,
+    Vivaldi, Opera) and modern Firefox LSNG (webappsstore.sqlite) without any
+    third-party module. When ``diagnose`` is true, returns a third element:
+    a redacted list describing what was scanned (no token values).
     """
-    refresh_token = None
-    hardware_id = None
-    
-    # Keycloak and Tolino-specific keys
-    token_keys = [
-        "refresh_token", "access_token", "id_token",
-        "token", "t_auth_token", "auth_token",
-        "bearer_token", "oauth_token"
-    ]
-    hardware_keys = [
-        "hardware_id", "hardware", "device_id",
-        "client_id", "hardwareId", "deviceId"
-    ]
-    
-    for key, value in storage_data.items():
-        try:
-            if isinstance(value, str):
-                key_lower = key.lower()
-                for tk in token_keys:
-                    if tk in key_lower:
-                        refresh_token = value
-                        break
-                for hk in hardware_keys:
-                    if hk in key_lower:
-                        hardware_id = value
-                        break
-        except Exception:
+    notes = []
+    for path in _find_browser_storage_paths():
+        if not os.path.isdir(path):
             continue
-    
-    return refresh_token, hardware_id
-
-
-
-
-def scrape_browser_tokens():
-    """
-    Scrape refresh_token and hardware_id from browser storage.
-    Searches Chrome, Edge, Firefox and other Chromium-based browsers.
-    Checks both Local Storage and Session Storage for all relevant origins.
-    
-    For Orell Fussli (Keycloak), checks:
-    - https://www.orellfuessli.ch
-    - https://orellfuessli.ch
-    - https://webreader.mytolino.com
-    - https://bosh.pageplace.de
-    
-    Returns:
-        tuple: (refresh_token, hardware_id) or (None, None) if not found
-    """
-    storage_paths = _find_browser_storage_paths()
-    
-    # Origins to check for Tolino and Keycloak
-    tolino_origins = [
-        "https://webreader.mytolino.com",
-        "https://www.orellfuessli.ch",
-        "https://orellfuessli.ch",
-        "https://bosh.pageplace.de",
-        "https://www.thalia.de",
-        "https://www.thalia.at",
-        "https://www.buch.de",
-        "https://www.osiander.de",
-        "https://www.buecher.de",
-        "https://www.hugendubel.de",
-    ]
-    
-    for path in storage_paths:
-        if not os.path.exists(path):
-            continue
-        
-        # Check both Local Storage and Session Storage
-        for storage_type in ["Local Storage", "Session Storage"]:
-            storage_data = {}
-            
-            if "firefox" in path.lower() or "mozilla" in path.lower():
-                if os.path.isdir(path):
-                    for profile in os.listdir(path):
-                        profile_path = os.path.join(path, profile)
-                        if os.path.isdir(profile_path):
-                            if storage_type == "Local Storage":
-                                storage_data.update(_read_firefox_local_storage(profile_path))
-                            else:
-                                storage_data.update(_read_firefox_session_storage(profile_path))
-            else:
-                if storage_type == "Local Storage":
-                    storage_data.update(_read_chromium_local_storage(path))
-                    storage_data.update(_read_chromium_local_storage_sqlite(path))
-                else:
-                    storage_data.update(_read_chromium_session_storage(path))
-            
-            if storage_data:
-                # Filter for Tolino/Keycloak origins
-                filtered_data = {}
-                for key, value in storage_data.items():
-                    for origin in tolino_origins:
-                        if origin in key:
-                            filtered_data[key] = value
-                            break
-                
-                if filtered_data:
-                    refresh_token, hardware_id = _extract_tokens_from_storage(filtered_data)
-                    if refresh_token and hardware_id:
-                        return refresh_token, hardware_id
-                
-                # Also try without origin filtering (for generic storage)
-                refresh_token, hardware_id = _extract_tokens_from_storage(storage_data)
+        if _is_chromium_profile_root(path):
+            storage, scanned = _collect_chromium_storage(path)
+            if scanned:
+                notes.append("Chromium: %s" % path)
+            if storage:
+                refresh_token, hardware_id = _extract_tokens_from_storage(storage)
                 if refresh_token and hardware_id:
-                    return refresh_token, hardware_id
-    
-    return None, None
+                    return (refresh_token, hardware_id, notes) if diagnose \
+                        else (refresh_token, hardware_id)
+        for profile in _firefox_profile_dirs(path):
+            storage = _read_firefox_storage(profile)
+            storage.update(_read_firefox_session_storage(profile))
+            if storage:
+                notes.append("Firefox: %s" % profile)
+                refresh_token, hardware_id = _extract_tokens_from_storage(storage)
+                if refresh_token and hardware_id:
+                    return (refresh_token, hardware_id, notes) if diagnose \
+                        else (refresh_token, hardware_id)
+    if not notes:
+        notes.append("Keine Browser-Profile gefunden (Chrome/Edge/Brave/Chromium/Firefox)")
+    return (None, None, notes) if diagnose else (None, None)
+
+
+def _firefox_profile_dirs(path):
+    """Yield Firefox profile directories below a profiles root."""
+    if not os.path.isdir(path):
+        return
+    try:
+        for entry in sorted(os.listdir(path)):
+            profile = os.path.join(path, entry)
+            if os.path.isdir(profile) and (
+                    os.path.isfile(os.path.join(profile, "webappsstore.sqlite"))
+                    or os.path.isfile(os.path.join(profile, "prefs.js"))
+                    or entry.endswith(".default") or entry.endswith(".default-release")):
+                yield profile
+    except OSError:
+        return
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)\b(access[_-]?token|refresh[_-]?token|authorization|"
     r"t_auth_token|password|secret)\b\s*[:=]\s*"
