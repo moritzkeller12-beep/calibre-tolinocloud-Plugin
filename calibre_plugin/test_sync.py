@@ -1100,6 +1100,62 @@ class SyncPlanTests(unittest.TestCase):
             weblogin._resolve_enum(FakeQWebEngineProfile, "NoSuch.Policy"))
         self.assertIsNone(weblogin._resolve_enum(None, "Close"))
 
+    def test_quiet_page_class_exists_when_webengine_available(self):
+        # With the real Calibre/Qt modules unavailable, the quiet page stub is
+        # None; the guard must be importable without Qt either way.
+        if weblogin.QWebEnginePage is None:
+            self.assertIsNone(weblogin._QuietWebEnginePage)
+        else:
+            self.assertTrue(issubclass(weblogin._QuietWebEnginePage,
+                                       weblogin.QWebEnginePage))
+
+    def test_teardown_is_idempotent_and_tolerates_gone_objects(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog._torn_down = False
+
+        class G:
+            def __init__(self):
+                self.calls = []
+
+            def stop(self):
+                self.calls.append("stop")
+
+            def setPage(self, value):
+                self.calls.append(("setPage", value))
+
+            def deleteLater(self):
+                self.calls.append("deleteLater")
+
+        class RuntimeErrorView(G):
+            def setPage(self, value):
+                raise RuntimeError("underlying C/C++ object has been deleted")
+
+        dialog.view = RuntimeErrorView()
+        dialog.page = G()
+        dialog.profile = G()
+        dialog._teardown_webengine()
+        self.assertTrue(dialog._torn_down)
+        # The view is only stopped and detached (setPage raised, swallowed);
+        # Qt destroys the child widget with the dialog itself.
+        self.assertEqual(["stop"], dialog.view.calls)
+        self.assertEqual(["deleteLater"], dialog.page.calls)
+        self.assertEqual(["deleteLater"], dialog.profile.calls)
+
+        # Second run must do nothing.
+        dialog.view = G()
+        dialog.page = G()
+        dialog.profile = G()
+        dialog._teardown_webengine()
+        self.assertEqual([], dialog.view.calls)
+        self.assertEqual([], dialog.page.calls)
+        self.assertEqual([], dialog.profile.calls)
+
+    def test_teardown_handles_missing_attributes(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog._torn_down = False
+        dialog._teardown_webengine()  # no view/page/profile attributes at all
+        self.assertTrue(dialog._torn_down)
+
 
 if __name__ == "__main__":
     unittest.main()

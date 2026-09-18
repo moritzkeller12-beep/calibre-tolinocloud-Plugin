@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.2**
+Plugin-Version: **0.8.3**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -159,6 +159,12 @@ python3 build_plugin.py
 ```
 
 ## Versionshistorie
+
+### 0.8.3 (2026-09-18)
+- Stille WebEngine-Konsole: harmlose Seiten-Warnungen (Permissions-Policy,
+  OTS-Schriften, Gamepad, HEVC-Video) werden nicht mehr ausgegeben
+- Sauberer Dialog-Abbau (WebEnginePage/Profil via deleteLater) – behebt die
+  Qt-Warnung "Release of profile requested but WebEnginePage still not deleted"
 
 ### 0.8.2 (2026-09-18)
 - Fix: Qt6/PyQt6-kompatible Qt-Enums in der eingebetteten Anmeldung

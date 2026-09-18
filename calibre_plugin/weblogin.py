@@ -73,6 +73,16 @@ def _on_reader(url):
     return any(host == name or host.endswith("." + name) for name in READER_HOSTS)
 
 
+if QWebEnginePage is not None:
+    class _QuietWebEnginePage(QWebEnginePage):
+        """Drop site console noise (Permissions-Policy, OTS fonts, gamepad, HEVC)."""
+
+        def javaScriptConsoleMessage(self, *_args):
+            return None
+else:
+    _QuietWebEnginePage = None
+
+
 class EmbeddedLoginDialog(QDialog):
     """Sign in to the partner OAuth page and harvest tokens from storage."""
 
@@ -85,6 +95,7 @@ class EmbeddedLoginDialog(QDialog):
         self.hardware_id = None
         self.completed = False
         self._cancel_requested = False
+        self._torn_down = False
 
         self.setWindowTitle("Tolino-Anmeldung: %s" % self.partner.get("name", ""))
         self.resize(980, 760)
@@ -99,7 +110,7 @@ class EmbeddedLoginDialog(QDialog):
         policy = _resolve_enum(QWebEngineProfile, *_FORCE_PERSISTENT_COOKIES)
         if policy is not None:
             self.profile.setPersistentCookiesPolicy(policy)
-        self.page = QWebEnginePage(self.profile, self)
+        self.page = _QuietWebEnginePage(self.profile, self)
         self.view = QWebEngineView(self)
         self.view.setPage(self.page)
         layout.addWidget(self.view)
@@ -165,16 +176,47 @@ class EmbeddedLoginDialog(QDialog):
         if QTimer is not None:
             QTimer.singleShot(600, self.accept)
 
+    def _teardown_webengine(self):
+        """Delete the page before the profile to avoid Qt lifetime warnings."""
+        if getattr(self, "_torn_down", True):
+            return
+        self._torn_down = True
+        view = getattr(self, "view", None)
+        page = getattr(self, "page", None)
+        profile = getattr(self, "profile", None)
+        if view is not None:
+            try:
+                view.stop()
+                view.setPage(None)
+            except RuntimeError:
+                pass
+        if page is not None:
+            try:
+                page.deleteLater()
+            except RuntimeError:
+                pass
+        if profile is not None:
+            try:
+                profile.deleteLater()
+            except RuntimeError:
+                pass
+
+    def accept(self):
+        self._teardown_webengine()
+        QDialog.accept(self)
+
     def reject(self):
         self._cancel_requested = True
         if hasattr(self, "_timer"):
             self._timer.stop()
+        self._teardown_webengine()
         QDialog.reject(self)
 
     def closeEvent(self, event):
         self._cancel_requested = True
         if hasattr(self, "_timer"):
             self._timer.stop()
+        self._teardown_webengine()
         QDialog.closeEvent(self, event)
 
 
