@@ -11,11 +11,12 @@ import urllib.parse
 try:
     from qt.core import (QDialog, QDialogButtonBox, QLabel, QTimer, QUrl,
                          QVBoxLayout)
-    from qt.webengine import QWebEnginePage, QWebEngineProfile, QWebEngineView
+    from qt.webengine import (QWebEnginePage, QWebEngineProfile,
+                              QWebEngineScript, QWebEngineView)
 except ImportError:  # Non-Calibre environments (tests, type checks)
     QDialog = object
     QDialogButtonBox = QLabel = QTimer = QUrl = QVBoxLayout = None
-    QWebEnginePage = QWebEngineProfile = QWebEngineView = None
+    QWebEnginePage = QWebEngineProfile = QWebEngineScript = QWebEngineView = None
 
 try:
     from .tolino import PARTNERS, TolinoAuthError, extract_login_tokens
@@ -70,6 +71,73 @@ _CLOSE_BUTTON = (
 
 
 _QT_UA_TOKEN = re.compile(r"\s*QtWebEngine/[\w.]+", re.IGNORECASE)
+LOGIN_PROFILE_STORAGE = "tolino-cloud-sync-login"
+STEALTH_SCRIPT_NAME = "tolino-cloud-sync-stealth"
+
+_STEALTH_JS = """
+(function() {
+    // Make the embedded Chromium look like a regular browser to bot
+    // protection scripts (DataDome etc.). Every step is wrapped so a
+    // failing spoof never breaks page functionality.
+    try {
+        Object.defineProperty(navigator, 'webdriver', {
+            get: function() { return false; }
+        });
+    } catch (err) {}
+    try {
+        window.chrome = window.chrome || { runtime: {}, app: { isInstalled: false } };
+    } catch (err) {}
+    try {
+        Object.defineProperty(navigator, 'languages', {
+            get: function() { return ['de-DE', 'de', 'en-US', 'en']; }
+        });
+    } catch (err) {}
+    try {
+        Object.defineProperty(navigator, 'plugins', {
+            get: function() {
+                return [{ name: 'Chrome PDF Viewer' },
+                        { name: 'Chromium PDF Viewer' },
+                        { name: 'Microsoft Edge PDF Viewer' },
+                        { name: 'WebKit built-in PDF' }];
+            }
+        });
+    } catch (err) {}
+    try {
+        if (navigator.permissions && navigator.permissions.query) {
+            var originalQuery = navigator.permissions.query.bind(navigator.permissions);
+            navigator.permissions.query = function(parameters) {
+                if (parameters && parameters.name === 'notifications') {
+                    var state = 'prompt';
+                    try {
+                        if (typeof Notification !== 'undefined' && Notification.permission) {
+                            state = Notification.permission;
+                        }
+                    } catch (err) {}
+                    return Promise.resolve({ state: state });
+                }
+                return originalQuery(parameters);
+            };
+        }
+    } catch (err) {}
+    try {
+        var spoofVendor = function(getParameter) {
+            return function(parameter) {
+                if (parameter === 37445) { return 'Intel Inc.'; }
+                if (parameter === 37446) { return 'Intel Iris OpenGL Engine'; }
+                return getParameter.call(this, parameter);
+            };
+        };
+        if (window.WebGLRenderingContext) {
+            WebGLRenderingContext.prototype.getParameter =
+                spoofVendor(WebGLRenderingContext.prototype.getParameter);
+        }
+        if (window.WebGL2RenderingContext) {
+            WebGL2RenderingContext.prototype.getParameter =
+                spoofVendor(WebGL2RenderingContext.prototype.getParameter);
+        }
+    } catch (err) {}
+})();
+"""
 
 
 def _clean_user_agent(ua):
@@ -126,12 +194,15 @@ class EmbeddedLoginDialog(QDialog):
             "werden die Tokens automatisch übernommen.")
         layout.addWidget(self.status)
 
-        self.profile = QWebEngineProfile(self)
+        self.profile = QWebEngineProfile(LOGIN_PROFILE_STORAGE, self)
+        # A named profile persists cookies across login attempts; DataDome's
+        # validation cookie then survives reloads and new dialog sessions.
         try:
             self.profile.setHttpUserAgent(
                 _clean_user_agent(self.profile.httpUserAgent()))
         except (AttributeError, RuntimeError):
             pass
+        self._install_stealth_script()
         policy = _resolve_enum(QWebEngineProfile, *_FORCE_PERSISTENT_COOKIES)
         if policy is not None:
             self.profile.setPersistentCookiesPolicy(policy)
@@ -152,6 +223,37 @@ class EmbeddedLoginDialog(QDialog):
         self.page.urlChanged.connect(self._on_url_changed)
         self._timer.start()
         self.view.load(QUrl(self._start_url()))
+
+    def _install_stealth_script(self):
+        """Inject the browser-consistency spoof before any page JS runs."""
+        if QWebEngineScript is None:
+            return
+        injection = _resolve_enum(
+            QWebEngineScript,
+            "InjectionPoint.DocumentCreation",  # Qt6 scoped
+            "DocumentCreation",  # Qt5 flat
+        )
+        world = _resolve_enum(
+            QWebEngineScript,
+            "ScriptWorldId.MainWorld",  # Qt6 scoped
+            "MainWorld",  # Qt5 flat
+        )
+        if injection is None or world is None:
+            return
+        collection = self.profile.scripts()
+        try:
+            for item in collection.toList():
+                if item.name() == STEALTH_SCRIPT_NAME:
+                    collection.remove(item)
+        except Exception:
+            pass
+        script = QWebEngineScript()
+        script.setName(STEALTH_SCRIPT_NAME)
+        script.setInjectionPoint(injection)
+        script.setWorldId(world)
+        script.setRunsOnSubFrames(True)
+        script.setSourceCode(_STEALTH_JS)
+        collection.insert(script)
 
     def _start_url(self):
         partner = self.partner

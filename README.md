@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.4**
+Plugin-Version: **0.8.5**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -159,6 +159,13 @@ python3 build_plugin.py
 ```
 
 ## Versionshistorie
+
+### 0.8.5 (2026-09-18)
+- DataDome-/Bot-Schutz-Härtung: das Anmeldeprofil persistiert Cookies
+  (benanntes Profil), und ein Stealth-Skript bringt die eingebettete Engine
+  auf konsistente Browser-Signale (navigator.webdriver=false, window.chrome,
+  Sprachen, Plugins, WebGL-Renderer, Permissions-API), damit der
+  "Verify human"-Check nicht endlos neu lädt
 
 ### 0.8.4 (2026-09-18)
 - Bot-Schutz-Fix: Der User-Agent des eingebetteten Browsers enthält kein

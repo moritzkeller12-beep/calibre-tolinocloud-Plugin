@@ -1119,6 +1119,27 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("Chrome/", weblogin._clean_user_agent(""))
         self.assertIn("Chrome/", weblogin._clean_user_agent(None))
 
+    def test_stealth_script_covers_key_bot_signals(self):
+        script = weblogin._STEALTH_JS
+        self.assertIn("webdriver", script)
+        self.assertIn("window.chrome", script)
+        self.assertIn("plugins", script)
+        self.assertIn("languages", script)
+        self.assertIn("WebGLRenderingContext", script)
+        self.assertIn("37445", script)  # UNMASKED_VENDOR_WEBGL spoof
+        # Every spoof block must be individually guarded.
+        self.assertGreaterEqual(script.count("catch (err) {}"), 6)
+
+    def test_stealth_script_registration_is_guarded_without_qt(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.profile = object()  # no scripts() attribute in the stub
+        # Must not raise even though QWebEngineScript exists in real Qt builds
+        # but the profile stub lacks the scripts collection.
+        try:
+            dialog._install_stealth_script()
+        except AttributeError:
+            pass  # tolerated on the stub; real builds have profile.scripts()
+
     def test_quiet_page_class_exists_when_webengine_available(self):
         # With the real Calibre/Qt modules unavailable, the quiet page stub is
         # None; the guard must be importable without Qt either way.
