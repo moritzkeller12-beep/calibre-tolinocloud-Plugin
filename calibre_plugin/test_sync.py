@@ -1120,7 +1120,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("Chrome/", weblogin._clean_user_agent(None))
 
     def test_stealth_script_covers_key_bot_signals(self):
-        script = weblogin._STEALTH_JS
+        script = weblogin._stealth_js("118", "Linux")
         self.assertIn("webdriver", script)
         self.assertIn("window.chrome", script)
         self.assertIn("plugins", script)
@@ -1129,6 +1129,63 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("37445", script)  # UNMASKED_VENDOR_WEBGL spoof
         # Every spoof block must be individually guarded.
         self.assertGreaterEqual(script.count("catch (err) {}"), 6)
+        self.assertIn('"118"', script)
+        self.assertIn('"Linux"', script)
+
+    def test_client_hint_headers_match_cleaned_ua(self):
+        ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, "
+              "like Gecko) Chrome/118.0.0.0 Safari/537.36")
+        hints = weblogin._client_hint_headers(ua)
+        self.assertEqual(
+            '"Not A(Brand";v="99", "Chromium";v="118", '
+            '"Google Chrome";v="118"',
+            hints["Sec-CH-UA"])
+        self.assertEqual("?0", hints["Sec-CH-UA-Mobile"])
+        self.assertEqual('"Linux"', hints["Sec-CH-UA-Platform"])
+
+        windows_hints = weblogin._client_hint_headers(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0")
+        self.assertEqual('"Windows"', windows_hints["Sec-CH-UA-Platform"])
+
+        # Non-Chrome user agents get no hints rather than wrong ones.
+        self.assertEqual({}, weblogin._client_hint_headers("Firefox/128.0"))
+        self.assertEqual({}, weblogin._client_hint_headers(None))
+
+    def test_external_fallback_adopts_and_requires_tokens(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.completed = False
+        dialog.refresh_token = None
+        dialog.hardware_id = None
+        dialog.hardware_id_value = "hw-fallback"
+        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
+        stopped = []
+
+        class Timer:
+            def stop(self):
+                stopped.append(True)
+
+        dialog._timer = Timer()
+
+        self.assertFalse(dialog._apply_external_tokens(None, None))
+        self.assertFalse(dialog._apply_external_tokens("  ", "hw"))
+        self.assertFalse(dialog.completed)
+
+        self.assertTrue(dialog._apply_external_tokens("external-refresh", "hw-x"))
+        self.assertTrue(dialog.completed)
+        self.assertEqual("external-refresh", dialog.refresh_token)
+        self.assertEqual("hw-x", dialog.hardware_id)
+        self.assertEqual([True], stopped)
+
+        # Missing hardware falls back to the configured value.
+        dialog.completed = False
+        dialog.refresh_token = None
+        dialog._apply_external_tokens("r2", None)
+        self.assertEqual("hw-fallback", dialog.hardware_id)
+
+    def test_external_login_page_targets_partner_auth_url(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.partner = dict(PARTNERS[8])
+        self.assertIn("auth/oauth2/autologin", dialog._start_url())
 
     def test_stealth_script_registration_is_guarded_without_qt(self):
         dialog = object.__new__(weblogin.EmbeddedLoginDialog)
@@ -1136,7 +1193,7 @@ class SyncPlanTests(unittest.TestCase):
         # Must not raise even though QWebEngineScript exists in real Qt builds
         # but the profile stub lacks the scripts collection.
         try:
-            dialog._install_stealth_script()
+            dialog._install_stealth_script("Chrome/118")
         except AttributeError:
             pass  # tolerated on the stub; real builds have profile.scripts()
 

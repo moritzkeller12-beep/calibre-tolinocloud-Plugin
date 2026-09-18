@@ -3,82 +3,88 @@
 Runs the partner's OAuth/Keycloak sign-in inside an embedded QtWebEngine view.
 After the user signs in and the web reader loads, the tokens are read from the
 page's Local Storage and persisted. No token value is ever logged.
+
+Bot-protection hardening history:
+- 0.8.4: cleaned Chrome-like user agent (no QtWebEngine token)
+- 0.8.5: named persistent profile (validation cookies survive reloads) and a
+  stealth script aligning JS fingerprints
+- 0.8.6: Sec-CH-UA client hint headers + navigator.userAgentData spoof, and a
+  guided fallback that completes the login in the user's default browser and
+  harvests the tokens from its storage when a provider still blocks the view.
 """
 import json
 import re
 import urllib.parse
+import webbrowser
 
 try:
-    from qt.core import (QDialog, QDialogButtonBox, QLabel, QTimer, QUrl,
-                         QVBoxLayout)
+    from qt.core import (QDialog, QDialogButtonBox, QLabel, QMessageBox,
+                         QPushButton, QTimer, QUrl, QVBoxLayout)
     from qt.webengine import (QWebEnginePage, QWebEngineProfile,
-                              QWebEngineScript, QWebEngineView)
+                              QWebEngineScript, QWebEngineUrlRequestInterceptor,
+                              QWebEngineView)
 except ImportError:  # Non-Calibre environments (tests, type checks)
     QDialog = object
-    QDialogButtonBox = QLabel = QTimer = QUrl = QVBoxLayout = None
-    QWebEnginePage = QWebEngineProfile = QWebEngineScript = QWebEngineView = None
+    QDialogButtonBox = QLabel = QMessageBox = QPushButton = None
+    QTimer = QUrl = QVBoxLayout = None
+    QWebEnginePage = QWebEngineProfile = QWebEngineScript = None
+    QWebEngineUrlRequestInterceptor = QWebEngineView = None
 
 try:
-    from .tolino import PARTNERS, TolinoAuthError, extract_login_tokens
+    from .tolino import (PARTNERS, TolinoAuthError, extract_login_tokens,
+                         scrape_browser_tokens)
 except ImportError:
-    from tolino import PARTNERS, TolinoAuthError, extract_login_tokens
+    from tolino import (PARTNERS, TolinoAuthError, extract_login_tokens,
+                        scrape_browser_tokens)
 
 
 READER_HOSTS = ("webreader.mytolino.com", "webreader.hugendubel.de")
-
-_STORAGE_JS = """
-(function() {
-    var result = {};
-    try {
-        for (var i = 0; i < localStorage.length; i += 1) {
-            var key = localStorage.key(i);
-            result[key] = localStorage.getItem(key);
-        }
-    } catch (err) { result["__error__"] = String(err); }
-    return JSON.stringify(result);
-})()
-"""
-
-
-def _resolve_enum(owner, *paths):
-    """Resolve a Qt constant across Qt5 and Qt6 enum naming schemes.
-
-    Qt6 scopes enums (e.g. PersistentCookiesPolicy.ForcePersistentCookies)
-    while Qt5 exposed flat names; PyQt6 builds vary in which shortcut exists.
-    Returns None when no variant is available.
-    """
-    if owner is None:
-        return None
-    for path in paths:
-        current = owner
-        for part in path.split("."):
-            current = getattr(current, part, None)
-            if current is None:
-                break
-        else:
-            return current
-    return None
-
-
-_FORCE_PERSISTENT_COOKIES = (
-    "PersistentCookiesPolicy.ForcePersistentCookies",  # Qt6 scoped
-    "ForcePersistentCookies",  # Qt5 flat
-)
-_CLOSE_BUTTON = (
-    "StandardButton.Close",  # Qt6 scoped
-    "Close",  # Qt5 flat
-)
-
-
-_QT_UA_TOKEN = re.compile(r"\s*QtWebEngine/[\w.]+", re.IGNORECASE)
 LOGIN_PROFILE_STORAGE = "tolino-cloud-sync-login"
 STEALTH_SCRIPT_NAME = "tolino-cloud-sync-stealth"
 
-_STEALTH_JS = """
+_QT_UA_TOKEN = re.compile(r"\s*QtWebEngine/[\w.]+", re.IGNORECASE)
+_CHROME_MAJOR_RE = re.compile(r"Chrome/(\d+)")
+
+_DEFAULT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+def _clean_user_agent(ua):
+    """Return a Chrome-like UA without the QtWebEngine fingerprint token."""
+    if not ua or not str(ua).strip():
+        return _DEFAULT_UA
+    cleaned = _QT_UA_TOKEN.sub("", str(ua))
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _platform_from_ua(ua):
+    text = str(ua or "")
+    if "Windows" in text:
+        return "Windows"
+    if "Mac OS" in text or "Macintosh" in text:
+        return "macOS"
+    return "Linux"
+
+
+def _client_hint_headers(user_agent):
+    """Sec-CH-UA headers matching the cleaned UA (empty for non-Chrome UAs)."""
+    match = _CHROME_MAJOR_RE.search(str(user_agent or ""))
+    if not match:
+        return {}
+    major = match.group(1)
+    platform = _platform_from_ua(user_agent)
+    return {
+        "Sec-CH-UA": ('"Not A(Brand";v="99", "Chromium";v="%s", '
+                      '"Google Chrome";v="%s"' % (major, major)),
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"%s"' % platform,
+    }
+
+
+_STEALTH_TEMPLATE = """
 (function() {
-    // Make the embedded Chromium look like a regular browser to bot
-    // protection scripts (DataDome etc.). Every step is wrapped so a
-    // failing spoof never breaks page functionality.
+    var chromeMajor = "__CHROME_MAJOR__";
+    var platformName = "__PLATFORM__";
     try {
         Object.defineProperty(navigator, 'webdriver', {
             get: function() { return false; }
@@ -136,28 +142,73 @@ _STEALTH_JS = """
                 spoofVendor(WebGL2RenderingContext.prototype.getParameter);
         }
     } catch (err) {}
+    try {
+        if (!navigator.userAgentData) {
+            var brands = [
+                { brand: 'Not A(Brand', version: '99' },
+                { brand: 'Chromium', version: chromeMajor },
+                { brand: 'Google Chrome', version: chromeMajor }
+            ];
+            var uaData = {
+                brands: brands,
+                mobile: false,
+                platform: platformName,
+                getHighEntropyValues: function() {
+                    return Promise.resolve({
+                        architecture: 'x86', bitness: '64', model: '',
+                        platform: platformName, platformVersion: '10.0.0',
+                        uaFullVersion: chromeMajor + '.0.0.0',
+                        fullVersionList: brands
+                    });
+                },
+                toJSON: function() {
+                    return { brands: brands, mobile: false, platform: platformName };
+                }
+            };
+            Object.defineProperty(navigator, 'userAgentData', {
+                get: function() { return uaData; }
+            });
+        }
+    } catch (err) {}
 })();
 """
 
 
-def _clean_user_agent(ua):
-    """Return a Chrome-like UA without the QtWebEngine fingerprint token.
-
-    Bot protection services (e.g. DataDome, used by several Tolino partner
-    shops) flag requests whose user agent contains "QtWebEngine". Keeping the
-    embedded Chromium version but dropping the Qt token makes the login window
-    look like a regular Chrome on the user's platform.
-    """
-    if not ua or not str(ua).strip():
-        return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-    cleaned = _QT_UA_TOKEN.sub("", str(ua))
-    return re.sub(r"\s{2,}", " ", cleaned).strip()
+def _stealth_js(chrome_major="118", platform="Linux"):
+    return (_STEALTH_TEMPLATE
+            .replace("__CHROME_MAJOR__", str(chrome_major))
+            .replace("__PLATFORM__", str(platform)))
 
 
-def _on_reader(url):
-    host = (url.host() or "").casefold()
-    return any(host == name or host.endswith("." + name) for name in READER_HOSTS)
+def _resolve_enum(owner, *paths):
+    """Resolve a Qt constant across Qt5 and Qt6 enum naming schemes."""
+    if owner is None:
+        return None
+    for path in paths:
+        current = owner
+        for part in path.split("."):
+            current = getattr(current, part, None)
+            if current is None:
+                break
+        else:
+            return current
+    return None
+
+
+_FORCE_PERSISTENT_COOKIES = (
+    "PersistentCookiesPolicy.ForcePersistentCookies",  # Qt6 scoped
+    "ForcePersistentCookies",  # Qt5 flat
+)
+_CLOSE_BUTTON = (
+    "StandardButton.Close",  # Qt6 scoped
+    "Close",  # Qt5 flat
+)
+_ACTION_ROLE = (
+    "ButtonRole.ActionRole",  # Qt6 scoped
+    "ActionRole",  # Qt5 flat
+)
+_OK_BUTTON = ("StandardButton.Ok", "Ok")
+_CANCEL_BUTTON = ("StandardButton.Cancel", "Cancel")
 
 
 if QWebEnginePage is not None:
@@ -168,6 +219,46 @@ if QWebEnginePage is not None:
             return None
 else:
     _QuietWebEnginePage = None
+
+if QWebEngineUrlRequestInterceptor is not None:
+    class _ClientHintsInterceptor(QWebEngineUrlRequestInterceptor):
+        """Add Sec-CH-UA headers consistent with the cleaned UA to every request."""
+
+        def __init__(self, user_agent, parent=None):
+            try:
+                QWebEngineUrlRequestInterceptor.__init__(self, parent)
+            except TypeError:
+                QWebEngineUrlRequestInterceptor.__init__(self)
+            self._headers = _client_hint_headers(user_agent)
+
+        def interceptRequest(self, *args):
+            info = args[0]
+            for name, value in self._headers.items():
+                try:
+                    info.setHttpHeader(name, value)
+                except Exception:
+                    return
+else:
+    _ClientHintsInterceptor = None
+
+
+def _on_reader(url):
+    host = (url.host() or "").casefold()
+    return any(host == name or host.endswith("." + name) for name in READER_HOSTS)
+
+
+_STORAGE_JS = """
+(function() {
+    var result = {};
+    try {
+        for (var i = 0; i < localStorage.length; i += 1) {
+            var key = localStorage.key(i);
+            result[key] = localStorage.getItem(key);
+        }
+    } catch (err) { result["__error__"] = String(err); }
+    return JSON.stringify(result);
+})()
+"""
 
 
 class EmbeddedLoginDialog(QDialog):
@@ -190,19 +281,22 @@ class EmbeddedLoginDialog(QDialog):
 
         self.status = QLabel(
             "Im Fenster anmelden. Falls ein Sicherheits-Check (Bot-Schutz) "
-            "erscheint, lösen Sie ihn bitte einmalig hier im Fenster; danach "
-            "werden die Tokens automatisch übernommen.")
+            "erscheint, lösen Sie ihn hier im Fenster – oder verwenden Sie "
+            "unten 'Im Standardbrowser öffnen', der zuverlässig durchgelassen wird.")
         layout.addWidget(self.status)
 
         self.profile = QWebEngineProfile(LOGIN_PROFILE_STORAGE, self)
         # A named profile persists cookies across login attempts; DataDome's
         # validation cookie then survives reloads and new dialog sessions.
+        user_agent = ""
         try:
             self.profile.setHttpUserAgent(
                 _clean_user_agent(self.profile.httpUserAgent()))
+            user_agent = self.profile.httpUserAgent()
         except (AttributeError, RuntimeError):
             pass
-        self._install_stealth_script()
+        self._install_client_hints(user_agent)
+        self._install_stealth_script(user_agent)
         policy = _resolve_enum(QWebEngineProfile, *_FORCE_PERSISTENT_COOKIES)
         if policy is not None:
             self.profile.setPersistentCookiesPolicy(policy)
@@ -211,9 +305,18 @@ class EmbeddedLoginDialog(QDialog):
         self.view.setPage(self.page)
         layout.addWidget(self.view)
 
+        buttons = QDialogButtonBox()
         close_role = _resolve_enum(QDialogButtonBox, *_CLOSE_BUTTON)
-        buttons = QDialogButtonBox(close_role) if close_role is not None \
-            else QDialogButtonBox()
+        if close_role is not None:
+            buttons = QDialogButtonBox(close_role)
+        self.external_button = QPushButton(
+            "Im Standardbrowser öffnen (bei Bot-Schutz)")
+        self.external_button.clicked.connect(self._open_external_login)
+        action_role = _resolve_enum(QDialogButtonBox, *_ACTION_ROLE)
+        if action_role is not None:
+            buttons.addButton(self.external_button, action_role)
+        else:
+            layout.addWidget(self.external_button)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -224,10 +327,31 @@ class EmbeddedLoginDialog(QDialog):
         self._timer.start()
         self.view.load(QUrl(self._start_url()))
 
-    def _install_stealth_script(self):
+    def _install_client_hints(self, user_agent):
+        """Register a request interceptor adding consistent Sec-CH-UA headers."""
+        if _ClientHintsInterceptor is None:
+            return
+        if not _client_hint_headers(user_agent):
+            return
+        try:
+            interceptor = _ClientHintsInterceptor(user_agent, self.profile)
+        except Exception:
+            return
+        for setter in ("setUrlRequestInterceptor", "setRequestInterceptor"):
+            try:
+                getattr(self.profile, setter)(interceptor)
+            except (AttributeError, RuntimeError):
+                continue
+            self._interceptor = interceptor
+            return
+
+    def _install_stealth_script(self, user_agent):
         """Inject the browser-consistency spoof before any page JS runs."""
         if QWebEngineScript is None:
             return
+        match = _CHROME_MAJOR_RE.search(user_agent or "")
+        source = _stealth_js(match.group(1) if match else "118",
+                             _platform_from_ua(user_agent))
         injection = _resolve_enum(
             QWebEngineScript,
             "InjectionPoint.DocumentCreation",  # Qt6 scoped
@@ -240,7 +364,10 @@ class EmbeddedLoginDialog(QDialog):
         )
         if injection is None or world is None:
             return
-        collection = self.profile.scripts()
+        try:
+            collection = self.profile.scripts()
+        except (AttributeError, RuntimeError):
+            return
         try:
             for item in collection.toList():
                 if item.name() == STEALTH_SCRIPT_NAME:
@@ -252,7 +379,7 @@ class EmbeddedLoginDialog(QDialog):
         script.setInjectionPoint(injection)
         script.setWorldId(world)
         script.setRunsOnSubFrames(True)
-        script.setSourceCode(_STEALTH_JS)
+        script.setSourceCode(source)
         collection.insert(script)
 
     def _start_url(self):
@@ -302,6 +429,69 @@ class EmbeddedLoginDialog(QDialog):
             "Anmeldung abgeschlossen / Sign-in complete.")
         if QTimer is not None:
             QTimer.singleShot(600, self.accept)
+
+    def _apply_external_tokens(self, refresh, hardware):
+        """Adopt tokens harvested from the default browser; True on success."""
+        refresh = str(refresh or "").strip()
+        if not refresh:
+            return False
+        self.refresh_token = refresh
+        self.hardware_id = hardware or self.hardware_id_value or None
+        self.completed = True
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        self.status.setText(
+            "Tokens aus dem Standardbrowser übernommen.")
+        return True
+
+    def _open_external_login(self):
+        """Guided fallback: login in the default browser, then harvest tokens."""
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        try:
+            opened = webbrowser.open(self._start_url())
+        except Exception:
+            opened = False
+        if not opened:
+            QMessageBox.warning(
+                self, "Browser-Anmeldung / Browser sign-in",
+                "Der Standardbrowser konnte nicht geöffnet werden.")
+            return
+        self.hide()
+        ok = _resolve_enum(QMessageBox, *_OK_BUTTON)
+        cancel = _resolve_enum(QMessageBox, *_CANCEL_BUTTON)
+        box = QMessageBox(self)
+        box.setWindowTitle("Anmeldung im Standardbrowser / Sign in externally")
+        box.setText(
+            "1. Melden Sie sich im geöffneten Browser an und lösen Sie dort "
+            "ggf. den Sicherheits-Check.\n"
+            "2. Öffnen Sie nach dem Login den Tolino Web Reader (wird meist "
+            "automatisch geladen) und schließen Sie den Browser dann "
+            "komplett.\n"
+            "3. Klicken Sie hier auf OK – die Tokens werden automatisch "
+            "übernommen.")
+        if ok is not None and cancel is not None:
+            box.setStandardButtons(ok | cancel)
+        accepted = (box.exec() == ok) if ok is not None else True
+        if accepted:
+            refresh, hardware = scrape_browser_tokens()
+            if self._apply_external_tokens(refresh, hardware):
+                self.accept()
+                return
+            QMessageBox.warning(
+                self, "Keine Tokens gefunden / No tokens found",
+                "Es wurden keine Tokens gefunden. Stellen Sie sicher, dass Sie "
+                "im Web Reader angemeldet waren und den Browser vollständig "
+                "geschlossen haben, und versuchen Sie es erneut.")
+        self.show()
+        try:
+            self._timer.start()
+        except Exception:
+            pass
 
     def _teardown_webengine(self):
         """Delete the page before the profile to avoid Qt lifetime warnings."""
