@@ -210,10 +210,6 @@ _CLOSE_BUTTON = (
     "StandardButton.Close",  # Qt6 scoped
     "Close",  # Qt5 flat
 )
-_ACTION_ROLE = (
-    "ButtonRole.ActionRole",  # Qt6 scoped
-    "ActionRole",  # Qt5 flat
-)
 _OK_BUTTON = ("StandardButton.Ok", "Ok")
 _CANCEL_BUTTON = ("StandardButton.Cancel", "Cancel")
 
@@ -293,9 +289,10 @@ class EmbeddedLoginDialog(QDialog):
         layout.addWidget(self.status)
 
         self.profile = QWebEngineProfile(LOGIN_PROFILE_STORAGE, None)
-        self.profile.setParent(self)
         # A named profile persists cookies across login attempts; DataDome's
         # validation cookie then survives reloads and new dialog sessions.
+        # The profile is deliberately parentless (no Qt child-destruction
+        # ordering warnings) and released via deleteLater in _teardown.
         user_agent = ""
         try:
             self.profile.setHttpUserAgent(
@@ -309,7 +306,6 @@ class EmbeddedLoginDialog(QDialog):
         if policy is not None:
             self.profile.setPersistentCookiesPolicy(policy)
         self.page = _QuietWebEnginePage(self.profile, None)
-        self.page.setParent(self)
         self.view = QWebEngineView(self)
         self.view.setPage(self.page)
         layout.addWidget(self.view)
@@ -318,16 +314,24 @@ class EmbeddedLoginDialog(QDialog):
         close_role = _resolve_enum(QDialogButtonBox, *_CLOSE_BUTTON)
         if close_role is not None:
             buttons = QDialogButtonBox(close_role)
+        else:
+            # Qt5 fallback: no valid role constant available; use plain layout.
+            buttons = None
         self.external_button = QPushButton(
             "Im Standardbrowser öffnen (bei Bot-Schutz)")
         self.external_button.clicked.connect(self._open_external_login)
-        action_role = _resolve_enum(QDialogButtonBox, *_ACTION_ROLE)
-        if action_role is not None:
-            buttons.addButton(self.external_button, action_role)
+        if buttons is not None:
+            buttons.addButton(self.external_button,
+                              QDialogButtonBox.ActionRole)
+            buttons.rejected.connect(self.reject)
+            layout.addWidget(buttons)
         else:
-            layout.addWidget(self.external_button)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+            row = QVBoxLayout()
+            row.addWidget(self.external_button)
+            layout.addLayout(row)
+            close = QPushButton("Schließen / Close")
+            close.clicked.connect(self.reject)
+            row.addWidget(close)
 
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
@@ -532,15 +536,11 @@ class EmbeddedLoginDialog(QDialog):
             pass
         if page is not None:
             try:
-                if hasattr(page, "setParent"):
-                    page.setParent(None)
                 page.deleteLater()
             except (RuntimeError, AttributeError):
                 pass
         if profile is not None:
             try:
-                if hasattr(profile, "setParent"):
-                    profile.setParent(None)
                 profile.deleteLater()
             except (RuntimeError, AttributeError):
                 pass

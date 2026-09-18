@@ -92,73 +92,84 @@ _BEARER_PATTERN = re.compile(
 def _find_browser_storage_paths():
     """Return candidate browser profile directories for the current platform.
 
-    Chromium profiles point at the profile root (parent of "Local Storage");
-    Firefox entries point at the profiles root directory (children are
-    profile directories).
+    Entries may be Chromium "User Data" roots (parent of profile dirs with
+    "Local Storage/leveldb") or Firefox profile roots (children are profile
+    dirs). Missing paths are fine; the diagnostic reports what exists.
     """
     paths = []
     system = platform.system()
 
+    def add(path):
+        if path and path not in paths:
+            paths.append(path)
+
     if system == "Windows":
         local = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local"))
         roaming = os.environ.get("APPDATA", os.path.expanduser("~/AppData/Roaming"))
-        for vendor in ("Google", "Chromium", "Microsoft", "BraveSoftware",
-                       "Yandex", "Vivaldi"):
-            for root in (os.path.join(local, vendor),):
-                if os.path.isdir(root):
-                    paths.append(root)
-        paths.extend([
-            os.path.join(local, "Google", "Chrome", "User Data"),
-            os.path.join(local, "Microsoft", "Edge", "User Data"),
-            os.path.join(local, "BraveSoftware", "Brave-Browser", "User Data"),
-            os.path.join(local, "Chromium", "User Data"),
-            os.path.join(local, "Vivaldi", "User Data"),
-            os.path.join(local, "Yandex", "YandexBrowser", "User Data"),
-            os.path.join(local, "Opera Software", "Opera Stable"),
-        ])
-        paths.append(os.path.join(roaming, "Mozilla", "Firefox", "Profiles"))
+        add(os.path.join(local, "Google", "Chrome", "User Data"))
+        add(os.path.join(local, "Microsoft", "Edge", "User Data"))
+        add(os.path.join(local, "BraveSoftware", "Brave-Browser", "User Data"))
+        add(os.path.join(local, "Chromium", "User Data"))
+        add(os.path.join(local, "Vivaldi", "User Data"))
+        add(os.path.join(local, "Yandex", "YandexBrowser", "User Data"))
+        add(os.path.join(local, "Opera Software", "Opera Stable"))
+        add(os.path.join(roaming, "Mozilla", "Firefox", "Profiles"))
 
     elif system == "Darwin":
         support = os.path.expanduser("~/Library/Application Support")
-        paths.extend([
-            os.path.join(support, "Google", "Chrome"),
-            os.path.join(support, "Microsoft Edge"),
-            os.path.join(support, "BraveSoftware", "Brave-Browser"),
-            os.path.join(support, "Chromium"),
-            os.path.join(support, "Vivaldi"),
-            os.path.join(support, "com.operasoftware.Opera"),
-            os.path.join(support, "Firefox", "Profiles"),
-        ])
+        add(os.path.join(support, "Google", "Chrome"))
+        add(os.path.join(support, "Microsoft Edge"))
+        add(os.path.join(support, "BraveSoftware", "Brave-Browser"))
+        add(os.path.join(support, "Chromium"))
+        add(os.path.join(support, "Vivaldi"))
+        add(os.path.join(support, "com.operasoftware.Opera"))
+        add(os.path.join(support, "Firefox", "Profiles"))
 
     else:  # Linux and other Unix
         home = os.path.expanduser("~")
         xdg = os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config"))
         flatpak = os.path.join(home, ".var", "app")
         snap = os.path.join(home, "snap")
-        chromium_apps = [
-            os.path.join(xdg, "google-chrome"),
-            os.path.join(xdg, "google-chrome-beta"),
-            os.path.join(xdg, "google-chrome-unstable"),
-            os.path.join(xdg, "chromium"),
-            os.path.join(xdg, "chromium-browser"),
-            os.path.join(xdg, "microsoft-edge"),
-            os.path.join(xdg, "BraveSoftware", "Brave-Browser"),
-            os.path.join(xdg, "vivaldi"),
-            os.path.join(xdg, "opera"),
-            os.path.join(xdg, "yandex-browser"),
-        ]
-        for base in ("", flatpak):
-            for app in chromium_apps:
-                paths.append(os.path.join(base, app) if base else app)
-        snap_names = ("chromium", "opera", "firefox")
-        for name in snap_names:
-            common = os.path.join(snap, name, "common")
-            if name == "firefox":
-                paths.append(os.path.join(common, ".mozilla", "firefox"))
+
+        # Native (deb/rpm) Chromium-family browsers: <app>/ profiles live
+        # directly under XDG_CONFIG_HOME (Default/Local Storage/leveldb).
+        for app in (
+            "google-chrome", "google-chrome-beta", "google-chrome-unstable",
+            "chromium", "chromium-browser", "microsoft-edge",
+            "BraveSoftware/Brave-Browser", "vivaldi", "opera",
+            "yandex-browser",
+        ):
+            add(os.path.join(xdg, app))
+
+        # Flatpak sandboxed browsers: ~/.var/app/<app-id>/config/<app>/
+        for app_id, app_dir in (
+            ("com.google.Chrome", "google-chrome"),
+            ("com.google.ChromeDev", "google-chrome-unstable"),
+            ("org.chromium.Chromium", "chromium"),
+            ("com.microsoft.Edge", "microsoft-edge"),
+            ("com.brave.Browser", "BraveSoftware/Brave-Browser"),
+            ("com.vivaldi.Vivaldi", "vivaldi"),
+            ("com.opera.Opera", "opera"),
+            ("de.yasuar.yandex-browser" , "yandex-browser"),
+            ("org.mozilla.firefox", None),  # Firefox handled below
+            ("org.chromium.Chromium.browser", "chromium"),
+        ):
+            base = os.path.join(flatpak, app_id, "config")
+            if app_dir is None:
+                # Flatpak Firefox keeps profiles under ~/.var/app/<id>/.mozilla
+                add(os.path.join(flatpak, app_id, ".mozilla", "firefox"))
+                add(os.path.join(base, "mozilla", "firefox"))
             else:
-                paths.append(os.path.join(common, name))
-        paths.append(os.path.join(home, ".mozilla", "firefox"))
-        paths.append(os.path.join(flatpak, "org.mozilla.firefox", ".mozilla", "firefox"))
+                add(os.path.join(base, app_dir))
+
+        # Snap browsers: ~/snap/<name>/common/... (current data dir)
+        add(os.path.join(snap, "firefox", "common", ".mozilla", "firefox"))
+        add(os.path.join(snap, "chromium", "common", "chromium"))
+        add(os.path.join(snap, "opera", "common", "opera"))
+        add(os.path.join(snap, "brave", "common", "BraveSoftware", "Brave-Browser"))
+
+        # Classic Firefox locations
+        add(os.path.join(home, ".mozilla", "firefox"))
 
     return [os.path.normpath(p) for p in paths]
 
@@ -180,22 +191,6 @@ TOLINO_STORAGE_ORIGINS = (
 def _origin_matches(host_text):
     text = str(host_text).casefold()
     return any(origin in text for origin in TOLINO_STORAGE_ORIGINS)
-
-
-def _iter_candidate_files(directory, max_depth=3):
-    """Yield files under directory (bounded depth, silently skipping errors)."""
-    if not os.path.isdir(directory):
-        return
-    base_depth = directory.rstrip(os.sep).count(os.sep)
-    try:
-        for root, dirs, files in os.walk(directory):
-            depth = root.rstrip(os.sep).count(os.sep) - base_depth
-            if depth >= max_depth:
-                dirs[:] = []
-            for name in files:
-                yield os.path.join(root, name)
-    except OSError:
-        return
 
 
 # --- Chromium LevelDB: raw, dependency-free readers -----------------------
@@ -480,52 +475,48 @@ def _read_firefox_session_storage(profile_path):
     return results
 
 
-def _candidate_browser_storage_dirs(profile_dir):
-    """Yield Chromium Local Storage and Session Storage directories."""
-    yield os.path.join(profile_dir, "Default", "Local Storage", "leveldb")
-    yield os.path.join(profile_dir, "Local Storage", "leveldb")
-    yield os.path.join(profile_dir, "Default", "Session Storage", "leveldb")
-    yield os.path.join(profile_dir, "Session Storage", "leveldb")
+def _collect_storage_under(path, notes):
+    """Walk a candidate root and harvest any Tolino storage entries found.
 
-
-def _collect_chromium_storage(profile_dir):
-    """Collect Tolino storage entries from one Chromium User Data directory."""
+    Finds Chromium "Local Storage/leveldb" and "Session Storage/leveldb"
+    directories plus Firefox "webappsstore.sqlite" files at any depth up to
+    5; ``notes`` receives one entry per distinct storage found.
+    """
     found = {}
-    scanned = []
-    for db_dir in _candidate_browser_storage_dirs(profile_dir):
-        if os.path.isdir(db_dir):
-            scanned.append(db_dir)
-            found.update(_scan_chromium_leveldb(db_dir))
-    return found, scanned
-
-
-def _is_chromium_profile_root(path):
-    """True when path looks like a Chromium User Data dir (has profile dirs)."""
+    seen_dirs = set()
     if not os.path.isdir(path):
-        return False
-    if os.path.isdir(os.path.join(path, "Local Storage", "leveldb")):
-        return True
-    for profile in ("Default", "Profile 1", "Profile 2", "Profile 3"):
-        if os.path.isdir(os.path.join(path, profile, "Local Storage", "leveldb")):
-            return True
-    return False
-
-
-def _is_firefox_profiles_root(path):
-    """True when path looks like a Firefox profiles root (contains *.default*)."""
-    if not os.path.isdir(path):
-        return False
+        return found
+    base_depth = path.rstrip(os.sep).count(os.sep)
     try:
-        for entry in os.listdir(path):
-            if (entry.endswith(".default") or entry.endswith(".default-release")
-                    or "default" in entry.casefold() and
-                    os.path.isdir(os.path.join(path, entry, "webappsstore.sqlite"))):
-                return True
-            if os.path.isfile(os.path.join(path, entry, "webappsstore.sqlite")):
-                return True
+        walker = os.walk(path)
+        for root, dirs, files in walker:
+            depth = root.rstrip(os.sep).count(os.sep) - base_depth
+            if depth >= 5:
+                dirs[:] = []
+            # Chromium: any directory named leveldb inside Local/Session Storage
+            if root.endswith(os.path.join("Local Storage", "leveldb")) or \
+                    root.endswith(os.path.join("Session Storage", "leveldb")):
+                if root not in seen_dirs:
+                    seen_dirs.add(root)
+                    notes.append("Chromium-Storage: %s" % root)
+                    found.update(_scan_chromium_leveldb(root))
+                dirs[:] = []  # no deeper storage below a leveldb dir
+                continue
+            # Firefox: webappsstore.sqlite at any depth (profiles root or tree)
+            for name in files:
+                if name == "webappsstore.sqlite":
+                    db = os.path.join(root, name)
+                    notes.append("Firefox-Storage: %s" % db)
+                    found.update(_read_firefox_storage(root))
+                    found.update(_read_firefox_session_storage(root))
+            # Skip heavy noise dirs that never hold web storage
+            dirs[:] = [d for d in dirs if d not in (
+                "Cache", "Cache2", "Code Cache", "GPUCache", "DawnCache",
+                "GrShaderCache", "ShaderCache", "Service Worker", "blob_storage",
+                "IndexedDB", "Sessions", "Crashpad", "thumbnails")]
     except OSError:
-        return False
-    return False
+        return found
+    return found
 
 
 def _extract_tokens_from_storage(storage_data):
@@ -657,46 +648,25 @@ def scrape_browser_tokens(diagnose=False):
     a redacted list describing what was scanned (no token values).
     """
     notes = []
+    checked = []
     for path in _find_browser_storage_paths():
-        if not os.path.isdir(path):
+        exists = os.path.isdir(path)
+        checked.append("%s%s" % (path, "" if exists else "  (fehlt)"))
+        if not exists:
             continue
-        if _is_chromium_profile_root(path):
-            storage, scanned = _collect_chromium_storage(path)
-            if scanned:
-                notes.append("Chromium: %s" % path)
-            if storage:
-                refresh_token, hardware_id = _extract_tokens_from_storage(storage)
-                if refresh_token and hardware_id:
-                    return (refresh_token, hardware_id, notes) if diagnose \
-                        else (refresh_token, hardware_id)
-        for profile in _firefox_profile_dirs(path):
-            storage = _read_firefox_storage(profile)
-            storage.update(_read_firefox_session_storage(profile))
-            if storage:
-                notes.append("Firefox: %s" % profile)
-                refresh_token, hardware_id = _extract_tokens_from_storage(storage)
-                if refresh_token and hardware_id:
-                    return (refresh_token, hardware_id, notes) if diagnose \
-                        else (refresh_token, hardware_id)
-    if not notes:
-        notes.append("Keine Browser-Profile gefunden (Chrome/Edge/Brave/Chromium/Firefox)")
+        storage = _collect_storage_under(path, notes)
+        if storage:
+            refresh_token, hardware_id = _extract_tokens_from_storage(storage)
+            if refresh_token and hardware_id:
+                return (refresh_token, hardware_id, notes) if diagnose \
+                    else (refresh_token, hardware_id)
+    if diagnose and not notes:
+        notes.append("Kein Chromium- (Local Storage/leveldb) oder Firefox-Storage "
+                     "(webappsstore.sqlite) gefunden. Geprüfte Orte:")
+        notes.extend(checked)
     return (None, None, notes) if diagnose else (None, None)
 
 
-def _firefox_profile_dirs(path):
-    """Yield Firefox profile directories below a profiles root."""
-    if not os.path.isdir(path):
-        return
-    try:
-        for entry in sorted(os.listdir(path)):
-            profile = os.path.join(path, entry)
-            if os.path.isdir(profile) and (
-                    os.path.isfile(os.path.join(profile, "webappsstore.sqlite"))
-                    or os.path.isfile(os.path.join(profile, "prefs.js"))
-                    or entry.endswith(".default") or entry.endswith(".default-release")):
-                yield profile
-    except OSError:
-        return
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)\b(access[_-]?token|refresh[_-]?token|authorization|"
     r"t_auth_token|password|secret)\b\s*[:=]\s*"
