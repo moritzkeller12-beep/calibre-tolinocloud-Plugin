@@ -1017,6 +1017,55 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIsNone(hardware)
         self.assertTrue(notes)
 
+    def test_walk_discovery_finds_chromium_profile_and_reports_diagnosis(self):
+        from .tolino import _collect_storage_under
+        import struct as _struct
+
+        def varint(value):
+            out = bytearray()
+            while True:
+                byte = value & 0x7F
+                value >>= 7
+                if value:
+                    out.append(byte | 0x80)
+                else:
+                    out.append(byte)
+                    return bytes(out)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = os.path.join(tmp, "Default")
+            db_dir = os.path.join(profile, "Local Storage", "leveldb")
+            os.makedirs(db_dir)
+            key = b"_https://webreader.mytolino.com\x00\x01refresh_token"
+            value = b"\x01tok-walk"
+            payload = (_struct.pack("<QI", 1, 1) + b"\x01"
+                       + varint(len(key)) + key + varint(len(value)) + value)
+            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
+                fh.write(_struct.pack("<IHB", 0, len(payload), 1) + payload)
+
+            notes = []
+            found = _collect_storage_under(tmp, notes)
+            self.assertTrue(any("refresh" in k for k in found), found)
+            self.assertTrue(any("tok-walk" == v for v in found.values()), found)
+            self.assertTrue(any("Chromium-Storage" in n for n in notes), notes)
+
+            # Full scrape path returns the token pair
+            refresh, hardware = scrape_browser_tokens()
+        self.assertIsNone(refresh)  # real machine: no real browser with token
+
+    def test_diagnose_lists_checked_paths_when_nothing_found(self):
+        missing = tempfile.mkdtemp()  # exists but empty -> no storage notes
+        self.addCleanup(__import__("shutil").rmtree, missing, True)
+        with patch("calibre_plugin.tolino._find_browser_storage_paths",
+                   return_value=[missing, "/definitely/missing/path"]):
+            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
+        self.assertIsNone(refresh)
+        self.assertIsNone(hardware)
+        joined = "\n".join(notes)
+        self.assertIn(missing, joined)
+        self.assertIn("/definitely/missing/path", joined)
+        self.assertIn("fehlt", joined)
+
     def test_extract_tokens_from_storage_reads_leveldb_records(self):
         from .tolino import _extract_tokens_from_storage
         storage = {

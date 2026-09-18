@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.7**
+Plugin-Version: **0.8.8**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -166,6 +166,21 @@ python3 build_plugin.py
 
 ## Versionshistorie
 
+### 0.8.8 (2026-09-18)
+- **"Keine Browser-Profile gefunden" behoben:** Die Speicherort-Erkennung
+  läuft jetzt als durchsuchender Walk über alle Kandidatenverzeichnisse und
+  findet Local-Storage-LevelDB-Ordner und Firefox-webappsstore.sqlite an
+  beliebiger Tiefe – auch in Flatpak- (`~/.var/app/<App-ID>/config/…`) und
+  Snap-Profilen (`~/snap/<name>/common/…`)
+- Vollständige Diagnose: Bei Fehlschlag listet der Dialog jeden geprüften
+  Pfad mit Status (vorhanden/fehlt) – so lässt sich sofort erkennen, welches
+  Browserprofil übersehen wurde
+- Qt-Warnungen entfernt: "Invalid ButtonRole, button not added" (Button
+  wird jetzt nur noch mit garantiert gültiger Rolle hinzugefügt) und die
+  Profil-Lebensdauer-Warnung beim Schließen (parentlose Page/Profil,
+  deleteLater nach Dialogende)
+
+### 0.8.7 (2026-09-18)
 ### 0.8.7 (2026-09-18)
 - **Token-Extraktion komplett neu**: moderne Chromium-Browser (Chrome, Edge,
   Brave, Chromium, Vivaldi, Opera) speichern Local Storage als LevelDB;
