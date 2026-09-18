@@ -500,13 +500,21 @@ class SyncDashboard(QDialog):
                     "Refresh-Token und speichern Sie manuell."
                 )
             else:
+                result = scrape_browser_tokens(diagnose=True)
+                refresh_token, hardware_id = result[0], result[1]
+                notes = result[2] if len(result) > 2 else []
+                detail = "\n".join("- %s" % note for note in notes) or \
+                    "- Kein Browserprofil gefunden"
                 QMessageBox.warning(
                     self, "Keine Token gefunden / No tokens found",
                     "Es wurden keine Tolino-Web-Reader-Tokens im Browser gefunden. "
                     "Stellen Sie sicher, dass:\n"
-                    "1. Sie im Tolino Web Reader angemeldet sind\n"
-                    "2. Der Browser geschlossen ist\n"
-                    "3. Sie den richtigen Browser verwenden (Chrome, Edge, Firefox)"
+                    "1. Sie im Tolino **Web Reader** (Bibliothek) angemeldet "
+                    "sind – nicht nur im Shop\n"
+                    "2. Der Browser danach komplett geschlossen ist\n"
+                    "3. Sie einen der unterstützten Browser verwenden "
+                    "(Chrome, Edge, Brave, Chromium, Firefox)\n\n"
+                    "Durchsuchte Speicherorte:\n%s" % detail
                 )
         except Exception as exc:
             QMessageBox.critical(
