@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.0**
+Plugin-Version: **0.9.1**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -163,6 +163,15 @@ python3 -m unittest calibre_plugin.test_sync
 python3 -m py_compile calibre_plugin/*.py build_plugin.py
 python3 build_plugin.py
 ```
+
+## Versionshistorie
+
+### 0.9.1 (2026-09-18)
+- **Toolbar-Icon repariert:** Das Plugin-Icon (eingebettetes SVG, Fallback
+  aufs gebündelte PNG) wird jetzt beim Start explizit der Calibre-Aktion
+  zugewiesen – vorher zeigte das Menüband nur den Text
+- Der Button „Token aus Browser extrahieren" bleibt als Rückfallebene
+  (z.B. wenn der Bot-Schutz die eingebettete Anmeldung blockiert)
 
 ## Versionshistorie
 
