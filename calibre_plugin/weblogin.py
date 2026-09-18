@@ -5,6 +5,7 @@ After the user signs in and the web reader loads, the tokens are read from the
 page's Local Storage and persisted. No token value is ever logged.
 """
 import json
+import re
 import urllib.parse
 
 try:
@@ -68,6 +69,24 @@ _CLOSE_BUTTON = (
 )
 
 
+_QT_UA_TOKEN = re.compile(r"\s*QtWebEngine/[\w.]+", re.IGNORECASE)
+
+
+def _clean_user_agent(ua):
+    """Return a Chrome-like UA without the QtWebEngine fingerprint token.
+
+    Bot protection services (e.g. DataDome, used by several Tolino partner
+    shops) flag requests whose user agent contains "QtWebEngine". Keeping the
+    embedded Chromium version but dropping the Qt token makes the login window
+    look like a regular Chrome on the user's platform.
+    """
+    if not ua or not str(ua).strip():
+        return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    cleaned = _QT_UA_TOKEN.sub("", str(ua))
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def _on_reader(url):
     host = (url.host() or "").casefold()
     return any(host == name or host.endswith("." + name) for name in READER_HOSTS)
@@ -102,11 +121,17 @@ class EmbeddedLoginDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.status = QLabel(
-            "Im Fenster anmelden. Nach dem Login öffnet sich der Web Reader; "
-            "die Tokens werden dann automatisch übernommen.")
+            "Im Fenster anmelden. Falls ein Sicherheits-Check (Bot-Schutz) "
+            "erscheint, lösen Sie ihn bitte einmalig hier im Fenster; danach "
+            "werden die Tokens automatisch übernommen.")
         layout.addWidget(self.status)
 
         self.profile = QWebEngineProfile(self)
+        try:
+            self.profile.setHttpUserAgent(
+                _clean_user_agent(self.profile.httpUserAgent()))
+        except (AttributeError, RuntimeError):
+            pass
         policy = _resolve_enum(QWebEngineProfile, *_FORCE_PERSISTENT_COOKIES)
         if policy is not None:
             self.profile.setPersistentCookiesPolicy(policy)

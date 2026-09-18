@@ -1100,6 +1100,25 @@ class SyncPlanTests(unittest.TestCase):
             weblogin._resolve_enum(FakeQWebEngineProfile, "NoSuch.Policy"))
         self.assertIsNone(weblogin._resolve_enum(None, "Close"))
 
+    def test_clean_user_agent_strips_qt_token_and_keeps_chrome(self):
+        qt6_ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, "
+                  "like Gecko) QtWebEngine/5.15.2 Chrome/87.0.4280.144 "
+                  "Safari/537.36")
+        cleaned = weblogin._clean_user_agent(qt6_ua)
+        self.assertNotIn("QtWebEngine", cleaned)
+        self.assertIn("Chrome/87.0.4280.144", cleaned)
+        self.assertIn("Mozilla/5.0 (X11; Linux x86_64)", cleaned)
+        self.assertNotIn("  ", cleaned)
+
+        # Older builds may embed the token with different casing/spacing.
+        self.assertNotIn(
+            "qtwebengine", weblogin._clean_user_agent(
+                "Mozilla/5.0 qtwebengine/6.7.0 Chrome/118").casefold())
+
+        # Empty/None falls back to a sensible Chrome UA.
+        self.assertIn("Chrome/", weblogin._clean_user_agent(""))
+        self.assertIn("Chrome/", weblogin._clean_user_agent(None))
+
     def test_quiet_page_class_exists_when_webengine_available(self):
         # With the real Calibre/Qt modules unavailable, the quiet page stub is
         # None; the guard must be importable without Qt either way.
