@@ -1078,6 +1078,28 @@ class SyncPlanTests(unittest.TestCase):
         dialog._storage_ready("not-json")
         self.assertFalse(dialog.completed)
 
+    def test_resolve_enum_supports_qt6_scoped_and_qt5_flat_names(self):
+        class FakeQWebEngineProfile:  # Qt6/PyQt6 shape, as in Calibre 7.x
+            class PersistentCookiesPolicy:
+                ForcePersistentCookies = "qt6-scoped"
+
+        class FakeQt5Profile:  # legacy flat shape
+            ForcePersistentCookies = "qt5-flat"
+
+        self.assertEqual(
+            "qt6-scoped",
+            weblogin._resolve_enum(
+                FakeQWebEngineProfile, *weblogin._FORCE_PERSISTENT_COOKIES),
+        )
+        self.assertEqual(
+            "qt5-flat",
+            weblogin._resolve_enum(
+                FakeQt5Profile, *weblogin._FORCE_PERSISTENT_COOKIES),
+        )
+        self.assertIsNone(
+            weblogin._resolve_enum(FakeQWebEngineProfile, "NoSuch.Policy"))
+        self.assertIsNone(weblogin._resolve_enum(None, "Close"))
+
 
 if __name__ == "__main__":
     unittest.main()
