@@ -241,6 +241,74 @@ def _read_firefox_session_storage(profile_path):
         return {}
 
 
+TOKEN_VALUE_KEYS = ("refresh_token", "t_auth_token", "refreshToken", "refresh-token")
+HARDWARE_VALUE_KEYS = ("hardware_id", "hardwareId", "device_id", "deviceId")
+
+
+def extract_login_tokens(storage):
+    """Extract refresh token and hardware ID from one login storage snapshot.
+
+    Accepts a mapping of storage keys to values (from an embedded browser's
+    Local Storage or the page's localStorage/sessionStorage). Values may be
+    plain strings or JSON strings; credential values are never logged.
+    """
+    refresh = None
+    hardware = None
+    if not isinstance(storage, dict):
+        return None, None
+
+    def _candidate(value):
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return text
+        if isinstance(parsed, dict):
+            for key in TOKEN_VALUE_KEYS:
+                nested = parsed.get(key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+            return None
+        return None
+
+    for key, value in storage.items():
+        key_text = str(key)
+        key_lower = key_text.casefold()
+        if refresh is None:
+            if key_lower in {name.casefold() for name in TOKEN_VALUE_KEYS}:
+                refresh = _candidate(value)
+            elif any(name in key_lower for name in ("refresh", "t_auth")):
+                refresh = _candidate(value)
+        if hardware is None:
+            for name in HARDWARE_VALUE_KEYS:
+                if name.casefold() in key_lower:
+                    hardware = _candidate(value)
+                    break
+    if refresh is None:
+        # Fallback: some partners (e.g. Keycloak) store the token set as a
+        # JSON object under a generic storage key.
+        for value in storage.values():
+            if not isinstance(value, str):
+                continue
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                for name in TOKEN_VALUE_KEYS:
+                    nested = parsed.get(name)
+                    if isinstance(nested, str) and nested.strip():
+                        refresh = nested.strip()
+                        break
+            if refresh is not None:
+                break
+    return refresh, hardware
+
+
 def _extract_tokens_from_storage(storage_data):
     """Extract refresh_token and hardware_id from browser storage data.
     

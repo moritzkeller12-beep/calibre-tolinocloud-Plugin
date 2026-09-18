@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 ROOT = Path(__file__).parent
 SOURCE = ROOT / "calibre_plugin"
 MARKER = "plugin-import-name-tolino_cloud_sync.txt"
-FILES = ("ui.py", "config.py", "sync.py", "tolino.py", "icons.py")
+FILES = ("ui.py", "config.py", "sync.py", "tolino.py", "weblogin.py", "icons.py")
 IMAGE_FILES = ("tolino_cloud_sync.png",)
 EXPECTED = {
     "__init__.py",
@@ -14,6 +14,7 @@ EXPECTED = {
     *FILES,
     "images/tolino_cloud_sync.png",
 }
+assert "weblogin.py" in EXPECTED
 
 with ZipFile(ROOT / "tolino_cloud_sync.zip", "w", ZIP_DEFLATED) as archive:
     archive.write(ROOT / "__init__.py", "__init__.py")

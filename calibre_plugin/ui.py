@@ -31,6 +31,7 @@ try:
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error,
                          scrape_browser_tokens)
+    from .weblogin import embedded_login_available, run_embedded_login
 except ImportError:
     from config import save_account, save_settings, settings
     from sync import (compare_inventory, format_error_details, iter_book_ids,
@@ -44,6 +45,7 @@ except ImportError:
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         hardware_id, normalize_refresh_token, sanitize_error,
                         scrape_browser_tokens)
+    from weblogin import embedded_login_available, run_embedded_login
 
 
 def _metadata_value(item, name, default=""):
@@ -529,8 +531,25 @@ class SyncDashboard(QDialog):
         }
 
     def browser_login(self):
+        """Embedded sign-in first; external OAuth callback as fallback."""
+        partner_id = self.partner.currentData()
+        hardware = self.hardware.text().strip()
+        if embedded_login_available():
+            try:
+                refresh, hardware = run_embedded_login(partner_id, hardware, self)
+            except TolinoAuthError as exc:
+                QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in", str(exc))
+                return
+            self.set_refresh_token(refresh)
+            self.hardware.setText(hardware or hardware_id())
+            self.persist_refresh_token(self.refresh.text().strip())
+            self.update_status()
+            QMessageBox.information(
+                self, "Anmeldung erfolgreich / Sign-in complete",
+                "Der neue Refresh-Token wurde sofort gespeichert.")
+            return
         try:
-            refresh, hardware = browser_login(self.partner.currentData(), self.hardware.text().strip())
+            refresh, hardware = browser_login(partner_id, hardware)
         except TolinoAuthError as exc:
             QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in", str(exc))
             return
