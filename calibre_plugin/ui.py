@@ -762,12 +762,43 @@ class SyncDashboard(QDialog):
 
 class TolinoSyncAction(InterfaceAction):
     name = "Tolino Cloud Sync"
-    action_spec = ("Tolino Cloud Sync", None, "Open Tolino Cloud dashboard", None)
+    action_spec = ("Tolino Cloud Sync", None,
+                   "Open Tolino Cloud dashboard", None)
 
     def genesis(self):
         self.qaction.triggered.connect(self.show_dashboard)
         self.menu = self.qaction
+        _apply_toolbar_icon(self)
 
     def show_dashboard(self):
         dialog = SyncDashboard(self.gui)
         dialog.exec()
+
+
+def _apply_toolbar_icon(action):
+    """Give the toolbar action its icon (bundled PNG, then embedded SVG)."""
+    try:
+        from qt.core import QIcon
+    except ImportError:
+        return
+    icon = QIcon()
+    try:
+        # Calibre resolves plugin-relative resource paths from the plugin zip.
+        from calibre.gui2 import get_icons
+        icon = get_icons("images/tolino_cloud_sync.png")
+    except Exception:
+        pass
+    if icon is None or icon.isNull():
+        icon = QIcon()
+        try:
+            from .icons import TOLINO_ICON_SVG
+            import base64
+            data = base64.b64encode(TOLINO_ICON_SVG.encode("utf-8"))
+            icon.loadFromData(data, "image/svg+xml")
+        except Exception:
+            pass
+    if icon is not None and not icon.isNull():
+        try:
+            action.qaction.setIcon(icon)
+        except Exception:
+            action.setIcon(icon)

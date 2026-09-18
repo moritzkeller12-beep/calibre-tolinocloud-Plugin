@@ -1484,5 +1484,103 @@ class SyncPlanTests(unittest.TestCase):
         self.assertTrue(dialog._torn_down)
 
 
+class ToolbarIconTests(unittest.TestCase):
+    """The toolbar action must receive an icon in real Calibre runs."""
+
+    @staticmethod
+    def _load_ui_module(get_icons_result):
+        """Import ui.py with Calibre and Qt imports stubbed."""
+        import sys
+        import types
+
+        class FakeIcon:
+            def __init__(self, *args, **kwargs):
+                self._null = True
+
+            def isNull(self):
+                return self._null
+
+        qt_core = types.ModuleType("qt.core")
+        qt_core.QIcon = FakeIcon
+        for name in ("QCheckBox", "QComboBox", "QDialog", "QDialogButtonBox",
+                     "QFormLayout", "QGroupBox", "QLabel", "QLineEdit",
+                     "QMessageBox", "QProgressBar", "QPushButton", "QThread",
+                     "QVBoxLayout", "QHBoxLayout", "QTableWidget",
+                     "QTableWidgetItem", "QTextEdit", "QObject",
+                     "QInputDialog"):
+            setattr(qt_core, name, type(name, (), {}))
+        qt_core.pyqtSignal = lambda *a, **k: None
+        qt_core.Signal = lambda *a, **k: None
+        calibre = types.ModuleType("calibre")
+        calibre_gui2 = types.ModuleType("calibre.gui2")
+        calibre_gui2.error_dialog = None
+        calibre_gui2.info_dialog = None
+        calibre_gui2.get_icons = lambda name: get_icons_result
+        calibre_actions = types.ModuleType("calibre.gui2.actions")
+        calibre_actions.InterfaceAction = object
+        calibre.gui2 = calibre_gui2
+        calibre_gui2.actions = calibre_actions
+        saved = {name: sys.modules.get(name)
+                 for name in ("calibre", "calibre.gui2",
+                              "calibre.gui2.actions", "qt.core", "qt",
+                              "calibre_plugin.ui")}
+        for name, module in (("calibre", calibre),
+                             ("calibre.gui2", calibre_gui2),
+                             ("calibre.gui2.actions", calibre_actions),
+                             ("qt", types.ModuleType("qt")),
+                             ("qt.core", qt_core)):
+            sys.modules[name] = module
+        sys.modules.pop("calibre_plugin.ui", None)
+        from calibre_plugin import ui as ui_module
+        # Stubs stay active until restore_stubs() so that function-level
+        # imports (from calibre.gui2 import get_icons) still resolve.
+        def restore_stubs():
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+        ui_module._restore_stubs_for_tests = restore_stubs
+        return ui_module
+
+    def test_get_icons_result_is_set_on_action(self):
+        set_calls = []
+
+        class Icon:
+            def isNull(self):
+                return False
+
+        class QAction:
+            def setIcon(self, icon):
+                set_calls.append(icon)
+
+        ui_module = self._load_ui_module(Icon())
+        try:
+            action = QAction()
+            ui_module._apply_toolbar_icon(action)
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(1, len(set_calls))
+        self.assertIsInstance(set_calls[0], Icon)
+
+    def test_null_icon_leaves_action_untouched(self):
+        set_calls = []
+
+        class Icon:
+            def isNull(self):
+                return True
+
+        class QAction:
+            def setIcon(self, icon):
+                set_calls.append(icon)
+
+        ui_module = self._load_ui_module(Icon())
+        try:
+            action = QAction()
+            ui_module._apply_toolbar_icon(action)
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], set_calls)
+
 if __name__ == "__main__":
     unittest.main()
