@@ -480,6 +480,16 @@ def _read_firefox_session_storage(profile_path):
     return results
 
 
+def _diagnose_storage_keys(storage):
+    """Redacted key overview from one storage snapshot (no values)."""
+    keys = []
+    for key in sorted(storage, key=str):
+        text = str(key)
+        if _origin_matches(text):
+            keys.append("%s = <wert geschwärzt>" % text)
+    return keys
+
+
 def _collect_storage_under(path, notes):
     """Walk a candidate root and harvest any Tolino storage entries found.
 
@@ -649,11 +659,13 @@ def scrape_browser_tokens(diagnose=False):
 
     Supports modern Chromium LevelDB stores (Chrome, Edge, Brave, Chromium,
     Vivaldi, Opera) and modern Firefox LSNG (webappsstore.sqlite) without any
-    third-party module. When ``diagnose`` is true, returns a third element:
+    third-party module. Files are read raw (no database locks), so the browser
+    may still be running. When ``diagnose`` is true, returns a third element:
     a redacted list describing what was scanned (no token values).
     """
     notes = []
     checked = []
+    all_keys = {}
     for path in _find_browser_storage_paths():
         exists = os.path.isdir(path)
         checked.append("%s%s" % (path, "" if exists else "  (fehlt)"))
@@ -661,14 +673,28 @@ def scrape_browser_tokens(diagnose=False):
             continue
         storage = _collect_storage_under(path, notes)
         if storage:
+            all_keys.update(storage)
             refresh_token, hardware_id = _extract_tokens_from_storage(storage)
             if refresh_token and hardware_id:
                 return (refresh_token, hardware_id, notes) if diagnose \
                     else (refresh_token, hardware_id)
-    if diagnose and not notes:
-        notes.append("Kein Chromium- (Local Storage/leveldb) oder Firefox-Storage "
-                     "(webappsstore.sqlite) gefunden. Geprüfte Orte:")
-        notes.extend(checked)
+    if diagnose:
+        if all_keys:
+            keys = _diagnose_storage_keys(all_keys)
+            if keys:
+                notes.append("Tolino-Schlüssel gefunden (Werte geschwärzt):")
+                notes.extend(keys)
+                notes.append("-> Es fehlt ein Wert mit Token-/Hardware-Form; "
+                             "Web Reader einmal vollständig laden.")
+            else:
+                notes.append("Storage gelesen, aber keine Tolino-Origin-Einträge "
+                             "darin – im Web Reader (Bibliothek) anmelden, "
+                             "dann erneut versuchen.")
+        elif checked:
+            notes.append("Kein Chromium- (Local Storage/leveldb) oder "
+                         "Firefox-Storage (webappsstore.sqlite) gefunden. "
+                         "Geprüfte Orte:")
+            notes.extend(checked)
     return (None, None, notes) if diagnose else (None, None)
 
 

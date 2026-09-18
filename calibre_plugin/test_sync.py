@@ -1053,6 +1053,32 @@ class SyncPlanTests(unittest.TestCase):
             refresh, hardware = scrape_browser_tokens()
         self.assertIsNone(refresh)  # real machine: no real browser with token
 
+    def test_diagnose_reports_found_tolino_keys_when_token_shape_missing(self):
+        with patch("calibre_plugin.tolino._find_browser_storage_paths",
+                   return_value=["/fake/profile"]), \
+                patch("calibre_plugin.tolino.os.path.isdir", return_value=True), \
+                patch("calibre_plugin.tolino._collect_storage_under",
+                      return_value={
+                          "webreader.mytolino.com/some_flag": "1",
+                          "other.example.com/refresh_token": "hidden",
+                      }):
+            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
+        self.assertIsNone(refresh)
+        joined = "\n".join(notes)
+        self.assertIn("webreader.mytolino.com/some_flag", joined)
+        self.assertIn("geschwärzt", joined)
+        self.assertNotIn("hidden", joined)
+
+    def test_diagnose_hints_reader_when_no_tolino_keys(self):
+        with patch("calibre_plugin.tolino._find_browser_storage_paths",
+                   return_value=["/fake/profile"]), \
+                patch("calibre_plugin.tolino.os.path.isdir", return_value=True), \
+                patch("calibre_plugin.tolino._collect_storage_under",
+                      return_value={"other.example.com/x": "1"}):
+            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
+        self.assertIsNone(refresh)
+        self.assertTrue(any("Web Reader" in n for n in notes), notes)
+
     def test_diagnose_lists_checked_paths_when_nothing_found(self):
         missing = tempfile.mkdtemp()  # exists but empty -> no storage notes
         self.addCleanup(__import__("shutil").rmtree, missing, True)

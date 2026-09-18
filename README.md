@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.9**
+Plugin-Version: **0.9.0**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -166,6 +166,17 @@ python3 build_plugin.py
 
 ## Versionshistorie
 
+### 0.9.0 (2026-09-18)
+- **Browser muss nicht mehr geschlossen werden:** Der Scanner liest
+  LevelDB-/SQLite-Dateien roh ohne Sperren – das Live-Auslesen aus einem
+  laufenden Browser funktioniert; alle Hinweistexte entsprechend angepasst
+- **Präzisere Diagnose:** Zeigt bei Fehlschlag gefundene Tolino-Schlüssel
+  (Werte geschwärzt) bzw. teilt mit, wenn Storage gelesen wurde, aber keine
+  Tolino-Einträge darin liegen (→ Web Reader vollständig laden)
+- Plugin-Version ist jetzt im Dialog-Titel sichtbar (erkennt veraltete
+  Installationen sofort)
+
+### 0.8.9 (2026-09-18)
 ### 0.8.9 (2026-09-18)
 - **OAuth-Code-Abfangen (neuer Hauptweg):** Die eingebettete Anmeldung fängt
   den Autorisierungs-Code aus dem OAuth-Redirect ab und tauscht ihn direkt

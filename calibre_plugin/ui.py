@@ -48,6 +48,15 @@ except ImportError:
     from weblogin import embedded_login_available, run_embedded_login
 
 
+def _plugin_version():
+    """Plugin version tuple for display; safe outside Calibre."""
+    try:
+        from . import PLUGIN_VERSION
+        return PLUGIN_VERSION
+    except Exception:
+        return (0, 9, 0)
+
+
 def _metadata_value(item, name, default=""):
     try:
         return getattr(item, name)
@@ -295,7 +304,8 @@ class SyncDashboard(QDialog):
         self.worker = None
         self.sync_column_enabled = False
         self.temp_files = []
-        self.setWindowTitle("Tolino Cloud Sync")
+        self.setWindowTitle("Tolino Cloud Sync (Plugin-Version %s)" %
+                            ".".join(str(v) for v in _plugin_version()))
         self.setMinimumWidth(560)
         root = QVBoxLayout(self)
 
@@ -507,14 +517,15 @@ class SyncDashboard(QDialog):
                     "- Kein Browserprofil gefunden"
                 QMessageBox.warning(
                     self, "Keine Token gefunden / No tokens found",
-                    "Es wurden keine Tolino-Web-Reader-Tokens im Browser gefunden. "
-                    "Stellen Sie sicher, dass:\n"
-                    "1. Sie im Tolino **Web Reader** (Bibliothek) angemeldet "
-                    "sind – nicht nur im Shop\n"
-                    "2. Der Browser danach komplett geschlossen ist\n"
-                    "3. Sie einen der unterstützten Browser verwenden "
-                    "(Chrome, Edge, Brave, Chromium, Firefox)\n\n"
-                    "Durchsuchte Speicherorte:\n%s" % detail
+                    "Es wurden keine Tolino-Web-Reader-Tokens gefunden "
+                    "(Plugin-Version %s). Der Browser darf dabei offen "
+                    "bleiben. Wichtig:\n"
+                    "1. Im Tolino **Web Reader** (Bibliothek) angemeldet "
+                    "sein – nicht nur im Shop\n"
+                    "2. Den Web Reader einmal vollständig geladen haben "
+                    "(Bücherliste sichtbar)\n\n"
+                    "Befund:\n%s" % (
+                        ".".join(str(v) for v in _plugin_version()), detail)
                 )
         except Exception as exc:
             QMessageBox.critical(

@@ -559,11 +559,11 @@ class EmbeddedLoginDialog(QDialog):
         box.setText(
             "1. Melden Sie sich im geöffneten Browser an und lösen Sie dort "
             "ggf. den Sicherheits-Check.\n"
-            "2. Öffnen Sie nach dem Login den Tolino Web Reader (wird meist "
-            "automatisch geladen) und schließen Sie den Browser dann "
-            "komplett.\n"
-            "3. Klicken Sie hier auf OK – die Tokens werden automatisch "
-            "übernommen.")
+            "2. Öffnen Sie den Tolino Web Reader (Bibliothek) und warten Sie, "
+            "bis die Bücherliste geladen ist. Der Browser darf offen "
+            "bleiben.\n"
+            "3. Klicken Sie hier auf OK – die Tokens werden direkt aus dem "
+            "laufenden Browser übernommen.")
         if ok is not None and cancel is not None:
             box.setStandardButtons(ok | cancel)
         accepted = (box.exec() == ok) if ok is not None else True
@@ -576,13 +576,11 @@ class EmbeddedLoginDialog(QDialog):
                 "- Kein Browserprofil gefunden"
             retry = QMessageBox.question(
                 self, "Keine Tokens gefunden / No tokens found",
-                "Es wurden keine Tokens gefunden. Wichtig:\n"
+                "Es wurden keine Tokens gefunden (der Browser darf offen "
+                "bleiben). Wichtig:\n"
                 "- Im Tolino **Web Reader** (Bibliothek) angemeldet sein, "
-                "nicht nur im Shop.\n"
-                "- Den Browser danach **komplett beenden** (alle Fenster) "
-                "und ein paar Sekunden warten, damit er die Daten auf die "
-                "Platte schreibt.\n\n"
-                "Durchsuchte Speicherorte:\n%s\n\n"
+                "nicht nur im Shop – die Bücherliste sollte geladen sein.\n\n"
+                "Befund:\n%s\n\n"
                 "Erneut versuchen?" % detail,
                 defaultButton=cancel,
             )

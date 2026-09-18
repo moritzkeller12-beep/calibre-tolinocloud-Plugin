@@ -4,10 +4,13 @@ except ImportError:
     InterfaceActionBase = object
 
 
+PLUGIN_VERSION = (0, 9, 0)
+
+
 class TolinoSyncPlugin(InterfaceActionBase):
     name = "Tolino Cloud Sync"
     description = "Synchronize the Calibre library with Tolino Cloud"
-    version = (0, 8, 9)
+    version = PLUGIN_VERSION
     author = "moritzkeller12-beep"
     type = "InterfaceAction"
     supported_platforms = ["linux", "windows", "osx"]
