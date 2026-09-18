@@ -17,9 +17,13 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    normalize_title, normalize_inventory_item, custom_column_available,
                    metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
-                     TolinoClient, hardware_id, normalize_refresh_token,
-                     sanitize_error, validate_callback, scrape_browser_tokens,
-                     browser_login)
+                     TolinoClient, extract_login_tokens, hardware_id,
+                     normalize_refresh_token, sanitize_error,
+                     validate_callback, scrape_browser_tokens, browser_login)
+try:
+    from . import weblogin
+except ImportError:
+    import weblogin
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -967,6 +971,7 @@ class SyncPlanTests(unittest.TestCase):
                 "config.py",
                 "sync.py",
                 "tolino.py",
+                "weblogin.py",
                 "icons.py",
                 "images/tolino_cloud_sync.png",
             }, set(plugin.namelist()))
@@ -1001,6 +1006,77 @@ class SyncPlanTests(unittest.TestCase):
         refresh, hardware = scrape_browser_tokens()
         self.assertIsNone(refresh)
         self.assertIsNone(hardware)
+
+    def test_extract_login_tokens_reads_plain_and_json_values(self):
+        storage = {
+            "refresh_token": "plain-refresh",
+            "t_auth_token": "ignored-second",
+            "device_id": "hw-123",
+            "unrelated": "value",
+        }
+        self.assertEqual(
+            ("plain-refresh", "hw-123"),
+            extract_login_tokens(storage),
+        )
+        self.assertEqual(("json-refresh", None), extract_login_tokens({
+            "oauth": '{"access_token":"a","refresh_token":"json-refresh"}',
+        }))
+        self.assertEqual((None, None), extract_login_tokens({}))
+        self.assertEqual((None, None), extract_login_tokens(None))
+        self.assertEqual((None, None), extract_login_tokens({"key": 42}))
+
+    def test_extract_login_tokens_matches_keycloak_style_keys(self):
+        refresh, hardware = extract_login_tokens({
+            "https://webreader.mytolino.com/refreshToken": " case-refresh ",
+            "hardwareId": "hw-9",
+        })
+        self.assertEqual("case-refresh", refresh)
+        self.assertEqual("hw-9", hardware)
+
+    def test_embedded_login_reports_unavailable_webengine(self):
+        with patch.object(weblogin, "QWebEngineView", None), \
+                patch.object(weblogin, "QWebEngineProfile", None):
+            self.assertFalse(weblogin.embedded_login_available())
+            with self.assertRaisesRegex(TolinoAuthError, "QtWebEngine"):
+                weblogin.run_embedded_login(8, "hw")
+
+    def test_embedded_start_url_builds_oauth_and_reader_fallback(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.partner = dict(PARTNERS[8])
+        url = dialog._start_url()
+        self.assertIn("auth/oauth2/autologin", url)
+        self.assertIn("client_id=webreader", url)
+        self.assertIn("x_buchde.mandant_id=37", url)
+
+        dialog.partner = {"client_id": "c", "scope": "s"}
+        url = dialog._start_url()
+        self.assertTrue(url.startswith("https://webreader.mytolino.com"))
+
+    def test_embedded_storage_ready_accepts_token_and_ignores_garbage(self):
+        import json as json_module
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.completed = False
+        dialog.hardware_id_value = "configured-hw"
+        dialog.refresh_token = None
+        dialog.hardware_id = None
+        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
+        stopped = []
+
+        class Timer:
+            def stop(self):
+                stopped.append(True)
+
+        dialog._timer = Timer()
+        dialog._storage_ready(json_module.dumps({
+            "refresh_token": "embedded-refresh", "device_id": "embedded-hw",
+        }))
+        self.assertTrue(dialog.completed)
+        self.assertEqual("embedded-refresh", dialog.refresh_token)
+        self.assertEqual("embedded-hw", dialog.hardware_id)
+
+        dialog.completed = False
+        dialog._storage_ready("not-json")
+        self.assertFalse(dialog.completed)
 
 
 if __name__ == "__main__":

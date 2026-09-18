@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.8.0**
+Plugin-Version: **0.8.1**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -46,12 +46,15 @@ Im Dialog **Tolino Cloud Sync**:
    `refresh_token` getrennt gespeichert.
 2. Partner auswählen (z.B. **8 – Books.ch / Orell Füssli**).
 3. Eine stabile Hardware-ID übernehmen oder selbst festlegen.
-4. Den aktuellen `refresh_token` einfügen. Umgebende Leerzeichen und
+4. Den aktuellen `refresh_token` einfügen – oder ihn über die eingebettete
+   Browser-Anmeldung beziehen (siehe unten). Umgebende Leerzeichen und
    äußere Anführungszeichen werden entfernt.
    
    **Für Orell Füssli (Partner 8):**
-   - Die Browser-Anmeldung funktioniert nicht mit Callback (Keycloak-Redirect)
-   - Bitte verwenden Sie stattdessen **"Token aus Browser extrahieren"**
+   - Die externe Browser-Anmeldung mit Callback funktioniert nicht
+     (Keycloak-Redirect)
+   - Verwenden Sie die **eingebettete Browser-Anmeldung** (Standard) oder
+     **"Token aus Browser extrahieren"**
 5. Bevorzugte Formate festlegen, normalerweise EPUB und PDF. Cover-Upload
    und Löschungen sind optional.
 
@@ -112,17 +115,25 @@ extrahieren, wenn Sie im Tolino Web Reader angemeldet sind:
 
 ## Browser-Anmeldung
 
-Für die meisten Partner (Thalia, Hugendubel, Bücher.de, etc.) funktioniert die
-automatische Browser-Anmeldung:
+**Eingebettete Anmeldung (Standard, alle Partner inkl. Orell Füssli):**
 
 1. Klicken Sie auf **"Im Browser anmelden"**
-2. Melden Sie sich im geöffneten Browser-Fenster an
-3. Nach erfolgreicher Anmeldung werden die Tokens automatisch extrahiert
+2. Ein in Calibre eingebettetes Browser-Fenster öffnet die Anmeldeseite des
+   Partners (OAuth/Keycloak)
+3. Melden Sie sich an; nach dem Redirect in den Tolino Web Reader werden
+   Refresh-Token und Hardware-ID automatisch aus dem Local Storage des
+   Web Readers übernommen und gespeichert – auch für Keycloak-Partner wie
+   Orell Füssli, bei denen der externe Callback-Flow scheitert
 
-**Hinweis für Orell Füssli (Partner 8):**
-Die Browser-Anmeldung funktioniert nicht, da Orell Füssli Keycloak verwendet, das
-nach dem Login direkt zum Web Reader weiterleitet, ohne zu unserer Callback-URL
-zurückzukehren. Bitte verwenden Sie stattdessen **"Token aus Browser extrahieren"**.
+**Externe Anmeldung (Fallback):**
+
+Falls Ihre Calibre-Installation keine eingebettete WebEngine mitbringt,
+fällt das Plugin auf den bisherigen externen OAuth-Callback-Flow zurück.
+Dieser funktioniert bei den meisten Partnern (Thalia, Hugendubel,
+Bücher.de, etc.), aber nicht bei Orell Füssli (Partner 8), da Keycloak
+nach dem Login direkt zum Web Reader weiterleitet, ohne zur Callback-URL
+zurückzukehren. Verwenden Sie in dem Fall die eingebettete Anmeldung oder
+**"Token aus Browser extrahieren"**.
 
 ## Bekannte Einschränkungen
 
@@ -130,12 +141,14 @@ zurückzukehren. Bitte verwenden Sie stattdessen **"Token aus Browser extrahiere
 - Das Plugin lädt Dateien und optional Cover hoch, bietet aber keinen
   verifizierten Metadaten-Upload.
 - Partner-, Token- und Dienständerungen können eine erneute Einrichtung erfordern.
-- Für Orell Füssli (Partner 8) muss die Token-Extraktion manuell ausgelöst werden.
+- Ohne eingebettete WebEngine bleibt für Orell Füssli (Partner 8) nur die
+  manuelle Token-Extraktion.
 
 Das Plugin liest keine Browserprofile, Cookies oder LocalStorage-Daten ohne
-explizite Nutzeraktion (Klick auf "Token aus Browser extrahieren"). Die
-Anmeldung bleibt ein bewusster Browser-/manueller Refresh-Token-Workflow;
-Tokenwerte werden nicht protokolliert.
+explizite Nutzeraktion (Klick auf "Im Browser anmelden" oder "Token aus
+Browser extrahieren"). Die Anmeldung bleibt ein bewusster
+Browser-/manueller Refresh-Token-Workflow; Tokenwerte werden nicht
+protokolliert.
 
 ## Lokale Validierung
 
@@ -147,6 +160,11 @@ python3 build_plugin.py
 
 ## Versionshistorie
 
+### 0.8.1 (2026-09-18)
+- Eingebettete Browser-Anmeldung (QtWebEngine) für alle Partner, inklusive
+  Orell Füssli/Keycloak: Tokens werden nach dem Login direkt aus dem
+  Web-Reader-Storage übernommen
+- Externer OAuth-Callback-Flow bleibt als Fallback erhalten
 ### 0.8.0 (2024-09-14)
 - Fix für Calibre 7.6: Cover- und Format-Pfad-Abfrage mit expliziten Buch-IDs
 - Erweiterte Token-Extraktion aus Browser (Local Storage + Session Storage)
