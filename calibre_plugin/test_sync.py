@@ -1210,6 +1210,78 @@ class SyncPlanTests(unittest.TestCase):
         dialog._storage_ready("not-json")
         self.assertFalse(dialog.completed)
 
+    def test_oauth_code_exchange_from_redirect_url(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.completed = False
+        dialog.partner = dict(PARTNERS[8])
+        dialog.partner_id = 8
+        dialog.hardware_id_value = "hw-99"
+        dialog.refresh_token = None
+        dialog.hardware_id = None
+        dialog._exchanged_code = None
+        dialog._redirect_hint = "https://webreader.mytolino.com/callback"
+        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
+        dialog._timer = type("Timer", (), {
+            "stop": staticmethod(lambda: None),
+            "start": staticmethod(lambda: None)})()
+
+        class FakeUrl:
+            def query(self):
+                return "code=abc123&state=xyz"
+
+        exchanged = {}
+
+        def fake_request(self, url, method="GET", data=None, form=False,
+                         authenticated=True, content_type=None, _retry=True):
+            exchanged["url"] = url
+            exchanged["data"] = data
+            return {"access_token": "a", "refresh_token": "code-refresh",
+                    "hardware_id": "hw-from-code"}
+
+        with patch.object(weblogin.TolinoClient, "_request", fake_request):
+            handled = dialog._maybe_exchange_oauth_code(FakeUrl())
+        self.assertTrue(handled)
+        self.assertTrue(dialog.completed)
+        self.assertEqual("code-refresh", dialog.refresh_token)
+        self.assertEqual("hw-from-code", dialog.hardware_id)
+        self.assertEqual(PARTNERS[8]["token_url"], exchanged["url"])
+        self.assertEqual("abc123", exchanged["data"]["code"])
+        self.assertEqual("authorization_code", exchanged["data"]["grant_type"])
+        self.assertEqual("https://webreader.mytolino.com/callback",
+                         exchanged["data"]["redirect_uri"])
+
+    def test_oauth_code_exchange_without_code_is_noop(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.completed = False
+        dialog.partner = dict(PARTNERS[8])
+        dialog._exchanged_code = None
+
+        class FakeUrl:
+            query = ""  # attribute, not callable -> guarded
+
+        self.assertFalse(dialog._maybe_exchange_oauth_code(FakeUrl()))
+        self.assertFalse(dialog.completed)
+
+    def test_record_redirect_hint_captures_code_url(self):
+        class FakeUrl:
+            def __init__(self, q):
+                self._q = q
+
+            def query(self):
+                return self._q
+
+            def toString(self, *_flags):
+                return "https://webreader.mytolino.com/cb"
+
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog._redirect_hint = None
+        dialog._record_redirect_hint(FakeUrl("code=k1&session_state=s"))
+        self.assertEqual("https://webreader.mytolino.com/cb",
+                         dialog._redirect_hint)
+        dialog._redirect_hint = None
+        dialog._record_redirect_hint(FakeUrl(""))
+        self.assertIsNone(dialog._redirect_hint)
+
     def test_resolve_enum_supports_qt6_scoped_and_qt5_flat_names(self):
         class FakeQWebEngineProfile:  # Qt6/PyQt6 shape, as in Calibre 7.x
             class PersistentCookiesPolicy:

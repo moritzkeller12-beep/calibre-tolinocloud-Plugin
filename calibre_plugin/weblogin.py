@@ -25,23 +25,25 @@ import webbrowser
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 try:
-    from qt.core import (QDialog, QDialogButtonBox, QLabel, QMessageBox,
+    from qt.core import (QDialog, QHBoxLayout, QLabel, QMessageBox,
                          QPushButton, QTimer, QUrl, QVBoxLayout)
     from qt.webengine import (QWebEnginePage, QWebEngineProfile,
                               QWebEngineScript, QWebEngineUrlRequestInterceptor,
                               QWebEngineView)
 except ImportError:  # Non-Calibre environments (tests, type checks)
     QDialog = object
-    QDialogButtonBox = QLabel = QMessageBox = QPushButton = None
+    QHBoxLayout = QLabel = QMessageBox = QPushButton = None
     QTimer = QUrl = QVBoxLayout = None
     QWebEnginePage = QWebEngineProfile = QWebEngineScript = None
     QWebEngineUrlRequestInterceptor = QWebEngineView = None
 
 try:
-    from .tolino import (PARTNERS, TolinoAuthError, extract_login_tokens,
+    from .tolino import (PARTNERS, TolinoAuthError, TolinoClient,
+                         extract_login_tokens, sanitize_error,
                          scrape_browser_tokens)
 except ImportError:
-    from tolino import (PARTNERS, TolinoAuthError, extract_login_tokens,
+    from tolino import (PARTNERS, TolinoAuthError, TolinoClient,
+                        extract_login_tokens, sanitize_error,
                         scrape_browser_tokens)
 
 
@@ -277,6 +279,8 @@ class EmbeddedLoginDialog(QDialog):
         self.completed = False
         self._cancel_requested = False
         self._torn_down = False
+        self._exchanged_code = None
+        self._redirect_hint = None
 
         self.setWindowTitle("Tolino-Anmeldung: %s" % self.partner.get("name", ""))
         self.resize(980, 760)
@@ -310,34 +314,25 @@ class EmbeddedLoginDialog(QDialog):
         self.view.setPage(self.page)
         layout.addWidget(self.view)
 
-        buttons = QDialogButtonBox()
-        close_role = _resolve_enum(QDialogButtonBox, *_CLOSE_BUTTON)
-        if close_role is not None:
-            buttons = QDialogButtonBox(close_role)
-        else:
-            # Qt5 fallback: no valid role constant available; use plain layout.
-            buttons = None
+        # Plain buttons instead of QDialogButtonBox: immune to the Qt6
+        # "Invalid ButtonRole, button not added" warning and enum churn.
+        row = QHBoxLayout()
         self.external_button = QPushButton(
             "Im Standardbrowser öffnen (bei Bot-Schutz)")
         self.external_button.clicked.connect(self._open_external_login)
-        if buttons is not None:
-            buttons.addButton(self.external_button,
-                              QDialogButtonBox.ActionRole)
-            buttons.rejected.connect(self.reject)
-            layout.addWidget(buttons)
-        else:
-            row = QVBoxLayout()
-            row.addWidget(self.external_button)
-            layout.addLayout(row)
-            close = QPushButton("Schließen / Close")
-            close.clicked.connect(self.reject)
-            row.addWidget(close)
+        row.addWidget(self.external_button)
+        close = QPushButton("Schließen / Close")
+        close.clicked.connect(self.reject)
+        row.addWidget(close)
+        row.addStretch(1)
+        layout.addLayout(row)
 
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._poll_storage)
         self.page.urlChanged.connect(self._on_url_changed)
         self._timer.start()
+        self.page.urlChanged.connect(self._record_redirect_hint)
         self.view.load(QUrl(self._start_url()))
 
     def _install_client_hints(self, user_agent):
@@ -412,10 +407,92 @@ class EmbeddedLoginDialog(QDialog):
             params = {}
         return auth_url + ("?" + urllib.parse.urlencode(params) if params else "")
 
+    def _record_redirect_hint(self, url):
+        """Remember the last URL that carried an authorization code."""
+        try:
+            query = url.query() or ""
+            if "code=" not in query:
+                return
+            # Rebuild without query/fragment via string ops (Qt-independent).
+            text = url.toString() or ""
+            text = text.split("?", 1)[0].split("#", 1)[0]
+            self._redirect_hint = text
+        except Exception:
+            pass
+
     def _on_url_changed(self, url):
+        if self.completed:
+            return
+        # Primary path: catch the OAuth authorization code on any redirect
+        # and exchange it directly at the token endpoint. This works even if
+        # the web reader's local storage never becomes readable.
+        if self._maybe_exchange_oauth_code(url):
+            return
         if _on_reader(url):
             self.status.setText(
                 "Angemeldet – Tokens werden aus dem Web Reader übernommen …")
+
+    def _maybe_exchange_oauth_code(self, url):
+        """Exchange an OAuth ?code= from a redirect URL; True when accepted."""
+        if url is None or not callable(getattr(url, "query", None)):
+            return False
+        try:
+            query = urllib.parse.parse_qs(url.query())
+        except Exception:
+            return False
+        codes = query.get("code") or query.get("authorization_code")
+        if not codes or not codes[0]:
+            return False
+        code = codes[0]
+        if self._exchanged_code == code:
+            return True
+        partner = self.partner
+        if not partner.get("token_url"):
+            return False
+        self._exchanged_code = code
+        self._timer.stop()
+        self.status.setText(
+            "Anmeldecode gefunden – Tokens werden angefordert …")
+        payload = {
+            "client_id": partner.get("client_id", "webreader"),
+            "grant_type": "authorization_code",
+            "code": code,
+        }
+        redirect_uri = getattr(self, "_redirect_hint", None)
+        if redirect_uri:
+            payload["redirect_uri"] = redirect_uri
+        try:
+            client = TolinoClient(self.partner_id, self.hardware_id_value)
+            data = client._request(partner["token_url"], "POST", payload,
+                                   form=True, authenticated=False)
+        except Exception as exc:
+            self.status.setText(
+                "Token-Austausch fehlgeschlagen (%s) – Storage-Übernahme "
+                "läuft weiter …" % sanitize_error(exc))
+            self._exchanged_code = None
+            try:
+                self._timer.start()
+            except Exception:
+                pass
+            return True
+        refresh = data.get("refresh_token")
+        if not refresh:
+            self.status.setText(
+                "Token-Antwort ohne Refresh-Token – Storage-Übernahme "
+                "läuft weiter …")
+            try:
+                self._timer.start()
+            except Exception:
+                pass
+            return True
+        self.refresh_token = refresh
+        self.hardware_id = (data.get("hardware_id")
+                            or self.hardware_id_value or None)
+        self.completed = True
+        self.status.setText("Anmeldung abgeschlossen / Sign-in complete.")
+        if QTimer is not None:
+            QTimer.singleShot(600, self.accept)
+        return True
 
     def _poll_storage(self):
         if self.completed or self._cancel_requested:
