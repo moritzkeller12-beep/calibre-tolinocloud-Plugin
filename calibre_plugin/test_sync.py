@@ -2207,23 +2207,88 @@ class BootstrapperTests(unittest.TestCase):
     def _fake_plugin_dir(self):
         return tempfile.mkdtemp(prefix="tolino-bootstrap-test-")
 
-    def test_wheel_table_is_consistent(self):
+    def test_wheel_tables_are_consistent(self):
         from . import bootstrapper
 
-        seen = set()
-        for key, entries in bootstrapper.WHEELS.items():
-            self.assertEqual(2, len(entries), key)  # curl_cffi + cffi wheel
-            for filename, sha256, url_path in entries:
-                self.assertTrue(filename.endswith(".whl"))
-                self.assertEqual(64, len(sha256))
-                self.assertNotIn("PLACEHOLDER", sha256)
-                seen.add(filename)
+        # The curl_cffi wheel is abi3 (works on every CPython >= its tag).
+        self.assertEqual(5, len(bootstrapper.CURL_CFFI_WHEELS))
+        for platform, row in bootstrapper.CURL_CFFI_WHEELS.items():
+            filename, sha256, url_path = row
+            self.assertIn("cp310-abi3", filename, platform)
+            self.assertEqual(64, len(sha256), platform)
+            self.assertTrue(url_path.endswith(filename), platform)
+        # cffi is version-specific: every supported CPython tag has a wheel
+        # for every platform, each with a valid checksum.
+        expected_keys = {("cp%d%d" % (3, minor), platform)
+                         for minor in range(10, 15)
+                         for platform in bootstrapper.CURL_CFFI_WHEELS}
+        self.assertEqual(expected_keys, set(bootstrapper.CFFI_WHEELS))
+        for (tag, platform), row in bootstrapper.CFFI_WHEELS.items():
+            filename, sha256, url_path = row
+            self.assertTrue(filename.startswith("cffi-2.1.1-%s-" % tag),
+                            (tag, platform))
+            self.assertEqual(64, len(sha256), (tag, platform))
+            self.assertTrue(url_path.endswith(filename), (tag, platform))
         for filename, sha256, url_path in bootstrapper.WHEELS_ANY:
+            self.assertTrue(filename.endswith(".whl"))
             self.assertEqual(64, len(sha256))
-            seen.add(filename)
+            self.assertNotIn("PLACEHOLDER", sha256)
+            self.assertTrue(url_path.endswith(filename))
         # Pure-python deps appear exactly once (they are platform-neutral).
+        seen = [row[0] for row in bootstrapper.WHEELS_ANY]
         self.assertEqual(1, sum(1 for name in seen if name.startswith("pycparser")))
         self.assertEqual(1, sum(1 for name in seen if name.startswith("certifi")))
+
+    def test_cffi_tag_follows_running_interpreter(self):
+        import sys
+        from . import bootstrapper
+
+        with patch.object(sys, "version_info", (3, 12, 3, "final", 0)):
+            self.assertEqual("cp312", bootstrapper._cffi_tag())
+        with patch.object(sys, "version_info", (3, 10, 0, "final", 0)):
+            self.assertEqual("cp310", bootstrapper._cffi_tag())
+        with patch.object(sys, "version_info", (3, 9, 18, "final", 0)):
+            self.assertIsNone(bootstrapper._cffi_tag())
+
+    def test_install_rejects_unsupported_python_with_manual_hint(self):
+        import sys
+        from . import bootstrapper
+
+        with patch.object(sys, "version_info", (3, 9, 18, "final", 0)):
+            with self.assertRaisesRegex(bootstrapper.BootstrapError,
+                                        "Python 3.10-3.14"):
+                bootstrapper.install(
+                    plugin_dir=self._fake_plugin_dir(), progress=lambda t: None)
+
+    def test_install_picks_cffi_wheel_matching_interpreter(self):
+        import sys
+        from . import bootstrapper
+
+        tmp = self._fake_plugin_dir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            tmp, ignore_errors=True))
+        picked = []
+
+        def fake_download(url, expected_sha256):
+            filename = url.rsplit("/", 1)[-1]
+            picked.append(filename)
+            buf = __import__("io").BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                top = filename.split("-")[0]
+                zf.writestr("%s/__init__.py" % top, "# fake package\n")
+            return buf.getvalue()
+
+        with patch.object(sys, "version_info", (3, 12, 3, "final", 0)), \
+                patch.object(bootstrapper, "_download", fake_download):
+            bootstrapper.install(plugin_dir=tmp, progress=lambda t: None)
+
+        self.assertEqual(4, len(picked))
+        self.assertTrue(
+            any(name.startswith("cffi-2.1.1-cp312-") for name in picked),
+            picked)
+        self.assertTrue(
+            any(name.startswith("curl_cffi-0.16.3-cp310-abi3-")
+                for name in picked), picked)
 
     def test_download_rejects_checksum_mismatch(self):
         from . import bootstrapper
@@ -2239,7 +2304,6 @@ class BootstrapperTests(unittest.TestCase):
                 bootstrapper._download("https://example.invalid/x.whl", wrong)
 
     def test_install_extracts_and_verifies_fake_wheels(self):
-        import zipfile
         from . import bootstrapper
 
         tmp = self._fake_plugin_dir()
@@ -2253,12 +2317,11 @@ class BootstrapperTests(unittest.TestCase):
                 zf.writestr("%s/__init__.py" % top, "# fake package\n")
             return buf.getvalue()
 
-        entries = []
-        for key, items in bootstrapper.WHEELS.items():
-            if key == bootstrapper._platform_key():
-                entries = list(items)
-                break
-        entries = bootstrapper.WHEELS_ANY + entries
+        platform = bootstrapper._platform_key()
+        entries = (list(bootstrapper.WHEELS_ANY)
+                   + [bootstrapper.CURL_CFFI_WHEELS[platform],
+                      bootstrapper.CFFI_WHEELS[(bootstrapper._cffi_tag(),
+                                                platform)]])
 
         def fake_download(url, expected_sha256):
             filename = url.rsplit("/", 1)[-1]
@@ -2270,6 +2333,59 @@ class BootstrapperTests(unittest.TestCase):
         root = os.path.join(tmp, "curl_cffi-libs")
         for name in ("curl_cffi", "cffi", "pycparser", "certifi"):
             self.assertTrue(os.path.isdir(os.path.join(root, name)), name)
+
+    def test_import_from_plugin_dir_loads_fresh_projected_copy(self):
+        """A healthy projected copy is imported (shadowing any other
+        curl_cffi); a broken one yields None instead of raising."""
+        import sys
+        import importlib
+        from . import bootstrapper
+
+        tmp = self._fake_plugin_dir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            tmp, ignore_errors=True))
+        root = os.path.join(tmp, "curl_cffi-libs")
+
+        def cleanup():
+            if root in sys.path:
+                sys.path.remove(root)
+            for name in [m for m in list(sys.modules)
+                         if m.split(".")[0] in ("curl_cffi", "cffi",
+                                                "_cffi_backend", "pycparser",
+                                                "certifi")]:
+                sys.modules.pop(name, None)
+        self.addCleanup(cleanup)
+
+        # Broken projected install, shadowing everything else on sys.path.
+        os.makedirs(os.path.join(root, "curl_cffi"))
+        with open(os.path.join(root, "curl_cffi", "__init__.py"), "w") as fh:
+            fh.write("raise ImportError('broken install')\n")
+        sys.path.insert(0, root)
+        with patch.object(bootstrapper, "calibre_plugin_dir",
+                          return_value=tmp):
+            self.assertIsNone(bootstrapper.import_from_plugin_dir())
+
+        # Repair the projected copy in place (like a fresh one-click install).
+        os.makedirs(os.path.join(root, "curl_cffi", "requests"))
+        with open(os.path.join(root, "curl_cffi", "__init__.py"), "w") as fh:
+            fh.write("")
+        with open(os.path.join(root, "curl_cffi", "requests", "__init__.py"),
+                  "w") as fh:
+            fh.write("class Session:\n"
+                     "    def __init__(self, impersonate=None):\n"
+                     "        self.impersonate = impersonate\n")
+        future = __import__("time").time() + 5
+        for base, dirs, files in os.walk(root):
+            for name in dirs + files:
+                os.utime(os.path.join(base, name), (future, future))
+        importlib.invalidate_caches()
+        with patch.object(bootstrapper, "calibre_plugin_dir",
+                          return_value=tmp):
+            session_factory = bootstrapper.import_from_plugin_dir()
+        self.assertIsNotNone(session_factory)
+        self.assertEqual("chrome",
+                         session_factory(impersonate="chrome").impersonate)
+        self.assertIn(root, sys.path)
 
     def test_setup_status_reports_missing_install(self):
         from . import bootstrapper

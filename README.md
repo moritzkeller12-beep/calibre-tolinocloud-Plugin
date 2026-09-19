@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.6** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
+Plugin-Version: **0.9.7** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
 
 ## Installation
 
@@ -62,11 +62,11 @@ python3 -m pip install --user curl_cffi
 
 Danach **Calibre neu starten** (Plugins laden Python-Module beim Start). Die Diagnose zeigt unter `curl_cffi: true/false`, ob das Modul gefunden wurde, und unter `transport`, welcher Transport den Request ausgeführt hat.
 
-### Ein-Klick-Installation (0.9.6)
+### Ein-Klick-Installation (0.9.7)
 
 Im Plugin-Dialog gibt es den Button **„curl_cffi installieren (Bot-Schutz umgehen)“**. Er:
 
-1. lädt die **offiziellen, versionierten Wheels** (curl_cffi 0.16.3, cffi 2.1.1, pycparser 2.23, certifi) direkt von PyPI,
+1. lädt die **offiziellen, versionierten Wheels** (curl_cffi 0.16.3, cffi 2.1.1 — das **passende cffi-Wheel für die jeweilige Python-Version** 3.10–3.14, pycparser 2.23, certifi) direkt von PyPI,
 2. **verifiziert jede Datei per SHA-256** (Prüfsummen aus den PyPI-Release-Metadaten; bei Abweichung bricht die Installation ab),
 3. entpackt sie in den Calibre-Plugin-Ordner (`<Calibre-Konfig>/plugins/curl_cffi-libs/`) und macht sie sofort importierbar — **ohne pip, ohne Neustart**.
 

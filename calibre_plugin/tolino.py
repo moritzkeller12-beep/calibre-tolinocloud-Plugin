@@ -1832,10 +1832,21 @@ def _impersonate_session():
     except Exception:
         # Bootstrap fallback: the one-click install extracts the library
         # into the plugin directory; import it from there on the fly.
+        bootstrapper = None
         try:
-            from calibre_plugin import bootstrapper
+            # Works inside any package: calibre_plugins.tolino_cloud_sync
+            # inside Calibre, calibre_plugin in the unit tests.
+            from . import bootstrapper  # type: ignore[no-redef]
         except Exception:
-            bootstrapper = None
+            for module_name in ("calibre_plugins.tolino_cloud_sync",
+                                "calibre_plugin"):
+                try:
+                    import importlib
+                    bootstrapper = importlib.import_module(
+                        "%s.bootstrapper" % module_name)
+                    break
+                except Exception:
+                    continue
         session = None
         if bootstrapper is not None:
             try:
