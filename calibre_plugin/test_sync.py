@@ -678,14 +678,14 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(PARTNERS[8]["token_url"], captured["url"])
         self.assertEqual(
             "client_id=webreader&grant_type=refresh_token&"
-            "refresh_token=refresh-token",
+            "refresh_token=refresh-token&scope=SCOPE_BOSH",
             captured["body"])
         self.assertEqual("application/x-www-form-urlencoded",
                          captured["content_type"])
         headers = {key.casefold(): value for key, value in captured["headers"].items()}
         self.assertEqual("https://webreader.mytolino.com", headers["origin"])
         self.assertEqual("https://webreader.mytolino.com/", headers["referer"])
-        self.assertNotIn("scope=", captured["body"])
+        self.assertIn("scope=SCOPE_BOSH", captured["body"])
         self.assertNotIn("client_type", headers)
         self.assertNotIn("client_version", headers)
         self.assertNotIn("reseller_id", headers)

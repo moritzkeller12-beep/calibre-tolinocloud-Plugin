@@ -1656,9 +1656,8 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri,
+        "scope": partner["scope"],
     }
-    if partner_id != 8:
-        payload["scope"] = partner["scope"]
     data = client._request(partner["token_url"], "POST", payload,
                            form=True, authenticated=False)
     if not data.get("access_token") or not data.get("refresh_token"):
@@ -1728,9 +1727,8 @@ class TolinoClient:
                 "client_id": self.partner["client_id"],
                 "grant_type": "refresh_token",
                 "refresh_token": self.refresh,
+                "scope": self.partner["scope"],
             }
-            if self.partner_id != 8:
-                payload["scope"] = self.partner["scope"]
         elif self.username and self.password:
             raise TolinoAuthError(
                 "Username/password login requires the partner's browser OAuth flow. "
