@@ -2021,6 +2021,47 @@ class CurlTransportTests(unittest.TestCase):
         self.assertEqual("a2", client.access)
         self.assertEqual("r3", client.refresh)
 
+    def test_token_post_sends_browser_sec_fetch_header_family(self):
+        import calibre_plugin.tolino as tolino_module
+
+        client = self._client()
+        captured = {}
+
+        def fake_curl(url, body, headers, timeout):
+            captured["headers"] = dict(headers)
+            return 200, json.dumps({
+                "access_token": "a7", "refresh_token": "r7",
+            }).encode("utf-8")
+
+        with patch.object(tolino_module, "_impersonate_session", return_value=None), \
+                patch.object(tolino_module, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.object(tolino_module, "_http_post_via_curl", fake_curl):
+            client.login()
+
+        headers = captured["headers"]
+        # The web reader's own token POST carries this family; the WAF
+        # answers requests without it with the "Zugriff geblockt" page.
+        self.assertEqual("empty", headers.get("Sec-Fetch-Dest"))
+        self.assertEqual("cors", headers.get("Sec-Fetch-Mode"))
+        self.assertEqual("cross-site", headers.get("Sec-Fetch-Site"))
+        self.assertIn("Chromium", headers.get("Sec-CH-UA", ""))
+        self.assertEqual("?0", headers.get("Sec-CH-UA-Mobile"))
+        self.assertEqual("*/*", headers.get("Accept"))
+        # Partner Origin/Referer must survive the merge.
+        self.assertEqual("https://webreader.mytolino.com",
+                         headers.get("Origin"))
+        self.assertEqual("https://webreader.mytolino.com/",
+                         headers.get("Referer"))
+
+    def test_compact_error_text_strips_html_bot_check_page(self):
+        import calibre_plugin.tolino as tolino_module
+
+        page = "<!DOCTYPE html><html><head><title>Zugriff geblockt</title></head>" \
+               "<body>layout-fehlerseite  Zugang verweigert</body></html>"
+        self.assertEqual(
+            "Zugriff geblockt layout-fehlerseite Zugang verweigert",
+            tolino_module._compact_error_text(page))
+
     def test_http_post_via_curl_parses_status_and_body(self):
         import calibre_plugin.tolino as tolino_module
 

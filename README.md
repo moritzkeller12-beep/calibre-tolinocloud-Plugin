@@ -43,6 +43,8 @@ Der Token-Endpunkt sitzt hinter einem Bot-Schutz, der TLS-Fingerprints prüft. D
 2. **curl** (Kommandozeilen-Client)
 3. **urllib** (Python-Standard, letzter Fallback)
 
+Zusätzlich sendet das Plugin beim Token-Request dieselbe **Sec-Fetch-/Client-Hints-Header-Familie** wie der Web Reader selbst (per DevTools verifiziert) — der Bot-Schutz blockt Anfragen ohne diese Header mit der Seite „Zugriff geblockt" (HTTP 403), noch bevor der Token geprüft wird.
+
 Welcher Transport benutzt wurde, steht in der Diagnose (`transport`). Seit 0.9.6 enthält die Fehlermeldung bei 403 zusätzlich die **bereinigte Antwort des Servers** — damit erkennt man, ob Bot-Schutz (z. B. "Access denied") oder ein verbrauchter Refresh-Token (`invalid_grant`) die Ursache ist. Bei `invalid_grant` fordert das Plugin zum Neubeziehen des Tokens im Web Reader auf.
 
 ## Weitere Funktionen

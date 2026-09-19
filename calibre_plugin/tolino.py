@@ -1760,6 +1760,39 @@ BROWSER_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
 )
 
+
+def _browser_sec_headers():
+    """Browser-consistent Sec-Fetch/Client-Hints headers for token requests.
+
+    The web reader's own token POST (captured via browser DevTools) carries
+    exactly this header family; the bot protection in front of the shop
+    token endpoints answers requests without them with an HTML
+    "Zugriff geblockt" page (HTTP 403). The Chrome major version is derived
+    from BROWSER_USER_AGENT so the UA and the Client Hints stay consistent.
+    """
+    match = re.search(r"Chrome/(\d+)", BROWSER_USER_AGENT)
+    major = match.group(1) if match else "153"
+    return {
+        "Accept": "*/*",
+        "Accept-Language": "de-DE,de;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Priority": "u=1, i",
+        "Sec-CH-UA": '"Chromium";v="%s", "Not_A Brand";v="8"' % major,
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Linux"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-GPC": "1",
+    }
+
+
+def _compact_error_text(detail):
+    """Collapse HTML bot-check pages to readable text for error messages."""
+    text = re.sub(r"<[^>]+>", " ", detail or "")
+    return re.sub(r"\s+", " ", text).strip()
+
 def _curl_binary():
     """Return a usable curl binary path, or None if curl is not installed."""
     for name in CURL_BINARIES:
@@ -1977,6 +2010,9 @@ class TolinoClient:
                 if self.partner.get(key):
                     headers[key] = self.partner[key]
         elif url == self.partner.get("token_url"):
+            # Look like the web reader's own token POST: full Sec-Fetch /
+            # Client-Hints set first, partner-specific Origin/Referer last.
+            headers.update(_browser_sec_headers())
             headers.update(self.partner.get("token_headers", {}))
         if data is not None:
             if form:
@@ -2028,7 +2064,8 @@ class TolinoClient:
                 self.access = None
                 raise TolinoAuthError(
                     "Tolino rejected authentication (%s): %s"
-                    % (exc.code, self.last_error_text or "no response detail")
+                    % (exc.code, _compact_error_text(self.last_error_text)
+                       or "no response detail")
                 )
             raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
 
