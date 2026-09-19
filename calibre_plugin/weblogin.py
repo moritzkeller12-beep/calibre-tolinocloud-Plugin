@@ -474,10 +474,14 @@ class EmbeddedLoginDialog(QDialog):
             "client_id": partner.get("client_id", "webreader"),
             "grant_type": "authorization_code",
             "code": code,
+            "scope": partner.get("scope", "SCOPE_BOSH"),
         }
         redirect_uri = getattr(self, "_redirect_hint", None)
         if redirect_uri:
             payload["redirect_uri"] = redirect_uri
+        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+            if partner.get(key):
+                payload[key] = partner[key]
         try:
             client = TolinoClient(self.partner_id, self.hardware_id_value)
             data = client._request(partner["token_url"], "POST", payload,

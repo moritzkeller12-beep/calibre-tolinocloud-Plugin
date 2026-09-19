@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import zipfile
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,7 +20,9 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN)
 from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      TolinoClient, extract_login_tokens, hardware_id,
-                     normalize_refresh_token, sanitize_error,
+                     force_legacy_partner_id, normalize_hardware_id,
+                     normalize_refresh_token, resolve_partner_id,
+                     sanitize_error,
                      validate_callback, scrape_browser_tokens, browser_login)
 try:
     from . import weblogin
@@ -589,28 +592,54 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual([("gone", "t2")], plan_sync({}, state, ["EPUB"], True)[1])
 
     def test_reference_partners_and_stable_hardware_shape(self):
-        for partner_id in (3, 4, 6, 8, 13, 23, 30):
+        for partner_id in (1, 2, 3, 4, 5, 6, 7):
             self.assertIn(partner_id, PARTNERS)
-        self.assertRegex(hardware_id(), r"^[123x]..A-00BCD-EFGHI-JKLMN-OPQRh$")
+        # Hardware IDs use the web reader's 8-4-4-4-12 UUID format.
+        self.assertRegex(hardware_id(), r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+    def test_reseller_id_matches_protocol_partner(self):
+        # The protocol reseller IDs stay stable while plugin IDs are
+        # consecutive; Orell Fuessli keeps reseller 8 (new plugin ID 4).
+        self.assertEqual("8", PARTNERS[4]["reseller_id"])
+        self.assertEqual("3", PARTNERS[1]["reseller_id"])
+        self.assertEqual("13", PARTNERS[5]["reseller_id"])
+
+    def test_legacy_partner_ids_are_resolved(self):
+        for legacy, expected in ((3, 1), (4, 2), (6, 3), (8, 4),
+                                 (13, 5), (23, 6), (30, 7)):
+            self.assertEqual(expected, force_legacy_partner_id(legacy))
+        # Runtime resolution is safe on overlapping IDs: current IDs win.
+        self.assertEqual(4, resolve_partner_id(4))
+        self.assertEqual(1, resolve_partner_id(1))
+
+    def test_compact_hardware_id_is_normalized_to_uuid(self):
+        self.assertEqual(
+            "aff2e436-beb8-53e8-23b8-e02163f55220",
+            normalize_hardware_id("aff2e436beb853e823b8e02163f55220"))
+        self.assertEqual(
+            "dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1",
+            normalize_hardware_id("dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1"))
+        self.assertEqual("", normalize_hardware_id(""))
+        self.assertEqual("custom-device", normalize_hardware_id("custom-device"))
 
     def test_partner_8_refresh_configuration_matches_reference(self):
-        self.assertEqual("webreader", PARTNERS[8]["client_id"])
-        self.assertEqual("SCOPE_BOSH", PARTNERS[8]["scope"])
+        self.assertEqual("webreader", PARTNERS[4]["client_id"])
+        self.assertEqual("SCOPE_BOSH", PARTNERS[4]["scope"])
         self.assertEqual("https://www.orellfuessli.ch/auth/oauth2/token",
-                         PARTNERS[8]["token_url"])
+                         PARTNERS[4]["token_url"])
         self.assertEqual(
             "https://www.orellfuessli.ch/auth/oauth2/autologin",
-            PARTNERS[8]["auth_url"])
+            PARTNERS[4]["auth_url"])
         self.assertEqual("https://webreader.mytolino.com/library/",
-                         PARTNERS[8]["reader_url"])
-        self.assertEqual("37", PARTNERS[8]["x_buchde.mandant_id"])
-        self.assertEqual("17", PARTNERS[8]["x_buchde.skin_id"])
-        self.assertEqual("TOLINO_WEBREADER", PARTNERS[8]["client_type"])
-        self.assertEqual("5.2.0", PARTNERS[8]["client_version"])
+                         PARTNERS[4]["reader_url"])
+        self.assertEqual("37", PARTNERS[4]["x_buchde.mandant_id"])
+        self.assertEqual("17", PARTNERS[4]["x_buchde.skin_id"])
+        self.assertEqual("TOLINO_WEBREADER", PARTNERS[4]["client_type"])
+        self.assertEqual("5.2.0", PARTNERS[4]["client_version"])
         self.assertEqual("https://webreader.mytolino.com",
-                         PARTNERS[8]["token_headers"]["Origin"])
+                         PARTNERS[4]["token_headers"]["Origin"])
         self.assertEqual("https://webreader.mytolino.com/",
-                         PARTNERS[8]["token_headers"]["Referer"])
+                         PARTNERS[4]["token_headers"]["Referer"])
 
     def test_refresh_token_normalization_reports_only_safe_metadata(self):
         token, info = normalize_refresh_token('  "refresh-secret-value"  ')
@@ -639,8 +668,9 @@ class SyncPlanTests(unittest.TestCase):
             captured["headers"] = request.headers
             return Response()
 
-        with patch("calibre_plugin.tolino.urlopen", request):
-            client = TolinoClient(8, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", request):
+            client = TolinoClient(4, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                                   "refresh-token")
             client.access = "access-token"
             client.expires_at = time.time() + 60
@@ -672,11 +702,12 @@ class SyncPlanTests(unittest.TestCase):
             captured["headers"] = request.headers
             return Response()
 
-        with patch("calibre_plugin.tolino.urlopen", request):
-            client = TolinoClient(8, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", request):
+            client = TolinoClient(4, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                                   " refresh-token ")
             client.login()
-        self.assertEqual(PARTNERS[8]["token_url"], captured["url"])
+        self.assertEqual(PARTNERS[4]["token_url"], captured["url"])
         self.assertEqual(
             "client_id=webreader&grant_type=refresh_token&"
             "refresh_token=refresh-token&scope=SCOPE_BOSH",
@@ -711,8 +742,9 @@ class SyncPlanTests(unittest.TestCase):
                 return (b'{"access_token":"access-secret",'
                         b'"refresh_token":"rotated-refresh","expires_in":3600}')
 
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
-            client = TolinoClient(8, "hardware", "old-refresh",
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+            client = TolinoClient(4, "hardware", "old-refresh",
                                   token_callback=captured.append)
             self.assertEqual("rotated-refresh", client.login())
             self.assertEqual(["rotated-refresh"], captured)
@@ -726,9 +758,10 @@ class SyncPlanTests(unittest.TestCase):
         body = b'{"error":"invalid_grant","error_description":"Maximum allowed refresh token reuse exceeded"}'
         error = HTTPError("https://example.invalid/token", 400, "Bad Request", {}, None)
         error.read = lambda: body
-        with patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
             with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
-                TolinoClient(8, "", "old-refresh").login()
+                TolinoClient(4, "", "old-refresh").login()
         self.assertEqual(1, request.call_count)
 
     def test_other_partner_refresh_payload_keeps_configured_scope(self):
@@ -750,8 +783,9 @@ class SyncPlanTests(unittest.TestCase):
             captured["body"] = request.data.decode("utf-8")
             return Response()
 
-        with patch("calibre_plugin.tolino.urlopen", request):
-            TolinoClient(3, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", request):
+            TolinoClient(1, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                          "refresh-token").login()
         self.assertEqual(
             "client_id=webreader&grant_type=refresh_token&"
@@ -759,7 +793,7 @@ class SyncPlanTests(unittest.TestCase):
             captured["body"])
 
     def test_auth_diagnostics_redacts_token_content(self):
-        client = TolinoClient(8, "", '"secret-refresh"')
+        client = TolinoClient(4, "", '"secret-refresh"')
         diagnostics = client.auth_diagnostics()
         rendered = format_diagnostic_report([{
             "step": "auth", "status": "error", "value": diagnostics,
@@ -834,8 +868,9 @@ class SyncPlanTests(unittest.TestCase):
         error = HTTPError("https://example.invalid/token", 400, "Bad Request",
                           {}, None)
         error.read = lambda: body
-        client = TolinoClient(8, "", token)
-        with patch("calibre_plugin.tolino.urlopen", side_effect=error):
+        client = TolinoClient(4, "", token)
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", side_effect=error):
             with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
                 client.login()
         self.assertIn("invalid_grant", client.last_error_text)
@@ -930,7 +965,7 @@ class SyncPlanTests(unittest.TestCase):
             })
             values = config.settings()
             self.assertEqual("default", values["active_account"])
-            self.assertEqual([{"name": "default", "partner_id": 8,
+            self.assertEqual([{"name": "default", "partner_id": 4,
                                "hardware_id": "hw-a", "refresh_token": "token-a",
                                "username": "", "password": "",
                                "state": {"u": {"tolino_id": "a"}}}],
@@ -993,7 +1028,7 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual(["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"], values)
 
     def test_browser_login_works_for_all_partners_with_auth_url(self):
-        for partner_id in (3, 4, 8, 13, 23, 30):
+        for partner_id in (1, 2, 4, 5, 6, 7):
             partner = PARTNERS[partner_id]
             if partner.get("auth_url") and partner.get("token_url"):
                 try:
@@ -1305,11 +1340,11 @@ class SyncPlanTests(unittest.TestCase):
                 patch.object(weblogin, "QWebEngineProfile", None):
             self.assertFalse(weblogin.embedded_login_available())
             with self.assertRaisesRegex(TolinoAuthError, "QtWebEngine"):
-                weblogin.run_embedded_login(8, "hw")
+                weblogin.run_embedded_login(4, "hw")
 
     def test_embedded_start_url_builds_oauth_and_reader_fallback(self):
         dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.partner = dict(PARTNERS[8])
+        dialog.partner = dict(PARTNERS[4])
         url = dialog._start_url()
         self.assertIn("auth/oauth2/autologin", url)
         self.assertIn("client_id=webreader", url)
@@ -1348,7 +1383,7 @@ class SyncPlanTests(unittest.TestCase):
     def test_oauth_code_exchange_from_redirect_url(self):
         dialog = object.__new__(weblogin.EmbeddedLoginDialog)
         dialog.completed = False
-        dialog.partner = dict(PARTNERS[8])
+        dialog.partner = dict(PARTNERS[4])
         dialog.partner_id = 8
         dialog.hardware_id_value = "hw-99"
         dialog.refresh_token = None
@@ -1379,16 +1414,21 @@ class SyncPlanTests(unittest.TestCase):
         self.assertTrue(dialog.completed)
         self.assertEqual("code-refresh", dialog.refresh_token)
         self.assertEqual("hw-from-code", dialog.hardware_id)
-        self.assertEqual(PARTNERS[8]["token_url"], exchanged["url"])
+        self.assertEqual(PARTNERS[4]["token_url"], exchanged["url"])
         self.assertEqual("abc123", exchanged["data"]["code"])
         self.assertEqual("authorization_code", exchanged["data"]["grant_type"])
         self.assertEqual("https://webreader.mytolino.com/callback",
                          exchanged["data"]["redirect_uri"])
+        # Payload must match the proven web-reader exchange exactly:
+        # scope plus the Orell-Fuessli shop parameters.
+        self.assertEqual("SCOPE_BOSH", exchanged["data"]["scope"])
+        self.assertEqual("37", exchanged["data"]["x_buchde.mandant_id"])
+        self.assertEqual("17", exchanged["data"]["x_buchde.skin_id"])
 
     def test_oauth_code_exchange_without_code_is_noop(self):
         dialog = object.__new__(weblogin.EmbeddedLoginDialog)
         dialog.completed = False
-        dialog.partner = dict(PARTNERS[8])
+        dialog.partner = dict(PARTNERS[4])
         dialog._exchanged_code = None
 
         class FakeUrl:
@@ -1523,7 +1563,7 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_external_login_page_targets_partner_auth_url(self):
         dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.partner = dict(PARTNERS[8])
+        dialog.partner = dict(PARTNERS[4])
         self.assertIn("auth/oauth2/autologin", dialog._start_url())
 
     def test_stealth_script_registration_is_guarded_without_qt(self):
@@ -1616,7 +1656,7 @@ class ToolbarIconTests(unittest.TestCase):
                      "QMessageBox", "QProgressBar", "QPushButton", "QThread",
                      "QVBoxLayout", "QHBoxLayout", "QTableWidget",
                      "QTableWidgetItem", "QTextEdit", "QObject",
-                     "QInputDialog"):
+                     "QInputDialog", "QFileDialog"):
             setattr(qt_core, name, type(name, (), {}))
         qt_core.pyqtSignal = lambda *a, **k: None
         qt_core.Signal = lambda *a, **k: None
@@ -1697,7 +1737,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
     sync-data collections/read-state, refresh expiry tracking."""
 
     def _client(self):
-        return TolinoClient(8, "hardware", "refresh-token")
+        return TolinoClient(4, "hardware", "refresh-token")
 
     def _login_client(self, token_response=None):
         client = self._client()
@@ -1717,7 +1757,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
                     b'"refresh_token":"rotated","expires_in":3600,'
                     b'"refresh_expires_in":36000}')
 
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", return_value=Response()):
             client.login()
         return client
 
@@ -1756,7 +1797,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
             captured["body"] = url_request.data.decode("utf-8")
             return Response()
 
-        with patch("calibre_plugin.tolino.urlopen", request):
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", request):
             hardware = client.fetch_hardware_id()
         self.assertIn("handshake/devices/list", captured["url"])
         self.assertIn("deviceListRequest", captured["body"])
@@ -1785,7 +1827,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
             def read(self):
                 return b'{"deviceListResponse":{"devices":[]}}'
 
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", return_value=Response()):
             with self.assertRaises(TolinoApiError):
                 client.fetch_hardware_id()
 
@@ -1869,12 +1912,109 @@ class TolinoClientFeatureTests(unittest.TestCase):
             def read(self):
                 return content
 
-        with patch("calibre_plugin.tolino.urlopen",
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen",
                    return_value=RawResponse()):
             data, metadata = client.download("b-9")
         self.assertEqual(content, data)
         self.assertEqual("T", metadata["epubMetaData"]["title"])
         self.assertIn("downloadinfo", calls[0]["url"])
+
+
+class CurlTransportTests(unittest.TestCase):
+    """The token POST may be routed through curl to dodge bot protection."""
+
+    def _client(self):
+        client = TolinoClient(4, "hw-curl", refresh="r-1")
+        client.hardware = "hw-curl"
+        return client
+
+    def test_token_post_prefers_curl_transport(self):
+        import calibre_plugin.tolino as tolino_module
+
+        client = self._client()
+        calls = []
+
+        def fake_curl(url, body, headers, timeout):
+            calls.append({"url": url, "body": body, "headers": dict(headers)})
+            return 200, json.dumps({
+                "access_token": "a1", "refresh_token": "r2",
+                "refresh_expires_in": 36000, "expires_in": 3600,
+            }).encode("utf-8")
+
+        with patch.object(tolino_module, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.object(tolino_module, "_http_post_via_curl", fake_curl):
+            client.login()
+
+        self.assertEqual(PARTNERS[4]["token_url"], calls[0]["url"])
+        self.assertEqual("refresh_token", dict(urllib.parse.parse_qsl(
+            calls[0]["body"].decode()))["grant_type"])
+        self.assertEqual("r-1", dict(urllib.parse.parse_qsl(
+            calls[0]["body"].decode()))["refresh_token"])
+        self.assertEqual("SCOPE_BOSH", dict(urllib.parse.parse_qsl(
+            calls[0]["body"].decode()))["scope"])
+        self.assertEqual("a1", client.access)
+        self.assertEqual("r2", client.refresh)
+        # Origin/Referer token headers from the partner config are forwarded.
+        self.assertEqual("https://webreader.mytolino.com",
+                         calls[0]["headers"].get("Origin"))
+        self.assertEqual("https://webreader.mytolino.com/",
+                         calls[0]["headers"].get("Referer"))
+
+    def test_token_post_falls_back_to_urllib_without_curl(self):
+        import calibre_plugin.tolino as tolino_module
+
+        client = self._client()
+        requests_seen = []
+
+        class FakeResponse:
+            status = 200
+
+            def read(self):
+                return json.dumps({
+                    "access_token": "a2", "refresh_token": "r3",
+                }).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            requests_seen.append(request)
+            return FakeResponse()
+
+        with patch.object(tolino_module, "_curl_binary", return_value=None), \
+                patch.object(tolino_module, "urlopen", fake_urlopen):
+            client.login()
+
+        self.assertEqual(1, len(requests_seen))
+        self.assertEqual("a2", client.access)
+        self.assertEqual("r3", client.refresh)
+
+    def test_http_post_via_curl_parses_status_and_body(self):
+        import calibre_plugin.tolino as tolino_module
+
+        class Completed:
+            returncode = 0
+            stdout = b'{"ok": true}\n200'
+            stderr = b""
+
+        with patch.object(tolino_module.subprocess, "run", return_value=Completed()):
+            status, raw = tolino_module._http_post_via_curl(
+                "https://example.test/token", "grant_type=x", {}, 5)
+
+        self.assertEqual(200, status)
+        self.assertEqual(b'{"ok": true}', raw)
+
+    def test_http_post_via_curl_raises_without_binary(self):
+        import calibre_plugin.tolino as tolino_module
+
+        with patch.object(tolino_module, "_curl_binary", return_value=None):
+            with self.assertRaises(RuntimeError):
+                tolino_module._http_post_via_curl(
+                    "https://example.test/token", "grant_type=x", {}, 5)
 
 
 if __name__ == "__main__":

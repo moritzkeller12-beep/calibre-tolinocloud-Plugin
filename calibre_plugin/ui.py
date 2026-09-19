@@ -9,14 +9,15 @@ try:
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
                          QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QTextEdit, QObject, QInputDialog, pyqtSignal)
+                         QTextEdit, QObject, QInputDialog, QFileDialog,
+                         pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
                          QProgressBar, QPushButton, QThread, QVBoxLayout,
                          QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QTextEdit, QObject, QInputDialog, Signal as pyqtSignal)
+                         QTextEdit, QObject, QInputDialog, QFileDialog, Signal as pyqtSignal)
 
 try:
     from .config import save_account, save_settings, settings
@@ -380,12 +381,33 @@ class SyncDashboard(QDialog):
         action_buttons.addWidget(self.debug)
         action_buttons.addWidget(self.start)
         root.addLayout(action_buttons)
+
+        # Cloud actions on the currently selected sync-table row.
+        cloud_row = QHBoxLayout()
+        self.download_btn = QPushButton(
+            "Buch herunterladen / Download book")
+        self.collection_add_btn = QPushButton(
+            "Zur Sammlung / To collection")
+        self.collection_rm_btn = QPushButton(
+            "Aus Sammlung / From collection")
+        self.mark_read_btn = QPushButton(
+            "Gelesen markieren / Mark read")
+        for button in (self.download_btn, self.collection_add_btn,
+                       self.collection_rm_btn, self.mark_read_btn):
+            cloud_row.addWidget(button)
+        root.addLayout(cloud_row)
+        self.download_btn.clicked.connect(self.download_selected)
+        self.collection_add_btn.clicked.connect(self.add_selected_to_collection)
+        self.collection_rm_btn.clicked.connect(self.remove_selected_from_collection)
+        self.mark_read_btn.clicked.connect(self.mark_selected_read)
         root.addWidget(self.cancel)
         # Plain close button instead of QDialogButtonBox: immune to the Qt6
         # "Invalid ButtonRole, button not added" warning seen in the field.
         close = QPushButton("Schließen / Close")
         close.clicked.connect(self.close)
         root.addWidget(close)
+        self._comparison_rows = []
+        self._comparison_table = None
         self.load_values()
 
     def _save_visible_account(self):
@@ -649,6 +671,8 @@ class SyncDashboard(QDialog):
             dialog = InventoryDialog(comparison, self)
             if dialog.exec() != QDialog.Accepted:
                 return
+            self._comparison_rows = list(comparison)
+            self._comparison_table = dialog.table
             selected_ids = dialog.selected_ids(comparison)
             uploads, removals, current = unpack_plan_result(plan_sync(
                 metadata, state, settings["preferred_formats"],
@@ -746,6 +770,143 @@ class SyncDashboard(QDialog):
             sanitize_error(message, (self.values()["refresh_token"],)),
             show=True,
         )
+
+    # --- Cloud actions on the currently compared inventory row ------------
+
+    def _cloud_client(self):
+        """Build a logged-in client from the current dialog values."""
+        settings = self.values()
+        if not settings["refresh_token"]:
+            QMessageBox.warning(self, "Konfiguration / Configuration",
+                                "Bitte zuerst einen Refresh-Token konfigurieren.")
+            return None
+        self._save_visible_account()
+        client = TolinoClient(
+            settings["partner_id"], settings["hardware_id"],
+            settings["refresh_token"], settings["username"],
+            settings["password"], token_callback=self.persist_refresh_token)
+        client.login()
+        self.set_refresh_token(client.refresh)
+        return client
+
+    def _selected_tolino_row(self):
+        """Return the comparison row for the selected table row, or None."""
+        rows = getattr(self, "_comparison_rows", []) or []
+        if not rows:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Bitte zuerst synchronisieren, damit der Bestand verglichen "
+                "wurde. / Run a synchronization first so the inventory is "
+                "compared.")
+            return None
+        table = getattr(self, "_comparison_table", None)
+        if table is None:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Kein Bestandsfenster offen. / No inventory window open.")
+            return None
+        selected = selected_table_rows(table)
+        if not selected:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Bitte eine Zeile im Bestand ausw\u00e4hlen. / Select a row in "
+                "the inventory table first.")
+            return None
+        row_index = selected[0]
+        if row_index >= len(rows):
+            return None
+        return rows[row_index]
+
+    def download_selected(self):
+        row = self._selected_tolino_row()
+        if row is None:
+            return
+        tolino_id = row.get("tolino_id")
+        if not tolino_id:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Diese Zeile hat keine Tolino-ID (nur in der Cloud vorhandene "
+                "B\u00fccher k\u00f6nnen heruntergeladen werden). / No Tolino ID "
+                "for this row.")
+            return
+        try:
+            client = self._cloud_client()
+            if client is None:
+                return
+            content, _metadata = client.download(tolino_id)
+        except Exception as exc:
+            error_dialog(self, "Download fehlgeschlagen / Download failed",
+                         sanitize_error(exc), show=True)
+            return
+        suggested = "%s.epub" % (row.get("title") or "tolino-book")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "EPUB speichern / Save EPUB", suggested, "EPUB (*.epub)")
+        if not path:
+            return
+        with open(path, "wb") as handle:
+            handle.write(content)
+        info_dialog(self, "Tolino Cloud Sync",
+                    "Buch gespeichert: %s" % path, show_copy_button=False)
+
+    def _collection_action(self, action, title):
+        row = self._selected_tolino_row()
+        if row is None:
+            return
+        tolino_id = row.get("tolino_id")
+        if not tolino_id:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Diese Zeile hat keine Tolino-ID. / No Tolino ID for this row.")
+            return
+        name, ok = QInputDialog.getText(
+            self, title,
+            "Sammlungsname / Collection name:")
+        if not ok or not str(name).strip():
+            return
+        try:
+            client = self._cloud_client()
+            if client is None:
+                return
+            action(client, tolino_id, str(name).strip())
+        except Exception as exc:
+            error_dialog(self, "Sammlung fehlgeschlagen / Collection failed",
+                         sanitize_error(exc), show=True)
+            return
+        info_dialog(self, "Tolino Cloud Sync",
+                    "Sammlung aktualisiert: %s" % name, show_copy_button=False)
+
+    def add_selected_to_collection(self):
+        self._collection_action(
+            lambda client, book, name: client.add_to_collection(book, name),
+            "Zur Sammlung hinzuf\u00fcgen / Add to collection")
+
+    def remove_selected_from_collection(self):
+        self._collection_action(
+            lambda client, book, name: client.remove_from_collection(book, name),
+            "Aus Sammlung entfernen / Remove from collection")
+
+    def mark_selected_read(self):
+        row = self._selected_tolino_row()
+        if row is None:
+            return
+        tolino_id = row.get("tolino_id")
+        if not tolino_id:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Diese Zeile hat keine Tolino-ID. / No Tolino ID for this row.")
+            return
+        try:
+            client = self._cloud_client()
+            if client is None:
+                return
+            client.mark_read(tolino_id, finished=True)
+        except Exception as exc:
+            error_dialog(self, "Markieren fehlgeschlagen / Marking failed",
+                         sanitize_error(exc), show=True)
+            return
+        info_dialog(self, "Tolino Cloud Sync",
+                    "Als gelesen markiert. / Marked as read.",
+                    show_copy_button=False)
 
     def finish_thread(self):
         self._save_visible_account()

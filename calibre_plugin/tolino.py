@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse, quote as _url_quote
 from urllib.request import Request, urlopen
+import subprocess
 
 
 class TolinoError(Exception):
@@ -32,22 +33,36 @@ class TolinoApiError(TolinoError):
 
 
 PARTNERS = {
-    3: {
+    # "reseller_id" is the ID the Tolino API expects (headers/protocol);
+    # the dict key is just the plugin-internal, consecutive list position.
+    # "key" preserves the historic plugin ID for migrating saved settings.
+    1: {
         "name": "Thalia.de",
+        "key": 3,
+        "reseller_id": "3",
         "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.thalia.de/auth/oauth2/token",
         "auth_url": "https://www.thalia.de/de.thalia.ecp.authservice.application/oauth2/authorize",
         "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles",
     },
-    4: {"name": "Thalia.at", "client_id": "webshop01",
+    2: {"name": "Thalia.at",
+        "key": 4,
+        "reseller_id": "4",
+        "client_id": "webshop01",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.thalia.at/de.buch.appservices/api/4004/oauth2/token",
         "auth_url": "https://www.thalia.at/de.thalia.ecp.authservice.application/oauth2/authorize",
         "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
-    6: {"name": "Buch.de", "client_id": "webshop01",
+    3: {"name": "Buch.de",
+        "key": 6,
+        "reseller_id": "6",
+        "client_id": "webshop01",
         "scope": "SCOPE_BOSH SCOPE_BUCHDE"},
-    8: {"name": "Books.ch / orellfuessli.ch", "client_id": "webreader",
+    4: {"name": "Books.ch / orellfuessli.ch",
+        "key": 8,
+        "reseller_id": "8",
+        "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.orellfuessli.ch/auth/oauth2/token",
         "auth_url": "https://www.orellfuessli.ch/auth/oauth2/autologin",
@@ -60,25 +75,62 @@ PARTNERS = {
         "x_buchde.skin_id": "17",
         "client_type": "TOLINO_WEBREADER",
         "client_version": "5.2.0"},
-    13: {
-        "name": "Hugendubel.de",
+    5: {"name": "Hugendubel.de",
+        "key": 13,
+        "reseller_id": "13",
         "client_id": "4c20de744aa8b83b79b692524c7ec6ae",
         "scope": "ebook_library",
         "token_url": "https://api.hugendubel.de/rest/oauth2/token",
         "auth_url": "https://www.hugendubel.de/oauth/authorize",
-        "reader_url": "https://webreader.hugendubel.de/library/index.html",
-    },
-    23: {"name": "Osiander.de", "client_id": "webreader",
+        "reader_url": "https://webreader.hugendubel.de/library/index.html"},
+    6: {"name": "Osiander.de",
+        "key": 23,
+        "reseller_id": "23",
+        "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.osiander.de/auth/oauth2/token",
         "auth_url": "https://www.osiander.de/de.thalia.ecp.authservice.application/oauth2/authorize",
         "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
-    30: {"name": "Buecher.de", "client_id": "webshop01",
+    7: {"name": "Buecher.de",
+        "key": 30,
+        "reseller_id": "30",
+        "client_id": "webshop01",
         "scope": "SCOPE_BOSH SCOPE_BUCHDE",
         "token_url": "https://www.buecher.de/oauth2/token",
         "auth_url": "https://www.buecher.de/oauth2/authorize",
         "reader_url": "https://webreader.mytolino.com/library/"},
 }
+
+# Historic plugin-internal IDs -> new consecutive IDs.
+LEGACY_PARTNER_IDS = {
+    partner["key"]: pid for pid, partner in PARTNERS.items() if "key" in partner
+}
+
+def resolve_partner_id(value):
+    """Map a saved (possibly historic) partner ID to the current plugin ID.
+
+    Safe for runtime use: values that are already valid current IDs pass
+    through unchanged (the ID spaces overlap, e.g. 3 and 4 exist in both).
+    """
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return value
+    if pid in PARTNERS:
+        return pid
+    if pid in LEGACY_PARTNER_IDS:
+        return LEGACY_PARTNER_IDS[pid]
+    return pid
+
+
+def force_legacy_partner_id(value):
+    """Unconditionally map a historic partner ID (for the one-time config
+    migration, where a stored ID can only come from the legacy numbering)."""
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return value
+    return LEGACY_PARTNER_IDS.get(pid, pid)
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 OAUTH_STATE_TTL = 300
@@ -1551,8 +1603,27 @@ def _query_value(query, name):
 
 
 def hardware_id():
-    os_id = {"Windows": "1", "Darwin": "2", "Linux": "3"}.get(platform.system(), "x")
-    return "%sxxA-00BCD-EFGHI-JKLMN-OPQRh" % os_id
+    """Return a fresh hardware ID in the web reader's UUID format."""
+    return str(uuid.uuid4())
+
+
+def normalize_hardware_id(value):
+    """Bring a hardware ID into the web reader's 8-4-4-4-12 UUID shape.
+
+    The web reader sends `dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1`; a compact
+    32-hex variant (no dashes) is converted rather than rejected, anything
+    else is kept as-is so non-hex legacy device IDs still work.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    compact = text.replace("-", "")
+    if re.fullmatch(r"[0-9a-fA-F]{32}", compact):
+        formatted = "%s-%s-%s-%s-%s" % (
+            compact[0:8], compact[8:12], compact[12:16],
+            compact[16:20], compact[20:32])
+        return formatted.lower()
+    return text
 
 
 def callback_redirect_uri(port):
@@ -1658,6 +1729,9 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         "redirect_uri": redirect_uri,
         "scope": partner["scope"],
     }
+    for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+        if partner.get(key):
+            payload[key] = partner[key]
     data = client._request(partner["token_url"], "POST", payload,
                            form=True, authenticated=False)
     if not data.get("access_token") or not data.get("refresh_token"):
@@ -1670,16 +1744,76 @@ def redact_error_text(value):
     return sanitize_error(value)[:500]
 
 
+# --- Optional curl transport -------------------------------------------------
+# Tolino's token endpoint sits behind a bot-protection that fingerprints TLS.
+# Python's urllib has a distinctive handshake and is sometimes rejected with a
+# bot-check page, while curl succeeds (it impersonates a common client).
+# When a `curl` binary is available we route HTTP through it; urllib remains the
+# fallback so the plugin still works without curl installed.
+
+CURL_BINARIES = ("curl",)
+
+# The token endpoint sits behind bot protection that also inspects the
+# User-Agent; a plain "Calibre-Tolino-Plugin" UA is an easy flag.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+)
+
+def _curl_binary():
+    """Return a usable curl binary path, or None if curl is not installed."""
+    for name in CURL_BINARIES:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+def _http_post_via_curl(url, body, headers, timeout):
+    """POST via curl; returns (status:int, raw_bytes). Raises RuntimeError."""
+    binary = _curl_binary()
+    if not binary:
+        raise RuntimeError("curl not available")
+    argv = [
+        binary,
+        "--silent",
+        "--show-error",
+        "--location",           # follow redirects like a browser would
+        "--max-time", str(int(timeout)),
+        "--write-out", "\n%{http_code}",
+        "--url", url,
+        "--request", "POST",
+        "--data-binary",
+        body.decode("utf-8", "replace") if isinstance(body, bytes) else body,
+    ]
+    for key, value in headers.items():
+        argv.extend(["--header", "%s: %s" % (key, value)])
+    completed = subprocess.run(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 5)
+    if completed.returncode != 0 and not completed.stdout:
+        raise RuntimeError("curl failed: %s" %
+                           completed.stderr.decode("utf-8", "replace")[:300])
+    output = completed.stdout
+    # Split off the trailing status code written by --write-out.
+    body_part, _, status_part = output.rpartition(b"\n")
+    try:
+        status = int(status_part.strip() or 0)
+    except ValueError:
+        status = 0
+    if not status:
+        status = 200 if completed.returncode == 0 else 0
+    return status, body_part
+
 class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
     def __init__(self, partner_id, hardware, refresh=None, username=None,
                  secret=None, timeout=45, token_callback=None):
+        partner_id = resolve_partner_id(partner_id)
         if partner_id not in PARTNERS:
             raise TolinoError("Unsupported Tolino partner ID: %s" % partner_id)
         self.partner_id = int(partner_id)
         self.partner = PARTNERS[self.partner_id]
-        self.hardware = hardware or hardware_id()
+        self.hardware = normalize_hardware_id(hardware) or hardware_id()
         self.refresh, self.token_diagnostics = normalize_refresh_token(refresh)
         self.username = username
         self.password = secret
@@ -1702,7 +1836,7 @@ class TolinoClient:
             "token_url": self.partner.get("token_url"),
             "grant_type": "refresh_token",
             "hardware_id": self.hardware,
-            "reseller_id": str(self.partner_id),
+            "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
             "refresh_expires_in": self.refresh_expires_in,
             "http_status": self.last_http_status,
             "error_text": sanitize_error(self.last_error_text,
@@ -1798,12 +1932,12 @@ class TolinoClient:
         if authenticated and (not self.access or time.time() >= self.expires_at):
             self.login()
         body = None
-        headers = {"User-Agent": "Calibre-Tolino-Plugin/0.2"}
+        headers = {"User-Agent": BROWSER_USER_AGENT}
         if authenticated:
             headers.update({
                 "t_auth_token": self.access,
                 "hardware_id": self.hardware,
-                "reseller_id": str(self.partner_id),
+                "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
             })
             for key in ("client_type", "client_version"):
                 if self.partner.get(key):
@@ -1820,14 +1954,16 @@ class TolinoClient:
             else:
                 body = json.dumps(data).encode("utf-8")
                 headers["Content-Type"] = content_type or "application/json"
-        request = Request(url, data=body, headers=headers, method=method)
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                self.last_http_status = response.status
-                self.last_error_text = None
-                raw = response.read()
-        except HTTPError as exc:
-            raw_detail = exc.read().decode("utf-8", "replace")
+
+        def _decode(raw):
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except ValueError:
+                raise TolinoApiError("Tolino returned invalid JSON.")
+
+        def _error(exc, raw_detail):
             self.last_http_status = exc.code
             try:
                 payload = json.loads(raw_detail)
@@ -1858,15 +1994,39 @@ class TolinoClient:
                 self.access = None
                 raise TolinoAuthError("Tolino rejected authentication (%s)." % exc.code)
             raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
+
+        # Route token-endpoint POSTs through curl when available: the bot
+        # protection behind it is friendlier to curl's TLS fingerprint than to
+        # urllib's (pytolino impersonates Chrome TLS for the same reason).
+        if (data is not None and url == self.partner.get("token_url")
+                and _curl_binary() is not None):
+            try:
+                status, raw = _http_post_via_curl(
+                    url, body or b"", headers, self.timeout)
+            except (RuntimeError, OSError, subprocess.TimeoutExpired):
+                status, raw = None, None  # fall back to urllib below
+            else:
+                self.last_http_status = status
+                if status and status < 400:
+                    self.last_error_text = None
+                    return _decode(raw)
+                return _error(
+                    HTTPError(url, status or 400,
+                              "HTTP Error %s" % (status or "?"), {}, None),
+                    (raw or b"").decode("utf-8", "replace"))
+
+        request = Request(url, data=body, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                self.last_http_status = response.status
+                self.last_error_text = None
+                raw = response.read()
+        except HTTPError as exc:
+            return _error(exc, exc.read().decode("utf-8", "replace"))
         except (URLError, OSError) as exc:
             raise TolinoApiError("Tolino request failed: %s" %
                                  sanitize_error(exc, (self.refresh, self.access)))
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except ValueError:
-            raise TolinoApiError("Tolino returned invalid JSON.")
+        return _decode(raw)
 
     def inventory(self):
         data = self._request(BASE_URL + "/inventory/delta?strip=true")
@@ -1947,7 +2107,7 @@ class TolinoClient:
             "deviceListRequest": {
                 "accounts": [{
                     "auth_token": self.access,
-                    "reseller_id": str(self.partner_id),
+                    "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
                 }],
             },
         }
@@ -1975,10 +2135,10 @@ class TolinoClient:
         if not content_url:
             raise TolinoApiError("DownloadInfo response had no contentUrl.")
         request = Request(content_url, headers={
-            "User-Agent": "Calibre-Tolino-Plugin/0.2",
+            "User-Agent": BROWSER_USER_AGENT,
             "t_auth_token": self.access,
             "hardware_id": self.hardware,
-            "reseller_id": str(self.partner_id),
+            "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
         })
         try:
             with urlopen(request, timeout=self.timeout) as response:
