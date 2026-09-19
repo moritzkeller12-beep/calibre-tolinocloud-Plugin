@@ -1391,29 +1391,73 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_embedded_storage_ready_accepts_token_and_ignores_garbage(self):
         import json as json_module
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.completed = False
-        dialog.hardware_id_value = "configured-hw"
-        dialog.refresh_token = None
-        dialog.hardware_id = None
-        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
-        stopped = []
 
-        class Timer:
-            def stop(self):
-                stopped.append(True)
+        def make_dialog():
+            dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+            dialog.completed = False
+            dialog.partner_id = 4
+            dialog.hardware_id_value = "configured-hw"
+            dialog.refresh_token = None
+            dialog.hardware_id = None
+            dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
+            dialog._timer = type("Timer", (), {
+                "stop": staticmethod(lambda: None)})()
+            return dialog
 
-        dialog._timer = Timer()
-        dialog._storage_ready(json_module.dumps({
+        storage = json_module.dumps({
             "refresh_token": "embedded-refresh", "device_id": "embedded-hw",
-        }))
+        })
+
+        # A candidate that validates gets adopted with its rotated token.
+        dialog = make_dialog()
+        with patch.object(weblogin.EmbeddedLoginDialog,
+                          "_validate_fresh_tokens", return_value=True) as val:
+            dialog._storage_ready(storage)
         self.assertTrue(dialog.completed)
-        self.assertEqual("embedded-refresh", dialog.refresh_token)
+        val.assert_called_once_with("embedded-refresh")
         self.assertEqual("embedded-hw", dialog.hardware_id)
 
-        dialog.completed = False
+        # A candidate that fails validation keeps polling (no adoption).
+        dialog = make_dialog()
+        with patch.object(weblogin.EmbeddedLoginDialog,
+                          "_validate_fresh_tokens", return_value=False):
+            dialog._storage_ready(storage)
+        self.assertFalse(dialog.completed)
+        self.assertIsNone(dialog.refresh_token)
+
         dialog._storage_ready("not-json")
         self.assertFalse(dialog.completed)
+
+    def test_validate_fresh_tokens_spends_candidate_and_adopts_rotated(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.completed = False
+        dialog.partner_id = 4
+        dialog.hardware_id = "hw-x"
+        dialog.refresh_token = None
+        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
+        dialog._timer = type("Timer", (), {"stop": staticmethod(lambda: None)})()
+
+        def fake_login(self):
+            if self.refresh == "stale":
+                raise TolinoAuthError("invalid_grant: Invalid refresh token")
+            assert self.refresh == "stale", self.refresh
+            self.refresh = "rotated-fresh"
+
+        with patch.object(weblogin.TolinoClient, "_login", fake_login):
+            adopted = dialog._validate_fresh_tokens("stale")
+        self.assertFalse(adopted)
+        self.assertIsNone(dialog.refresh_token)
+
+        def fresh_login(self):
+            assert self.refresh == "candidate", self.refresh
+            self.refresh = "validated-rotated"
+
+        dialog.completed = False
+        with patch.object(weblogin.TolinoClient, "_login", fresh_login):
+            adopted = dialog._validate_fresh_tokens("candidate")
+        self.assertTrue(adopted)
+        self.assertEqual("validated-rotated", dialog.refresh_token)
+        self.assertTrue(dialog.completed)
 
     def test_oauth_code_exchange_from_redirect_url(self):
         dialog = object.__new__(weblogin.EmbeddedLoginDialog)

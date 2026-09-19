@@ -506,9 +506,12 @@ class EmbeddedLoginDialog(QDialog):
             except Exception:
                 pass
             return True
-        self.refresh_token = refresh
+        # A authorization code is single-use: whoever wins the exchange owns
+        # a brand-new grant, so this token is fresh by construction and is
+        # adopted directly (no storage race applies here).
         self.hardware_id = (data.get("hardware_id")
                             or self.hardware_id_value or None)
+        self.refresh_token = refresh
         self.completed = True
         self.status.setText("Anmeldung abgeschlossen / Sign-in complete.")
         if QTimer is not None:
@@ -532,14 +535,11 @@ class EmbeddedLoginDialog(QDialog):
         refresh, hardware = extract_login_tokens(storage)
         if not refresh:
             return
-        self.refresh_token = refresh
-        self.hardware_id = hardware or self.hardware_id_value or None
-        self.completed = True
-        self._timer.stop()
-        self.status.setText(
-            "Anmeldung abgeschlossen / Sign-in complete.")
-        if QTimer is not None:
-            QTimer.singleShot(600, self.accept)
+        self.hardware_id = (hardware or self.hardware_id
+                            or self.hardware_id_value or None)
+        # The validator adopts the validated (rotated) token itself.
+        if self._validate_fresh_tokens(refresh):
+            self.completed = True
 
     def _apply_external_tokens(self, refresh, hardware):
         """Adopt tokens harvested from the default browser; True on success."""
@@ -555,6 +555,39 @@ class EmbeddedLoginDialog(QDialog):
             pass
         self.status.setText(
             "Tokens aus dem Standardbrowser übernommen.")
+        return True
+
+    def _validate_fresh_tokens(self, refresh):
+        """Live-validate a candidate refresh token before adopting it.
+
+        Tolino rotates the refresh token on every token exchange and the web
+        reader rotates it in the background while it runs, so the token read
+        from storage may already have been replaced by a newer one. Adopting
+        such a spent token produces "invalid_grant" later during sync. This
+        spends the candidate once in exchange for a guaranteed-fresh pair;
+        returns True when the validated tokens were adopted.
+        """
+        client = TolinoClient(self.partner_id, self.hardware_id or "")
+        client.refresh = refresh
+        try:
+            client._login()
+        except Exception as exc:
+            self.status.setText(
+                "Gefundener Token ist nicht frisch (%s) – Überwachung läuft "
+                "weiter …" % sanitize_error(exc))
+            return False
+        if not client.refresh or client.refresh == refresh:
+            self.status.setText(
+                "Token-Vorschau ergab keinen neuen Refresh-Token – "
+                "Überwachung läuft weiter …")
+            return False
+        self.refresh_token = client.refresh
+        self.completed = True
+        self._timer.stop()
+        self.status.setText(
+            "Anmeldung abgeschlossen / Sign-in complete.")
+        if QTimer is not None:
+            QTimer.singleShot(600, self.accept)
         return True
 
     def _open_external_login(self):
@@ -590,9 +623,18 @@ class EmbeddedLoginDialog(QDialog):
         accepted = (box.exec() == ok) if ok is not None else True
         if accepted:
             refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
-            if self._apply_external_tokens(refresh, hardware):
-                self.accept()
-                return
+            notes = list(notes)
+            if refresh:
+                self.hardware_id = (hardware or self.hardware_id
+                                    or self.hardware_id_value or None)
+                if self._validate_fresh_tokens(refresh):
+                    # The validator adopted the rotated token already.
+                    self.accept()
+                    return
+                notes.append(
+                    "Der gefundene Token war bereits verbraucht (invalid "
+                    "grant). Warten Sie, bis der Web Reader einen neuen "
+                    "ausgegeben hat, und versuchen Sie es gleich nochmal.")
             detail = "\n".join("- %s" % note for note in notes) or \
                 "- Kein Browserprofil gefunden"
             retry = QMessageBox.question(
