@@ -1,5 +1,6 @@
 import unittest
 import ast
+import json
 import os
 import tempfile
 import time
@@ -1689,6 +1690,192 @@ class ToolbarIconTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual([], set_calls)
+
+
+class TolinoClientFeatureTests(unittest.TestCase):
+    """Tests for pytolino-derived client features: device list, download,
+    sync-data collections/read-state, refresh expiry tracking."""
+
+    def _client(self):
+        return TolinoClient(8, "hardware", "refresh-token")
+
+    def _login_client(self, token_response=None):
+        client = self._client()
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return token_response or (
+                    b'{"access_token":"access-secret",'
+                    b'"refresh_token":"rotated","expires_in":3600,'
+                    b'"refresh_expires_in":36000}')
+
+        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+            client.login()
+        return client
+
+    def test_refresh_expiry_is_tracked_from_token_response(self):
+        client = self._login_client()
+        self.assertGreater(client.refresh_expires_at, time.time())
+        self.assertLessEqual(client.refresh_expires_in, 36000)
+        diagnostics = client.auth_diagnostics()
+        self.assertIn("refresh_expires_in", diagnostics)
+        self.assertLessEqual(diagnostics["refresh_expires_in"], 36000)
+
+    def test_refresh_expiry_unknown_when_response_lacks_field(self):
+        client = self._login_client(
+            b'{"access_token":"access-secret","expires_in":3600}')
+        self.assertEqual(0, client.refresh_expires_at)
+        self.assertEqual(0, client.refresh_expires_in)
+
+    def _device_list_client(self, devices_payload):
+        client = self._login_client()
+        captured = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return devices_payload
+
+        def request(url_request, timeout):
+            captured["url"] = url_request.full_url
+            captured["body"] = url_request.data.decode("utf-8")
+            return Response()
+
+        with patch("calibre_plugin.tolino.urlopen", request):
+            hardware = client.fetch_hardware_id()
+        self.assertIn("handshake/devices/list", captured["url"])
+        self.assertIn("deviceListRequest", captured["body"])
+        self.assertIn("auth_token", captured["body"])
+        return hardware
+
+    def test_fetch_hardware_id_returns_most_recent_device(self):
+        payload = (b'{"deviceListResponse":{"devices":[{'
+                   b'"deviceId":"older","deviceLastUsage":"100"},{'
+                   b'"deviceId":"newest","deviceLastUsage":"200"}]}}')
+        self.assertEqual("newest", self._device_list_client(payload))
+
+    def test_fetch_hardware_id_rejects_empty_device_list(self):
+        from .tolino import TolinoApiError
+        client = self._login_client()
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"deviceListResponse":{"devices":[]}}'
+
+        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+            with self.assertRaises(TolinoApiError):
+                client.fetch_hardware_id()
+
+    def _patching_client(self, responses):
+        """Client whose _request returns queued dict responses."""
+        client = self._login_client()
+        queue = list(responses)
+        calls = []
+
+        def fake_request(url, method="GET", data=None, form=False,
+                         authenticated=True, content_type=None, _retry=True):
+            calls.append({"url": url, "method": method, "data": data})
+            return queue.pop(0)
+
+        client._request = fake_request
+        return client, calls
+
+    def test_add_to_collection_sends_tag_add_patch(self):
+        client, calls = self._patching_client([{"revision": 7}])
+        revision = client.add_to_collection("book-1", "SciFi")
+        self.assertEqual(7, revision)
+        self.assertEqual("PATCH", calls[0]["method"])
+        self.assertIn("sync-data", calls[0]["url"])
+        body = calls[0]["data"]
+        patch = body["patches"][0]
+        self.assertEqual("add", patch["op"])
+        self.assertEqual("/publications/book-1/tags", patch["path"])
+        self.assertEqual("SciFi", patch["value"]["name"])
+        self.assertEqual("collection", patch["value"]["category"])
+
+    def test_remove_from_collection_requires_existing_tag(self):
+        from .tolino import TolinoApiError
+        existing = {
+            "op": "add",
+            "path": "/publications/book-1/tags",
+            "value": {"name": "SciFi", "category": "collection",
+                      "revision": 3, "modified": 1},
+        }
+        client, calls = self._patching_client([
+            {"revision": 7, "patches": [existing]},   # get_sync_data
+            {"revision": 8},                          # remove patch
+        ])
+        revision = client.remove_from_collection("book-1", "SciFi")
+        self.assertEqual(8, revision)
+        patch = calls[1]["data"]["patches"][0]
+        self.assertEqual("remove", patch["op"])
+        self.assertEqual(3, patch["value"]["revision"])
+
+        client2, _ = self._patching_client([
+            {"revision": 7, "patches": []}])
+        with self.assertRaises(TolinoApiError):
+            client2.remove_from_collection("book-1", "SciFi")
+
+    def test_mark_read_uses_system_tag(self):
+        client, calls = self._patching_client([{"revision": 9}])
+        revision = client.mark_read("book-2", finished=True)
+        self.assertEqual(9, revision)
+        patch = calls[0]["data"]["patches"][0]
+        self.assertEqual("system", patch["value"]["category"])
+        self.assertEqual("collection_finished_readings_name",
+                         patch["value"]["name"])
+
+    def test_download_resolves_content_url_and_returns_metadata(self):
+        client, calls = self._patching_client([
+            {"DownloadInfo": {"contentUrl": "https://cdn.example/epub"}},
+            {"PublicationInventory": {"edata": [],
+                                      "ebook": [{"deliverableId": "b-9",
+                                                 "epubMetaData": {"title": "T"}}]}},
+        ])
+        content = b"EPUB-BYTES"
+
+        class RawResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return content
+
+        with patch("calibre_plugin.tolino.urlopen",
+                   return_value=RawResponse()):
+            data, metadata = client.download("b-9")
+        self.assertEqual(content, data)
+        self.assertEqual("T", metadata["epubMetaData"]["title"])
+        self.assertIn("downloadinfo", calls[0]["url"])
+
 
 if __name__ == "__main__":
     unittest.main()
