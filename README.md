@@ -16,7 +16,7 @@ Im Dialog **Tolino Cloud Sync**: Konto wählen, Partner (z. B. **8 – Books.ch 
 
 ## Refresh-Token beschaffen
 
-**Automatisch:** Im Plugin **„Im Browser anmelden"** oder **„Token aus Browser extrahieren"** klicken (im Tolino **Web Reader** angemeldet sein, nicht nur im Shop).
+**Automatisch:** Im Plugin **„Im Browser anmelden“** oder **„Token aus Browser extrahieren“** klicken (im Tolino **Web Reader** angemeldet sein, nicht nur im Shop). Beide Wege **validieren gefundene Tokens live** am Token-Endpunkt und speichern nur den frischen, rotierten Token. Browser-Storages enthalten nach Hintergrund-Rotationen oft mehrere Tokens, von denen ältere bereits verbraucht sind — sind alle Kandidaten verbraucht, den Web Reader einmal neu laden (F5) und direkt danach erneut versuchen.
 
 **Manuell (Fallback):**
 
