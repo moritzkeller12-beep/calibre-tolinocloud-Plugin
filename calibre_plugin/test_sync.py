@@ -1428,6 +1428,79 @@ class SyncPlanTests(unittest.TestCase):
         dialog._storage_ready("not-json")
         self.assertFalse(dialog.completed)
 
+    def test_extract_all_tokens_returns_every_historical_candidate(self):
+        from .tolino import _extract_all_tokens_from_storage
+
+        storage = {
+            "webreader.mytolino.com/refresh_token": "spent-old",
+            "webreader.mytolino.com/userToken":
+                '{"refresh": "spent-newer", "expireTime": 1}',
+            "webreader.mytolino.com/hardware_id": "hw-77",
+        }
+        refreshes, hardwares = _extract_all_tokens_from_storage(storage)
+        self.assertEqual(["spent-old", "spent-newer"], refreshes)
+        self.assertEqual(["hw-77"], hardwares)
+
+    def test_scrape_browser_tokens_all_candidates_returns_lists(self):
+        with patch("calibre_plugin.tolino._find_browser_storage_paths",
+                   return_value=["/fake/profile"]), \
+                patch("calibre_plugin.tolino.os.path.isdir", return_value=True), \
+                patch("calibre_plugin.tolino._collect_storage_under",
+                      return_value={
+                          "webreader.mytolino.com/refresh_token": "spent-old",
+                          "webreader.mytolino.com/hardware_id": "hw-77",
+                      }):
+            refreshes, hardwares, notes = scrape_browser_tokens(
+                diagnose=True, all_candidates=True)
+        self.assertEqual(["spent-old"], refreshes)
+        self.assertEqual(["hw-77"], hardwares)
+        self.assertTrue(any("Kandidat" in n for n in notes), notes)
+
+    def test_validate_fresh_tokens_walks_candidate_list(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.completed = False
+        dialog.partner_id = 4
+        dialog.hardware_id = "hw-x"
+        dialog.refresh_token = None
+        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
+        dialog._timer = type("Timer", (), {"stop": staticmethod(lambda: None)})()
+        seen = []
+
+        def fake_login(self):
+            seen.append(self.refresh)
+            if self.refresh == "spent-old":
+                raise TolinoAuthError("invalid_grant: Invalid refresh token")
+            if self.refresh == "spent-newer":
+                raise TolinoAuthError("invalid_grant: Invalid refresh token")
+            assert self.refresh == "fresh-now", self.refresh
+            self.refresh = "rotated-fresh"
+
+        with patch.object(weblogin.TolinoClient, "_login", fake_login):
+            adopted = dialog._validate_fresh_tokens(
+                ["spent-old", "spent-newer", "fresh-now"])
+        self.assertTrue(adopted)
+        self.assertEqual(["spent-old", "spent-newer", "fresh-now"], seen)
+        self.assertEqual("rotated-fresh", dialog.refresh_token)
+        self.assertTrue(dialog.completed)
+
+    def test_validate_fresh_tokens_rejects_all_spent_candidates(self):
+        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
+        dialog.completed = False
+        dialog.partner_id = 4
+        dialog.hardware_id = "hw-x"
+        dialog.refresh_token = None
+        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
+        dialog._timer = type("Timer", (), {"stop": staticmethod(lambda: None)})()
+
+        def fake_login(self):
+            raise TolinoAuthError("invalid_grant: Invalid refresh token")
+
+        with patch.object(weblogin.TolinoClient, "_login", fake_login):
+            adopted = dialog._validate_fresh_tokens(["spent-a", "spent-b"])
+        self.assertFalse(adopted)
+        self.assertIsNone(dialog.refresh_token)
+        self.assertFalse(dialog.completed)
+
     def test_validate_fresh_tokens_spends_candidate_and_adopts_rotated(self):
         dialog = object.__new__(weblogin.EmbeddedLoginDialog)
         dialog.completed = False

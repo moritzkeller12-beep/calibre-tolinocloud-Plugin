@@ -1473,8 +1473,96 @@ def extract_login_tokens(storage):
     return refresh, hardware
 
 
-def scrape_browser_tokens(diagnose=False):
+def _extract_all_tokens_from_storage(storage_data):
+    """Return (refresh_candidates, hardware_candidates) as ordered lists.
+
+    Browser storages keep historical entries after every background token
+    rotation, and LevelDB scan order is not recency order, so the first
+    match can be a spent token. Callers should validate candidates one by
+    one until one is accepted by the token endpoint.
+    """
+    refresh_candidates = []
+    hardware_candidates = []
+
+    def remember(value, bucket):
+        if value and value not in bucket:
+            bucket.append(value)
+
+    def value_text(value):
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value).decode("utf-8", "replace")
+        return str(value)
+
+    def candidates_for(value, mode):
+        names = TOKEN_VALUE_KEYS if mode == "refresh" else HARDWARE_VALUE_KEYS
+        found = []
+        try:
+            text = value_text(value)
+        except Exception:
+            return found
+        if "Salted__" in text or (text and text.startswith("U2FsdGVk")):
+            for phrase in READER_AES_PHRASES:
+                decrypted = cryptojs_decrypt(text, phrase)
+                if decrypted and decrypted.strip():
+                    found.append(decrypted.strip())
+        found.append(text.strip())
+        return found
+
+    def shaped(value, mode):
+        """Best non-ciphertext token text for a storage value (or None)."""
+        names = TOKEN_VALUE_KEYS if mode == "refresh" else HARDWARE_VALUE_KEYS
+        for plain in candidates_for(value, mode):
+            if not plain:
+                continue
+            try:
+                parsed = json.loads(plain)
+            except ValueError:
+                if not plain.startswith("{") and not plain.startswith("U2FsdGVk"):
+                    return plain
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            for name in names:
+                nested = parsed.get(name)
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+            if mode == "refresh":
+                nested = parsed.get("refresh")
+                if isinstance(nested, str) and nested.strip():
+                    for plain_inner in candidates_for(nested, mode):
+                        if plain_inner and not plain_inner.startswith("U2FsdGVk"):
+                            return plain_inner
+        return None
+
+    for key, value in storage_data.items():
+        key_lower = str(key).casefold()
+        if any(name in key_lower for name in ("refresh", "t_auth", "usertoken")):
+            remember(shaped(value, "refresh"), refresh_candidates)
+        if any(name in key_lower for name in ("hardware", "device", "userinfos")):
+            remember(shaped(value, "hardware"), hardware_candidates)
+
+    if not refresh_candidates:
+        for value in storage_data.values():
+            candidate = shaped(value, "refresh")
+            if candidate:
+                remember(candidate, refresh_candidates)
+                break
+    if not hardware_candidates:
+        for value in storage_data.values():
+            candidate = shaped(value, "hardware")
+            if candidate:
+                remember(candidate, hardware_candidates)
+                break
+    return refresh_candidates, hardware_candidates
+
+
+def scrape_browser_tokens(diagnose=False, all_candidates=False):
     """Read Tolino refresh_token/hardware_id from installed browsers.
+
+    With ``all_candidates`` the return value becomes
+    ``(refresh_candidates, hardware_candidates, notes)`` with ordered lists
+    of every credential found: storages keep spent tokens from previous
+    background rotations, so callers validate them one by one.
 
     Supports modern Chromium LevelDB stores (Chrome, Edge, Brave, Chromium,
     Vivaldi, Opera) and modern Firefox LSNG (webappsstore.sqlite) without any
@@ -1485,8 +1573,26 @@ def scrape_browser_tokens(diagnose=False):
     notes = []
     checked = []
     all_keys = {}
-    refresh_token = None
-    hardware_id = None
+    all_refresh = []
+    all_hardware = []
+
+    def remember_pair(storage):
+        if all_candidates:
+            # List mode: keep scanning every profile and merge everything.
+            refreshes, hardwares = _extract_all_tokens_from_storage(storage)
+            for value in refreshes:
+                if value not in all_refresh:
+                    all_refresh.append(value)
+            for value in hardwares:
+                if value not in all_hardware:
+                    all_hardware.append(value)
+            return None
+        refresh_token, hardware_id = _extract_tokens_from_storage(storage)
+        if refresh_token and hardware_id:
+            return (refresh_token, hardware_id, notes) if diagnose \
+                else (refresh_token, hardware_id)
+        return None
+
     for path in _find_browser_storage_paths():
         exists = os.path.isdir(path)
         checked.append("%s%s" % (path, "" if exists else "  (fehlt)"))
@@ -1495,16 +1601,32 @@ def scrape_browser_tokens(diagnose=False):
         storage = _collect_storage_under(path, notes)
         if storage:
             all_keys.update(storage)
-            refresh_token, hardware_id = _extract_tokens_from_storage(storage)
-            if refresh_token and hardware_id:
-                return (refresh_token, hardware_id, notes) if diagnose \
-                    else (refresh_token, hardware_id)
-    if not refresh_token or not hardware_id:
+            result = remember_pair(storage)
+            if result is not None:
+                return result
+    if all_candidates:
+        if not all_refresh or not all_hardware:
+            # Tokens may be split across browser profiles; merge everything.
+            refreshes, hardwares = _extract_all_tokens_from_storage(all_keys)
+            for value in refreshes:
+                if value not in all_refresh:
+                    all_refresh.append(value)
+            for value in hardwares:
+                if value not in all_hardware:
+                    all_hardware.append(value)
+        if all_refresh or all_hardware:
+            notes.append(
+                "%d Refresh-Kandidat(en) und %d Hardware-Kandidat(en) "
+                "gefunden; einer nach dem anderen wird jetzt gegen den "
+                "Token-Endpunkt geprueft." % (len(all_refresh),
+                                              len(all_hardware)))
+            return all_refresh, all_hardware, notes
+    else:
         # Tokens may be split across browser profiles; try the combined set.
-        refresh_token, hardware_id = _extract_tokens_from_storage(all_keys)
-        if refresh_token and hardware_id:
-            return (refresh_token, hardware_id, notes) if diagnose \
-                else (refresh_token, hardware_id)
+        combined = _extract_tokens_from_storage(all_keys)
+        if combined[0] and combined[1]:
+            return (combined[0], combined[1], notes) if diagnose \
+                else (combined[0], combined[1])
     if diagnose:
         if all_keys:
             keys = _diagnose_storage_keys(all_keys)

@@ -558,37 +558,49 @@ class EmbeddedLoginDialog(QDialog):
         return True
 
     def _validate_fresh_tokens(self, refresh):
-        """Live-validate a candidate refresh token before adopting it.
+        """Live-validate candidate refresh token(s) before adopting one.
 
         Tolino rotates the refresh token on every token exchange and the web
-        reader rotates it in the background while it runs, so the token read
-        from storage may already have been replaced by a newer one. Adopting
-        such a spent token produces "invalid_grant" later during sync. This
-        spends the candidate once in exchange for a guaranteed-fresh pair;
-        returns True when the validated tokens were adopted.
+        reader rotates it in the background while it runs, so storage holds
+        spent tokens from earlier rotations and LevelDB scan order is not
+        recency order. A list of candidates is therefore validated in order
+        until the token endpoint accepts one; the rotated, guaranteed-fresh
+        token of the accepted grant is adopted. True on success.
         """
+        candidates = list(refresh) if isinstance(refresh, (list, tuple)) \
+            else [refresh]
         client = TolinoClient(self.partner_id, self.hardware_id or "")
-        client.refresh = refresh
-        try:
-            client._login()
-        except Exception as exc:
+        tried = 0
+        for candidate in candidates:
+            candidate = (candidate or "").strip()
+            if not candidate:
+                continue
+            tried += 1
+            client.refresh = candidate
+            try:
+                client._login()
+            except Exception:
+                continue  # spent or rejected -> try the next candidate
+            if client.refresh and client.refresh != candidate:
+                self.refresh_token = client.refresh
+                self.completed = True
+                self._timer.stop()
+                self.status.setText(
+                    "Anmeldung abgeschlossen / Sign-in complete.")
+                if QTimer is not None:
+                    QTimer.singleShot(600, self.accept)
+                return True
+        if tried:
             self.status.setText(
-                "Gefundener Token ist nicht frisch (%s) – Überwachung läuft "
-                "weiter …" % sanitize_error(exc))
-            return False
-        if not client.refresh or client.refresh == refresh:
+                "Alle %d gefundenen Token-Vorschläge waren bereits "
+                "verbraucht (invalid grant). Lade den Web Reader einmal "
+                "neu, bis ein frischer Token ausgestellt wird, und "
+                "versuche es gleich nochmal." % tried)
+        else:
             self.status.setText(
-                "Token-Vorschau ergab keinen neuen Refresh-Token – "
-                "Überwachung läuft weiter …")
-            return False
-        self.refresh_token = client.refresh
-        self.completed = True
-        self._timer.stop()
-        self.status.setText(
-            "Anmeldung abgeschlossen / Sign-in complete.")
-        if QTimer is not None:
-            QTimer.singleShot(600, self.accept)
-        return True
+                "Kein brauchbarer Token gefunden – Überwachung läuft "
+                "weiter …")
+        return False
 
     def _open_external_login(self):
         """Guided fallback: login in the default browser, then harvest tokens."""

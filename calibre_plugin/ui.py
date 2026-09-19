@@ -524,52 +524,77 @@ class SyncDashboard(QDialog):
         except Exception:
             return hardware_id()
 
+    def _validate_scraped_candidates(self, refreshes, hardwares):
+        """Validate scraped candidates live; return the fresh pair or None."""
+        for refresh in refreshes:
+            client = TolinoClient(self.partner.currentData(),
+                                  hardwares[0] if hardwares else "")
+            client.refresh = refresh
+            try:
+                client._login()
+            except Exception:
+                continue  # spent or rejected -> try the next candidate
+            if client.refresh and client.refresh != refresh:
+                return client.refresh, (hardwares[0] if hardwares else None)
+        return None
+
     def scrape_browser_tokens(self):
-        """Extract refresh_token and hardware_id from browser local storage."""
+        """Extract a working refresh_token and hardware_id from browsers.
+
+        Browser storage keeps spent tokens from earlier background rotations
+        and scan order is not recency order, so every candidate is validated
+        against the token endpoint until one is accepted. Only the fresh,
+        rotated token of the accepted grant is persisted.
+        """
         try:
-            refresh_token, hardware_id = scrape_browser_tokens()
-            if refresh_token and hardware_id:
-                self.refresh.setText(refresh_token)
-                self.hardware.setText(hardware_id)
-                self.persist_refresh_token(refresh_token)
-                QMessageBox.information(
-                    self, "Token extrahiert / Tokens extracted",
-                    "Refresh-Token und Hardware-ID wurden aus dem Browser extrahiert "
-                    "und gespeichert. Bitte pr\u00fcfen Sie, ob der Partner "
-                    "\u00fcbereinstimmt."
-                )
-            elif refresh_token:
-                self.refresh.setText(refresh_token)
-                QMessageBox.information(
-                    self, "Teilerfolg / Partial success",
-                    "Nur der Refresh-Token wurde gefunden. Bitte pr\u00fcfen Sie die "
-                    "Hardware-ID und speichern Sie manuell."
-                )
-            elif hardware_id:
-                self.hardware.setText(hardware_id)
-                QMessageBox.information(
-                    self, "Teilerfolg / Partial success",
-                    "Nur die Hardware-ID wurde gefunden. Bitte pr\u00fcfen Sie den "
-                    "Refresh-Token und speichern Sie manuell."
-                )
-            else:
-                result = scrape_browser_tokens(diagnose=True)
-                refresh_token, hardware_id = result[0], result[1]
-                notes = result[2] if len(result) > 2 else []
+            refreshes, hardwares, notes = scrape_browser_tokens(
+                diagnose=True, all_candidates=True)
+            if refreshes:
+                validated = self._validate_scraped_candidates(
+                    refreshes, hardwares)
+                if validated:
+                    refresh_token, hardware_id = validated
+                    if hardware_id:
+                        self.hardware.setText(hardware_id)
+                    self.refresh.setText(refresh_token)
+                    self.persist_refresh_token(refresh_token)
+                    QMessageBox.information(
+                        self, "Token extrahiert / Tokens extracted",
+                        "Frischer Refresh-Token gefunden und gespeichert "
+                        "(aus %d Kandidaten validiert). Hardware-ID: %s"
+                        % (len(refreshes), hardware_id or "unverändert")
+                    )
+                    return
                 detail = "\n".join("- %s" % note for note in notes) or \
                     "- Kein Browserprofil gefunden"
                 QMessageBox.warning(
-                    self, "Keine Token gefunden / No tokens found",
-                    "Es wurden keine Tolino-Web-Reader-Tokens gefunden "
-                    "(Plugin-Version %s). Der Browser darf dabei offen "
-                    "bleiben. Wichtig:\n"
-                    "1. Im Tolino **Web Reader** (Bibliothek) angemeldet "
-                    "sein – nicht nur im Shop\n"
-                    "2. Den Web Reader einmal vollständig geladen haben "
-                    "(Bücherliste sichtbar)\n\n"
+                    self, "Token verbraucht / Tokens spent",
+                    "Es wurden %d Refresh-Token gefunden, aber alle waren "
+                    "bereits verbraucht (invalid grant).\n\n"
+                    "Lade den Web Reader einmal neu (F5), bis die "
+                    "Bücherliste geladen ist, und versuche es direkt "
+                    "danach erneut.\n\n"
                     "Befund:\n%s" % (
-                        ".".join(str(v) for v in _plugin_version()), detail)
+                        len(refreshes), detail)
                 )
+                return
+            result = scrape_browser_tokens(diagnose=True)
+            refresh_token, hardware_id = result[0], result[1]
+            notes = result[2] if len(result) > 2 else []
+            detail = "\n".join("- %s" % note for note in notes) or \
+                "- Kein Browserprofil gefunden"
+            QMessageBox.warning(
+                self, "Keine Token gefunden / No tokens found",
+                "Es wurden keine Tolino-Web-Reader-Tokens gefunden "
+                "(Plugin-Version %s). Der Browser darf dabei offen "
+                "bleiben. Wichtig:\n"
+                "1. Im Tolino **Web Reader** (Bibliothek) angemeldet "
+                "sein – nicht nur im Shop\n"
+                "2. Den Web Reader einmal vollständig geladen haben "
+                "(Bücherliste sichtbar)\n\n"
+                "Befund:\n%s" % (
+                    ".".join(str(v) for v in _plugin_version()), detail)
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self, "Fehler / Error",
