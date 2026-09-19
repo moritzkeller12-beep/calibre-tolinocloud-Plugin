@@ -62,6 +62,16 @@ python3 -m pip install --user curl_cffi
 
 Danach **Calibre neu starten** (Plugins laden Python-Module beim Start). Die Diagnose zeigt unter `curl_cffi: true/false`, ob das Modul gefunden wurde, und unter `transport`, welcher Transport den Request ausgeführt hat.
 
+### Ein-Klick-Installation (0.9.6)
+
+Im Plugin-Dialog gibt es den Button **„curl_cffi installieren (Bot-Schutz umgehen)“**. Er:
+
+1. lädt die **offiziellen, versionierten Wheels** (curl_cffi 0.16.3, cffi 2.1.1, pycparser 2.23, certifi) direkt von PyPI,
+2. **verifiziert jede Datei per SHA-256** (Prüfsummen aus den PyPI-Release-Metadaten; bei Abweichung bricht die Installation ab),
+3. entpackt sie in den Calibre-Plugin-Ordner (`<Calibre-Konfig>/plugins/curl_cffi-libs/`) und macht sie sofort importierbar — **ohne pip, ohne Neustart**.
+
+Das funktioniert auch in Calibres eingefrorener Python-Umgebung (Windows/macOS), wo `pip install --user` die Module nicht in Reichweite des Plugins bringt. Wer es bevorzugt, kann weiterhin manuell installieren: `python3 -m pip install --user curl_cffi` + Calibre-Neustart.
+
 Welcher Transport benutzt wurde, steht in der Diagnose (`transport`). Seit 0.9.6 enthält die Fehlermeldung bei 403 zusätzlich die **bereinigte Antwort des Servers** — damit erkennt man, ob Bot-Schutz (z. B. "Access denied") oder ein verbrauchter Refresh-Token (`invalid_grant`) die Ursache ist. Bei `invalid_grant` fordert das Plugin zum Neubeziehen des Tokens im Web Reader auf.
 
 ## Weitere Funktionen

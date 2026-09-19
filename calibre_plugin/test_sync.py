@@ -1687,10 +1687,11 @@ class ToolbarIconTests(unittest.TestCase):
         qt_core.QIcon = FakeIcon
         for name in ("QCheckBox", "QComboBox", "QDialog", "QDialogButtonBox",
                      "QFormLayout", "QGroupBox", "QLabel", "QLineEdit",
-                     "QMessageBox", "QProgressBar", "QPushButton", "QThread",
+                     "QMessageBox", "QProgressBar", "QPushButton",
+                     "QProgressDialog", "QThread",
                      "QVBoxLayout", "QHBoxLayout", "QTableWidget",
                      "QTableWidgetItem", "QTextEdit", "QObject",
-                     "QInputDialog", "QFileDialog"):
+                     "QInputDialog", "QFileDialog", "Qt"):
             setattr(qt_core, name, type(name, (), {}))
         qt_core.pyqtSignal = lambda *a, **k: None
         qt_core.Signal = lambda *a, **k: None
@@ -2196,6 +2197,91 @@ class CurlTransportTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 tolino_module._http_post_via_curl(
                     "https://example.test/token", "grant_type=x", {}, 5)
+
+
+class BootstrapperTests(unittest.TestCase):
+    """The curl_cffi one-click installer verifies checksums and projects a
+    working import root into the plugin directory."""
+
+    def _fake_plugin_dir(self):
+        return tempfile.mkdtemp(prefix="tolino-bootstrap-test-")
+
+    def test_wheel_table_is_consistent(self):
+        from . import bootstrapper
+
+        seen = set()
+        for key, entries in bootstrapper.WHEELS.items():
+            self.assertEqual(2, len(entries), key)  # curl_cffi + cffi wheel
+            for filename, sha256, url_path in entries:
+                self.assertTrue(filename.endswith(".whl"))
+                self.assertEqual(64, len(sha256))
+                self.assertNotIn("PLACEHOLDER", sha256)
+                seen.add(filename)
+        for filename, sha256, url_path in bootstrapper.WHEELS_ANY:
+            self.assertEqual(64, len(sha256))
+            seen.add(filename)
+        # Pure-python deps appear exactly once (they are platform-neutral).
+        self.assertEqual(1, sum(1 for name in seen if name.startswith("pycparser")))
+        self.assertEqual(1, sum(1 for name in seen if name.startswith("certifi")))
+
+    def test_download_rejects_checksum_mismatch(self):
+        from . import bootstrapper
+
+        blob = b"definitely-not-a-wheel"
+        wrong = "0" * 64
+        with patch.object(bootstrapper, "urlopen") as fake:
+            fake.return_value.__enter__ = lambda s: type(
+                "R", (), {"read": lambda self: blob})()
+            fake.return_value.__exit__ = lambda s, *a: False
+            with self.assertRaisesRegex(bootstrapper.BootstrapError,
+                                        "SHA-256 mismatch"):
+                bootstrapper._download("https://example.invalid/x.whl", wrong)
+
+    def test_install_extracts_and_verifies_fake_wheels(self):
+        import zipfile
+        from . import bootstrapper
+
+        tmp = self._fake_plugin_dir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            tmp, ignore_errors=True))
+
+        def fake_wheel_blob(name):
+            buf = __import__("io").BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                top = name.split("-")[0]
+                zf.writestr("%s/__init__.py" % top, "# fake package\n")
+            return buf.getvalue()
+
+        entries = []
+        for key, items in bootstrapper.WHEELS.items():
+            if key == bootstrapper._platform_key():
+                entries = list(items)
+                break
+        entries = bootstrapper.WHEELS_ANY + entries
+
+        def fake_download(url, expected_sha256):
+            filename = url.rsplit("/", 1)[-1]
+            return fake_wheel_blob(filename)
+
+        with patch.object(bootstrapper, "_download", fake_download):
+            installed = bootstrapper.install(plugin_dir=tmp, progress=lambda t: None)
+        self.assertEqual(len(entries), len(installed))
+        root = os.path.join(tmp, "curl_cffi-libs")
+        for name in ("curl_cffi", "cffi", "pycparser", "certifi"):
+            self.assertTrue(os.path.isdir(os.path.join(root, name)), name)
+
+    def test_setup_status_reports_missing_install(self):
+        from . import bootstrapper
+
+        tmp = self._fake_plugin_dir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(
+            tmp, ignore_errors=True))
+        with patch.object(bootstrapper, "calibre_plugin_dir", return_value=tmp), \
+                patch.object(bootstrapper, "is_available", return_value=False):
+            installed, importable, plugin_dir = bootstrapper.setup_status()
+        self.assertFalse(installed)
+        self.assertFalse(importable)
+        self.assertEqual(tmp, plugin_dir)
 
 
 if __name__ == "__main__":

@@ -7,19 +7,21 @@ from calibre.gui2.actions import InterfaceAction
 try:
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
-                         QProgressBar, QPushButton, QThread, QVBoxLayout,
-                         QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QTextEdit, QObject, QInputDialog, QFileDialog,
-                         pyqtSignal)
+                         QProgressBar, QPushButton, QProgressDialog, QThread,
+                         QVBoxLayout, QHBoxLayout, QTableWidget,
+                         QTableWidgetItem, QTextEdit, QObject, QInputDialog,
+                         QFileDialog, Qt, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
-                         QProgressBar, QPushButton, QThread, QVBoxLayout,
-                         QHBoxLayout, QTableWidget, QTableWidgetItem,
-                         QTextEdit, QObject, QInputDialog, QFileDialog, Signal as pyqtSignal)
+                         QProgressBar, QPushButton, QProgressDialog, QThread,
+                         QVBoxLayout, QHBoxLayout, QTableWidget,
+                         QTableWidgetItem, QTextEdit, QObject, QInputDialog,
+                         QFileDialog, Qt, Signal as pyqtSignal)
 
 try:
+    from . import bootstrapper
     from .config import save_account, save_settings, settings
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
                        load_state, metadata_by_id, plan_sync,
@@ -34,6 +36,7 @@ try:
                          scrape_browser_tokens)
     from .weblogin import embedded_login_available, run_embedded_login
 except ImportError:
+    bootstrapper = None
     from config import save_account, save_settings, settings
     from sync import (compare_inventory, format_error_details, iter_book_ids,
                       load_state, metadata_by_id, plan_sync,
@@ -329,6 +332,9 @@ class SyncDashboard(QDialog):
         self.browser.clicked.connect(self.browser_login)
         self.scrape_browser = QPushButton("Token aus Browser extrahieren / Extract from browser")
         self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
+        self.install_curl_cffi = QPushButton(
+            "curl_cffi installieren (Bot-Schutz umgehen) / Install curl_cffi")
+        self.install_curl_cffi.clicked.connect(self.install_curl_cffi_clicked)
         self.account_select.currentIndexChanged.connect(self.account_changed)
         self.account_new.clicked.connect(self.new_account)
         self.account_remove.clicked.connect(self.remove_account)
@@ -339,6 +345,7 @@ class SyncDashboard(QDialog):
         account_form.addRow("Refresh token", self.refresh)
         account_form.addRow("", self.browser)
         account_form.addRow("", self.scrape_browser)
+        account_form.addRow("", self.install_curl_cffi)
         account_form.addRow("Status", self.status)
         root.addWidget(account)
 
@@ -568,6 +575,58 @@ class SyncDashboard(QDialog):
                 self, "Fehler / Error",
                 "Fehler beim Extrahieren der Tokens: %s" % sanitize_error(exc)
             )
+
+    def install_curl_cffi_clicked(self):
+        """One-click install of curl_cffi wheels (pinned, checksum-verified)."""
+        if bootstrapper is None:
+            QMessageBox.critical(
+                self, "curl_cffi",
+                "Interner Fehler: Bootstrapper-Modul fehlt im Plugin-Paket.")
+            return
+        installed, importable, plugin_dir = bootstrapper.setup_status()
+        if importable:
+            QMessageBox.information(
+                self, "curl_cffi",
+                "curl_cffi ist bereits installiert und importierbar "
+                "(Diagnose zeigt curl_cffi: true).")
+            return
+        confirm = QMessageBox.question(
+            self, "curl_cffi installieren",
+            "Es werden die offiziellen, versionierten curl_cffi-Räder "
+            "(Version %s) von PyPI geladen, ihre SHA-256-Prüfsummen "
+            "geprüft und in den Calibre-Plugin-Ordner entpackt:\n%s\n\n"
+            "Fortfahren?" % (bootstrapper.CURL_CFFI_VERSION, plugin_dir))
+        if confirm != QMessageBox.Yes:
+            return
+        progress = QProgressDialog(
+            "curl_cffi wird installiert ...", None, 0, 0, self)
+        progress.setWindowTitle("curl_cffi Installation")
+        progress.setWindowModality(Qt.WindowModal)
+        try:
+            def step(text):
+                progress.setLabelText(text)
+                from qt.core import QCoreApplication
+                QCoreApplication.processEvents()
+
+            bootstrapper.install(progress=step)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "curl_cffi Installation fehlgeschlagen",
+                "Fehler bei der Installation: %s" % sanitize_error(exc))
+            return
+        finally:
+            progress.cancel()
+        session_factory = bootstrapper.import_from_plugin_dir()
+        if session_factory is not None:
+            QMessageBox.information(
+                self, "curl_cffi installiert",
+                "curl_cffi wurde installiert und ist sofort nutzbar. "
+                "Testen Sie jetzt \u201eTolino-Antwort testen\u201c.")
+        else:
+            QMessageBox.information(
+                self, "curl_cffi installiert",
+                "curl_cffi wurde nach %s entpackt. Bitte Calibre neu "
+                "starten, damit die Module geladen werden." % plugin_dir)
 
     def values(self):
         refresh_token, _ = normalize_refresh_token(self.refresh.text())

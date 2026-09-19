@@ -1830,7 +1830,20 @@ def _impersonate_session():
     try:
         from curl_cffi.requests import Session
     except Exception:
-        return None
+        # Bootstrap fallback: the one-click install extracts the library
+        # into the plugin directory; import it from there on the fly.
+        try:
+            from calibre_plugin import bootstrapper
+        except Exception:
+            bootstrapper = None
+        session = None
+        if bootstrapper is not None:
+            try:
+                session = bootstrapper.import_from_plugin_dir()
+            except Exception:
+                session = None
+        if session is None:
+            return None
     try:
         session = Session(impersonate="chrome")
         # ``post`` must exist; guard against stubbed/partial installs.
