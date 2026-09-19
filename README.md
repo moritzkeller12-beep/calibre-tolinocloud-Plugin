@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.1**
+Plugin-Version: **0.9.2**
 
 Das Plugin synchronisiert unterstützte Bücher aus einer geöffneten Calibre-
 Bibliothek mit der Tolino Cloud. Vor dem Upload zeigt es einen Vergleich von
@@ -165,6 +165,26 @@ python3 build_plugin.py
 ```
 
 ## Versionshistorie
+
+### 0.9.2 (2026-09-19)
+- **Echte Speicherformate des Web Readers entschlüsselt:** Der Tolino Web
+  Reader legt Refresh-Token und Hardware-ID **verschlüsselt im IndexedDB**
+  ab (`userToken`/`userInfos`, CryptoJS-AES im OpenSSL-`Salted__`-Format,
+  Passphrase aus der Reader-Konfiguration) – nicht im Klartext im Local
+  Storage, weshalb frühere Versionen nichts fanden. Der Scanner liest jetzt
+  Chromium-IndexedDB-LevelDBs und entschlüsselt diese Blobs (eigene,
+  abhängigkeitsfreie AES-Implementierung)
+- **Firefox LSNG korrekt gelesen:** moderne Firefox-Profile speichern Local
+  Storage in per-Origin-`data.sqlite`-Dateien (`storage/default/<origin>/ls/`)
+  und `ls-archive.sqlite` mit den Spalten `key/conversion_type/compression_
+  type/value` – die bisherige `webappsstore.sqlite`-Abfrage griff auf eine
+  nicht existierende Spalte zu und fand daher nie Zeilen; Legacy-
+  `webappsstore2` (originAttributes/originKey/scope/key/value) bleibt als
+  Fallback
+- Token-/Hardware-Teilfunde aus verschiedenen Browserprofilen werden jetzt
+  kombiniert, statt still verworfen zu werden
+- Kandidatenpriorität: entschlüsselte Klartexte schlagen Rohwerte; kein
+  Zurückgeben von verschlüsselten Blobs oder JSON-Bündeln als „Token"
 
 ### 0.9.1 (2026-09-18)
 - **Toolbar-Icon repariert:** Das Plugin-Icon (eingebettetes SVG, Fallback

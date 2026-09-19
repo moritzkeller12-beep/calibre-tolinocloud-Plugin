@@ -380,10 +380,12 @@ class SyncDashboard(QDialog):
         action_buttons.addWidget(self.debug)
         action_buttons.addWidget(self.start)
         root.addLayout(action_buttons)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(self.close)
         root.addWidget(self.cancel)
-        root.addWidget(buttons)
+        # Plain close button instead of QDialogButtonBox: immune to the Qt6
+        # "Invalid ButtonRole, button not added" warning seen in the field.
+        close = QPushButton("Schließen / Close")
+        close.clicked.connect(self.close)
+        root.addWidget(close)
         self.load_values()
 
     def _save_visible_account(self):

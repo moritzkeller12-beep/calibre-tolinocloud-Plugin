@@ -3,12 +3,16 @@ import mimetypes
 import os
 import platform
 import re
+import shutil
 import sqlite3
 import struct
+import tempfile
 import threading
 import time
 import uuid
 import webbrowser
+import base64
+import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -87,6 +91,248 @@ _JWT_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(
     r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"
 )
+
+
+# --- crypto-js-compatible AES (stdlib only) --------------------------------#
+#
+# The Tolino web reader encrypts its refresh token / user infos with
+# CryptoJS.AES.encrypt(value, VERSION.PHRASE) and stores the Base64 result in
+# IndexedDB (keys "userToken" / "userInfos"). CryptoJS uses the OpenSSL
+# "Salted__" KDF: EVP_BytesToKey with MD5 and a random 8-byte salt, AES-256-CBC.
+# The passphrase (PHRASE) is currently an empty string; we accept any phrase
+# so a future change on the reader side keeps working.
+
+_AES_SBOX = []
+_AES_INV_SBOX = []
+_AES_RCON = []
+
+
+def _aes_init_tables():
+    """Build AES S-box / inverse S-box / round constants once (stdlib only)."""
+    global _AES_SBOX, _AES_INV_SBOX, _AES_RCON
+    if _AES_SBOX:
+        return
+
+    def xtime(a):
+        a <<= 1
+        return ((a ^ 0x1B) & 0xFF) if a & 0x100 else a
+
+    def mul(a, b):
+        result = 0
+        while b:
+            if b & 1:
+                result ^= a
+            a = xtime(a)
+            b >>= 1
+        return result & 0xFF
+
+    # S-box: multiplicative inverse in GF(2^8) + affine transform.
+    sbox = [0] * 256
+    inverse_sbox = [0] * 256
+    # log/antilog tables over the generator 0x03
+    log_table = [0] * 256
+    alog_table = [0] * 256
+    value = 1
+    for exponent in range(255):
+        log_table[value] = exponent
+        alog_table[exponent] = value
+        value ^= xtime(value)  # multiply by generator 3: v*3 = v ^ (v*2)
+    log_table[0] = None
+    for value in range(256):
+        if value == 0:
+            inverse = 0
+        else:
+            inverse = alog_table[(255 - log_table[value]) % 255]
+        transformed = inverse
+        result = inverse
+        for _ in range(4):
+            result = ((result << 1) | (result >> 7)) & 0xFF
+            transformed ^= result
+        sbox[value] = transformed ^ 0x63
+    for value, transformed in enumerate(sbox):
+        inverse_sbox[transformed] = value
+    rcon = [0x01]
+    for _ in range(9):
+        rcon.append(xtime(rcon[-1]))
+    _AES_SBOX[:] = sbox
+    _AES_INV_SBOX[:] = inverse_sbox
+    _AES_RCON[:] = rcon
+
+
+def _aes_expand_key(key):
+    """Expand a 16/24/32-byte key into 4-byte round-key words."""
+    _aes_init_tables()
+    nk = len(key) // 4
+    words = [list(key[i:i + 4]) for i in range(0, len(key), 4)]
+    rounds = {16: 10, 24: 12, 32: 14}[len(key)]
+    total = 4 * (rounds + 1)
+    rcon_index = 0
+    while len(words) < total:
+        temp = list(words[-1])
+        if len(words) % nk == 0:
+            temp = temp[1:] + temp[:1]
+            temp = [_AES_SBOX[b] for b in temp]
+            temp[0] ^= _AES_RCON[rcon_index]
+            rcon_index += 1
+        elif len(key) == 32 and len(words) % 4 == 0:
+            temp = [_AES_SBOX[b] for b in temp]
+        base = list(words[-nk])
+        words.append([base[j] ^ temp[j] for j in range(4)])
+    return words, rounds
+
+
+def _aes_rounds(state, words, rounds, decrypt=False):
+    """Run the AES round function over a 4x4 state (state[r][c] = in[4c+r])."""
+    _aes_init_tables()
+
+    def add_round_key(current, round_index):
+        for c in range(4):
+            for r in range(4):
+                current[r][c] ^= words[round_index * 4 + c][r]
+
+    def sub_bytes(current, inverse=False):
+        box = _AES_INV_SBOX if inverse else _AES_SBOX
+        for r in range(4):
+            for c in range(4):
+                current[r][c] = box[current[r][c]]
+
+    def shift_rows(current, inverse=False):
+        for r in range(1, 4):
+            row = current[r]
+            if not inverse:
+                current[r] = row[r:] + row[:r]
+            else:
+                current[r] = row[-r:] + row[:-r]
+
+    def xtime(v):
+        v <<= 1
+        return ((v ^ 0x1B) & 0xFF) if v & 0x100 else v
+
+    def mul(v, m):
+        result = 0
+        while m:
+            if m & 1:
+                result ^= v
+            v = xtime(v)
+            m >>= 1
+        return result & 0xFF
+
+    def mix_columns(current, inverse=False):
+        for c in range(4):
+            a = [current[r][c] for r in range(4)]
+            if not inverse:
+                current[0][c] = mul(a[0], 2) ^ mul(a[1], 3) ^ a[2] ^ a[3]
+                current[1][c] = a[0] ^ mul(a[1], 2) ^ mul(a[2], 3) ^ a[3]
+                current[2][c] = a[0] ^ a[1] ^ mul(a[2], 2) ^ mul(a[3], 3)
+                current[3][c] = mul(a[0], 3) ^ a[1] ^ a[2] ^ mul(a[3], 2)
+            else:
+                current[0][c] = (mul(a[0], 14) ^ mul(a[1], 11) ^
+                                 mul(a[2], 13) ^ mul(a[3], 9))
+                current[1][c] = (mul(a[0], 9) ^ mul(a[1], 14) ^
+                                 mul(a[2], 11) ^ mul(a[3], 13))
+                current[2][c] = (mul(a[0], 13) ^ mul(a[1], 9) ^
+                                 mul(a[2], 14) ^ mul(a[3], 11))
+                current[3][c] = (mul(a[0], 11) ^ mul(a[1], 13) ^
+                                 mul(a[2], 9) ^ mul(a[3], 14))
+
+    if not decrypt:
+        add_round_key(state, 0)
+        for round_index in range(1, rounds):
+            sub_bytes(state)
+            shift_rows(state)
+            mix_columns(state)
+            add_round_key(state, round_index)
+        sub_bytes(state)
+        shift_rows(state)
+        add_round_key(state, rounds)
+    else:
+        add_round_key(state, rounds)
+        for round_index in range(rounds - 1, 0, -1):
+            shift_rows(state, inverse=True)
+            sub_bytes(state, inverse=True)
+            add_round_key(state, round_index)
+            mix_columns(state, inverse=True)
+        shift_rows(state, inverse=True)
+        sub_bytes(state, inverse=True)
+        add_round_key(state, 0)
+    return state
+
+
+def _state_from_block(block):
+    """Load one 16-byte block into FIPS-197 state layout (columns first)."""
+    return [[block[4 * c + r] for c in range(4)] for r in range(4)]
+
+
+def _state_to_block(state):
+    out = bytearray(16)
+    for c in range(4):
+        for r in range(4):
+            out[4 * c + r] = state[r][c]
+    return bytes(out)
+
+
+def _aes_encrypt_block(block, words, rounds):
+    """Encrypt one 16-byte block with AES."""
+    return _state_to_block(_aes_rounds(_state_from_block(block), words, rounds))
+
+
+def _aes_decrypt_block(block, words, rounds):
+    """Decrypt one 16-byte block with AES."""
+    return _state_to_block(
+        _aes_rounds(_state_from_block(block), words, rounds, decrypt=True))
+
+
+def _evp_bytes_to_key(password, salt, key_len=32, iv_len=16):
+    """OpenSSL EVP_BytesToKey (MD5) as used by CryptoJS."""
+    derived = b""
+    previous = b""
+    while len(derived) < key_len + iv_len:
+        previous = hashlib.md5(previous + password + salt).digest()
+        derived += previous
+    return derived[:key_len], derived[key_len:key_len + iv_len]
+
+
+def _pkcs7_unpad(data):
+    if not data or len(data) % 16:
+        return None
+    pad = data[-1]
+    if not 1 <= pad <= 16 or data[-pad:] != bytes([pad]) * pad:
+        return None
+    return data[:-pad]
+
+
+def cryptojs_decrypt(b64_text, passphrase=""):
+    """Decrypt a CryptoJS.AES.encrypt Base64 blob; return "" on any mismatch.
+
+    CryptoJS output is OpenSSL-formatted: base64("Salted__" + salt(8) +
+    AES-256-CBC(PKCS7, key/iv = EVP_BytesToKey(MD5, passphrase, salt))).
+    """
+    try:
+        raw = base64.b64decode("".join(str(b64_text or "").split()), validate=False)
+    except Exception:
+        return ""
+    if len(raw) < 32 or raw[:8] != b"Salted__":
+        return ""
+    salt = raw[8:16]
+    ciphertext = raw[16:]
+    if not ciphertext or len(ciphertext) % 16:
+        return ""
+    key, iv = _evp_bytes_to_key(str(passphrase).encode("utf-8"), salt)
+    words, rounds = _aes_expand_key(key)
+    plain = b""
+    previous = iv
+    for offset in range(0, len(ciphertext), 16):
+        block = ciphertext[offset:offset + 16]
+        decrypted = _aes_decrypt_block(block, words, rounds)
+        plain += bytes(a ^ b for a, b in zip(decrypted, previous))
+        previous = block
+    plain = _pkcs7_unpad(plain)
+    if plain is None:
+        return ""
+    try:
+        return plain.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
 
 
 def _find_browser_storage_paths():
@@ -170,6 +416,16 @@ def _find_browser_storage_paths():
 
         # Classic Firefox locations
         add(os.path.join(home, ".mozilla", "firefox"))
+
+        # Calibre's own QtWebEngine data: the embedded login window persists
+        # cookies/localStorage under the "tolino-cloud-sync-login" profile,
+        # so its storage is also a valid harvest source.
+        calibre_data = os.environ.get(
+            "XDG_DATA_HOME", os.path.join(home, ".local", "share"))
+        add(os.path.join(calibre_data, "calibre", "webengine",
+                         "tolino-cloud-sync-login"))
+        add(os.path.join(calibre_data, "calibre", "webengine",
+                         "QtWebEngine", "tolino-cloud-sync-login"))
 
     return [os.path.normpath(p) for p in paths]
 
@@ -297,11 +553,27 @@ def _leveldb_records_from_log(data):
 
 
 def _leveldb_records_from_ldb(data):
-    """Yield (key, value) pairs from an .ldb/.sst table file (simplified scan)."""
-    # .ldb files contain data blocks prefixed by 5-byte trailer handles. A full
-    # parser needs block restarts/compression; scanning for the origin marker
-    # plus a following value byte is far simpler and good enough for finding
-    # token-shaped records.
+    """Yield (key, value) pairs from an .ldb/.sst table file.
+
+    .ldb table files store records in blocks that are usually Snappy-
+    compressed (a raw scan would miss nearly everything). We parse the footer,
+    decompress each data block and walk the key/value prefixes.
+    """
+    try:
+        blocks = _leveldb_ldb_blocks(data)
+    except Exception:
+        blocks = []
+    for block in blocks:
+        for key, value in _leveldb_ldb_pairs(block):
+            yield key, value
+    # Fallback for uncompressed or exotic files: raw marker scan.
+    if blocks:
+        return
+    yield from _leveldb_records_from_ldb_raw(data)
+
+
+def _leveldb_records_from_ldb_raw(data):
+    """Naive scan for marker-bearing records in an uncompressed table."""
     marker = _TOLINO_ORIGIN_MARKER
     pos = 0
     n = len(data)
@@ -309,7 +581,6 @@ def _leveldb_records_from_ldb(data):
         idx = data.find(marker, pos)
         if idx < 0:
             return
-        # The key continues until a control byte (0x01/0x02) or value marker.
         end = idx + len(marker)
         key_end = end
         while key_end < n and data[key_end] not in (0x00, 0x01, 0x02):
@@ -321,9 +592,146 @@ def _leveldb_records_from_ldb(data):
         value_end = value_start
         while value_end < n and data[value_end] not in (0x00, 0x01, 0x02):
             value_end += 1
-        value = data[value_start:value_end]
-        yield key, value
+        yield key, data[value_start:value_end]
         pos = idx + len(marker)
+
+
+_SNAPPY_LITERAL = 0
+_SNAPPY_COPY1 = 1
+_SNAPPY_COPY2 = 2
+_SNAPPY_COPY4 = 3
+
+
+def _snappy_uncompress(data):
+    """Minimal Snappy decompressor (no dependencies). Returns b"" on error."""
+    try:
+        pos = 0
+        out = bytearray()
+        total, pos = _varint(data, pos)
+        if total is None or total > 64 * 1024 * 1024:
+            return b""
+        n = len(data)
+        while pos < n and len(out) < total:
+            tag = data[pos]
+            kind = tag & 0x03
+            if kind == _SNAPPY_LITERAL:
+                length = (tag >> 2) + 1
+                pos += 1
+                if length > 60:
+                    extra = length - 60
+                    if pos + extra > n:
+                        return b""
+                    length = int.from_bytes(data[pos:pos + extra], "little") + 1
+                    pos += extra
+                if pos + length > n:
+                    return b""
+                out += data[pos:pos + length]
+                pos += length
+            else:
+                if kind == _SNAPPY_COPY1:
+                    if pos + 1 >= n:
+                        return b""
+                    offset = ((tag >> 2) & 0x07) << 8 | data[pos + 1]
+                    length = (tag >> 5) + 4
+                    pos += 2
+                elif kind == _SNAPPY_COPY2:
+                    if pos + 3 >= n:
+                        return b""
+                    offset = int.from_bytes(data[pos + 1:pos + 3], "little")
+                    length = (tag >> 2) & 0x3F
+                    pos += 3
+                else:  # COPY4
+                    if pos + 4 >= n:
+                        return b""
+                    offset = int.from_bytes(data[pos + 1:pos + 5], "little")
+                    length = (tag >> 2) & 0x3F
+                    pos += 5
+                if offset == 0 or offset > len(out):
+                    return b""
+                start = len(out) - offset
+                for _ in range(length):
+                    out.append(out[start])
+                    start += 1
+        return bytes(out) if len(out) == total else b""
+    except Exception:
+        return b""
+
+
+def _leveldb_ldb_blocks(data):
+    """Return decompressed data blocks of one .ldb table (footer-based)."""
+    if len(data) < 48:
+        return []
+    footer = data[-48:]
+    magic = struct.unpack_from("<Q", footer, 40)[0]
+    if magic != 0xDB4775248B80FB57:
+        return []
+    meta_offset, meta_size = struct.unpack_from("<II", footer, 0)
+    index_offset, index_size = struct.unpack_from("<II", footer, 8)
+    if index_offset + index_size > len(data) - 48:
+        return []
+    index = _snappy_uncompress(
+        data[index_offset:index_offset + index_size])
+    if not index:
+        index = data[index_offset:index_offset + index_size]
+    # Index entries: shared(varint) non_shared(varint) value_len(varint)
+    # key(non_shared bytes) + block_handle(offset varint, size varint).
+    blocks = []
+    pos = 0
+    n = len(index)
+    while pos < n:
+        shared, pos = _varint(index, pos)
+        non_shared, pos = _varint(index, pos)
+        value_len, pos = _varint(index, pos)
+        if shared is None or non_shared is None or value_len is None:
+            break
+        pos += non_shared  # skip separator key
+        handle_offset, pos = _varint(index, pos)
+        handle_size, pos = _varint(index, pos)
+        if handle_offset is None or handle_size is None:
+            break
+        block_data = data[handle_offset:handle_offset + handle_size]
+        if len(block_data) < 5:
+            continue
+        body = block_data[:-5]  # 1 type byte + 4 crc
+        ctype = block_data[-5]
+        if ctype == 0:
+            blocks.append(body)
+        elif ctype == 1:
+            decompressed = _snappy_uncompress(body)
+            if decompressed:
+                blocks.append(decompressed)
+    return blocks
+
+
+def _leveldb_ldb_pairs(block):
+    """Yield (key, value) pairs from one decompressed .ldb data block.
+
+    Entries: shared(varint) non_shared(varint) value_len(varint)
+    then delta-key bytes and the value. We reconstruct keys with a shared-
+    prefix buffer and tolerate restart-array noise at block end.
+    """
+    pos = 0
+    n = len(block)
+    last_key = b""
+    while pos < n:
+        start = pos
+        shared, pos = _varint(block, pos)
+        non_shared, pos = _varint(block, pos)
+        value_len, pos = _varint(block, pos)
+        if (shared is None or non_shared is None or value_len is None
+                or pos + non_shared + value_len > n
+                or shared > len(last_key)):
+            # Not a valid entry (restart point / padding) – stop this block.
+            break
+        key = last_key[:shared] + block[pos:pos + non_shared]
+        pos += non_shared
+        value = block[pos:pos + value_len]
+        pos += value_len
+        last_key = key
+        if _TOLINO_ORIGIN_MARKER in key:
+            yield key, value
+        elif start == pos:  # safety: never loop forever
+            break
 
 
 _TOLINO_ORIGIN_MARKER = b"webreader.mytolino.com"
@@ -404,8 +812,63 @@ def _scan_chromium_leveldb(db_dir):
 # --- Firefox (LSNG): webappsstore.sqlite ----------------------------------
 
 
-def _lsng_value_text(value):
-    """Decode one LSNG value (BLOB with 0x01/0x02 prefix, or str)."""
+def _sqlite_snapshot_copy(db_path):
+    """Copy db + WAL/journal next to it so a live Firefox can be read.
+
+    Reading the main file with immutable=1 ignores the write-ahead log, so
+    recently written rows are invisible. A temporary snapshot of db+WAL makes
+    them visible without locking or touching the original.
+    """
+    directory = tempfile.mkdtemp(prefix="tolino-scan-")
+    try:
+        target = os.path.join(directory, os.path.basename(db_path))
+        shutil.copy2(db_path, target)
+        for suffix in ("-wal", "-shm", "-journal"):
+            side = db_path + suffix
+            if os.path.exists(side):
+                try:
+                    shutil.copy2(side, target + suffix)
+                except OSError:
+                    pass
+        return target
+    except OSError:
+        shutil.rmtree(directory, ignore_errors=True)
+        return None
+
+
+def _read_sqlite_snapshot(db_path, sql, params=()):
+    """Run one query against a snapshot copy; returns rows or []."""
+    snapshot = _sqlite_snapshot_copy(db_path)
+    if snapshot is None:
+        return []
+    try:
+        conn = sqlite3.connect(snapshot)
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    finally:
+        shutil.rmtree(snapshot and os.path.dirname(snapshot),
+                      ignore_errors=True)
+
+
+def _snappy_uncompress_wrapper(data):
+    return _snappy_uncompress(data) if data else b""
+
+
+def _lsng_value_text(value, conversion=0, compression=0):
+    """Decode one LSNG value from its conversion/compression metadata.
+
+    The modern Firefox schema stores the value encoding in two integer
+    columns, not in a prefix byte:
+    - conversion_type: 0 = the BLOB holds raw UTF-16LE code units,
+      1 (UTF16_UTF8) = the BLOB holds UTF-8 text,
+    - compression_type: 0 = uncompressed, 1 = Snappy-compressed.
+    Legacy databases sometimes carry a 0x01/0x02 prefix byte inside the
+    value instead; those prefixes are handled as a fallback.
+    """
     if isinstance(value, str):
         return value
     if value is None:
@@ -413,71 +876,189 @@ def _lsng_value_text(value):
     blob = bytes(value)
     if not blob:
         return ""
-    prefix, body = blob[:1], blob[1:]
-    # LSNG spec: 0x01 prefix = UTF-16LE string, 0x02 prefix = UTF-8 string.
-    if prefix == b"\x01":
-        try:
-            return body.decode("utf-16-le")
-        except UnicodeDecodeError:
-            return body.decode("utf-8", "replace")
-    if prefix == b"\x02":
-        return body.decode("utf-8", "replace")
-    # Legacy row without prefix: try UTF-8, fall back to UTF-16LE heuristic.
-    try:
-        return blob.decode("utf-8")
-    except UnicodeDecodeError:
+    if compression not in (0, 1, None):
+        compression = 0
+    if compression == 1:
+        blob = _snappy_uncompress(blob)
+        if not blob:
+            return ""
+
+    def utf16():
         try:
             return blob.decode("utf-16-le")
         except UnicodeDecodeError:
+            return ""
+
+    def utf8():
+        try:
+            return blob.decode("utf-8")
+        except UnicodeDecodeError:
             return blob.decode("utf-8", "replace")
+
+    if conversion == 1:  # UTF16_UTF8: bytes are UTF-8 text
+        return utf8()
+    if conversion == 0:  # NONE: bytes are raw UTF-16LE code units
+        text = utf16()
+        if text:
+            return text
+        return utf8()
+    # Unknown conversion: sniff - BLOBs with NUL padding are UTF-16LE.
+    if len(blob) >= 4 and blob[1] == 0 and blob[3] == 0:
+        return utf16() or utf8()
+    return utf8() or utf16()
+
+
+def _read_firefox_rows(db_path, sql):
+    """Run one query via snapshot copy, falling back to immutable open."""
+    rows = _read_sqlite_snapshot(db_path, sql)
+    if rows:
+        return rows
+    try:
+        conn = sqlite3.connect("file:%s?immutable=1" % db_path, uri=True)
+        try:
+            return conn.execute(sql).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def _read_firefox_data_sqlite(db_path):
+    """Read one LSNG per-origin data.sqlite / ls-archive.sqlite database.
+
+    Schema (Firefox dom/localstorage/ActorsParent.cpp, CreateDataTable):
+      data(key TEXT PRIMARY KEY, utf16_length INTEGER, conversion_type INTEGER,
+           compression_type INTEGER, last_access_time INTEGER, value BLOB)
+    conversion_type 0 = raw UTF-16LE units, 1 = UTF-8; compression_type
+    1 = Snappy. Keys are stored without the origin (the file IS per-origin).
+    """
+    results = {}
+    rows = _read_firefox_rows(
+        db_path,
+        "SELECT key, value, conversion_type, compression_type FROM data")
+    for key, value, conversion, compression in rows:
+        if not isinstance(key, str):
+            key = str(key)
+        results[key] = _lsng_value_text(value, conversion or 0,
+                                        compression or 0)
+    return results
 
 
 def _read_firefox_storage(profile_path):
-    """Read localStorage from Firefox LSNG webappsstore.sqlite (BLOB values)."""
+    """Read localStorage from a Firefox profile across all known layouts.
+
+    Modern Firefox (LSNG) keeps localStorage in per-origin databases at
+    storage/default/<origin>/ls/data.sqlite plus a cold store ls-archive.sqlite
+    in the storage root; the legacy webappsstore.sqlite only survives as a
+    disabled-by-default shadow database. Its real schema is
+    webappsstore2(originAttributes, originKey, scope, key, value).
+    All reads use snapshot copies, so the browser may keep running.
+    """
     results = {}
-    db_path = os.path.join(profile_path, "webappsstore.sqlite")
-    if not os.path.exists(db_path):
-        return results
-    try:
-        conn = sqlite3.connect("file:%s?immutable=1" % db_path, uri=True)
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT originKey, key, value FROM data")
-            for origin_key, key, value in cursor.fetchall():
+    # 1) LSNG per-origin data.sqlite files anywhere under this profile.
+    for root, dirs, files in os.walk(profile_path):
+        dirs[:] = [d for d in dirs if d not in (
+            "cache2", "Cache", "Cache2", "startupCache", "thumbnails",
+            "shader-cache", "Sanitizes", "crashes", "minidumps")]
+        if "data.sqlite" in files:
+            db_path = os.path.join(root, "data.sqlite")
+            data = _read_firefox_data_sqlite(db_path)
+            if data:
+                origin_hint = os.path.basename(os.path.dirname(root))
+                for key, value in data.items():
+                    results["%s/%s" % (origin_hint, key)] = value
+    # 2) ls-archive.sqlite cold store (storage root may be profile itself).
+    for name in ("ls-archive.sqlite", os.path.join("storage", "ls-archive.sqlite")):
+        db_path = os.path.join(profile_path, name)
+        if os.path.exists(db_path):
+            rows = _read_firefox_rows(
+                db_path,
+                "SELECT originAttributes, originKey, key, value, "
+                "conversion_type, compression_type FROM data")
+            for origin_attrs, origin_key, key, value, conversion, compression in rows:
                 origin_text = _lsng_value_text(origin_key)
-                value = _lsng_value_text(value)
                 if not isinstance(key, str):
                     key = str(key)
-                results["%s/%s" % (origin_text, key)] = value
-        finally:
-            conn.close()
-    except Exception:
-        return results
+                results["%s/%s" % (origin_text, key)] = _lsng_value_text(
+                    value, conversion or 0, compression or 0)
+    # 3) Legacy/shadow webappsstore.sqlite (webappsstore2 schema).
+    db_path = os.path.join(profile_path, "webappsstore.sqlite")
+    if os.path.exists(db_path):
+        rows = _read_firefox_rows(
+            db_path,
+            "SELECT originAttributes, originKey, scope, key, value "
+            "FROM webappsstore2")
+        for _attrs, origin_key, _scope, key, value in rows:
+            origin_text = _lsng_value_text(origin_key)
+            if not isinstance(key, str):
+                key = str(key)
+            results["%s/%s" % (origin_text, key)] = _lsng_value_text(value)
     return results
 
 
-def _read_firefox_session_storage(profile_path):
-    """Firefox sessionStorage lives in the same LSNG database (scoped column)."""
+def _read_firefox_cookies(profile_path):
+    """Read Tolino-relevant cookie names/values from cookies.sqlite.
+
+    Values of non-Tolino hosts are never returned. Chromium cookie values are
+    encrypted at rest and are therefore not read here.
+    """
     results = {}
-    db_path = os.path.join(profile_path, "webappsstore.sqlite")
+    db_path = os.path.join(profile_path, "cookies.sqlite")
     if not os.path.exists(db_path):
         return results
-    try:
-        conn = sqlite3.connect("file:%s?immutable=1" % db_path, uri=True)
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT originKey, key, value, conversionType FROM data")
-            for origin_key, key, value, conversion in cursor.fetchall():
-                if (conversion or 0) & 1:  # sessionStorage flag (1 << 0)
-                    continue
-                origin_text = _lsng_value_text(origin_key)
-                value = _lsng_value_text(value)
-                results["%s/%s" % (origin_text, key)] = value
-        finally:
-            conn.close()
-    except Exception:
-        return results
+    for row in _read_sqlite_snapshot(
+            db_path, "SELECT host, name, value FROM moz_cookies"):
+        host, name, value = (row + (None, None, None))[:3]
+        if not host or not name:
+            continue
+        if not _origin_matches(host):
+            continue
+        results["cookie:%s/%s" % (host, name)] = _lsng_value_text(value) or ""
     return results
+
+
+def _scan_chromium_indexeddb(idb_dir, notes):
+    """Scan a Chromium IndexedDB level directory for Tolino records.
+
+    The web reader keeps userToken/userInfos in the IndexedDB database
+    "tolino-user" (origin webreader.mytolino.com), stored by Chromium in
+    .ldb/.log LevelDB files with the origin encoded as UTF-16LE inside the
+    keys. We therefore search both UTF-8 and UTF-16LE origin encodings,
+    collect every record whose raw bytes carry a Tolino origin and let the
+    token matcher inspect the (possibly AES-encrypted) values.
+    """
+    found = {}
+    utf16_marker = _TOLINO_ORIGIN_MARKER.encode("utf-16-le")
+    for file_name in sorted(os.listdir(idb_dir)):
+        if not file_name.endswith((".log", ".ldb")):
+            continue
+        file_path = os.path.join(idb_dir, file_name)
+        try:
+            with open(file_path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            continue
+        if _TOLINO_ORIGIN_MARKER not in data and utf16_marker not in data:
+            continue
+        if file_name.endswith(".log"):
+            iterator = _leveldb_records_from_log(data)
+        else:
+            iterator = _leveldb_records_from_ldb(data)
+        for key, value in iterator:
+            if (_TOLINO_ORIGIN_MARKER not in key
+                    and utf16_marker not in key
+                    and _TOLINO_ORIGIN_MARKER not in value
+                    and utf16_marker not in value):
+                continue
+            text = _decode_leveldb_text(key)
+            if not text and value:
+                text = _decode_leveldb_text(value[:64])
+            value_text = _leveldb_value_text(value) or _decode_leveldb_text(value)
+            if value_text:
+                found["idb:%s/%s" % (text[:120], idb_dir[-40:])] = value_text
+    if found:
+        notes.append("Chromium-IndexedDB: %s" % idb_dir)
+    return found
 
 
 def _diagnose_storage_keys(storage):
@@ -524,11 +1105,32 @@ def _collect_storage_under(path, notes):
                     notes.append("Firefox-Storage: %s" % db)
                     found.update(_read_firefox_storage(root))
                     found.update(_read_firefox_session_storage(root))
+                    found.update(_read_firefox_cookies(root))
+            # Chromium IndexedDB: origin dirs like
+            # https_webreader.mytolino.com_0.indexeddb.leveldb (may also be
+            # UTF-16LE encoded on disk); scan every .leveldb below.
+            if os.path.basename(root) == "IndexedDB":
+                try:
+                    entries = sorted(os.listdir(root))
+                except OSError:
+                    entries = []
+                for entry in entries:
+                    try:
+                        decoded = entry.encode("latin-1", "ignore").decode("utf-16-le", "ignore")
+                    except Exception:
+                        decoded = ""
+                    if _origin_matches(entry) or _origin_matches(decoded):
+                        inner = os.path.join(root, entry)
+                        if os.path.isdir(inner):
+                            for sub in sorted(os.listdir(inner)):
+                                if sub.endswith(".leveldb"):
+                                    found.update(_scan_chromium_indexeddb(
+                                        os.path.join(inner, sub), notes))
             # Skip heavy noise dirs that never hold web storage
             dirs[:] = [d for d in dirs if d not in (
                 "Cache", "Cache2", "Code Cache", "GPUCache", "DawnCache",
                 "GrShaderCache", "ShaderCache", "Service Worker", "blob_storage",
-                "IndexedDB", "Sessions", "Crashpad", "thumbnails")]
+                "Sessions", "Crashpad", "thumbnails")]
     except OSError:
         return found
     return found
@@ -537,7 +1139,11 @@ def _collect_storage_under(path, notes):
 def _extract_tokens_from_storage(storage_data):
     """Extract refresh_token and hardware_id from a storage snapshot.
 
-    Works on string, bytes or JSON-bundle values; never logs token values.
+    Handles plain strings, JSON bundles and the Tolino web reader's real
+    format: CryptoJS-AES-encrypted "userToken"/{"refresh":...} and
+    "userInfos"/JSON({userId, devKey, hardwareId}) blobs (passphrase from
+    the reader's src/config.json, currently the empty string).
+    Never logs token values.
     """
     refresh_token = None
     hardware_id = None
@@ -547,34 +1153,74 @@ def _extract_tokens_from_storage(storage_data):
             return bytes(value).decode("utf-8", "replace")
         return str(value)
 
-    def usable(text):
-        text = (text or "").strip()
-        if not text:
-            return None
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            return text
-        if isinstance(parsed, dict):
-            for name in TOKEN_VALUE_KEYS:
+    def plaintexts(text):
+        """Yield decrypted plaintexts first, then the raw value itself."""
+        if "Salted__" in text or (text and text.startswith("U2FsdGVk")):
+            for phrase in READER_AES_PHRASES:
+                decrypted = cryptojs_decrypt(text, phrase)
+                if decrypted:
+                    yield decrypted
+        yield text
+
+    def usable(text, mode="refresh"):
+        """Pick the best credential text among raw and decrypted candidates."""
+        names = TOKEN_VALUE_KEYS if mode == "refresh" else HARDWARE_VALUE_KEYS
+        fallback = None
+        for plain in plaintexts(text):
+            plain = (plain or "").strip()
+            if not plain:
+                continue
+            try:
+                parsed = json.loads(plain)
+            except ValueError:
+                if fallback is None:
+                    fallback = plain
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            for name in names:
                 nested = parsed.get(name)
                 if isinstance(nested, str) and nested.strip():
                     return nested.strip()
-        return None
+            # userToken: {"refresh": "<CryptoJS b64>", "expireTime": ...}
+            if mode == "refresh":
+                nested = parsed.get("refresh")
+                if isinstance(nested, str) and nested.strip():
+                    for plain_inner in plaintexts(nested):
+                        plain_inner = (plain_inner or "").strip()
+                        if plain_inner and not plain_inner.startswith("U2FsdGVk"):
+                            return plain_inner
+            if fallback is None:
+                fallback = plain
+        return fallback
+
+    def first_candidate(value, mode="refresh"):
+        try:
+            text = usable(value_text(value), mode)
+        except Exception:
+            return None
+        if not text:
+            return None
+        text = text.strip()
+        # Never hand back undecrypted JSON bundles or ciphertext.
+        if text.startswith("{") or text.startswith("U2FsdGVk"):
+            return None
+        return text
 
     for key, value in storage_data.items():
         key_lower = str(key).casefold()
-        text = value_text(value)
         if refresh_token is None:
-            if any(name in key_lower for name in ("refresh", "t_auth")):
-                refresh_token = usable(text)
+            if any(name in key_lower for name in ("refresh", "t_auth",
+                                                 "usertoken")):
+                refresh_token = first_candidate(value)
         if hardware_id is None:
-            if any(name in key_lower for name in ("hardware", "device")):
-                hardware_id = usable(text)
+            if any(name in key_lower for name in ("hardware", "device",
+                                                 "userinfos")):
+                hardware_id = first_candidate(value, "hardware")
 
     if refresh_token is None:
         for value in storage_data.values():
-            candidate = usable(value_text(value))
+            candidate = first_candidate(value)
             if candidate:
                 refresh_token = candidate
                 break
@@ -588,6 +1234,11 @@ def _extract_tokens_from_storage(storage_data):
 
 TOKEN_VALUE_KEYS = ("refresh_token", "t_auth_token", "refreshToken", "refresh-token")
 HARDWARE_VALUE_KEYS = ("hardware_id", "hardwareId", "device_id", "deviceId")
+
+# Passphrases the web reader used for its CryptoJS blobs (VERSION.PHRASE in
+# src/config.json). Currently an empty string; keep candidates so a future
+# change on the reader side keeps the extractor working.
+READER_AES_PHRASES = ("",)
 
 
 def extract_login_tokens(storage):
@@ -666,6 +1317,8 @@ def scrape_browser_tokens(diagnose=False):
     notes = []
     checked = []
     all_keys = {}
+    refresh_token = None
+    hardware_id = None
     for path in _find_browser_storage_paths():
         exists = os.path.isdir(path)
         checked.append("%s%s" % (path, "" if exists else "  (fehlt)"))
@@ -678,6 +1331,12 @@ def scrape_browser_tokens(diagnose=False):
             if refresh_token and hardware_id:
                 return (refresh_token, hardware_id, notes) if diagnose \
                     else (refresh_token, hardware_id)
+    if not refresh_token or not hardware_id:
+        # Tokens may be split across browser profiles; try the combined set.
+        refresh_token, hardware_id = _extract_tokens_from_storage(all_keys)
+        if refresh_token and hardware_id:
+            return (refresh_token, hardware_id, notes) if diagnose \
+                else (refresh_token, hardware_id)
     if diagnose:
         if all_keys:
             keys = _diagnose_storage_keys(all_keys)
@@ -687,9 +1346,10 @@ def scrape_browser_tokens(diagnose=False):
                 notes.append("-> Es fehlt ein Wert mit Token-/Hardware-Form; "
                              "Web Reader einmal vollständig laden.")
             else:
-                notes.append("Storage gelesen, aber keine Tolino-Origin-Einträge "
-                             "darin – im Web Reader (Bibliothek) anmelden, "
-                             "dann erneut versuchen.")
+                notes.append("%d Storage-Quelle(n) gelesen, aber keine "
+                             "Tolino-Origin-Einträge darin – im Web Reader "
+                             "(Bibliothek) anmelden, dann erneut versuchen:" %
+                             len(notes))
         elif checked:
             notes.append("Kein Chromium- (Local Storage/leveldb) oder "
                          "Firefox-Storage (webappsstore.sqlite) gefunden. "

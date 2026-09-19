@@ -1146,24 +1146,92 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_firefox_lsng_reader_decodes_blob_values(self):
         import sqlite3
+        from .tolino import _read_firefox_storage, _read_firefox_data_sqlite
+        with tempfile.TemporaryDirectory() as tmp:
+            # Modern LSNG per-origin database: storage/default/<origin>/ls/
+            origin_dir = os.path.join(tmp, "storage", "default",
+                                      "https+++webreader.mytolino.com", "ls")
+            os.makedirs(origin_dir)
+            db_path = os.path.join(origin_dir, "data.sqlite")
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE data (key TEXT PRIMARY KEY, "
+                         "utf16_length INTEGER, conversion_type INTEGER, "
+                         "compression_type INTEGER, last_access_time INTEGER, "
+                         "value BLOB)")
+            # conversion_type 0 => raw UTF-16LE units (Firefox's NONE mode)
+            conn.execute(
+                "INSERT INTO data (key, conversion_type, value) "
+                "VALUES (?, 0, ?)",
+                ("refresh_token", "tok-ff-utf16".encode("utf-16-le")))
+            # conversion_type 1 (UTF16_UTF8) => UTF-8 text
+            conn.execute(
+                "INSERT INTO data (key, conversion_type, value) "
+                "VALUES (?, 1, ?)",
+                ("hardware_id", b"hw-ff-utf8"))
+            conn.commit()
+            conn.close()
+            storage = _read_firefox_storage(tmp)
+        self.assertEqual(storage.get(
+            "https+++webreader.mytolino.com/refresh_token"), "tok-ff-utf16")
+        self.assertEqual(storage.get(
+            "https+++webreader.mytolino.com/hardware_id"), "hw-ff-utf8")
+
+    def test_legacy_webappsstore2_columns_are_read(self):
+        import sqlite3
         from .tolino import _read_firefox_storage
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "webappsstore.sqlite")
             conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE data (originKey TEXT, key TEXT, "
-                         "value BLOB, conversionType INTEGER DEFAULT 0)")
+            conn.execute("CREATE TABLE webappsstore2 (originAttributes TEXT, "
+                         "originKey TEXT, scope TEXT, key TEXT, value BLOB)")
             conn.execute(
-                "INSERT INTO data (originKey, key, value) VALUES (?, ?, ?)",
-                ("https://webreader.mytolino.com", "refresh_token",
-                 b"\x02tok-ff-utf8"))
+                "INSERT INTO webappsstore2 VALUES (?, ?, ?, ?, ?)",
+                ("", "https://webreader.mytolino.com", "",
+                 "refresh_token", "legacy-tok"))
             conn.commit()
             conn.close()
             storage = _read_firefox_storage(tmp)
-        refresh, hardware = extract_login_tokens(storage) if False else (None, None)
-        self.assertEqual(storage.get("https://webreader.mytolino.com/refresh_token"),
-                         "tok-ff-utf8")
-        self.assertIsNone(refresh)
-        self.assertIsNone(hardware)
+        self.assertEqual(storage.get(
+            "https://webreader.mytolino.com/refresh_token"), "legacy-tok")
+
+    def test_cryptojs_decrypt_reads_reader_user_token(self):
+        from .tolino import cryptojs_decrypt, _extract_tokens_from_storage
+        import base64 as b64
+        import hashlib
+        import struct
+
+        def encrypt(plain, phrase=""):
+            from Crypto.Cipher import AES
+            salt = os.urandom(8)
+            derived = b""
+            prev = b""
+            while len(derived) < 48:
+                prev = hashlib.md5(prev + phrase.encode() + salt).digest()
+                derived += prev
+            key, iv = derived[:32], derived[32:]
+            data = plain.encode()
+            pad = 16 - len(data) % 16
+            data += bytes([pad]) * pad
+            ct = AES.new(key, AES.MODE_CBC, iv).encrypt(data)
+            return b64.b64encode(b"Salted__" + salt + ct).decode()
+
+        # The reader stores {"refresh": AES(refresh_token)} under userToken.
+        encrypted = encrypt("bosh-refresh-inside")
+        import json as json_module
+        usertoken = json_module.dumps({"refresh": encrypted, "expireTime": 1})
+        self.assertEqual(
+            _extract_tokens_from_storage(
+                {"webreader.mytolino.com/userToken": usertoken})[0],
+            "bosh-refresh-inside")
+        # Direct decrypt helper matches.
+        self.assertEqual(cryptojs_decrypt(encrypted), "bosh-refresh-inside")
+        # userInfos: AES(JSON with hardwareId) under userInfos.
+        userinfos = encrypt(json_module.dumps(
+            {"userId": "u", "devKey": "d", "hardwareId": "hw-99"}))
+        self.assertEqual(
+            _extract_tokens_from_storage(
+                {"webreader.mytolino.com/userInfos": userinfos})[1],
+            "hw-99")
 
     def test_extract_login_tokens_reads_plain_and_json_values(self):
         storage = {

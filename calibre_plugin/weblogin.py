@@ -38,12 +38,12 @@ except ImportError:  # Non-Calibre environments (tests, type checks)
     QWebEngineUrlRequestInterceptor = QWebEngineView = None
 
 try:
-    from .tolino import (PARTNERS, TolinoAuthError, TolinoClient,
-                         extract_login_tokens, sanitize_error,
+    from .tolino import (PARTNERS, TOLINO_STORAGE_ORIGINS, TolinoAuthError,
+                         TolinoClient, extract_login_tokens, sanitize_error,
                          scrape_browser_tokens)
 except ImportError:
-    from tolino import (PARTNERS, TolinoAuthError, TolinoClient,
-                        extract_login_tokens, sanitize_error,
+    from tolino import (PARTNERS, TOLINO_STORAGE_ORIGINS, TolinoAuthError,
+                        TolinoClient, extract_login_tokens, sanitize_error,
                         scrape_browser_tokens)
 
 
@@ -249,7 +249,14 @@ else:
 
 def _on_reader(url):
     host = (url.host() or "").casefold()
-    return any(host == name or host.endswith("." + name) for name in READER_HOSTS)
+    if any(host == name or host.endswith("." + name) for name in READER_HOSTS):
+        return True
+    # Token-bearing pages include partner shops (Orell Füssli Keycloak etc.)
+    for origin in TOLINO_STORAGE_ORIGINS:
+        name = str(origin).casefold()
+        if name and (host == name or host.endswith("." + name)):
+            return True
+    return False
 
 
 _STORAGE_JS = """
@@ -260,7 +267,17 @@ _STORAGE_JS = """
             var key = localStorage.key(i);
             result[key] = localStorage.getItem(key);
         }
-    } catch (err) { result["__error__"] = String(err); }
+    } catch (err) { result["__ls_error__"] = String(err); }
+    try {
+        for (var j = 0; j < sessionStorage.length; j += 1) {
+            var skey = sessionStorage.key(j);
+            result["session:" + skey] = sessionStorage.getItem(skey);
+        }
+    } catch (err) { result["__ss_error__"] = String(err); }
+    try {
+        var cookies = document.cookie;
+        if (cookies) { result["__cookies__"] = cookies; }
+    } catch (err) {}
     return JSON.stringify(result);
 })()
 """
