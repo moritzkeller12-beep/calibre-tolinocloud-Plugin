@@ -1800,9 +1800,10 @@ _BOT_CHECK_MARKERS = (
 )
 
 CURL_CFFI_HINT = (
-    "The bot protection rejected this client's TLS fingerprint. Install "
-    "curl_cffi into Calibre's Python environment (e.g. `python3 -m pip "
-    "install --user curl_cffi`) and restart Calibre; see README section "
+    "The bot protection rejected this client's TLS fingerprint. Open the "
+    "plugin dashboard and click \u201ecurl_cffi installieren\u201c (one-click "
+    "installer for Calibre's own Python environment), or run `python3 -m "
+    "pip install --user curl_cffi` and restart Calibre; see README section "
     "\u201e403-Fehler verstehen\u201c."
 )
 

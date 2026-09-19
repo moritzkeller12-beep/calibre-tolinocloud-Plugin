@@ -249,6 +249,10 @@ def install(plugin_dir=None, progress=None):
     notify = progress or (lambda text: None)
     plugin_dir = plugin_dir or calibre_plugin_dir()
     root = os.path.join(plugin_dir, "curl_cffi-libs")
+    # Remove any previous projection first: an install made with an older
+    # plugin version may contain wheels built for the wrong CPython (its
+    # broken modules would keep shadowing the fresh ones otherwise).
+    shutil.rmtree(root, ignore_errors=True)
     os.makedirs(root, exist_ok=True)
 
     platform = _platform_key()
