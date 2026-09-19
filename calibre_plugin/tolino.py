@@ -996,6 +996,122 @@ def _read_firefox_storage(profile_path):
     return results
 
 
+def _lz4_block_decompress(data, expected_size=0):
+    """Decode one raw LZ4 block (pure Python); return b"" on malformed input."""
+    out = bytearray()
+    i = 0
+    n = len(data)
+    while i < n:
+        token = data[i]
+        i += 1
+        literal_len = token >> 4
+        if literal_len == 15:
+            while i < n:
+                extra = data[i]
+                i += 1
+                literal_len += extra
+                if extra != 255:
+                    break
+        if i + literal_len > n:
+            return b""
+        out += data[i:i + literal_len]
+        i += literal_len
+        if i >= n:
+            break
+        if i + 2 > n:
+            return b""
+        offset = data[i] | (data[i + 1] << 8)
+        i += 2
+        if offset == 0 or offset > len(out):
+            return b""
+        match_len = (token & 0xF) + 4
+        if (token & 0xF) == 15:
+            while i < n:
+                extra = data[i]
+                i += 1
+                match_len += extra
+                if extra != 255:
+                    break
+        start = len(out) - offset
+        for j in range(match_len):
+            out.append(out[start + j])
+        if expected_size and len(out) >= expected_size:
+            break
+    if expected_size:
+        return bytes(out[:expected_size])
+    return bytes(out)
+
+
+def _read_mozlz4(path):
+    """Read a Mozilla mozLZ4 file (magic mozLz40\0) as bytes; None otherwise."""
+    try:
+        with open(path, "rb") as handle:
+            blob = handle.read()
+    except OSError:
+        return None
+    if blob[:8] != b"mozLz40\x00" or len(blob) < 12:
+        return None
+    size = int.from_bytes(blob[8:12], "little")
+    if size <= 0 or size > 64 * 1024 * 1024:
+        return None
+    return _lz4_block_decompress(blob[12:], size)
+
+
+def _harvest_sessionstore_origins(node, results):
+    """Collect "origin/key" pairs from a sessionstore JSON tree.
+
+    SessionStore serializes DOM sessionStorage as nested mappings keyed by
+    origin (any depth), whose values are flat dicts of name -> value.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if (isinstance(key, str) and _origin_matches(key)
+                    and isinstance(value, dict)):
+                for name, item in value.items():
+                    if isinstance(item, str):
+                        text = item
+                    elif isinstance(item, (dict, list)):
+                        text = json.dumps(item, ensure_ascii=False)
+                    elif item is None:
+                        text = ""
+                    else:
+                        text = str(item)
+                    if text:
+                        results["%s/%s" % (key, name)] = text
+            else:
+                _harvest_sessionstore_origins(value, results)
+    elif isinstance(node, list):
+        for item in node:
+            _harvest_sessionstore_origins(item, results)
+
+
+def _read_firefox_session_storage(profile_path):
+    """Best-effort read of DOM sessionStorage from Firefox sessionstore files.
+
+    Firefox keeps sessionStorage inside the mozLZ4-compressed sessionstore
+    JSON (sessionstore-backups/recovery.jsonlz4 and friends), not in a
+    SQLite database. Values are keyed "origin/key"; nothing outside Tolino
+    origins is returned.
+    """
+    results = {}
+    for rel in ("sessionstore-backups/recovery.jsonlz4",
+                "sessionstore-backups/previous.jsonlz4",
+                "sessionstore-backups/recovery.baklz4",
+                "sessionstore.jsonlz4"):
+        path = os.path.join(profile_path, rel)
+        if not os.path.exists(path):
+            continue
+        raw = _read_mozlz4(path)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        _harvest_sessionstore_origins(payload, results)
+    return results
+
+
 def _read_firefox_cookies(profile_path):
     """Read Tolino-relevant cookie names/values from cookies.sqlite.
 

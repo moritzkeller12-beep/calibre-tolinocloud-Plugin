@@ -1194,6 +1194,46 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(storage.get(
             "https://webreader.mytolino.com/refresh_token"), "legacy-tok")
 
+    def test_firefox_session_storage_reads_mozlz4_sessionstore(self):
+        import json as json_module
+        import struct
+        from .tolino import _read_firefox_session_storage, _read_mozlz4
+
+        def lz4_block(data):
+            # Final-sequence-only encoder: literals without a trailing match.
+            n = len(data)
+            if n <= 15:
+                return bytes([n << 4]) + data
+            continuation = bytearray()
+            remaining = n - 15
+            while remaining >= 255:
+                continuation.append(255)
+                remaining -= 255
+            continuation.append(remaining)
+            return bytes([0xF0]) + bytes(continuation) + data
+
+        payload = json_module.dumps({
+            "windows": [{"tabs": [{"entries": [{
+                "url": "https://webreader.mytolino.com/library/",
+                "storage": {"session": {
+                    "https://webreader.mytolino.com": {
+                        "t_auth_token": "sess-tok-1"},
+                }},
+            }]}]}],
+        }).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = os.path.join(tmp, "sessionstore-backups")
+            os.makedirs(backup_dir)
+            path = os.path.join(backup_dir, "recovery.jsonlz4")
+            with open(path, "wb") as handle:
+                handle.write(b"mozLz40\x00"
+                             + struct.pack("<I", len(payload))
+                             + lz4_block(payload))
+            self.assertEqual(_read_mozlz4(path), payload)
+            storage = _read_firefox_session_storage(tmp)
+        self.assertEqual(storage.get(
+            "https://webreader.mytolino.com/t_auth_token"), "sess-tok-1")
+
     def test_cryptojs_decrypt_reads_reader_user_token(self):
         from .tolino import cryptojs_decrypt, _extract_tokens_from_storage
         import base64 as b64
