@@ -1043,6 +1043,7 @@ class SyncPlanTests(unittest.TestCase):
                 "tolino.py",
                 "weblogin.py",
                 "icons.py",
+                "bootstrapper.py",
                 "images/tolino_cloud_sync.png",
             }, set(plugin.namelist()))
             marker = next(name for name in plugin.namelist()
