@@ -483,6 +483,18 @@ class SyncDashboard(QDialog):
             "hardware_id": self.hardware.text().strip() or hardware_id(),
         }, active=self.account_name)
 
+    def _resolve_hardware_id(self):
+        """Resolve the account hardware ID via the device list after login."""
+        try:
+            client = TolinoClient(
+                self.partner.currentData(), self.hardware.text().strip(),
+                self.refresh.text().strip())
+            client.login()
+            hardware = client.fetch_hardware_id()
+            return hardware or hardware_id()
+        except Exception:
+            return hardware_id()
+
     def scrape_browser_tokens(self):
         """Extract refresh_token and hardware_id from browser local storage."""
         try:
@@ -562,7 +574,7 @@ class SyncDashboard(QDialog):
                 QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in", str(exc))
                 return
             self.set_refresh_token(refresh)
-            self.hardware.setText(hardware or hardware_id())
+            self.hardware.setText(hardware or self._resolve_hardware_id())
             self.persist_refresh_token(self.refresh.text().strip())
             self.update_status()
             QMessageBox.information(

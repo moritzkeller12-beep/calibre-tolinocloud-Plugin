@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.2** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
+Plugin-Version: **0.9.3** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
 
 ## Installation
 
@@ -34,3 +34,10 @@ Im Dialog **Tolino Cloud Sync**: Konto wählen, Partner (z. B. **8 – Books.ch 
 python3 -m unittest calibre_plugin.test_sync
 python3 build_plugin.py
 ```
+
+## Weitere Funktionen (0.9.3)
+
+- **Hardware-ID automatisch auflösen** aus der Tolino-Geräteliste (nach der Anmeldung)
+- **Buch herunterladen** aus der Tolino Cloud (`TolinoClient.download(deliverable_id)`)
+- **Sammlungen verwalten** (`add_to_collection` / `remove_from_collection`) und **Gelesen-Markierung** (`mark_read`) über die Sync-Data-API
+- **Refresh-Token-Ablaufzeit** wird aus der Token-Antwort gelesen (Diagnose zeigt `refresh_expires_in`)

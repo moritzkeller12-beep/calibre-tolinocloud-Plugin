@@ -4,7 +4,7 @@ except ImportError:
     InterfaceActionBase = object
 
 
-PLUGIN_VERSION = (0, 9, 2)
+PLUGIN_VERSION = (0, 9, 3)
 
 
 class TolinoSyncPlugin(InterfaceActionBase):

@@ -15,7 +15,7 @@ import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, quote as _url_quote
 from urllib.request import Request, urlopen
 
 
@@ -1686,6 +1686,7 @@ class TolinoClient:
         self.timeout = timeout
         self.access = None
         self.expires_at = 0
+        self.refresh_expires_at = 0
         self.last_http_status = None
         self.last_error_text = None
         self.token_callback = token_callback
@@ -1702,6 +1703,7 @@ class TolinoClient:
             "grant_type": "refresh_token",
             "hardware_id": self.hardware,
             "reseller_id": str(self.partner_id),
+            "refresh_expires_in": self.refresh_expires_in,
             "http_status": self.last_http_status,
             "error_text": sanitize_error(self.last_error_text,
                                          (self.refresh, self.access)),
@@ -1764,6 +1766,12 @@ class TolinoClient:
         previous_refresh = self.refresh
         self.access = data["access_token"]
         new_refresh = data.get("refresh_token", self.refresh)
+        try:
+            refresh_expires_in = int(data.get("refresh_expires_in", 0))
+        except (TypeError, ValueError):
+            refresh_expires_in = 0
+        self.refresh_expires_at = (
+            time.time() + refresh_expires_in if refresh_expires_in > 0 else 0)
         
         # CRITICAL: Save the new refresh token IMMEDIATELY before any further use
         # Tolino invalidates refresh tokens after single use, so we must persist
@@ -1777,6 +1785,13 @@ class TolinoClient:
         
         self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
         return self.refresh
+
+    @property
+    def refresh_expires_in(self):
+        """Seconds until the (rotated) refresh token becomes invalid; 0 = unknown."""
+        if not self.refresh_expires_at:
+            return 0
+        return max(0, int(self.refresh_expires_at - time.time()))
 
     def _request(self, url, method="GET", data=None, form=False,
                  authenticated=True, content_type=None, _retry=True):
@@ -1915,3 +1930,139 @@ class TolinoClient:
 
     def delete(self, deliverable_id):
         self._request(BASE_URL + "/deletecontent?deliverableId=" + str(deliverable_id))
+
+    # --- Device list (pytolino-derived): resolve the real hardware ID ------
+
+    DEVICES_URL = "https://bosh.pageplace.de/bosh/rest/handshake/devices/list"
+
+    def fetch_hardware_id(self):
+        """Return the most recently used hardware ID registered for the account.
+
+        Mirrors pytolino's device-list flow: POST accounts with the access
+        token, read deviceListResponse.devices sorted by deviceLastUsage and
+        take the latest entry's deviceId. Useful after a fresh web reader
+        login, when the account's registered device is unknown.
+        """
+        payload = {
+            "deviceListRequest": {
+                "accounts": [{
+                    "auth_token": self.access,
+                    "reseller_id": str(self.partner_id),
+                }],
+            },
+        }
+        data = self._request(self.DEVICES_URL, "POST", payload,
+                             content_type="application/json")
+        devices = (data.get("deviceListResponse") or {}).get("devices") or []
+        devices = [item for item in devices if isinstance(item, dict)]
+        if not devices:
+            raise TolinoApiError("Tolino device list returned no devices.")
+        devices.sort(key=lambda item: str(item.get("deviceLastUsage", "")))
+        hardware = devices[-1].get("deviceId")
+        if not hardware:
+            raise TolinoApiError("Tolino device list entry has no deviceId.")
+        return str(hardware)
+
+    # --- Download (pytolino-derived): fetch an uploaded ebook back ---------
+
+    def download(self, deliverable_id):
+        """Download one book from the cloud; returns (content_bytes, metadata)."""
+        info_url = (BASE_URL + "/cloud/downloadinfo/%s/%s/type/external-download"
+                    % (_url_quote(str(deliverable_id)),
+                       _url_quote(str(deliverable_id))))
+        info = self._request(info_url)
+        content_url = (info.get("DownloadInfo") or {}).get("contentUrl")
+        if not content_url:
+            raise TolinoApiError("DownloadInfo response had no contentUrl.")
+        request = Request(content_url, headers={
+            "User-Agent": "Calibre-Tolino-Plugin/0.2",
+            "t_auth_token": self.access,
+            "hardware_id": self.hardware,
+            "reseller_id": str(self.partner_id),
+        })
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                content = response.read()
+        except (HTTPError, URLError, OSError) as exc:
+            raise TolinoApiError("Tolino download failed: %s" %
+                                 sanitize_error(exc, (self.refresh, self.access)))
+        # Metadata comes from the inventory record.
+        for item in self.inventory():
+            if isinstance(item, dict) and str(
+                    item.get("deliverableId") or item.get("deliverable_id") or ""
+                    ) == str(deliverable_id):
+                return content, item
+        return content, {}
+
+    # --- Collections & read state (pytolino-derived sync-data patches) -----
+
+    SYNC_DATA_URL = BASE_URL + "/sync-data?paths=publications"
+
+    def _sync_patch(self, payload):
+        data = self._request(self.SYNC_DATA_URL, "PATCH", payload,
+                             content_type="application/json")
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _tag_patch(op, book_id, name, category, revision=None):
+        value = {"modified": int(time.time() * 1000),
+                 "name": name, "category": category}
+        if revision is not None:
+            value["revision"] = revision
+        return {"op": op, "value": value,
+                "path": "/publications/%s/tags" % book_id}
+
+    def get_sync_data(self):
+        """Return (revision, patches) describing tags/collections state."""
+        data = self._sync_patch({"revision": None, "patches": []})
+        return data.get("revision"), data.get("patches") or []
+
+    def add_to_collection(self, book_id, collection_name):
+        """Add an uploaded/purchased book to a named collection."""
+        patch = self._tag_patch("add", book_id, collection_name, "collection")
+        data = self._sync_patch({"revision": None, "patches": [patch]})
+        return data.get("revision")
+
+    def remove_from_collection(self, book_id, collection_name):
+        """Remove a book from a named collection (the book itself stays)."""
+        revision, patches = self.get_sync_data()
+        existing = next((
+            item for item in patches
+            if isinstance(item, dict)
+            and "/publications/%s/tags" % book_id in str(item.get("path", ""))
+            and isinstance(item.get("value"), dict)
+            and item["value"].get("category") == "collection"
+            and item["value"].get("name") == collection_name
+        ), None)
+        if existing is None:
+            raise TolinoApiError(
+                "Book %s is not part of collection %r." % (book_id, collection_name))
+        patch = self._tag_patch(
+            "remove", book_id, collection_name, "collection",
+            revision=existing["value"].get("revision"))
+        data = self._sync_patch({"revision": revision, "patches": [patch]})
+        return data.get("revision")
+
+    def mark_read(self, book_id, finished=True):
+        """Mark a book as finished (or unmark it) via the system tag patch."""
+        name = "collection_finished_readings_name"
+        if finished:
+            patch = self._tag_patch("add", book_id, name, "system")
+            data = self._sync_patch({"revision": None, "patches": [patch]})
+            return data.get("revision")
+        revision, patches = self.get_sync_data()
+        existing = next((
+            item for item in patches
+            if isinstance(item, dict)
+            and "/publications/%s/tags" % book_id in str(item.get("path", ""))
+            and isinstance(item.get("value"), dict)
+            and item["value"].get("category") == "system"
+            and item["value"].get("name") == name
+        ), None)
+        if existing is None:
+            raise TolinoApiError("Book %s is not marked as finished." % book_id)
+        patch = self._tag_patch(
+            "remove", book_id, name, "system",
+            revision=existing["value"].get("revision"))
+        data = self._sync_patch({"revision": revision, "patches": [patch]})
+        return data.get("revision")
