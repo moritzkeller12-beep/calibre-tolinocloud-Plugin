@@ -25,7 +25,8 @@ try:
     from .config import save_account, save_settings, settings
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
                        load_state, metadata_by_id, plan_sync,
-                       selected_book_ids, selected_table_rows, sync_summary,
+                       selected_book_ids, selected_table_rows,
+                       sync_summary,
                        normalize_formats, safe_format_path, cover_bytes,
                        unpack_plan_result, unpack_upload_record,
                        diagnose_preparation, format_diagnostic_report,
@@ -33,14 +34,15 @@ try:
                        update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error,
-                         scrape_browser_tokens)
-    from .weblogin import embedded_login_available, run_embedded_login
+                         scrape_browser_tokens,
+                         validate_refresh_candidates)
 except ImportError:
     bootstrapper = None
     from config import save_account, save_settings, settings
     from sync import (compare_inventory, format_error_details, iter_book_ids,
                       load_state, metadata_by_id, plan_sync,
-                      selected_book_ids, selected_table_rows, sync_summary,
+                      selected_book_ids, selected_table_rows,
+                      sync_summary,
                       normalize_formats, safe_format_path, cover_bytes,
                       unpack_plan_result, unpack_upload_record,
                       diagnose_preparation, format_diagnostic_report,
@@ -48,8 +50,8 @@ except ImportError:
                       update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         hardware_id, normalize_refresh_token, sanitize_error,
-                        scrape_browser_tokens)
-    from weblogin import embedded_login_available, run_embedded_login
+                        scrape_browser_tokens,
+                        validate_refresh_candidates)
 
 
 def _plugin_version():
@@ -95,15 +97,17 @@ class InventoryDialog(QDialog):
     HEADERS = ("Upload", "Status", "Titel / Title", "Autor / Author",
                "ISBN", "Tolino-ID", "Hinweis / Explanation")
 
-    def __init__(self, rows, parent=None):
+    def __init__(self, rows, parent=None, client_factory=None):
         QDialog.__init__(self, parent)
+        self.rows = list(rows)
+        self.client_factory = client_factory
         self.setWindowTitle("Bestandsvergleich / Inventory comparison")
         self.setMinimumSize(900, 420)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Autor, Titel und ISBN dienen nur zum Vergleichen/Filtern; "
-            "die Tolino-API schreibt keine Metadaten. Uploadbar sind Datei/Format "
-            "und optional Cover."))
+            "Häkchen setzen, was hochgeladen werden soll, dann \u201eAuswahl "
+            "synchronisieren\u201c klicken. Cloud-Aktionen wirken auf die "
+            "markierte Zeile."))
         self.table = QTableWidget(len(rows), len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.checks = []
@@ -132,9 +136,30 @@ class InventoryDialog(QDialog):
             for column, value in enumerate(values, 1):
                 self.table.setItem(row_index, column, QTableWidgetItem(str(value or "")))
         self.table.resizeColumnsToContents()
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
+
+        # Cloud actions live inside this window and use its own table, so
+        # they can never outlive it (the deleted-QTableWidget crash).
+        actions = QGroupBox(
+            "Aktionen für die markierte Zeile / Actions for the selected row")
+        action_row = QHBoxLayout()
+        self.download_btn = QPushButton("Herunterladen / Download")
+        self.collection_add_btn = QPushButton("Zur Sammlung / To collection")
+        self.collection_rm_btn = QPushButton("Aus Sammlung / From collection")
+        self.mark_read_btn = QPushButton("Gelesen / Mark read")
+        for button in (self.download_btn, self.collection_add_btn,
+                       self.collection_rm_btn, self.mark_read_btn):
+            action_row.addWidget(button)
+        actions.setLayout(action_row)
+        layout.addWidget(actions)
+        self.download_btn.clicked.connect(self.download_selected)
+        self.collection_add_btn.clicked.connect(self.add_selected_to_collection)
+        self.collection_rm_btn.clicked.connect(self.remove_selected_from_collection)
+        self.mark_read_btn.clicked.connect(self.mark_selected_read)
+
         buttons = QHBoxLayout()
-        confirm = QPushButton("Auswahl übernehmen / Confirm selection")
+        confirm = QPushButton("Auswahl synchronisieren / Sync selection")
         cancel = QPushButton("Abbrechen / Cancel")
         confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
@@ -142,12 +167,130 @@ class InventoryDialog(QDialog):
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
 
-    def selected_ids(self, rows):
+    def selected_ids(self, rows=None):
+        rows = self.rows if rows is None else rows
         if len(rows) != len(self.checks):
             raise ValueError("Inventory table and selection controls have different row counts.")
         return selected_book_ids([
             dict(row, selected=check.isChecked()) for row, check in zip(rows, self.checks)
         ])
+
+    # --- Cloud actions on the currently selected table row ---------------
+
+    def _selected_row(self):
+        """The comparison row for the selection, or None with a hint."""
+        selected = selected_table_rows(self.table)
+        if not selected:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Bitte eine Zeile markieren. / Select a row first.")
+            return None
+        row_index = selected[0]
+        if row_index >= len(self.rows):
+            return None
+        return self.rows[row_index]
+
+    def _client(self):
+        if self.client_factory is None:
+            QMessageBox.warning(
+                self, "Tolino Cloud Sync",
+                "Keine Anmeldung verfügbar. / No sign-in available.")
+            return None
+        try:
+            return self.client_factory()
+        except Exception as exc:
+            error_dialog(self, "Anmeldung fehlgeschlagen / Sign-in failed",
+                         sanitize_error(exc), show=True)
+            return None
+
+    def download_selected(self):
+        row = self._selected_row()
+        if row is None:
+            return
+        tolino_id = row.get("tolino_id")
+        if not tolino_id:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Diese Zeile hat keine Tolino-ID (nur in der Cloud vorhandene "
+                "Bücher können heruntergeladen werden).")
+            return
+        try:
+            client = self._client()
+            if client is None:
+                return
+            content, _metadata = client.download(tolino_id)
+        except Exception as exc:
+            error_dialog(self, "Download fehlgeschlagen / Download failed",
+                         sanitize_error(exc), show=True)
+            return
+        suggested = "%s.epub" % (row.get("title") or "tolino-book")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "EPUB speichern / Save EPUB", suggested, "EPUB (*.epub)")
+        if not path:
+            return
+        with open(path, "wb") as handle:
+            handle.write(content)
+        info_dialog(self, "Tolino Cloud Sync",
+                    "Buch gespeichert: %s" % path, show_copy_button=False)
+
+    def _collection_action(self, action, title):
+        row = self._selected_row()
+        if row is None:
+            return
+        tolino_id = row.get("tolino_id")
+        if not tolino_id:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Diese Zeile hat keine Tolino-ID. / No Tolino ID for this row.")
+            return
+        name, ok = QInputDialog.getText(
+            self, title, "Sammlungsname / Collection name:")
+        if not ok or not str(name).strip():
+            return
+        try:
+            client = self._client()
+            if client is None:
+                return
+            action(client, tolino_id, str(name).strip())
+        except Exception as exc:
+            error_dialog(self, "Sammlung fehlgeschlagen / Collection failed",
+                         sanitize_error(exc), show=True)
+            return
+        info_dialog(self, "Tolino Cloud Sync",
+                    "Sammlung aktualisiert: %s" % name, show_copy_button=False)
+
+    def add_selected_to_collection(self):
+        self._collection_action(
+            lambda client, book, name: client.add_to_collection(book, name),
+            "Zur Sammlung hinzufügen / Add to collection")
+
+    def remove_selected_from_collection(self):
+        self._collection_action(
+            lambda client, book, name: client.remove_from_collection(book, name),
+            "Aus Sammlung entfernen / Remove from collection")
+
+    def mark_selected_read(self):
+        row = self._selected_row()
+        if row is None:
+            return
+        tolino_id = row.get("tolino_id")
+        if not tolino_id:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Diese Zeile hat keine Tolino-ID. / No Tolino ID for this row.")
+            return
+        try:
+            client = self._client()
+            if client is None:
+                return
+            client.mark_read(tolino_id, finished=True)
+        except Exception as exc:
+            error_dialog(self, "Markieren fehlgeschlagen / Marking failed",
+                         sanitize_error(exc), show=True)
+            return
+        info_dialog(self, "Tolino Cloud Sync",
+                    "Als gelesen markiert. / Marked as read.",
+                    show_copy_button=False)
 
 
 class DiagnosticDialog(QDialog):
@@ -313,14 +456,8 @@ class SyncDashboard(QDialog):
         self.setMinimumWidth(560)
         root = QVBoxLayout(self)
 
-        account = QGroupBox("Tolino-Konto / Tolino account")
-        account_form = QFormLayout(account)
-        self.account_select = QComboBox()
-        self.account_new = QPushButton("Neues Konto / New account")
-        self.account_remove = QPushButton("Konto löschen / Remove")
-        account_buttons = QHBoxLayout()
-        account_buttons.addWidget(self.account_new)
-        account_buttons.addWidget(self.account_remove)
+        setup = QGroupBox("1. Anmeldung / Sign-in")
+        setup_form = QFormLayout(setup)
         self.partner = QComboBox()
         for pid, partner in sorted(PARTNERS.items()):
             self.partner.addItem("%s - %s" % (pid, partner["name"]), pid)
@@ -328,28 +465,27 @@ class SyncDashboard(QDialog):
         self.refresh = QLineEdit()
         self.refresh.setEchoMode(QLineEdit.Password)
         self.status = QLabel()
-        self.browser = QPushButton("Im Browser anmelden / Sign in in browser")
+        self.browser = QPushButton(
+            "Im Browser anmelden (frischen Token holen) / Sign in via browser")
         self.browser.clicked.connect(self.browser_login)
-        self.scrape_browser = QPushButton("Token aus Browser extrahieren / Extract from browser")
+        self.scrape_browser = QPushButton(
+            "Frischen Token aus laufendem Web Reader übernehmen / "
+            "Adopt fresh token from running web reader")
         self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
         self.install_curl_cffi = QPushButton(
-            "curl_cffi installieren (Bot-Schutz umgehen) / Install curl_cffi")
+            "Bot-Schutz-Komponente installieren (einmalig) / "
+            "Install bot-protection component")
         self.install_curl_cffi.clicked.connect(self.install_curl_cffi_clicked)
-        self.account_select.currentIndexChanged.connect(self.account_changed)
-        self.account_new.clicked.connect(self.new_account)
-        self.account_remove.clicked.connect(self.remove_account)
-        account_form.addRow("Konto / Account", self.account_select)
-        account_form.addRow("", account_buttons)
-        account_form.addRow("Partner", self.partner)
-        account_form.addRow("Hardware ID", self.hardware)
-        account_form.addRow("Refresh token", self.refresh)
-        account_form.addRow("", self.browser)
-        account_form.addRow("", self.scrape_browser)
-        account_form.addRow("", self.install_curl_cffi)
-        account_form.addRow("Status", self.status)
-        root.addWidget(account)
+        setup_form.addRow("Buchhändler / Partner", self.partner)
+        setup_form.addRow("", self.browser)
+        setup_form.addRow("", self.scrape_browser)
+        setup_form.addRow("", self.install_curl_cffi)
+        setup_form.addRow("", self.status)
+        setup_form.addRow("Hardware ID (automatisch erkannt)", self.hardware)
+        setup_form.addRow("Refresh token", self.refresh)
+        root.addWidget(setup)
 
-        options = QGroupBox("Synchronisation / Synchronization")
+        options = QGroupBox("2. Optionen (Standard reicht) / Options")
         option_form = QFormLayout(options)
         self.formats = QLineEdit()
         self.covers = QCheckBox("Covers hochladen / Upload covers")
@@ -361,9 +497,7 @@ class SyncDashboard(QDialog):
         self.compare_isbn = QCheckBox("ISBN (nur Vergleich/Filter)")
         for field in (self.compare_authors, self.compare_title, self.compare_isbn):
             field.setChecked(True)
-        self.upload_format = QLabel("Datei/Format wird hochgeladen / File/format is uploadable")
         option_form.addRow("Formate / Formats", self.formats)
-        option_form.addRow("", self.upload_format)
         option_form.addRow("", self.covers)
         option_form.addRow("", self.compare_authors)
         option_form.addRow("", self.compare_title)
@@ -372,11 +506,26 @@ class SyncDashboard(QDialog):
         option_form.addRow("", self.tolino_column)
         root.addWidget(options)
 
+        accounts = QGroupBox("Konten (optional) / Accounts")
+        account_form = QFormLayout(accounts)
+        self.account_select = QComboBox()
+        self.account_new = QPushButton("Neues Konto / New account")
+        self.account_remove = QPushButton("Konto löschen / Remove")
+        account_buttons = QHBoxLayout()
+        account_buttons.addWidget(self.account_new)
+        account_buttons.addWidget(self.account_remove)
+        self.account_select.currentIndexChanged.connect(self.account_changed)
+        self.account_new.clicked.connect(self.new_account)
+        self.account_remove.clicked.connect(self.remove_account)
+        account_form.addRow("Konto / Account", self.account_select)
+        account_form.addRow("", account_buttons)
+        root.addWidget(accounts)
+
         self.progress_label = QLabel("Bereit / Ready")
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
-        self.start = QPushButton("Synchronisierung starten / Start synchronization")
-        self.debug = QPushButton("Debug / Diagnose")
+        self.start = QPushButton("3. Synchronisierung starten / Start synchronization")
+        self.debug = QPushButton("Diagnose / Diagnostics")
         self.cancel = QPushButton("Abbrechen / Abort")
         self.cancel.setEnabled(False)
         self.start.clicked.connect(self.start_sync)
@@ -388,33 +537,12 @@ class SyncDashboard(QDialog):
         action_buttons.addWidget(self.debug)
         action_buttons.addWidget(self.start)
         root.addLayout(action_buttons)
-
-        # Cloud actions on the currently selected sync-table row.
-        cloud_row = QHBoxLayout()
-        self.download_btn = QPushButton(
-            "Buch herunterladen / Download book")
-        self.collection_add_btn = QPushButton(
-            "Zur Sammlung / To collection")
-        self.collection_rm_btn = QPushButton(
-            "Aus Sammlung / From collection")
-        self.mark_read_btn = QPushButton(
-            "Gelesen markieren / Mark read")
-        for button in (self.download_btn, self.collection_add_btn,
-                       self.collection_rm_btn, self.mark_read_btn):
-            cloud_row.addWidget(button)
-        root.addLayout(cloud_row)
-        self.download_btn.clicked.connect(self.download_selected)
-        self.collection_add_btn.clicked.connect(self.add_selected_to_collection)
-        self.collection_rm_btn.clicked.connect(self.remove_selected_from_collection)
-        self.mark_read_btn.clicked.connect(self.mark_selected_read)
         root.addWidget(self.cancel)
         # Plain close button instead of QDialogButtonBox: immune to the Qt6
         # "Invalid ButtonRole, button not added" warning seen in the field.
         close = QPushButton("Schließen / Close")
         close.clicked.connect(self.close)
         root.addWidget(close)
-        self._comparison_rows = []
-        self._comparison_table = None
         self.load_values()
 
     def _save_visible_account(self):
@@ -512,31 +640,11 @@ class SyncDashboard(QDialog):
             "hardware_id": self.hardware.text().strip() or hardware_id(),
         }, active=self.account_name)
 
-    def _resolve_hardware_id(self):
-        """Resolve the account hardware ID via the device list after login."""
-        try:
-            client = TolinoClient(
-                self.partner.currentData(), self.hardware.text().strip(),
-                self.refresh.text().strip())
-            client.login()
-            hardware = client.fetch_hardware_id()
-            return hardware or hardware_id()
-        except Exception:
-            return hardware_id()
-
     def _validate_scraped_candidates(self, refreshes, hardwares):
         """Validate scraped candidates live; return the fresh pair or None."""
-        for refresh in refreshes:
-            client = TolinoClient(self.partner.currentData(),
-                                  hardwares[0] if hardwares else "")
-            client.refresh = refresh
-            try:
-                client._login()
-            except Exception:
-                continue  # spent or rejected -> try the next candidate
-            if client.refresh and client.refresh != refresh:
-                return client.refresh, (hardwares[0] if hardwares else None)
-        return None
+        return validate_refresh_candidates(
+            self.partner.currentData(), hardwares[0] if hardwares else "",
+            refreshes)
 
     def scrape_browser_tokens(self):
         """Extract a working refresh_token and hardware_id from browsers.
@@ -670,34 +778,46 @@ class SyncDashboard(QDialog):
         }
 
     def browser_login(self):
-        """Embedded sign-in first; external OAuth callback as fallback."""
+        """Sign in with the system browser and adopt the fresh token.
+
+        The embedded QtWebEngine window was removed: it produced its own
+        bot-protection fingerprint problems and never completed reliably.
+        The external browser signs in with the user's real fingerprint and
+        the plugin validates every harvested token before adopting it.
+        """
         partner_id = self.partner.currentData()
-        hardware = self.hardware.text().strip()
-        if embedded_login_available():
-            try:
-                refresh, hardware = run_embedded_login(partner_id, hardware, self)
-            except TolinoAuthError as exc:
-                QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in", str(exc))
-                return
-            self.set_refresh_token(refresh)
-            self.hardware.setText(hardware or self._resolve_hardware_id())
-            self.persist_refresh_token(self.refresh.text().strip())
-            self.update_status()
-            QMessageBox.information(
-                self, "Anmeldung erfolgreich / Sign-in complete",
-                "Der neue Refresh-Token wurde sofort gespeichert.")
-            return
         try:
-            refresh, hardware = browser_login(partner_id, hardware)
+            refresh, hardware = browser_login(partner_id,
+                                              self.hardware.text().strip())
         except TolinoAuthError as exc:
             QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in", str(exc))
             return
         self.set_refresh_token(refresh)
-        self.hardware.setText(hardware)
+        if hardware:
+            self.hardware.setText(hardware)
         self.persist_refresh_token(refresh)
         self.update_status()
         QMessageBox.information(self, "Anmeldung erfolgreich / Sign-in complete",
                                 "Der neue Refresh-Token wurde sofort gespeichert.")
+
+    def _cloud_client(self):
+        """Build a logged-in client from the current dialog values.
+
+        Raises on failure; the inventory dialog turns that into an error
+        dialog. The rotated refresh token is persisted immediately.
+        """
+        settings = self.values()
+        if not settings["refresh_token"]:
+            raise TolinoAuthError(
+                "Bitte zuerst einen Refresh-Token konfigurieren.")
+        self._save_visible_account()
+        client = TolinoClient(
+            settings["partner_id"], settings["hardware_id"],
+            settings["refresh_token"], settings["username"],
+            settings["password"], token_callback=self.persist_refresh_token)
+        client.login()
+        self.set_refresh_token(client.refresh)
+        return client
 
     def start_sync(self):
         if self.thread is not None:
@@ -752,12 +872,10 @@ class SyncDashboard(QDialog):
                 use_metadata_ids=(self.sync_column_enabled and
                                   len(settings()["accounts"]) == 1),
             )
-            dialog = InventoryDialog(comparison, self)
-            if dialog.exec() != QDialog.Accepted:
-                return
-            self._comparison_rows = list(comparison)
-            self._comparison_table = dialog.table
-            selected_ids = dialog.selected_ids(comparison)
+            dialog = InventoryDialog(
+                comparison, self,
+                client_factory=lambda: self._cloud_client())
+            dialog.exec()
             uploads, removals, current = unpack_plan_result(plan_sync(
                 metadata, state, settings["preferred_formats"],
                 settings["enable_deletions"], selected_ids,
@@ -854,143 +972,6 @@ class SyncDashboard(QDialog):
             sanitize_error(message, (self.values()["refresh_token"],)),
             show=True,
         )
-
-    # --- Cloud actions on the currently compared inventory row ------------
-
-    def _cloud_client(self):
-        """Build a logged-in client from the current dialog values."""
-        settings = self.values()
-        if not settings["refresh_token"]:
-            QMessageBox.warning(self, "Konfiguration / Configuration",
-                                "Bitte zuerst einen Refresh-Token konfigurieren.")
-            return None
-        self._save_visible_account()
-        client = TolinoClient(
-            settings["partner_id"], settings["hardware_id"],
-            settings["refresh_token"], settings["username"],
-            settings["password"], token_callback=self.persist_refresh_token)
-        client.login()
-        self.set_refresh_token(client.refresh)
-        return client
-
-    def _selected_tolino_row(self):
-        """Return the comparison row for the selected table row, or None."""
-        rows = getattr(self, "_comparison_rows", []) or []
-        if not rows:
-            QMessageBox.information(
-                self, "Tolino Cloud Sync",
-                "Bitte zuerst synchronisieren, damit der Bestand verglichen "
-                "wurde. / Run a synchronization first so the inventory is "
-                "compared.")
-            return None
-        table = getattr(self, "_comparison_table", None)
-        if table is None:
-            QMessageBox.information(
-                self, "Tolino Cloud Sync",
-                "Kein Bestandsfenster offen. / No inventory window open.")
-            return None
-        selected = selected_table_rows(table)
-        if not selected:
-            QMessageBox.information(
-                self, "Tolino Cloud Sync",
-                "Bitte eine Zeile im Bestand ausw\u00e4hlen. / Select a row in "
-                "the inventory table first.")
-            return None
-        row_index = selected[0]
-        if row_index >= len(rows):
-            return None
-        return rows[row_index]
-
-    def download_selected(self):
-        row = self._selected_tolino_row()
-        if row is None:
-            return
-        tolino_id = row.get("tolino_id")
-        if not tolino_id:
-            QMessageBox.information(
-                self, "Tolino Cloud Sync",
-                "Diese Zeile hat keine Tolino-ID (nur in der Cloud vorhandene "
-                "B\u00fccher k\u00f6nnen heruntergeladen werden). / No Tolino ID "
-                "for this row.")
-            return
-        try:
-            client = self._cloud_client()
-            if client is None:
-                return
-            content, _metadata = client.download(tolino_id)
-        except Exception as exc:
-            error_dialog(self, "Download fehlgeschlagen / Download failed",
-                         sanitize_error(exc), show=True)
-            return
-        suggested = "%s.epub" % (row.get("title") or "tolino-book")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "EPUB speichern / Save EPUB", suggested, "EPUB (*.epub)")
-        if not path:
-            return
-        with open(path, "wb") as handle:
-            handle.write(content)
-        info_dialog(self, "Tolino Cloud Sync",
-                    "Buch gespeichert: %s" % path, show_copy_button=False)
-
-    def _collection_action(self, action, title):
-        row = self._selected_tolino_row()
-        if row is None:
-            return
-        tolino_id = row.get("tolino_id")
-        if not tolino_id:
-            QMessageBox.information(
-                self, "Tolino Cloud Sync",
-                "Diese Zeile hat keine Tolino-ID. / No Tolino ID for this row.")
-            return
-        name, ok = QInputDialog.getText(
-            self, title,
-            "Sammlungsname / Collection name:")
-        if not ok or not str(name).strip():
-            return
-        try:
-            client = self._cloud_client()
-            if client is None:
-                return
-            action(client, tolino_id, str(name).strip())
-        except Exception as exc:
-            error_dialog(self, "Sammlung fehlgeschlagen / Collection failed",
-                         sanitize_error(exc), show=True)
-            return
-        info_dialog(self, "Tolino Cloud Sync",
-                    "Sammlung aktualisiert: %s" % name, show_copy_button=False)
-
-    def add_selected_to_collection(self):
-        self._collection_action(
-            lambda client, book, name: client.add_to_collection(book, name),
-            "Zur Sammlung hinzuf\u00fcgen / Add to collection")
-
-    def remove_selected_from_collection(self):
-        self._collection_action(
-            lambda client, book, name: client.remove_from_collection(book, name),
-            "Aus Sammlung entfernen / Remove from collection")
-
-    def mark_selected_read(self):
-        row = self._selected_tolino_row()
-        if row is None:
-            return
-        tolino_id = row.get("tolino_id")
-        if not tolino_id:
-            QMessageBox.information(
-                self, "Tolino Cloud Sync",
-                "Diese Zeile hat keine Tolino-ID. / No Tolino ID for this row.")
-            return
-        try:
-            client = self._cloud_client()
-            if client is None:
-                return
-            client.mark_read(tolino_id, finished=True)
-        except Exception as exc:
-            error_dialog(self, "Markieren fehlgeschlagen / Marking failed",
-                         sanitize_error(exc), show=True)
-            return
-        info_dialog(self, "Tolino Cloud Sync",
-                    "Als gelesen markiert. / Marked as read.",
-                    show_copy_button=False)
 
     def finish_thread(self):
         self._save_visible_account()

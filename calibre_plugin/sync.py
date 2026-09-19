@@ -132,8 +132,36 @@ def normalize_formats(value):
     return formats
 
 
+try:
+    import shiboken6 as _shiboken
+except Exception:
+    try:
+        import shiboken2 as _shiboken
+    except Exception:
+        _shiboken = None
+
+
+def _qt_object_alive(obj):
+    """False for Qt wrappers whose C++ object was already deleted.
+
+    Clicking a button after its inventory table was destroyed crashed the
+    plugin with "wrapped C/C++ object of type QTableWidget has been
+    deleted"; this check turns that into a harmless empty selection.
+    """
+    if obj is None:
+        return False
+    if _shiboken is not None:
+        try:
+            return bool(_shiboken.isValid(obj))
+        except Exception:
+            return False
+    return True
+
+
 def selected_table_rows(table):
     """Return valid selected Qt row numbers without assuming QModelIndex shape."""
+    if not _qt_object_alive(table):
+        return []
     selection_model = getattr(table, "selectionModel", None)
     selected = selection_model().selectedRows() if callable(selection_model) else ()
     rows = []

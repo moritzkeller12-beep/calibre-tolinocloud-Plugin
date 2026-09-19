@@ -23,11 +23,9 @@ from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
                      force_legacy_partner_id, normalize_hardware_id,
                      normalize_refresh_token, resolve_partner_id,
                      sanitize_error,
-                     validate_callback, scrape_browser_tokens, browser_login)
-try:
-    from . import weblogin
-except ImportError:
-    import weblogin
+                     validate_callback, scrape_browser_tokens, browser_login,
+                     validate_refresh_candidates)
+import calibre_plugin.tolino as tolino_module
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -1041,7 +1039,6 @@ class SyncPlanTests(unittest.TestCase):
                 "config.py",
                 "sync.py",
                 "tolino.py",
-                "weblogin.py",
                 "icons.py",
                 "bootstrapper.py",
                 "images/tolino_cloud_sync.png",
@@ -1370,70 +1367,44 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("case-refresh", refresh)
         self.assertEqual("hw-9", hardware)
 
-    def test_embedded_login_reports_unavailable_webengine(self):
-        with patch.object(weblogin, "QWebEngineView", None), \
-                patch.object(weblogin, "QWebEngineProfile", None):
-            self.assertFalse(weblogin.embedded_login_available())
-            with self.assertRaisesRegex(TolinoAuthError, "QtWebEngine"):
-                weblogin.run_embedded_login(4, "hw")
+    def test_validate_refresh_candidates_walks_candidate_list(self):
+        """First candidate accepted wins; the rotated token is returned."""
+        seen = []
 
-    def test_embedded_start_url_builds_oauth_and_reader_fallback(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.partner = dict(PARTNERS[4])
-        url = dialog._start_url()
-        self.assertIn("auth/oauth2/autologin", url)
-        self.assertIn("client_id=webreader", url)
-        self.assertIn("x_buchde.mandant_id=37", url)
+        def fake_login(self):
+            seen.append(self.refresh)
+            if self.refresh in ("spent-old", "spent-newer"):
+                raise TolinoAuthError("invalid_grant: Invalid refresh token")
+            assert self.refresh == "fresh-now", self.refresh
+            self.refresh = "rotated-fresh"
 
-        dialog.partner = {"client_id": "c", "scope": "s"}
-        url = dialog._start_url()
-        self.assertTrue(url.startswith("https://webreader.mytolino.com"))
+        with patch.object(tolino_module.TolinoClient, "_login", fake_login):
+            result = validate_refresh_candidates(
+                4, "hw-x", ["spent-old", "spent-newer", "fresh-now"])
+        self.assertEqual(("rotated-fresh", "hw-x"), result)
+        self.assertEqual(["spent-old", "spent-newer", "fresh-now"], seen)
 
-    def test_embedded_storage_ready_accepts_token_and_ignores_garbage(self):
-        import json as json_module
+    def test_validate_refresh_candidates_rejects_all_spent(self):
+        def fake_login(self):
+            raise TolinoAuthError("invalid_grant: Invalid refresh token")
 
-        def make_dialog():
-            dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-            dialog.completed = False
-            dialog.partner_id = 4
-            dialog.hardware_id_value = "configured-hw"
-            dialog.refresh_token = None
-            dialog.hardware_id = None
-            dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
-            dialog._timer = type("Timer", (), {
-                "stop": staticmethod(lambda: None)})()
-            return dialog
+        with patch.object(tolino_module.TolinoClient, "_login", fake_login):
+            self.assertIsNone(validate_refresh_candidates(
+                4, "hw-x", ["spent-a", "spent-b"]))
 
-        storage = json_module.dumps({
-            "refresh_token": "embedded-refresh", "device_id": "embedded-hw",
-        })
-
-        # A candidate that validates gets adopted with its rotated token.
-        dialog = make_dialog()
-        with patch.object(weblogin.EmbeddedLoginDialog,
-                          "_validate_fresh_tokens", return_value=True) as val:
-            dialog._storage_ready(storage)
-        self.assertTrue(dialog.completed)
-        val.assert_called_once_with("embedded-refresh")
-        self.assertEqual("embedded-hw", dialog.hardware_id)
-
-        # A candidate that fails validation keeps polling (no adoption).
-        dialog = make_dialog()
-        with patch.object(weblogin.EmbeddedLoginDialog,
-                          "_validate_fresh_tokens", return_value=False):
-            dialog._storage_ready(storage)
-        self.assertFalse(dialog.completed)
-        self.assertIsNone(dialog.refresh_token)
-
-        dialog._storage_ready("not-json")
-        self.assertFalse(dialog.completed)
+    def test_validate_refresh_candidates_skips_blank_and_bad_input(self):
+        with patch.object(tolino_module.TolinoClient, "_login") as fake:
+            fake.side_effect = TolinoAuthError("nope")
+            self.assertIsNone(validate_refresh_candidates(4, "", []))
+            self.assertIsNone(validate_refresh_candidates(4, "", [None, "  "]))
+        fake.assert_not_called()
 
     def test_extract_all_tokens_returns_every_historical_candidate(self):
         from .tolino import _extract_all_tokens_from_storage
 
         storage = {
             "webreader.mytolino.com/refresh_token": "spent-old",
-            "webreader.mytolino.com/userToken":
+            "webreader.mytolino.com/userToken": 
                 '{"refresh": "spent-newer", "expireTime": 1}',
             "webreader.mytolino.com/hardware_id": "hw-77",
         }
@@ -1455,335 +1426,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(["spent-old"], refreshes)
         self.assertEqual(["hw-77"], hardwares)
         self.assertTrue(any("Kandidat" in n for n in notes), notes)
-
-    def test_validate_fresh_tokens_walks_candidate_list(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.completed = False
-        dialog.partner_id = 4
-        dialog.hardware_id = "hw-x"
-        dialog.refresh_token = None
-        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
-        dialog._timer = type("Timer", (), {"stop": staticmethod(lambda: None)})()
-        seen = []
-
-        def fake_login(self):
-            seen.append(self.refresh)
-            if self.refresh == "spent-old":
-                raise TolinoAuthError("invalid_grant: Invalid refresh token")
-            if self.refresh == "spent-newer":
-                raise TolinoAuthError("invalid_grant: Invalid refresh token")
-            assert self.refresh == "fresh-now", self.refresh
-            self.refresh = "rotated-fresh"
-
-        with patch.object(weblogin.TolinoClient, "_login", fake_login):
-            adopted = dialog._validate_fresh_tokens(
-                ["spent-old", "spent-newer", "fresh-now"])
-        self.assertTrue(adopted)
-        self.assertEqual(["spent-old", "spent-newer", "fresh-now"], seen)
-        self.assertEqual("rotated-fresh", dialog.refresh_token)
-        self.assertTrue(dialog.completed)
-
-    def test_validate_fresh_tokens_rejects_all_spent_candidates(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.completed = False
-        dialog.partner_id = 4
-        dialog.hardware_id = "hw-x"
-        dialog.refresh_token = None
-        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
-        dialog._timer = type("Timer", (), {"stop": staticmethod(lambda: None)})()
-
-        def fake_login(self):
-            raise TolinoAuthError("invalid_grant: Invalid refresh token")
-
-        with patch.object(weblogin.TolinoClient, "_login", fake_login):
-            adopted = dialog._validate_fresh_tokens(["spent-a", "spent-b"])
-        self.assertFalse(adopted)
-        self.assertIsNone(dialog.refresh_token)
-        self.assertFalse(dialog.completed)
-
-    def test_validate_fresh_tokens_spends_candidate_and_adopts_rotated(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.completed = False
-        dialog.partner_id = 4
-        dialog.hardware_id = "hw-x"
-        dialog.refresh_token = None
-        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
-        dialog._timer = type("Timer", (), {"stop": staticmethod(lambda: None)})()
-
-        def fake_login(self):
-            if self.refresh == "stale":
-                raise TolinoAuthError("invalid_grant: Invalid refresh token")
-            assert self.refresh == "stale", self.refresh
-            self.refresh = "rotated-fresh"
-
-        with patch.object(weblogin.TolinoClient, "_login", fake_login):
-            adopted = dialog._validate_fresh_tokens("stale")
-        self.assertFalse(adopted)
-        self.assertIsNone(dialog.refresh_token)
-
-        def fresh_login(self):
-            assert self.refresh == "candidate", self.refresh
-            self.refresh = "validated-rotated"
-
-        dialog.completed = False
-        with patch.object(weblogin.TolinoClient, "_login", fresh_login):
-            adopted = dialog._validate_fresh_tokens("candidate")
-        self.assertTrue(adopted)
-        self.assertEqual("validated-rotated", dialog.refresh_token)
-        self.assertTrue(dialog.completed)
-
-    def test_oauth_code_exchange_from_redirect_url(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.completed = False
-        dialog.partner = dict(PARTNERS[4])
-        dialog.partner_id = 8
-        dialog.hardware_id_value = "hw-99"
-        dialog.refresh_token = None
-        dialog.hardware_id = None
-        dialog._exchanged_code = None
-        dialog._redirect_hint = "https://webreader.mytolino.com/callback"
-        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
-        dialog._timer = type("Timer", (), {
-            "stop": staticmethod(lambda: None),
-            "start": staticmethod(lambda: None)})()
-
-        class FakeUrl:
-            def query(self):
-                return "code=abc123&state=xyz"
-
-        exchanged = {}
-
-        def fake_request(self, url, method="GET", data=None, form=False,
-                         authenticated=True, content_type=None, _retry=True):
-            exchanged["url"] = url
-            exchanged["data"] = data
-            return {"access_token": "a", "refresh_token": "code-refresh",
-                    "hardware_id": "hw-from-code"}
-
-        with patch.object(weblogin.TolinoClient, "_request", fake_request):
-            handled = dialog._maybe_exchange_oauth_code(FakeUrl())
-        self.assertTrue(handled)
-        self.assertTrue(dialog.completed)
-        self.assertEqual("code-refresh", dialog.refresh_token)
-        self.assertEqual("hw-from-code", dialog.hardware_id)
-        self.assertEqual(PARTNERS[4]["token_url"], exchanged["url"])
-        self.assertEqual("abc123", exchanged["data"]["code"])
-        self.assertEqual("authorization_code", exchanged["data"]["grant_type"])
-        self.assertEqual("https://webreader.mytolino.com/callback",
-                         exchanged["data"]["redirect_uri"])
-        # Payload must match the proven web-reader exchange exactly:
-        # scope plus the Orell-Fuessli shop parameters.
-        self.assertEqual("SCOPE_BOSH", exchanged["data"]["scope"])
-        self.assertEqual("37", exchanged["data"]["x_buchde.mandant_id"])
-        self.assertEqual("17", exchanged["data"]["x_buchde.skin_id"])
-
-    def test_oauth_code_exchange_without_code_is_noop(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.completed = False
-        dialog.partner = dict(PARTNERS[4])
-        dialog._exchanged_code = None
-
-        class FakeUrl:
-            query = ""  # attribute, not callable -> guarded
-
-        self.assertFalse(dialog._maybe_exchange_oauth_code(FakeUrl()))
-        self.assertFalse(dialog.completed)
-
-    def test_record_redirect_hint_captures_code_url(self):
-        class FakeUrl:
-            def __init__(self, q):
-                self._q = q
-
-            def query(self):
-                return self._q
-
-            def toString(self, *_flags):
-                return "https://webreader.mytolino.com/cb"
-
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog._redirect_hint = None
-        dialog._record_redirect_hint(FakeUrl("code=k1&session_state=s"))
-        self.assertEqual("https://webreader.mytolino.com/cb",
-                         dialog._redirect_hint)
-        dialog._redirect_hint = None
-        dialog._record_redirect_hint(FakeUrl(""))
-        self.assertIsNone(dialog._redirect_hint)
-
-    def test_resolve_enum_supports_qt6_scoped_and_qt5_flat_names(self):
-        class FakeQWebEngineProfile:  # Qt6/PyQt6 shape, as in Calibre 7.x
-            class PersistentCookiesPolicy:
-                ForcePersistentCookies = "qt6-scoped"
-
-        class FakeQt5Profile:  # legacy flat shape
-            ForcePersistentCookies = "qt5-flat"
-
-        self.assertEqual(
-            "qt6-scoped",
-            weblogin._resolve_enum(
-                FakeQWebEngineProfile, *weblogin._FORCE_PERSISTENT_COOKIES),
-        )
-        self.assertEqual(
-            "qt5-flat",
-            weblogin._resolve_enum(
-                FakeQt5Profile, *weblogin._FORCE_PERSISTENT_COOKIES),
-        )
-        self.assertIsNone(
-            weblogin._resolve_enum(FakeQWebEngineProfile, "NoSuch.Policy"))
-        self.assertIsNone(weblogin._resolve_enum(None, "Close"))
-
-    def test_clean_user_agent_strips_qt_token_and_keeps_chrome(self):
-        qt6_ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, "
-                  "like Gecko) QtWebEngine/5.15.2 Chrome/87.0.4280.144 "
-                  "Safari/537.36")
-        cleaned = weblogin._clean_user_agent(qt6_ua)
-        self.assertNotIn("QtWebEngine", cleaned)
-        self.assertIn("Chrome/87.0.4280.144", cleaned)
-        self.assertIn("Mozilla/5.0 (X11; Linux x86_64)", cleaned)
-        self.assertNotIn("  ", cleaned)
-
-        # Older builds may embed the token with different casing/spacing.
-        self.assertNotIn(
-            "qtwebengine", weblogin._clean_user_agent(
-                "Mozilla/5.0 qtwebengine/6.7.0 Chrome/118").casefold())
-
-        # Empty/None falls back to a sensible Chrome UA.
-        self.assertIn("Chrome/", weblogin._clean_user_agent(""))
-        self.assertIn("Chrome/", weblogin._clean_user_agent(None))
-
-    def test_stealth_script_covers_key_bot_signals(self):
-        script = weblogin._stealth_js("118", "Linux")
-        self.assertIn("webdriver", script)
-        self.assertIn("window.chrome", script)
-        self.assertIn("plugins", script)
-        self.assertIn("languages", script)
-        self.assertIn("WebGLRenderingContext", script)
-        self.assertIn("37445", script)  # UNMASKED_VENDOR_WEBGL spoof
-        # Every spoof block must be individually guarded.
-        self.assertGreaterEqual(script.count("catch (err) {}"), 6)
-        self.assertIn('"118"', script)
-        self.assertIn('"Linux"', script)
-
-    def test_client_hint_headers_match_cleaned_ua(self):
-        ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, "
-              "like Gecko) Chrome/118.0.0.0 Safari/537.36")
-        hints = weblogin._client_hint_headers(ua)
-        self.assertEqual(
-            '"Not A(Brand";v="99", "Chromium";v="118", '
-            '"Google Chrome";v="118"',
-            hints["Sec-CH-UA"])
-        self.assertEqual("?0", hints["Sec-CH-UA-Mobile"])
-        self.assertEqual('"Linux"', hints["Sec-CH-UA-Platform"])
-
-        windows_hints = weblogin._client_hint_headers(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0")
-        self.assertEqual('"Windows"', windows_hints["Sec-CH-UA-Platform"])
-
-        # Non-Chrome user agents get no hints rather than wrong ones.
-        self.assertEqual({}, weblogin._client_hint_headers("Firefox/128.0"))
-        self.assertEqual({}, weblogin._client_hint_headers(None))
-
-    def test_external_fallback_adopts_and_requires_tokens(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.completed = False
-        dialog.refresh_token = None
-        dialog.hardware_id = None
-        dialog.hardware_id_value = "hw-fallback"
-        dialog.status = type("Label", (), {"setText": staticmethod(lambda *_: None)})()
-        stopped = []
-
-        class Timer:
-            def stop(self):
-                stopped.append(True)
-
-        dialog._timer = Timer()
-
-        self.assertFalse(dialog._apply_external_tokens(None, None))
-        self.assertFalse(dialog._apply_external_tokens("  ", "hw"))
-        self.assertFalse(dialog.completed)
-
-        self.assertTrue(dialog._apply_external_tokens("external-refresh", "hw-x"))
-        self.assertTrue(dialog.completed)
-        self.assertEqual("external-refresh", dialog.refresh_token)
-        self.assertEqual("hw-x", dialog.hardware_id)
-        self.assertEqual([True], stopped)
-
-        # Missing hardware falls back to the configured value.
-        dialog.completed = False
-        dialog.refresh_token = None
-        dialog._apply_external_tokens("r2", None)
-        self.assertEqual("hw-fallback", dialog.hardware_id)
-
-    def test_external_login_page_targets_partner_auth_url(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.partner = dict(PARTNERS[4])
-        self.assertIn("auth/oauth2/autologin", dialog._start_url())
-
-    def test_stealth_script_registration_is_guarded_without_qt(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog.profile = object()  # no scripts() attribute in the stub
-        # Must not raise even though QWebEngineScript exists in real Qt builds
-        # but the profile stub lacks the scripts collection.
-        try:
-            dialog._install_stealth_script("Chrome/118")
-        except AttributeError:
-            pass  # tolerated on the stub; real builds have profile.scripts()
-
-    def test_quiet_page_class_exists_when_webengine_available(self):
-        # With the real Calibre/Qt modules unavailable, the quiet page stub is
-        # None; the guard must be importable without Qt either way.
-        if weblogin.QWebEnginePage is None:
-            self.assertIsNone(weblogin._QuietWebEnginePage)
-        else:
-            self.assertTrue(issubclass(weblogin._QuietWebEnginePage,
-                                       weblogin.QWebEnginePage))
-
-    def test_teardown_is_idempotent_and_tolerates_gone_objects(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog._torn_down = False
-
-        class G:
-            def __init__(self):
-                self.calls = []
-
-            def stop(self):
-                self.calls.append("stop")
-
-            def setPage(self, value):
-                self.calls.append(("setPage", value))
-
-            def deleteLater(self):
-                self.calls.append("deleteLater")
-
-        class RuntimeErrorView(G):
-            def setPage(self, value):
-                raise RuntimeError("underlying C/C++ object has been deleted")
-
-        dialog.view = RuntimeErrorView()
-        dialog.page = G()
-        dialog.profile = G()
-        dialog._teardown_webengine()
-        self.assertTrue(dialog._torn_down)
-        # The view is only stopped and detached (setPage raised, swallowed);
-        # Qt destroys the child widget with the dialog itself.
-        self.assertEqual(["stop"], dialog.view.calls)
-        self.assertEqual(["deleteLater"], dialog.page.calls)
-        self.assertEqual(["deleteLater"], dialog.profile.calls)
-
-        # Second run must do nothing.
-        dialog.view = G()
-        dialog.page = G()
-        dialog.profile = G()
-        dialog._teardown_webengine()
-        self.assertEqual([], dialog.view.calls)
-        self.assertEqual([], dialog.page.calls)
-        self.assertEqual([], dialog.profile.calls)
-
-    def test_teardown_handles_missing_attributes(self):
-        dialog = object.__new__(weblogin.EmbeddedLoginDialog)
-        dialog._torn_down = False
-        dialog._teardown_webengine()  # no view/page/profile attributes at all
-        self.assertTrue(dialog._torn_down)
-
 
 class ToolbarIconTests(unittest.TestCase):
     """The toolbar action must receive an icon in real Calibre runs."""

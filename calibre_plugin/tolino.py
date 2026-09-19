@@ -1473,6 +1473,31 @@ def extract_login_tokens(storage):
     return refresh, hardware
 
 
+def validate_refresh_candidates(partner_id, hardware_id, candidates):
+    """Live-validate scraped refresh tokens; return the fresh pair or None.
+
+    Browser storages keep spent tokens from earlier background rotations and
+    LevelDB scan order is not recency order, so candidates are tried in
+    order against the token endpoint. The rotated refresh token of the first
+    accepted grant is returned together with the hardware ID (the login
+    spends one candidate per attempt; a candidate that is already spent
+    cannot be adopted anyway).
+    """
+    for candidate in candidates or ():
+        candidate = (candidate or "").strip()
+        if not candidate:
+            continue
+        client = TolinoClient(partner_id, hardware_id or "")
+        client.refresh = candidate
+        try:
+            client._login()
+        except Exception:
+            continue  # spent or rejected -> try the next candidate
+        if client.refresh and client.refresh != candidate:
+            return client.refresh, (client.hardware or hardware_id)
+    return None
+
+
 def _extract_all_tokens_from_storage(storage_data):
     """Return (refresh_candidates, hardware_candidates) as ordered lists.
 
