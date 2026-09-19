@@ -39,11 +39,28 @@ python3 build_plugin.py
 
 Der Token-Endpunkt sitzt hinter einem Bot-Schutz, der TLS-Fingerprints prüft. Das Plugin versucht deshalb der Reihe nach:
 
-1. **curl_cffi** (Chrome-TLS, wie die Referenz pytolino) — optional installierbar: `pip install curl_cffi`
+1. **curl_cffi** (Chrome-TLS, wie die Referenz pytolino) — **erforderlich bei aktivem Bot-Schutz**: `python3 -m pip install --user curl_cffi`
 2. **curl** (Kommandozeilen-Client)
 3. **urllib** (Python-Standard, letzter Fallback)
 
 Zusätzlich sendet das Plugin beim Token-Request dieselbe **Sec-Fetch-/Client-Hints-Header-Familie** wie der Web Reader selbst (per DevTools verifiziert) — der Bot-Schutz blockt Anfragen ohne diese Header mit der Seite „Zugriff geblockt" (HTTP 403), noch bevor der Token geprüft wird.
+
+**Entscheidend ist der TLS-Fingerprint.** Verifiziert per Direkttest gegen den Endpunkt:
+
+| Transport | Ergebnis |
+|---|---|
+| System-curl 7.81 (Ubuntu) | ❌ HTTP 403 „Zugriff geblockt" |
+| curl_cffi (Chrome-Imitation) | ✅ HTTP 400 `invalid_grant` — WAF passiert, OAuth-Antwort korrekt |
+
+Wenn die Fehlermeldung bei 403 den Hinweis "Install curl_cffi" enthält, ist curl_cffi in Calibres Python-Umgebung nicht installiert und die WAF blockt den Fallback-Transport:
+
+```bash
+# In die Python-Umgebung installieren, mit der Calibre läuft:
+python3 -m pip install --user curl_cffi
+# oder systemweit: pip install curl_cffi
+```
+
+Danach **Calibre neu starten** (Plugins laden Python-Module beim Start). Die Diagnose zeigt unter `curl_cffi: true/false`, ob das Modul gefunden wurde, und unter `transport`, welcher Transport den Request ausgeführt hat.
 
 Welcher Transport benutzt wurde, steht in der Diagnose (`transport`). Seit 0.9.6 enthält die Fehlermeldung bei 403 zusätzlich die **bereinigte Antwort des Servers** — damit erkennt man, ob Bot-Schutz (z. B. "Access denied") oder ein verbrauchter Refresh-Token (`invalid_grant`) die Ursache ist. Bei `invalid_grant` fordert das Plugin zum Neubeziehen des Tokens im Web Reader auf.
 

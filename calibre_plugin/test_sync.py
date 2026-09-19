@@ -669,7 +669,8 @@ class SyncPlanTests(unittest.TestCase):
             return Response()
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", request):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", request):
             client = TolinoClient(4, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                                   "refresh-token")
             client.access = "access-token"
@@ -703,7 +704,8 @@ class SyncPlanTests(unittest.TestCase):
             return Response()
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", request):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", request):
             client = TolinoClient(4, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                                   " refresh-token ")
             client.login()
@@ -743,7 +745,8 @@ class SyncPlanTests(unittest.TestCase):
                         b'"refresh_token":"rotated-refresh","expires_in":3600}')
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", return_value=Response()):
             client = TolinoClient(4, "hardware", "old-refresh",
                                   token_callback=captured.append)
             self.assertEqual("rotated-refresh", client.login())
@@ -759,7 +762,8 @@ class SyncPlanTests(unittest.TestCase):
         error = HTTPError("https://example.invalid/token", 400, "Bad Request", {}, None)
         error.read = lambda: body
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
             with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
                 TolinoClient(4, "", "old-refresh").login()
         self.assertEqual(1, request.call_count)
@@ -771,7 +775,8 @@ class SyncPlanTests(unittest.TestCase):
         error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
         error.read = lambda: body
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", side_effect=error):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", side_effect=error):
             with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
                 TolinoClient(4, "", "old-refresh").login()
 
@@ -783,7 +788,8 @@ class SyncPlanTests(unittest.TestCase):
         error.read = lambda: body
         client = TolinoClient(4, "", "old-refresh")
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", side_effect=error):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", side_effect=error):
             with self.assertRaisesRegex(TolinoAuthError, "Access denied"):
                 client.login()
         self.assertEqual(403, client.last_http_status)
@@ -810,7 +816,8 @@ class SyncPlanTests(unittest.TestCase):
             return Response()
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", request):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", request):
             TolinoClient(1, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                          "refresh-token").login()
         self.assertEqual(
@@ -896,7 +903,8 @@ class SyncPlanTests(unittest.TestCase):
         error.read = lambda: body
         client = TolinoClient(4, "", token)
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", side_effect=error):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", side_effect=error):
             with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
                 client.login()
         self.assertIn("invalid_grant", client.last_error_text)
@@ -1784,7 +1792,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
                     b'"refresh_expires_in":36000}')
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", return_value=Response()):
             client.login()
         return client
 
@@ -1824,7 +1833,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
             return Response()
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", request):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", request):
             hardware = client.fetch_hardware_id()
         self.assertIn("handshake/devices/list", captured["url"])
         self.assertIn("deviceListRequest", captured["body"])
@@ -1854,7 +1864,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
                 return b'{"deviceListResponse":{"devices":[]}}'
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen", return_value=Response()):
             with self.assertRaises(TolinoApiError):
                 client.fetch_hardware_id()
 
@@ -1939,7 +1950,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
                 return content
 
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
-                patch("calibre_plugin.tolino.urlopen",
+                patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
+                        patch("calibre_plugin.tolino.urlopen",
                    return_value=RawResponse()):
             data, metadata = client.download("b-9")
         self.assertEqual(content, data)
@@ -2052,6 +2064,46 @@ class CurlTransportTests(unittest.TestCase):
                          headers.get("Origin"))
         self.assertEqual("https://webreader.mytolino.com/",
                          headers.get("Referer"))
+
+    def test_403_bot_check_without_curl_cffi_appends_install_hint(self):
+        from urllib.error import HTTPError
+        import calibre_plugin.tolino as tolino_module
+
+        body = b"<!DOCTYPE html><title>Zugriff geblockt</title>"
+        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
+        error.read = lambda: body
+        client = TolinoClient(4, "", "old-refresh")
+        with patch.object(tolino_module, "_impersonate_session", return_value=None), \
+                patch.object(tolino_module, "_curl_binary", return_value=None), \
+                patch.object(tolino_module, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(TolinoAuthError, "curl_cffi"):
+                client.login()
+
+    def test_403_bot_check_with_curl_cffi_has_no_install_hint(self):
+        from urllib.error import HTTPError
+        import calibre_plugin.tolino as tolino_module
+
+        body = b"<!DOCTYPE html><title>Zugriff geblockt</title>"
+        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
+        error.read = lambda: body
+        client = TolinoClient(4, "", "old-refresh")
+        with patch.object(tolino_module, "_impersonate_session",
+                          return_value=object()), \
+                patch.object(tolino_module, "_curl_binary", return_value=None), \
+                patch.object(tolino_module, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(TolinoAuthError, "Zugriff geblockt"):
+                client.login()
+        self.assertNotIn("curl_cffi", str(getattr(client, "last_error_text", "")))
+
+    def test_auth_diagnostics_reports_curl_cffi_availability(self):
+        import calibre_plugin.tolino as tolino_module
+
+        client = TolinoClient(4, "", "old-refresh")
+        with patch.object(tolino_module, "_impersonate_session", return_value=None):
+            self.assertFalse(client.auth_diagnostics()["curl_cffi"])
+        with patch.object(tolino_module, "_impersonate_session",
+                          return_value=object()):
+            self.assertTrue(client.auth_diagnostics()["curl_cffi"])
 
     def test_compact_error_text_strips_html_bot_check_page(self):
         import calibre_plugin.tolino as tolino_module

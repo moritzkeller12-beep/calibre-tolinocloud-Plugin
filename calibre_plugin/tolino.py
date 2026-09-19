@@ -1793,6 +1793,25 @@ def _compact_error_text(detail):
     text = re.sub(r"<[^>]+>", " ", detail or "")
     return re.sub(r"\s+", " ", text).strip()
 
+
+_BOT_CHECK_MARKERS = (
+    "zugriff geblockt", "access denied", "captcha", "cloudfront",
+    "request blocked", "<!doctype html",
+)
+
+CURL_CFFI_HINT = (
+    "The bot protection rejected this client's TLS fingerprint. Install "
+    "curl_cffi into Calibre's Python environment (e.g. `python3 -m pip "
+    "install --user curl_cffi`) and restart Calibre; see README section "
+    "\u201e403-Fehler verstehen\u201c."
+)
+
+
+def _bot_check_detected(detail):
+    """True when the response looks like a bot-protection page, not OAuth."""
+    return any(marker in str(detail or "").casefold()
+               for marker in _BOT_CHECK_MARKERS)
+
 def _curl_binary():
     """Return a usable curl binary path, or None if curl is not installed."""
     for name in CURL_BINARIES:
@@ -1896,6 +1915,7 @@ class TolinoClient:
         """Return safe authentication context for the debug report."""
         return {
             "transport": getattr(self, "last_transport", None),
+            "curl_cffi": _impersonate_session() is not None,
             "partner_id": self.partner_id,
             "partner_name": self.partner["name"],
             "client_id": self.partner.get("client_id"),
@@ -2062,10 +2082,14 @@ class TolinoClient:
                                      content_type, _retry=False)
             if exc.code in (401, 403):
                 self.access = None
+                message = (_compact_error_text(self.last_error_text)
+                           or "no response detail")
+                if (_bot_check_detected(self.last_error_text)
+                        and self.last_transport != "curl_cffi"
+                        and _impersonate_session() is None):
+                    message += " " + CURL_CFFI_HINT
                 raise TolinoAuthError(
-                    "Tolino rejected authentication (%s): %s"
-                    % (exc.code, _compact_error_text(self.last_error_text)
-                       or "no response detail")
+                    "Tolino rejected authentication (%s): %s" % (exc.code, message)
                 )
             raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
 
