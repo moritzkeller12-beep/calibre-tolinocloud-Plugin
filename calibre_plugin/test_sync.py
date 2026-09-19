@@ -1459,7 +1459,7 @@ class ToolbarIconTests(unittest.TestCase):
         calibre_gui2 = types.ModuleType("calibre.gui2")
         calibre_gui2.error_dialog = None
         calibre_gui2.info_dialog = None
-        calibre_gui2.get_icons = lambda name: get_icons_result
+        calibre_gui2.get_icons = lambda name, context=None: get_icons_result
         calibre_actions = types.ModuleType("calibre.gui2.actions")
         calibre_actions.InterfaceAction = object
         calibre.gui2 = calibre_gui2

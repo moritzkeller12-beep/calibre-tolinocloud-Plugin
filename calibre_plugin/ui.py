@@ -870,15 +870,19 @@ class SyncDashboard(QDialog):
                 metadata, state, client.inventory(), settings["preferred_formats"],
                 comparison_fields,
                 use_metadata_ids=(self.sync_column_enabled and
-                                  len(settings()["accounts"]) == 1),
+                                  len(settings["accounts"]) == 1),
             )
             dialog = InventoryDialog(
                 comparison, self,
                 client_factory=lambda: self._cloud_client())
-            dialog.exec()
+            if dialog.exec() != QDialog.Accepted:
+                return
+            # The checkbox state of the confirmed dialog decides what is
+            # uploaded; an empty selection simply syncs nothing.
+            selected = dialog.selected_ids()
             uploads, removals, current = unpack_plan_result(plan_sync(
                 metadata, state, settings["preferred_formats"],
-                settings["enable_deletions"], selected_ids,
+                settings["enable_deletions"], upload_book_ids=selected,
             ))
             jobs = []
             skipped_uploads = []
@@ -1019,22 +1023,29 @@ def _apply_toolbar_icon(action):
     """Give the toolbar action its icon (bundled PNG, then embedded SVG)."""
     try:
         from qt.core import QIcon
+        from calibre.gui2 import get_icons
     except ImportError:
         return
     icon = QIcon()
-    try:
-        # Calibre resolves plugin-relative resource paths from the plugin zip.
-        from calibre.gui2 import get_icons
-        icon = get_icons("images/tolino_cloud_sync.png")
-    except Exception:
-        pass
+    # get_icons must be called with the plugin name as context so it reads
+    # the resources loaded from the plugin zip (no context = main-Calibre
+    # icons, where this image does not exist and the icon stays empty).
+    context = getattr(action, "name", None) or ""
+    for resource_context in (context, None):
+        try:
+            icon = get_icons("images/tolino_cloud_sync.png",
+                             context=resource_context)
+        except Exception:
+            icon = QIcon()
+        if icon is not None and not icon.isNull():
+            break
     if icon is None or icon.isNull():
         icon = QIcon()
         try:
             from .icons import TOLINO_ICON_SVG
-            import base64
-            data = base64.b64encode(TOLINO_ICON_SVG.encode("utf-8"))
-            icon.loadFromData(data, "image/svg+xml")
+            # loadFromData expects the raw SVG bytes, not base64.
+            icon.loadFromData(TOLINO_ICON_SVG.encode("utf-8"),
+                              "image/svg+xml")
         except Exception:
             pass
     if icon is not None and not icon.isNull():

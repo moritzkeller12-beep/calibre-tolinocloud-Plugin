@@ -1803,36 +1803,76 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         return
 
 
+# Partners whose OAuth endpoint does not accept localhost redirect URIs:
+# Orell Füssli (8) is Keycloak-based and registers only its Web Reader
+# redirect URIs, so the code flow cannot complete on 127.0.0.1.
+LOCAL_CALLBACK_UNSUPPORTED_PARTNERS = (8,)
+
+
+def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
+    """Guided browser sign-in for Keycloak partners without local callback.
+
+    Opens the authorization page (or the web reader itself), then polls the
+    browser storages, live-validating every harvested refresh-token
+    candidate. Returns the fresh rotated token of the first accepted grant.
+    """
+    partner = PARTNERS[partner_id]
+    params = {
+        "client_id": partner["client_id"],
+        "response_type": "code",
+        "scope": partner["scope"],
+    }
+    for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+        if partner.get(key):
+            params[key] = partner[key]
+    auth_url = partner["auth_url"]
+    if "?" not in auth_url:
+        auth_url = auth_url + "?" + urlencode(params)
+    webbrowser.open(auth_url)
+
+    deadline = time.time() + max(30, timeout)
+    seen = set()
+    last_note = ""
+    while time.time() < deadline:
+        time.sleep(2)
+        refreshes, hardwares, notes = scrape_browser_tokens(
+            diagnose=True, all_candidates=True)
+        if notes:
+            last_note = notes[-1]
+        for candidate in refreshes or ():
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            validated = validate_refresh_candidates(
+                partner_id, hardwares[0] if hardwares else "", (candidate,))
+            if validated:
+                return validated[0], validated[1]
+    raise TolinoAuthError(
+        "Nach dem Anmelden im Browser wurde kein frischer Tolino-"
+        "Refresh-Token gefunden (letzte Meldung: %s). Melde dich im "
+        "Web Reader (Bibliothek, Buecherliste geladen) an, lade ihn "
+        "einmal neu (F5) und starte die Browser-Anmeldung erneut."
+        % (last_note or "kein Browser-Storage gelesen")
+    )
+
+
 def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
-    """Run an OAuth callback for all partners with valid auth_url."""
+    """Sign in via the partner's OAuth authorization endpoint.
+
+    For most partners (Thalia ecosystem) the authorization endpoint accepts
+    a localhost redirect URI, so the authorization code flows back to the
+    local callback server and is exchanged for a guaranteed-fresh token.
+
+    For Keycloak-based partners such as Orell Füssli the shop registers only
+    its own Web Reader redirect URIs, so the code flow cannot complete
+    locally. Instead the browser opens, the user signs in, and the plugin
+    then harvests refresh-token candidates from the browser storages and
+    validates each live against the token endpoint, adopting only the
+    guaranteed-fresh rotated token. If every candidate is spent, the user
+    is told to reload the Web Reader once and retry.
+    """
     partner = PARTNERS.get(int(partner_id))
-    
-    # Special handling for Orell Fussli (partner 8) - uses Keycloak
-    # Keycloak redirects to webreader.mytolino.com, not back to localhost callback
-    if int(partner_id) == 8:
-        if not partner or not partner.get("auth_url"):
-            raise TolinoAuthError(
-                "Orell F\u00fcssli authentication requires manual token extraction. "
-                "Use 'Token aus Browser extrahieren' instead."
-            )
-        params = {
-            "client_id": partner["client_id"],
-            "response_type": "code",
-            "scope": partner["scope"],
-        }
-        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
-            if partner.get(key):
-                params[key] = partner[key]
-        auth_url = partner["auth_url"] + "?" + urlencode(params)
-        if not webbrowser.open(auth_url):
-            raise TolinoAuthError("Could not open the system browser.")
-        raise TolinoAuthError(
-            "Orell F\u00fcssli authentication completed in browser. "
-            "Please: 1) Sign in in the browser that just opened, "
-            "2) Close the browser when done, "
-            "3) Click 'Token aus Browser extrahieren' to get your tokens."
-        )
-    
+
     if not partner or not partner.get("auth_url"):
         raise TolinoAuthError(
             "This Tolino partner has no OAuth authorization URL configured. "
@@ -1843,12 +1883,16 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
             "This Tolino partner has no token endpoint configured. "
             "Use a Web Reader refresh token in the configuration as fallback."
         )
+
+    if int(partner_id) in LOCAL_CALLBACK_UNSUPPORTED_PARTNERS:
+        return _keycloak_assisted_login(int(partner_id), hardware, timeout)
+
     state = uuid.uuid4().hex
     created_at = time.time()
     server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
     server.timeout = timeout
     redirect_uri = callback_redirect_uri(server.server_port)
-    
+
     params = {
         "client_id": partner["client_id"],
         "response_type": "code",
@@ -1859,7 +1903,7 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
         if partner.get(key):
             params[key] = partner[key]
-    
+
     if not webbrowser.open(partner["auth_url"] + "?" + urlencode(params)):
         server.server_close()
         raise TolinoAuthError("Could not open the system browser.")
@@ -1884,6 +1928,7 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     if not data.get("access_token") or not data.get("refresh_token"):
         raise TolinoAuthError("Browser login returned an incomplete token response.")
     return data["refresh_token"], client.hardware
+
 
 
 def redact_error_text(value):
@@ -2143,7 +2188,23 @@ class TolinoClient:
                                  form=True, authenticated=False)
         except (TolinoApiError, TolinoAuthError) as exc:
             detail = str(exc)
-            if "invalid_grant" in detail.casefold() or "reuse exceeded" in detail.casefold():
+            folded = detail.casefold()
+            if "not active" in folded or "session not active" in folded:
+                # Keycloak answers "invalid_grant / Session not active" when
+                # the account's SSO session ended (logged out, expired, or
+                # another device rotated the token). The token value itself
+                # is not the problem here.
+                self.refresh = None
+                self.access = None
+                self.expires_at = 0
+                raise TolinoAuthError(
+                    "Die Tolino-Sitzung dieses Refresh-Tokens ist beendet "
+                    "(Session not active): Der Account wurde im Web Reader "
+                    "abgemeldet oder die Sitzung ist abgelaufen. Melde dich "
+                    "im Web Reader (Bibliothek) neu an und starte danach "
+                    "die Browser-Anmeldung erneut."
+                ) from exc
+            if "invalid_grant" in folded or "reuse exceeded" in folded:
                 # Invalidate the current refresh token to prevent reuse
                 self.refresh = None
                 self.access = None
