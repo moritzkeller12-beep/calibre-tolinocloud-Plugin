@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.3** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
+Plugin-Version: **0.9.6** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
 
 ## Installation
 
@@ -35,7 +35,17 @@ python3 -m unittest calibre_plugin.test_sync
 python3 build_plugin.py
 ```
 
-## Weitere Funktionen (0.9.3)
+## 403-Fehler verstehen (0.9.6)
+
+Der Token-Endpunkt sitzt hinter einem Bot-Schutz, der TLS-Fingerprints prüft. Das Plugin versucht deshalb der Reihe nach:
+
+1. **curl_cffi** (Chrome-TLS, wie die Referenz pytolino) — optional installierbar: `pip install curl_cffi`
+2. **curl** (Kommandozeilen-Client)
+3. **urllib** (Python-Standard, letzter Fallback)
+
+Welcher Transport benutzt wurde, steht in der Diagnose (`transport`). Seit 0.9.6 enthält die Fehlermeldung bei 403 zusätzlich die **bereinigte Antwort des Servers** — damit erkennt man, ob Bot-Schutz (z. B. "Access denied") oder ein verbrauchter Refresh-Token (`invalid_grant`) die Ursache ist. Bei `invalid_grant` fordert das Plugin zum Neubeziehen des Tokens im Web Reader auf.
+
+## Weitere Funktionen
 
 - **Hardware-ID automatisch auflösen** aus der Tolino-Geräteliste (nach der Anmeldung)
 - **Buch herunterladen** aus der Tolino Cloud (`TolinoClient.download(deliverable_id)`)

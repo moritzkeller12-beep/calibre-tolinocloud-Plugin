@@ -764,6 +764,32 @@ class SyncPlanTests(unittest.TestCase):
                 TolinoClient(4, "", "old-refresh").login()
         self.assertEqual(1, request.call_count)
 
+    def test_403_with_invalid_grant_body_gives_user_action(self):
+        from urllib.error import HTTPError
+
+        body = b'{"error":"invalid_grant","error_description":"token reused"}'
+        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
+        error.read = lambda: body
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", side_effect=error):
+            with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
+                TolinoClient(4, "", "old-refresh").login()
+
+    def test_403_bot_protection_reports_response_detail(self):
+        from urllib.error import HTTPError
+
+        body = b"Access denied | bot protection"
+        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
+        error.read = lambda: body
+        client = TolinoClient(4, "", "old-refresh")
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino.urlopen", side_effect=error):
+            with self.assertRaisesRegex(TolinoAuthError, "Access denied"):
+                client.login()
+        self.assertEqual(403, client.last_http_status)
+        self.assertIn("Access denied", client.last_error_text)
+        self.assertEqual("urllib", client.last_transport)
+
     def test_other_partner_refresh_payload_keeps_configured_scope(self):
         captured = {}
 
@@ -1943,6 +1969,7 @@ class CurlTransportTests(unittest.TestCase):
             }).encode("utf-8")
 
         with patch.object(tolino_module, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.object(tolino_module, "_impersonate_session", return_value=None), \
                 patch.object(tolino_module, "_http_post_via_curl", fake_curl):
             client.login()
 
@@ -1986,6 +2013,7 @@ class CurlTransportTests(unittest.TestCase):
             return FakeResponse()
 
         with patch.object(tolino_module, "_curl_binary", return_value=None), \
+                patch.object(tolino_module, "_impersonate_session", return_value=None), \
                 patch.object(tolino_module, "urlopen", fake_urlopen):
             client.login()
 
@@ -2007,6 +2035,66 @@ class CurlTransportTests(unittest.TestCase):
 
         self.assertEqual(200, status)
         self.assertEqual(b'{"ok": true}', raw)
+
+    def test_token_post_prefers_curl_cffi_impersonation(self):
+        import calibre_plugin.tolino as tolino_module
+
+        client = self._client()
+        calls = []
+
+        class FakeSession:
+            def post(self, url, data=None, headers=None, timeout=None,
+                     allow_redirects=None):
+                calls.append({"url": url, "data": data, "headers": dict(headers)})
+                response = type("R", (), {})()
+                response.status_code = 200
+                response.content = json.dumps({
+                    "access_token": "a4", "refresh_token": "r5",
+                }).encode("utf-8")
+                return response
+
+        def must_not_run(*args, **kwargs):
+            raise AssertionError("plain curl must not run when curl_cffi exists")
+
+        with patch.object(tolino_module, "_impersonate_session",
+                          return_value=FakeSession()), \
+                patch.object(tolino_module, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.object(tolino_module, "_http_post_via_curl", must_not_run):
+            client.login()
+
+        self.assertEqual("curl_cffi", client.last_transport)
+        self.assertEqual("a4", client.access)
+        self.assertEqual("r5", client.refresh)
+        sent = dict(urllib.parse.parse_qsl(calls[0]["data"]))
+        self.assertEqual("refresh_token", sent["grant_type"])
+        self.assertEqual("r-1", sent["refresh_token"])
+
+    def test_curl_cffi_failure_falls_back_to_curl_binary(self):
+        import calibre_plugin.tolino as tolino_module
+
+        client = self._client()
+
+        class BrokenSession:
+            def post(self, *_args, **_kwargs):
+                raise RuntimeError("curl_cffi exploded")
+
+        curl_calls = []
+
+        def fake_curl(url, body, headers, timeout):
+            curl_calls.append(url)
+            return 200, json.dumps({
+                "access_token": "a6", "refresh_token": "r6",
+            }).encode("utf-8")
+
+        with patch.object(tolino_module, "_impersonate_session",
+                          return_value=BrokenSession()), \
+                patch.object(tolino_module, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.object(tolino_module, "_http_post_via_curl", fake_curl):
+            client.login()
+
+        self.assertEqual("curl", client.last_transport)
+        self.assertEqual(1, len(curl_calls))
+        self.assertEqual("a6", client.access)
 
     def test_http_post_via_curl_raises_without_binary(self):
         import calibre_plugin.tolino as tolino_module

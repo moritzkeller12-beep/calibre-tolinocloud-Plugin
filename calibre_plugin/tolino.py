@@ -1768,6 +1768,38 @@ def _curl_binary():
             return path
     return None
 
+
+# curl_cffi (if installed) impersonates Chrome's TLS fingerprint exactly like
+# the pytolino reference client; plain urllib/curl handshakes are rejected by
+# the bot protection in front of some partner token endpoints (HTTP 403
+# without an OAuth error body).
+def _impersonate_session():
+    """Return a curl_cffi session that impersonates Chrome, or None."""
+    try:
+        from curl_cffi.requests import Session
+    except Exception:
+        return None
+    try:
+        session = Session(impersonate="chrome")
+        # ``post`` must exist; guard against stubbed/partial installs.
+        if not callable(getattr(session, "post", None)):
+            return None
+        return session
+    except Exception:
+        return None
+
+
+def _http_post_via_curl_cffi(session, url, body, headers, timeout):
+    """POST via a curl_cffi session; returns (status:int, raw_bytes)."""
+    response = session.post(
+        url,
+        data=body.decode("utf-8", "replace") if isinstance(body, bytes) else body,
+        headers=dict(headers),
+        timeout=timeout,
+        allow_redirects=True,
+    )
+    return int(response.status_code), response.content or b""
+
 def _http_post_via_curl(url, body, headers, timeout):
     """POST via curl; returns (status:int, raw_bytes). Raises RuntimeError."""
     binary = _curl_binary()
@@ -1823,12 +1855,14 @@ class TolinoClient:
         self.refresh_expires_at = 0
         self.last_http_status = None
         self.last_error_text = None
+        self.last_transport = None
         self.token_callback = token_callback
         self._login_lock = threading.Lock()
 
     def auth_diagnostics(self):
         """Return safe authentication context for the debug report."""
         return {
+            "transport": getattr(self, "last_transport", None),
             "partner_id": self.partner_id,
             "partner_name": self.partner["name"],
             "client_id": self.partner.get("client_id"),
@@ -1882,7 +1916,7 @@ class TolinoClient:
         try:
             data = self._request(self.partner["token_url"], "POST", payload,
                                  form=True, authenticated=False)
-        except TolinoApiError as exc:
+        except (TolinoApiError, TolinoAuthError) as exc:
             detail = str(exc)
             if "invalid_grant" in detail.casefold() or "reuse exceeded" in detail.casefold():
                 # Invalidate the current refresh token to prevent reuse
@@ -1992,30 +2026,55 @@ class TolinoClient:
                                      content_type, _retry=False)
             if exc.code in (401, 403):
                 self.access = None
-                raise TolinoAuthError("Tolino rejected authentication (%s)." % exc.code)
+                raise TolinoAuthError(
+                    "Tolino rejected authentication (%s): %s"
+                    % (exc.code, self.last_error_text or "no response detail")
+                )
             raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
 
-        # Route token-endpoint POSTs through curl when available: the bot
-        # protection behind it is friendlier to curl's TLS fingerprint than to
-        # urllib's (pytolino impersonates Chrome TLS for the same reason).
-        if (data is not None and url == self.partner.get("token_url")
-                and _curl_binary() is not None):
-            try:
-                status, raw = _http_post_via_curl(
-                    url, body or b"", headers, self.timeout)
-            except (RuntimeError, OSError, subprocess.TimeoutExpired):
-                status, raw = None, None  # fall back to urllib below
-            else:
-                self.last_http_status = status
-                if status and status < 400:
-                    self.last_error_text = None
-                    return _decode(raw)
-                return _error(
-                    HTTPError(url, status or 400,
-                              "HTTP Error %s" % (status or "?"), {}, None),
-                    (raw or b"").decode("utf-8", "replace"))
+        # Route token-endpoint POSTs through an impersonating transport when
+        # available: the bot protection behind it fingerprints TLS and is
+        # friendlier to Chrome's handshake (curl_cffi impersonate="chrome",
+        # exactly what the pytolino reference client does) than to urllib's.
+        # Plain curl and urllib remain as fallbacks so the plugin still works
+        # without optional dependencies.
+        if data is not None and url == self.partner.get("token_url"):
+            session = _impersonate_session()
+            if session is not None:
+                self.last_transport = "curl_cffi"
+                try:
+                    status, raw = _http_post_via_curl_cffi(
+                        session, url, body or b"", headers, self.timeout)
+                except Exception:
+                    status, raw = None, None  # fall through to curl/urllib
+                else:
+                    self.last_http_status = status
+                    if status and status < 400:
+                        self.last_error_text = None
+                        return _decode(raw)
+                    return _error(
+                        HTTPError(url, status or 400,
+                                  "HTTP Error %s" % (status or "?"), {}, None),
+                        (raw or b"").decode("utf-8", "replace"))
+            if _curl_binary() is not None:
+                self.last_transport = "curl"
+                try:
+                    status, raw = _http_post_via_curl(
+                        url, body or b"", headers, self.timeout)
+                except (RuntimeError, OSError, subprocess.TimeoutExpired):
+                    status, raw = None, None  # fall back to urllib below
+                else:
+                    self.last_http_status = status
+                    if status and status < 400:
+                        self.last_error_text = None
+                        return _decode(raw)
+                    return _error(
+                        HTTPError(url, status or 400,
+                                  "HTTP Error %s" % (status or "?"), {}, None),
+                        (raw or b"").decode("utf-8", "replace"))
 
         request = Request(url, data=body, headers=headers, method=method)
+        self.last_transport = "urllib"
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 self.last_http_status = response.status
