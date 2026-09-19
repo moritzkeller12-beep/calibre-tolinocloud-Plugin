@@ -25,12 +25,12 @@ try:
     from .config import save_account, save_settings, settings
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
                        load_state, metadata_by_id, plan_sync,
-                       selected_book_ids, sync_summary, normalize_formats,
-                       safe_format_path, cover_bytes, unpack_plan_result,
-                       unpack_upload_record, diagnose_preparation,
-                       format_diagnostic_report, custom_column_available,
-                       metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN,
-                       TOLINO_COLUMN_LABEL)
+                       selected_book_ids, selected_table_rows, sync_summary,
+                       normalize_formats, safe_format_path, cover_bytes,
+                       unpack_plan_result, unpack_upload_record,
+                       diagnose_preparation, format_diagnostic_report,
+                       custom_column_available, metadata_tolino_id,
+                       update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error,
                          scrape_browser_tokens)
@@ -40,12 +40,12 @@ except ImportError:
     from config import save_account, save_settings, settings
     from sync import (compare_inventory, format_error_details, iter_book_ids,
                       load_state, metadata_by_id, plan_sync,
-                      selected_book_ids, sync_summary, normalize_formats,
-                      safe_format_path, cover_bytes, unpack_plan_result,
-                      unpack_upload_record, diagnose_preparation,
-                      format_diagnostic_report, custom_column_available,
-                      metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN,
-                      TOLINO_COLUMN_LABEL)
+                      selected_book_ids, selected_table_rows, sync_summary,
+                      normalize_formats, safe_format_path, cover_bytes,
+                      unpack_plan_result, unpack_upload_record,
+                      diagnose_preparation, format_diagnostic_report,
+                      custom_column_available, metadata_tolino_id,
+                      update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         hardware_id, normalize_refresh_token, sanitize_error,
                         scrape_browser_tokens)
