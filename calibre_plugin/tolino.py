@@ -787,6 +787,12 @@ def _leveldb_ldb_pairs(block):
 
 
 _TOLINO_ORIGIN_MARKER = b"webreader.mytolino.com"
+# Byte markers of every origin whose storage may hold reader credentials:
+# used for the cheap file-level prefilter when scanning LevelDB directories.
+_TOLINO_STORAGE_MARKERS = tuple(
+    origin.encode("utf-8") for origin in TOLINO_STORAGE_ORIGINS
+    if origin not in ("keycloak", "auth") and "." in origin
+)
 
 
 def _decode_leveldb_text(raw):
@@ -826,11 +832,19 @@ def _leveldb_value_text(raw):
     return _decode_leveldb_text(raw)
 
 
-def _scan_chromium_leveldb(db_dir):
-    """Scan a Chromium Local/Session Storage LevelDB directory for Tolino keys."""
+def _scan_chromium_leveldb(db_dir, recency_hint=None):
+    """Scan a Chromium Local/Session Storage LevelDB directory for Tolino keys.
+
+    ``recency_hint`` marks how fresh the harvested values are: values from a
+    write-ahead ``.log`` carry the browser's newest writes, while ``.ldb``
+    files (and directories without a live writer) only hold compacted
+    history. Recency only affects candidate ORDER, never what is read.
+    """
     found = {}
     for file_name in sorted(os.listdir(db_dir)):
         if not file_name.endswith((".log", ".ldb")):
+            continue
+        if recency_hint == _RECENCY_LIVE and not file_name.endswith(".log"):
             continue
         file_path = os.path.join(db_dir, file_name)
         try:
@@ -838,18 +852,30 @@ def _scan_chromium_leveldb(db_dir):
                 data = handle.read()
         except OSError:
             continue
-        if _TOLINO_ORIGIN_MARKER not in data:
-            continue
+        # Session Storage keys carry no origin, so also accept files that
+        # contain any known Tolino origin in UTF-16LE (IndexedDB-style
+        # encoding) before giving up on the file.
+        if not any(marker in data for marker in _TOLINO_STORAGE_MARKERS):
+            utf16_markers = tuple(
+                marker.decode("utf-8").encode("utf-16-le")
+                for marker in _TOLINO_STORAGE_MARKERS)
+            if not any(marker in data for marker in utf16_markers):
+                continue
         if file_name.endswith(".log"):
             iterator = _leveldb_records_from_log(data)
+            tier = _RECENCY_LIVE if recency_hint == _RECENCY_LIVE else _RECENCY_LDB
         else:
             iterator = _leveldb_records_from_ldb(data)
+            tier = _RECENCY_LDB
         for key, value in iterator:
             key_text = _decode_leveldb_text(key)
             value_text = _leveldb_value_text(value)
-            if not _origin_matches(key_text) or not value_text:
+            if not value_text:
                 continue
-            if not _leveldb_pair_has_token_shape(key_text, value_text):
+            is_session = "session storage" in db_dir.casefold()
+            if not _origin_matches(key_text) and not (
+                    is_session and _leveldb_pair_has_token_shape(key_text,
+                                                                  value_text)):
                 continue
             # Drop the scheme prefix and the 0x00/0x01 separator from the key
             storage_key = key_text
@@ -858,6 +884,7 @@ def _scan_chromium_leveldb(db_dir):
                     storage_key = storage_key[len(prefix):]
                     break
             found[storage_key.lstrip("\x00\x01\x02")] = value_text
+            _RECENCY_BUCKETS[value_text] = tier
     return found
 
 
@@ -1007,6 +1034,7 @@ def _read_firefox_storage(profile_path):
     All reads use snapshot copies, so the browser may keep running.
     """
     results = {}
+    legacy = {}
     # 1) LSNG per-origin data.sqlite files anywhere under this profile.
     for root, dirs, files in os.walk(profile_path):
         dirs[:] = [d for d in dirs if d not in (
@@ -1019,6 +1047,7 @@ def _read_firefox_storage(profile_path):
                 origin_hint = os.path.basename(os.path.dirname(root))
                 for key, value in data.items():
                     results["%s/%s" % (origin_hint, key)] = value
+                    _RECENCY_BUCKETS[value] = _RECENCY_LIVE
     # 2) ls-archive.sqlite cold store (storage root may be profile itself).
     for name in ("ls-archive.sqlite", os.path.join("storage", "ls-archive.sqlite")):
         db_path = os.path.join(profile_path, name)
@@ -1031,9 +1060,14 @@ def _read_firefox_storage(profile_path):
                 origin_text = _lsng_value_text(origin_key)
                 if not isinstance(key, str):
                     key = str(key)
-                results["%s/%s" % (origin_text, key)] = _lsng_value_text(
-                    value, conversion or 0, compression or 0)
-    # 3) Legacy/shadow webappsstore.sqlite (webappsstore2 schema).
+                value = _lsng_value_text(value, conversion or 0,
+                                         compression or 0)
+                results["%s/%s" % (origin_text, key)] = value
+                _RECENCY_BUCKETS[value] = _RECENCY_LDB
+    # 3) Legacy/shadow webappsstore.sqlite (webappsstore2 schema). This copy
+    # is only written while Firefox is fully closed, so it holds STALE token
+    # history. Collect it separately and never let it overwrite fresher
+    # LSNG rows for the same storage key.
     db_path = os.path.join(profile_path, "webappsstore.sqlite")
     if os.path.exists(db_path):
         rows = _read_firefox_rows(
@@ -1044,7 +1078,11 @@ def _read_firefox_storage(profile_path):
             origin_text = _lsng_value_text(origin_key)
             if not isinstance(key, str):
                 key = str(key)
-            results["%s/%s" % (origin_text, key)] = _lsng_value_text(value)
+            value = _lsng_value_text(value)
+            legacy["%s/%s" % (origin_text, key)] = value
+            _RECENCY_BUCKETS[value] = _RECENCY_LEGACY
+    for key, value in legacy.items():
+        results.setdefault(key, value)
     return results
 
 
@@ -1263,6 +1301,7 @@ def _collect_storage_under(path, notes):
                 if root not in seen_dirs:
                     seen_dirs.add(root)
                     notes.append("Chromium-Storage: %s" % root)
+                    _CHROMIUM_STORAGE_DIRS.append(root)
                     found.update(_scan_chromium_leveldb(root))
                 dirs[:] = []  # no deeper storage below a leveldb dir
                 continue
@@ -1409,6 +1448,69 @@ HARDWARE_VALUE_KEYS = ("hardware_id", "hardwareId", "device_id", "deviceId")
 READER_AES_PHRASES = ("",)
 
 
+# --- Candidate ordering -----------------------------------------------------
+# Browser storages keep every historical token copy from past background
+# rotations; LevelDB scan order is file-name order, not recency order. The
+# reader's CURRENT token lives in the newest write, which Chromium keeps in
+# the write-ahead .log (values there overwrite the older .ldb copies for the
+# same key) and Firefox keeps in the WAL of its LSNG data.sqlite (the legacy
+# webappsstore.sqlite shadow copy is only written while Firefox is closed).
+# We therefore tag every harvested value with a recency tier and sort the
+# candidate lists by it before validation: freshest candidates first, so the
+# live token-endpoint validation adopts the reader's current token instead of
+# spending time (and login attempts) on stale history first.
+
+_RECENCY_LIVE = 0    # newest write: Chromium .log / Firefox LSNG WAL
+_RECENCY_LDB = 1     # Chromium .ldb / any Firefox row
+_RECENCY_LEGACY = 2  # legacy/shadow stores only (old Firefox webappsstore)
+
+_RECENCY_BUCKETS = {}
+
+# Chromium storage directories discovered during a scan; a second, live-only
+# pass reads their newest records (write-ahead .log) so the reader's current
+# token beats stale history in candidate ordering.
+_CHROMIUM_STORAGE_DIRS = []
+
+
+def _recency_tier(value):
+    """Recency tier recorded for a harvested value (unknown -> .ldb tier)."""
+    return _RECENCY_BUCKETS.get(str(value), _RECENCY_LDB)
+
+
+def _sort_candidates_by_recency(candidates):
+    """Return candidates sorted freshest-first, deduplicated, order kept."""
+    ordered = []
+    for candidate in candidates:
+        if candidate and candidate not in ordered:
+            ordered.append(candidate)
+    return sorted(
+        ordered,
+        key=lambda value: (_recency_tier(value), -len(value)),
+    )
+
+
+def _sort_hardware_candidates(candidates):
+    """Hardware IDs: prefer UUID-shaped ones, then freshest first."""
+    ordered = []
+    for candidate in candidates:
+        if candidate and candidate not in ordered:
+            ordered.append(candidate)
+
+    def _uuid_rank(value):
+        text = str(value)
+        if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", text):
+            return 0
+        if re.fullmatch(r"[0-9a-fA-F]{32}", text):
+            return 1
+        return 2
+
+    return sorted(
+        ordered,
+        key=lambda value: (_uuid_rank(value), _recency_tier(value)),
+    )
+
+
 def extract_login_tokens(storage):
     """Extract refresh token and hardware ID from one login storage snapshot.
 
@@ -1498,13 +1600,17 @@ def validate_refresh_candidates(partner_id, hardware_id, candidates):
     return None
 
 
-def _extract_all_tokens_from_storage(storage_data):
+def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
     """Return (refresh_candidates, hardware_candidates) as ordered lists.
 
     Browser storages keep historical entries after every background token
     rotation, and LevelDB scan order is not recency order, so the first
     match can be a spent token. Callers should validate candidates one by
     one until one is accepted by the token endpoint.
+
+    ``recency`` marks how fresh the underlying snapshot is: values harvested
+    from a Chromium write-ahead .log (the newest writes) are recorded in the
+    live tier so candidate ordering can put them first.
     """
     refresh_candidates = []
     hardware_candidates = []
@@ -1512,6 +1618,8 @@ def _extract_all_tokens_from_storage(storage_data):
     def remember(value, bucket):
         if value and value not in bucket:
             bucket.append(value)
+            if value not in _RECENCY_BUCKETS:
+                _RECENCY_BUCKETS[value] = recency
 
     def value_text(value):
         if isinstance(value, (bytes, bytearray, memoryview)):
@@ -1600,6 +1708,10 @@ def scrape_browser_tokens(diagnose=False, all_candidates=False):
     all_keys = {}
     all_refresh = []
     all_hardware = []
+    # Fresh scan: never mix recency state or storage dirs from a previous
+    # call into this one's candidate ordering.
+    _RECENCY_BUCKETS.clear()
+    del _CHROMIUM_STORAGE_DIRS[:]
 
     def remember_pair(storage):
         if all_candidates:
@@ -1629,6 +1741,22 @@ def scrape_browser_tokens(diagnose=False, all_candidates=False):
             result = remember_pair(storage)
             if result is not None:
                 return result
+    # Second, live-only pass: read only the write-ahead .log of every
+    # Chromium storage dir found. These hold the browser's newest writes,
+    # so the reader's CURRENT token outranks compacted .ldb history even
+    # when the first complete pair found in file order was already spent.
+    live_storage = {}
+    for db_dir in list(_CHROMIUM_STORAGE_DIRS):
+        try:
+            live_storage.update(_scan_chromium_leveldb(
+                db_dir, recency_hint=_RECENCY_LIVE))
+        except OSError:
+            continue
+    if live_storage:
+        all_keys.update(live_storage)
+        result = remember_pair(live_storage)
+        if result is not None:
+            return result
     if all_candidates:
         if not all_refresh or not all_hardware:
             # Tokens may be split across browser profiles; merge everything.
@@ -1645,7 +1773,8 @@ def scrape_browser_tokens(diagnose=False, all_candidates=False):
                 "gefunden; einer nach dem anderen wird jetzt gegen den "
                 "Token-Endpunkt geprueft." % (len(all_refresh),
                                               len(all_hardware)))
-            return all_refresh, all_hardware, notes
+            return (_sort_candidates_by_recency(all_refresh),
+                    _sort_hardware_candidates(all_hardware), notes)
     else:
         # Tokens may be split across browser profiles; try the combined set.
         combined = _extract_tokens_from_storage(all_keys)
@@ -1850,12 +1979,17 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
             diagnose=True, all_candidates=True)
         if notes:
             last_note = notes[-1]
+        hardware_candidates = _sort_hardware_candidates(hardwares or ())[:3]
         for candidate in refreshes or ():
             if candidate in seen:
                 continue
             seen.add(candidate)
-            validated = validate_refresh_candidates(
-                partner_id, hardwares[0] if hardwares else "", (candidate,))
+            validated = None
+            for hw in hardware_candidates or [""]:
+                validated = validate_refresh_candidates(
+                    partner_id, hw, (candidate,))
+                if validated:
+                    break
             if validated:
                 return validated[0], validated[1]
             tried += 1

@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.11** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
+Plugin-Version: **0.9.12** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
 
 ## Installation
 
@@ -17,6 +17,8 @@ Im Dialog **Tolino Cloud Sync**: Konto wählen, Partner (z. B. **8 – Books.ch 
 ## Refresh-Token beschaffen
 
 **Automatisch (empfohlen):** Im Plugin **„Im Browser anmelden“** klicken — es öffnet sich der Standardbrowser (das eingebaute QtWebEngine-Fenster wurde entfernt, es lief zuverlässig gegen den Bot-Schutz). Bei Keycloak-Partnern wie Orell Füssli öffnet sich direkt der **Web Reader**; nach dem Anmelden (Bibliothek mit Bücherliste) den **Web-Reader-Tab oder den ganzen Browser schließen** — ein offener Web Reader verbraucht und rotiert den Token im Hintergrund, sodass nichts für das Plugin überbleibt. Kein privates/Inkognito-Fenster verwenden. Das Plugin sammelt danach die Refresh-Token-Kandidaten aus den Browser-Storages und validiert jeden live am Token-Endpunkt. Alternativ **„Frischen Token aus laufendem Web Reader übernehmen“**, wenn der Web Reader im Standardbrowser geöffnet und angemeldet ist. Beide Wege **validieren gefundene Tokens live** am Token-Endpunkt und speichern nur den frischen, rotierten Token; Browser-Storages enthalten nach Hintergrund-Rotationen oft mehrere Tokens, von denen ältere bereits verbraucht sind.
+
+**Frische Kandidaten zuerst (0.9.12):** Browser-Storages enthalten nach jeder Hintergrund-Rotation mehrere Token-Generationen. Das Plugin sortiert die Kandidaten jetzt nach Frische: Die neuesten Schreibvorgänge (Chromium Write-Ahead-Log, Firefox-LSNG-Datenbank mit WAL) werden zuerst geprüft, alte Shadow-Kopien (z. B. `webappsstore.sqlite` eines geschlossenen Firefox) zuletzt. Sind alle Kandidaten verbraucht, bietet der Dialog an, alle 30 Sekunden bis zu 5 Minuten weiterzuprüfen — der Web Reader schreibt bei seinem nächsten Hintergrund-Refresh einen frischen Token, den das Plugin dann automatisch übernimmt.
 
 **Token-Keep-alive:** Keycloak-Refresh-Tokens verfallen nach ca. einer Stunde Untätigkeit (`refresh_expires_in` ≈ 3598). Solange Calibre läuft, rotiert das Plugin deshalb alle 45 Minuten still den gespeicherten Token und speichert die Rotation — der Token bleibt zwischen zwei Synchronisierungen gültig. Nebenwirkung: Der im Browser angemeldete Web Reader muss sich gelegentlich neu anmelden, da auch seine Token bei der Rotation veralten.
 

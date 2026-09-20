@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import traceback
 
 from calibre.gui2 import error_dialog, info_dialog
@@ -10,7 +11,7 @@ try:
                          QProgressBar, QPushButton, QProgressDialog, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QTextEdit, QObject, QInputDialog,
-                         QFileDialog, Qt, pyqtSignal)
+                         QFileDialog, Qt, QTimer, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -18,7 +19,7 @@ except ImportError:
                          QProgressBar, QPushButton, QProgressDialog, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QTextEdit, QObject, QInputDialog,
-                         QFileDialog, Qt, Signal as pyqtSignal)
+                         QFileDialog, Qt, QTimer, Signal as pyqtSignal)
 
 try:
     from . import bootstrapper
@@ -676,10 +677,23 @@ class SyncDashboard(QDialog):
         }, active=self.account_name)
 
     def _validate_scraped_candidates(self, refreshes, hardwares):
-        """Validate scraped candidates live; return the fresh pair or None."""
-        return validate_refresh_candidates(
-            self.partner.currentData(), hardwares[0] if hardwares else "",
-            refreshes)
+        """Validate scraped candidates live; return the fresh pair or None.
+
+        The hardware ID must match the one the refresh token was issued
+        for. Storages may hold several historical device IDs, and
+        ``scrape_browser_tokens`` already ranks them (UUID-shaped and
+        freshest first), so the top candidates are tried in order.
+        """
+        hardwares = [str(hw) for hw in (hardwares or ()) if hw]
+        for hw in hardwares[:3]:
+            validated = validate_refresh_candidates(
+                self.partner.currentData(), hw, refreshes)
+            if validated:
+                return validated
+        if not hardwares:
+            return validate_refresh_candidates(
+                self.partner.currentData(), "", refreshes)
+        return None
 
     def scrape_browser_tokens(self):
         """Extract a working refresh_token and hardware_id from browsers.
@@ -708,18 +722,7 @@ class SyncDashboard(QDialog):
                         % (len(refreshes), hardware_id or "unverändert")
                     )
                     return
-                detail = "\n".join("- %s" % note for note in notes) or \
-                    "- Kein Browserprofil gefunden"
-                QMessageBox.warning(
-                    self, "Token verbraucht / Tokens spent",
-                    "Es wurden %d Refresh-Token gefunden, aber alle waren "
-                    "bereits verbraucht (invalid grant).\n\n"
-                    "Lade den Web Reader einmal neu (F5), bis die "
-                    "Bücherliste geladen ist, und versuche es direkt "
-                    "danach erneut.\n\n"
-                    "Befund:\n%s" % (
-                        len(refreshes), detail)
-                )
+                self._offer_spent_token_retry(len(refreshes), notes)
                 return
             result = scrape_browser_tokens(diagnose=True)
             refresh_token, hardware_id = result[0], result[1]
@@ -743,6 +746,86 @@ class SyncDashboard(QDialog):
                 self, "Fehler / Error",
                 "Fehler beim Extrahieren der Tokens: %s" % sanitize_error(exc)
             )
+
+    def _offer_spent_token_retry(self, count, notes):
+        """Explain spent candidates and offer a 30 s background retry poll.
+
+        The Web Reader rotates its refresh token on every background
+        refresh, so a fresh token usually lands in the browser storage
+        within a minute or two of the reader being used. Instead of making
+        the user re-click the button, offer an automatic poll.
+        """
+        detail = "\n".join("- %s" % note for note in notes) or \
+            "- Kein Browserprofil gefunden"
+        answer = QMessageBox.question(
+            self, "Token verbraucht / Tokens spent",
+            "Es wurden %d Refresh-Token gefunden, aber alle waren bereits "
+            "verbraucht (invalid grant).\n\n"
+            "Der Web Reader rotiert den Token bei jedem Hintergrund-"
+            "Refresh; sobald ein frischer Token im Browser-Storage "
+            "ankommt, übernimmt das Plugin ihn automatisch.\n\n"
+            "Jetzt alle 30 Sekunden für 5 Minuten weiterprüfen? Lasse "
+            "dazu den Web Reader geöffnet (Bücherliste geladen) und lade "
+            "ihn ggf. einmal neu (F5).\n\n"
+            "Befund:\n%s" % (count, detail),
+            QMessageBox.Yes | QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self._stop_scrape_retry()
+        self._scrape_retry_deadline = time.time() + 5 * 60
+        timer = QTimer(self)
+        timer.setInterval(30 * 1000)
+        timer.timeout.connect(self._scrape_retry_tick)
+        self._scrape_retry_timer = timer
+        timer.start()
+        try:
+            self.status.setText(
+                "Warte auf frischen Token (Prüfung alle 30 s, bis zu "
+                "5 Minuten) – Web Reader geöffnet lassen ...")
+        except RuntimeError:
+            pass
+
+    def _scrape_retry_tick(self):
+        """Re-scrape and validate once per poll interval until fresh."""
+        if time.time() > getattr(self, "_scrape_retry_deadline", 0):
+            self._stop_scrape_retry()
+            QMessageBox.information(
+                self, "Token verbraucht / Tokens spent",
+                "Auch nach 5 Minuten kam kein frischer Token an. Melde "
+                "dich im Web Reader (Bibliothek) neu an, lade ihn einmal "
+                "neu (F5) und starte die Browser-Anmeldung erneut.")
+            return
+        try:
+            refreshes, hardwares, _notes = scrape_browser_tokens(
+                diagnose=True, all_candidates=True)
+        except Exception:
+            return  # transient scan error: try again on the next tick
+        if not refreshes:
+            return
+        validated = self._validate_scraped_candidates(refreshes, hardwares)
+        if not validated:
+            return
+        self._stop_scrape_retry()
+        refresh_token, hw = validated
+        if hw:
+            self.hardware.setText(str(hw))
+        self.refresh.setText(refresh_token)
+        self.persist_refresh_token(refresh_token)
+        self.update_status()
+        QMessageBox.information(
+            self, "Token extrahiert / Tokens extracted",
+            "Frischer Refresh-Token gefunden und gespeichert.")
+
+    def _stop_scrape_retry(self):
+        """Stop the 30 s retry poll (new poll, success or shutdown)."""
+        timer = getattr(self, "_scrape_retry_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._scrape_retry_timer = None
+        try:
+            self.status.setText("Bereit / Ready")
+        except RuntimeError:
+            pass  # dialog already destroyed (Calibre shutdown)
 
     def install_curl_cffi_clicked(self):
         """One-click install of curl_cffi wheels (pinned, checksum-verified)."""
@@ -1074,6 +1157,7 @@ class SyncDashboard(QDialog):
         self.update_status()
 
     def closeEvent(self, event):
+        self._stop_scrape_retry()
         if self.thread:
             self.cancel_sync()
             self.thread.quit()

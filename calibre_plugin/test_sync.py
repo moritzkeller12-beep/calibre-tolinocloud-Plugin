@@ -1569,6 +1569,178 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(["hw-77"], hardwares)
         self.assertTrue(any("Kandidat" in n for n in notes), notes)
 
+    def test_recency_sorting_puts_freshest_and_uuid_candidates_first(self):
+        from .tolino import (_sort_candidates_by_recency,
+                             _sort_hardware_candidates, _RECENCY_BUCKETS,
+                             _RECENCY_LIVE, _RECENCY_LDB, _RECENCY_LEGACY)
+        try:
+            _RECENCY_BUCKETS.clear()
+            _RECENCY_BUCKETS["legacy-tok"] = _RECENCY_LEGACY
+            _RECENCY_BUCKETS["ldb-tok"] = _RECENCY_LDB
+            _RECENCY_BUCKETS["fresh-log-tok"] = _RECENCY_LIVE
+            ordered = _sort_candidates_by_recency(
+                ["ldb-tok", "legacy-tok", "fresh-log-tok"])
+            self.assertEqual(["fresh-log-tok", "ldb-tok", "legacy-tok"],
+                             ordered)
+            uuid_hw = "da284d4b-6348-43c8-b0ab-17edcddfb25d"
+            ordered_hw = _sort_hardware_candidates(
+                ["plain-hw", uuid_hw, "0123456789abcdef0123456789abcdef"])
+            self.assertEqual(uuid_hw, ordered_hw[0])
+        finally:
+            _RECENCY_BUCKETS.clear()
+
+    def test_scan_chromium_leveldb_live_hint_reads_only_log_files(self):
+        import struct as _struct
+        from .tolino import (_scan_chromium_leveldb, _RECENCY_BUCKETS,
+                             _RECENCY_LIVE, _RECENCY_LDB)
+
+        def varint(value):
+            out = bytearray()
+            while True:
+                byte = value & 0x7F
+                value >>= 7
+                if value:
+                    out.append(byte | 0x80)
+                else:
+                    out.append(byte)
+                    return bytes(out)
+
+        def writebatch(key, value):
+            payload = (_struct.pack("<QI", 1, 1)
+                       + b"\x01" + varint(len(key)) + key
+                       + varint(len(value)) + value)
+            return _struct.pack("<IHB", 0, len(payload), 1) + payload
+
+        key = b"_https://webreader.mytolino.com\x00\x01refresh_token"
+        blob = writebatch(key, b"\x01tok-from-log")
+        with tempfile.TemporaryDirectory() as tmp:
+            db_dir = os.path.join(tmp, "leveldb")
+            os.makedirs(db_dir)
+            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
+                fh.write(blob)
+            with open(os.path.join(db_dir, "000005.ldb"), "wb") as fh:
+                fh.write(b"not-a-real-table-but-big-enough" * 40)
+            try:
+                _RECENCY_BUCKETS.clear()
+                live = _scan_chromium_leveldb(
+                    db_dir, recency_hint=_RECENCY_LIVE)
+                self.assertEqual(
+                    {"webreader.mytolino.com\x00\x01refresh_token":
+                     "tok-from-log"},
+                    live)
+                self.assertEqual(
+                    _RECENCY_LIVE,
+                    _RECENCY_BUCKETS.get("tok-from-log"))
+                _RECENCY_BUCKETS.clear()
+                plain = _scan_chromium_leveldb(db_dir)
+                self.assertEqual(
+                    {"webreader.mytolino.com\x00\x01refresh_token":
+                     "tok-from-log"},
+                    plain)
+                self.assertEqual(
+                    _RECENCY_LDB, _RECENCY_BUCKETS.get("tok-from-log"))
+            finally:
+                _RECENCY_BUCKETS.clear()
+
+    def test_scrape_all_candidates_ranks_fresh_log_token_first(self):
+        """A .log-harvested token outranks the compacted-history token."""
+        import struct as _struct
+        from .tolino import (_CHROMIUM_STORAGE_DIRS, _RECENCY_BUCKETS)
+
+        def varint(value):
+            out = bytearray()
+            while True:
+                byte = value & 0x7F
+                value >>= 7
+                if value:
+                    out.append(byte | 0x80)
+                else:
+                    out.append(byte)
+                    return bytes(out)
+
+        def writebatch(records):
+            payload = _struct.pack("<QI", 1, len(records))
+            for key, value in records:
+                payload += (b"\x01" + varint(len(key)) + key
+                            + varint(len(value)) + value)
+            return _struct.pack("<IHB", 0, len(payload), 1) + payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_dir = os.path.join(tmp, "Local Storage", "leveldb")
+            os.makedirs(db_dir)
+            blob = writebatch([
+                (b"_https://webreader.mytolino.com\x00\x01refresh_token",
+                 b"\x01fresh-log-token"),
+                (b"_https://webreader.mytolino.com\x00\x01hardware_id",
+                 b"\x01hw-fresh-log"),
+            ])
+            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
+                fh.write(blob)
+
+            def fake_collect(path, notes):
+                if path == "/fake/profile-old":
+                    # Simulate compacted .ldb history found first; the real
+                    # live dir is discovered like _collect_storage_under does.
+                    _CHROMIUM_STORAGE_DIRS.append(db_dir)
+                    return {
+                        "webreader.mytolino.com/refresh_token":
+                            "spent-ldb-token",
+                        "webreader.mytolino.com/hardware_id": "hw-spent",
+                    }
+                return {}
+
+            try:
+                with patch("calibre_plugin.tolino._find_browser_storage_paths",
+                           return_value=["/fake/profile-old", db_dir]), \
+                        patch("calibre_plugin.tolino.os.path.isdir",
+                              return_value=True), \
+                        patch("calibre_plugin.tolino._collect_storage_under",
+                              side_effect=fake_collect):
+                    refreshes, hardwares, notes = scrape_browser_tokens(
+                        diagnose=True, all_candidates=True)
+            finally:
+                _RECENCY_BUCKETS.clear()
+                del _CHROMIUM_STORAGE_DIRS[:]
+        self.assertIn("fresh-log-token", refreshes)
+        self.assertIn("spent-ldb-token", refreshes)
+        self.assertEqual("fresh-log-token", refreshes[0])
+        self.assertEqual("hw-fresh-log", hardwares[0])
+        self.assertTrue(any("Kandidat" in n for n in notes), notes)
+
+    def test_firefox_lsng_rows_are_not_overwritten_by_legacy_shadow(self):
+        import sqlite3
+        from .tolino import _read_firefox_storage
+        with tempfile.TemporaryDirectory() as tmp:
+            origin_dir = os.path.join(
+                tmp, "https+++webreader.mytolino.com", "ls")
+            os.makedirs(origin_dir)
+            conn = sqlite3.connect(os.path.join(origin_dir, "data.sqlite"))
+            conn.execute(
+                "CREATE TABLE data (key TEXT PRIMARY KEY, "
+                "utf16_length INTEGER, conversion_type INTEGER, "
+                "compression_type INTEGER, last_access_time INTEGER, "
+                "value BLOB)")
+            conn.execute(
+                "INSERT INTO data (key, conversion_type, value) "
+                "VALUES (?, 1, ?)", ("refresh_token", b"fresh-lsng-token"))
+            conn.commit()
+            conn.close()
+            # Legacy shadow copy holds an OLDER token for the same key.
+            legacy = sqlite3.connect(os.path.join(tmp, "webappsstore.sqlite"))
+            legacy.execute(
+                "CREATE TABLE webappsstore2 (originAttributes TEXT, "
+                "originKey TEXT, scope TEXT, key TEXT, value BLOB)")
+            legacy.execute(
+                "INSERT INTO webappsstore2 VALUES (?, ?, ?, ?, ?)",
+                ("", "https+++webreader.mytolino.com", "",
+                 "refresh_token", "legacy-shadow-token"))
+            legacy.commit()
+            legacy.close()
+            storage = _read_firefox_storage(tmp)
+        self.assertEqual(
+            storage.get("https+++webreader.mytolino.com/refresh_token"),
+            "fresh-lsng-token")
+
 class ToolbarIconTests(unittest.TestCase):
     """The toolbar action must receive an icon in real Calibre runs."""
 
@@ -1593,7 +1765,7 @@ class ToolbarIconTests(unittest.TestCase):
                      "QProgressDialog", "QThread",
                      "QVBoxLayout", "QHBoxLayout", "QTableWidget",
                      "QTableWidgetItem", "QTextEdit", "QObject",
-                     "QInputDialog", "QFileDialog", "Qt"):
+                     "QInputDialog", "QFileDialog", "Qt", "QTimer"):
             setattr(qt_core, name, type(name, (), {}))
         qt_core.pyqtSignal = lambda *a, **k: None
         qt_core.Signal = lambda *a, **k: None
