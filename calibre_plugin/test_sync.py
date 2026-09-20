@@ -1070,6 +1070,34 @@ class SyncPlanTests(unittest.TestCase):
                     self.assertNotIn("local browser callback is not supported", error_msg)
                     self.assertNotIn("only registers its Web Reader redirect URI", error_msg)
 
+    def test_keycloak_assisted_login_opens_web_reader_not_authorize_url(self):
+        """Keycloak partners must open the Web Reader page itself.
+
+        A hand-built authorize URL is rejected by Keycloak with
+        "Ung\u00fctiger Parameter: redirect_uri" (only registered redirect
+        URIs are accepted), which is exactly the reported browser-login
+        failure for Orell F\u00fcssli.
+        """
+        from .tolino import _keycloak_assisted_login
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 1000.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=True) as open_mock, \
+             patch("calibre_plugin.tolino.time.time",
+                   side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            with self.assertRaises(TolinoAuthError):
+                _keycloak_assisted_login(4, "test_hardware")
+        opened = open_mock.call_args[0][0]
+        self.assertEqual(PARTNERS[4]["reader_url"], opened)
+        self.assertNotIn("redirect_uri", opened)
+        self.assertNotIn("response_type", opened)
+
     def test_scrape_browser_tokens_returns_none_when_not_found(self):
         with patch("calibre_plugin.tolino._find_browser_storage_paths",
                    return_value=[]):

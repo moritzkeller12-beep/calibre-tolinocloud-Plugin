@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.8** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
+Plugin-Version: **0.9.9** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
 
 ## Installation
 
