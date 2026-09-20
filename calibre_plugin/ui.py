@@ -443,12 +443,47 @@ class SyncWorker(QObject):
         }, active=self.settings["account_name"])
 
 
+# Browser sign-in keeps a module-level reference to its worker thread: the
+# dashboard may be closed while the flow is still polling the browser
+# storages, and a parented QThread destroyed while running crashes Calibre.
+_LOGIN_WORKER_THREADS = []
+
+
+def _reap_login_thread(thread):
+    try:
+        _LOGIN_WORKER_THREADS.remove(thread)
+    except ValueError:
+        pass
+
+
+class BrowserLoginWorker(QObject):
+    """Runs browser_login off the GUI thread (it polls for minutes)."""
+    completed = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, partner_id, hardware):
+        QObject.__init__(self)
+        self.partner_id = partner_id
+        self.hardware = hardware
+
+    def run(self):
+        try:
+            refresh, hardware = browser_login(self.partner_id, self.hardware)
+        except Exception as exc:
+            self.failed.emit("%s: %s" % (type(exc).__name__,
+                                         sanitize_error(exc)))
+            return
+        self.completed.emit(refresh, hardware)
+
+
 class SyncDashboard(QDialog):
     def __init__(self, gui):
         QDialog.__init__(self, gui)
         self.gui = gui
         self.thread = None
         self.worker = None
+        self.login_thread = None
+        self.login_worker = None
         self.sync_column_enabled = False
         self.temp_files = []
         self.setWindowTitle("Tolino Cloud Sync (Plugin-Version %s)" %
@@ -784,21 +819,64 @@ class SyncDashboard(QDialog):
         bot-protection fingerprint problems and never completed reliably.
         The external browser signs in with the user's real fingerprint and
         the plugin validates every harvested token before adopting it.
+
+        The flow polls the browser storages for minutes, so it runs in a
+        worker thread: blocking the GUI thread froze Calibre and could
+        crash it while the frozen window was interacting.
         """
+        if self.login_thread is not None and self.login_thread.isRunning():
+            return  # a sign-in attempt is already running
         partner_id = self.partner.currentData()
+        self.browser.setEnabled(False)
+        self.status.setText(
+            "Browser-Anmeldung l\u00e4uft: im ge\u00f6ffneten Browser im "
+            "Web Reader (Bibliothek) anmelden und das Fenster offen "
+            "lassen ...")
+        thread = QThread()  # no parent: dialog may close first
+        worker = BrowserLoginWorker(partner_id, self.hardware.text().strip())
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.completed.connect(self.login_completed)
+        worker.failed.connect(self.login_failed)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: _reap_login_thread(thread))
+        _LOGIN_WORKER_THREADS.append(thread)
+        self.login_thread = thread
+        self.login_worker = worker
+        thread.start()
+
+    def login_completed(self, refresh, hardware):
         try:
-            refresh, hardware = browser_login(partner_id,
-                                              self.hardware.text().strip())
-        except TolinoAuthError as exc:
-            QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in", str(exc))
-            return
-        self.set_refresh_token(refresh)
-        if hardware:
-            self.hardware.setText(hardware)
-        self.persist_refresh_token(refresh)
-        self.update_status()
-        QMessageBox.information(self, "Anmeldung erfolgreich / Sign-in complete",
-                                "Der neue Refresh-Token wurde sofort gespeichert.")
+            self._login_cleanup()
+            self.set_refresh_token(refresh)
+            if hardware:
+                self.hardware.setText(str(hardware))
+            self.persist_refresh_token(refresh)
+            self.update_status()
+            QMessageBox.information(
+                self, "Anmeldung erfolgreich / Sign-in complete",
+                "Der neue Refresh-Token wurde sofort gespeichert.")
+        except RuntimeError:
+            pass  # dialog already destroyed (Calibre shutdown)
+
+    def login_failed(self, message):
+        try:
+            self._login_cleanup()
+            QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in",
+                                sanitize_error(message))
+        except RuntimeError:
+            pass  # dialog already destroyed (Calibre shutdown)
+
+    def _login_cleanup(self):
+        self.login_thread = None
+        self.login_worker = None
+        try:
+            self.browser.setEnabled(True)
+            self.status.setText("Bereit / Ready")
+        except RuntimeError:
+            pass  # dialog already destroyed
 
     def _cloud_client(self):
         """Build a logged-in client from the current dialog values.
@@ -1000,6 +1078,11 @@ class SyncDashboard(QDialog):
             self.cancel_sync()
             self.thread.quit()
             self.thread.wait()
+        # A running browser sign-in is left alone on purpose: its thread is
+        # unparented and self-terminates after its timeout, and joining it
+        # here could freeze the close for minutes.
+        self.login_thread = None
+        self.login_worker = None
         self._save_visible_account()
         event.accept()
 

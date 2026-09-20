@@ -1812,23 +1812,30 @@ LOCAL_CALLBACK_UNSUPPORTED_PARTNERS = (8,)
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     """Guided browser sign-in for Keycloak partners without local callback.
 
-    Opens the authorization page (or the web reader itself), then polls the
-    browser storages, live-validating every harvested refresh-token
-    candidate. Returns the fresh rotated token of the first accepted grant.
+    Opens the partner's real Web Reader page (never a hand-built authorize
+    URL: Keycloak rejects unregistered redirect URIs with "Ungueltiger
+    Parameter: redirect_uri"), then polls the browser storages,
+    live-validating every harvested refresh-token candidate. Returns the
+    fresh rotated token of the first accepted grant.
     """
     partner = PARTNERS[partner_id]
-    params = {
-        "client_id": partner["client_id"],
-        "response_type": "code",
-        "scope": partner["scope"],
-    }
-    for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
-        if partner.get(key):
-            params[key] = partner[key]
-    auth_url = partner["auth_url"]
-    if "?" not in auth_url:
-        auth_url = auth_url + "?" + urlencode(params)
-    webbrowser.open(auth_url)
+    # The Web Reader's own login flow uses the partner's registered redirect
+    # URIs, so it can never hit the Keycloak redirect_uri error.
+    auth_url = partner.get("reader_url")
+    if not auth_url:
+        params = {
+            "client_id": partner["client_id"],
+            "response_type": "code",
+            "scope": partner["scope"],
+        }
+        for key in ("x_buchde.mandant_id", "x_buchde.skin_id"):
+            if partner.get(key):
+                params[key] = partner[key]
+        auth_url = partner["auth_url"]
+        if "?" not in auth_url:
+            auth_url = auth_url + "?" + urlencode(params)
+    if not webbrowser.open(auth_url):
+        raise TolinoAuthError("Could not open the system browser.")
 
     deadline = time.time() + max(30, timeout)
     seen = set()
@@ -1850,8 +1857,9 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     raise TolinoAuthError(
         "Nach dem Anmelden im Browser wurde kein frischer Tolino-"
         "Refresh-Token gefunden (letzte Meldung: %s). Melde dich im "
-        "Web Reader (Bibliothek, Buecherliste geladen) an, lade ihn "
-        "einmal neu (F5) und starte die Browser-Anmeldung erneut."
+        "ge\u00f6ffneten Web Reader (Bibliothek, Buecherliste geladen) "
+        "an, lade ihn einmal neu (F5) und starte die Browser-Anmeldung "
+        "erneut."
         % (last_note or "kein Browser-Storage gelesen")
     )
 
