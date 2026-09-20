@@ -1121,6 +1121,53 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(1, len(opened))
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1", opened[0])
 
+
+    def test_keycloak_assisted_login_waits_for_reader_quiescence(self):
+        """While the reader is actively writing tokens, nothing is spent.
+
+        Validating a refresh token rotates it; doing that while the Web
+        Reader is mid-login steals the reader's fresh grant and bounces the
+        user back to the login page. Validation must only start once the
+        harvested snapshot has been stable for a while, and then take the
+        newest candidate.
+        """
+        from .tolino import _keycloak_assisted_login
+
+        validations = []
+
+        def fake_validate(partner_id, hw, candidates):
+            validations.extend(candidates)
+            return ("rotated-fresh", "hw1")
+
+        polls = {"n": 0}
+
+        def fake_scrape(diagnose=False, all_candidates=False):
+            polls["n"] += 1
+            if polls["n"] <= 3:
+                # Reader actively (re)writing credentials: snapshot changes.
+                return (["tok-%d" % polls["n"]], ["hw1"], ["note"])
+            return (["tok-3"], ["hw1"], ["note"])
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 5.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   side_effect=fake_scrape), \
+             patch("calibre_plugin.tolino.validate_refresh_candidates",
+                   side_effect=fake_validate), \
+             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
+        self.assertEqual(("rotated-fresh", "hw1"), (refresh, hardware))
+        # tok-1/tok-2 were written while the reader was active and must
+        # never have been validated; after settling, the newest is used.
+        self.assertEqual(["tok-3"], validations)
+
     def test_keycloak_assisted_login_reports_close_reader_hint(self):
         """When candidates were harvested but all were rejected, the error
         must tell the user to CLOSE the Web Reader before retrying: an open

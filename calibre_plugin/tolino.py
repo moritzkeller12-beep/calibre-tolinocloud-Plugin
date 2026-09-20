@@ -1946,9 +1946,15 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
 
     Opens the partner's real Web Reader page (never a hand-built authorize
     URL: Keycloak rejects unregistered redirect URIs with "Ungueltiger
-    Parameter: redirect_uri"), then polls the browser storages,
-    live-validating every harvested refresh-token candidate. Returns the
-    fresh rotated token of the first accepted grant.
+    Parameter: redirect_uri"), then polls the browser storages and adopts
+    the first candidate the token endpoint accepts.
+
+    Validating a refresh token consumes it (refresh grants rotate), so the
+    plugin never validates while the Web Reader is still writing its
+    storage: every candidate set must be IDENTICAL on two consecutive
+    polls before the first validation happens. Otherwise the reader's
+    background token refresh races the plugin and the reader loses its
+    session -- the user is thrown back to the login page.
     """
     partner = PARTNERS[partner_id]
     # The Web Reader's own login flow uses the partner's registered redirect
@@ -1970,17 +1976,36 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         raise TolinoAuthError("Could not open the system browser.")
 
     deadline = time.time() + max(30, timeout)
+    poll_seconds = 2
+    stable_seconds = 20  # candidate set unchanged for this long -> reader idle
     seen = set()
     tried = 0
     last_note = ""
+    previous_snapshot = None
+    snapshot_since = None
     while time.time() < deadline:
-        time.sleep(2)
+        time.sleep(poll_seconds)
         refreshes, hardwares, notes = scrape_browser_tokens(
             diagnose=True, all_candidates=True)
         if notes:
             last_note = notes[-1]
+        snapshot = (tuple(refreshes or ()), tuple(hardwares or ()))
+        now = time.time()
+        if snapshot != previous_snapshot:
+            # The reader (re)wrote credentials: it is active. Never spend a
+            # token now -- validating would steal the grant the reader just
+            # received and log the reader out.
+            previous_snapshot = snapshot
+            snapshot_since = now
+            continue
+        if snapshot_since is None:
+            snapshot_since = now
+        if not refreshes:
+            continue
+        if now - snapshot_since < stable_seconds:
+            continue  # reader not idle long enough yet
         hardware_candidates = _sort_hardware_candidates(hardwares or ())[:3]
-        for candidate in refreshes or ():
+        for candidate in refreshes:
             if candidate in seen:
                 continue
             seen.add(candidate)
@@ -1993,6 +2018,12 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
             if validated:
                 return validated[0], validated[1]
             tried += 1
+            # A failed validation does not rotate the token, but the
+            # storage may have changed meanwhile: re-require stability
+            # before spending another candidate.
+            previous_snapshot = None
+            snapshot_since = None
+            break
     if tried:
         raise TolinoAuthError(
             "%d gefundene(n) Refresh-Token-Kandidaten wurden gepr\u00fcft, "

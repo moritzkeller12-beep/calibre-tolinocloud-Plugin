@@ -912,9 +912,10 @@ class SyncDashboard(QDialog):
         partner_id = self.partner.currentData()
         self.browser.setEnabled(False)
         self.status.setText(
-            "Browser-Anmeldung l\u00e4uft: im ge\u00f6ffneten Browser im "
-            "Web Reader (Bibliothek) anmelden und das Fenster offen "
-            "lassen ...")
+            "Browser-Anmeldung läuft: im Web Reader (Bibliothek) anmelden "
+            "und Bücherliste laden lassen, dann warten – der Token wird "
+            "übernommen, sobald sich der Reader beruhigt hat (ca. 20–30 s). "
+            "Der Web Reader kann sich dabei abmelden, das ist normal.")
         thread = QThread()  # no parent: dialog may close first
         worker = BrowserLoginWorker(partner_id, self.hardware.text().strip())
         worker.moveToThread(thread)
