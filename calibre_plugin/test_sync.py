@@ -1122,14 +1122,14 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1", opened[0])
 
 
-    def test_keycloak_assisted_login_waits_for_reader_quiescence(self):
-        """While the reader is actively writing tokens, nothing is spent.
+    def test_keycloak_assisted_login_validates_each_new_candidate_once(self):
+        """Every newly harvested candidate is validated exactly once.
 
-        Validating a refresh token rotates it; doing that while the Web
-        Reader is mid-login steals the reader's fresh grant and bounces the
-        user back to the login page. Validation must only start once the
-        harvested snapshot has been stable for a while, and then take the
-        newest candidate.
+        Validating a refresh token rotates it; an "invalid_grant" answer
+        means the candidate is dead forever and must be remembered, so it
+        is never retried on a later poll. A fresh candidate that shows up
+        later (e.g. the reader's next background rotation) is still picked
+        up and validated.
         """
         from .tolino import _keycloak_assisted_login
 
@@ -1137,16 +1137,20 @@ class SyncPlanTests(unittest.TestCase):
 
         def fake_validate(partner_id, hw, candidates):
             validations.extend(candidates)
-            return ("rotated-fresh", "hw1")
+            if candidates == ("fresh-1",):
+                return ("rotated-fresh", "hw1")
+            return None
 
         polls = {"n": 0}
 
         def fake_scrape(diagnose=False, all_candidates=False):
             polls["n"] += 1
-            if polls["n"] <= 3:
-                # Reader actively (re)writing credentials: snapshot changes.
-                return (["tok-%d" % polls["n"]], ["hw1"], ["note"])
-            return (["tok-3"], ["hw1"], ["note"])
+            if polls["n"] == 1:
+                return (["spent-1"], ["hw1"], ["note"])
+            if polls["n"] == 2:
+                return (["spent-1", "spent-2"], ["hw1"], ["note"])
+            # The reader's rotation wrote a fresh token.
+            return (["spent-1", "spent-2", "fresh-1"], ["hw1"], ["note"])
 
         clock = {"t": 1000.0}
 
@@ -1164,9 +1168,9 @@ class SyncPlanTests(unittest.TestCase):
              patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
             refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
         self.assertEqual(("rotated-fresh", "hw1"), (refresh, hardware))
-        # tok-1/tok-2 were written while the reader was active and must
-        # never have been validated; after settling, the newest is used.
-        self.assertEqual(["tok-3"], validations)
+        # Each candidate was tried exactly once, in harvest order; the
+        # fresh one is adopted, no dead token was ever re-tested.
+        self.assertEqual(["spent-1", "spent-2", "fresh-1"], validations)
 
     def test_keycloak_assisted_login_reports_close_reader_hint(self):
         """When candidates were harvested but all were rejected, the error
@@ -1193,6 +1197,51 @@ class SyncPlanTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("SCHLIESSE", message)
         self.assertIn("1 gefundene(n)", message)
+
+    def test_keycloak_assisted_login_keeps_polling_after_exhausted(self):
+        """A run that exhausts all candidates must not end immediately.
+
+        The freshest token often reaches disk only when the user closes
+        the Web Reader tab (Chromium flushes Local Storage on close), so
+        the loop must keep polling and adopt the late candidate instead
+        of failing with "all candidates spent".
+        """
+        from .tolino import _keycloak_assisted_login
+
+        polls = {"n": 0}
+        validations = []
+
+        def fake_scrape(diagnose=False, all_candidates=False):
+            polls["n"] += 1
+            if polls["n"] <= 10:
+                return (["dead-1", "dead-2"], ["hw1"], ["note"])
+            # The user closed the reader tab: the fresh token lands late.
+            return (["dead-1", "dead-2", "late-fresh"], ["hw1"], ["note"])
+
+        def fake_validate(partner_id, hw, candidates):
+            validations.extend(candidates)
+            if candidates == ("late-fresh",):
+                return ("rotated-late", "hw1")
+            return None
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 5.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   side_effect=fake_scrape), \
+             patch("calibre_plugin.tolino.validate_refresh_candidates",
+                   side_effect=fake_validate), \
+             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
+        self.assertEqual(("rotated-late", "hw1"), (refresh, hardware))
+        # The dead pair was validated once and then never again.
+        self.assertEqual(["dead-1", "dead-2", "late-fresh"], validations)
 
     def test_keepalive_refresh_rotates_and_persists(self):
         """Keep-alive must silently rotate the stored token and persist it."""

@@ -1949,12 +1949,13 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     Parameter: redirect_uri"), then polls the browser storages and adopts
     the first candidate the token endpoint accepts.
 
-    Validating a refresh token consumes it (refresh grants rotate), so the
-    plugin never validates while the Web Reader is still writing its
-    storage: every candidate set must be IDENTICAL on two consecutive
-    polls before the first validation happens. Otherwise the reader's
-    background token refresh races the plugin and the reader loses its
-    session -- the user is thrown back to the login page.
+    Validating a refresh token consumes it (refresh grants rotate), so a
+    candidate the endpoint rejects as "invalid_grant" is remembered and
+    never retried: re-testing spent tokens wastes the whole run. Instead
+    the loop keeps polling and picks up every newly written candidate --
+    the reader writes a fresh one after each background rotation and
+    Chromium flushes its Local Storage to disk when the tab closes, which
+    is exactly when the freshest, never-touched token becomes readable.
     """
     partner = PARTNERS[partner_id]
     # The Web Reader's own login flow uses the partner's registered redirect
@@ -1977,38 +1978,36 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
 
     deadline = time.time() + max(30, timeout)
     poll_seconds = 2
-    stable_seconds = 20  # candidate set unchanged for this long -> reader idle
-    seen = set()
+    # The Web Reader refreshes its token roughly every 40-60 s in the
+    # background (refresh_expires_in ~3598 with a proactive rotation well
+    # before expiry). Waiting 20 s of "stability" therefore never wins the
+    # race against an OPEN reader -- and a closed reader writes nothing at
+    # all. So instead of blocking until the storage looks quiet: harvest
+    # candidates each round, remember the ones the token endpoint rejected
+    # (a spent "invalid_grant" token can never come back to life), and
+    # keep polling until a NEWLY written candidate shows up -- typically
+    # right after the reader finished its login or after the user closed
+    # the tab (Chromium flushes its Local Storage to disk on close). That
+    # closes the "all candidates spent" gap in which earlier versions gave
+    # up even though the freshest token had not been written yet.
+    seen_spent = set()
     tried = 0
     last_note = ""
-    previous_snapshot = None
-    snapshot_since = None
     while time.time() < deadline:
         time.sleep(poll_seconds)
         refreshes, hardwares, notes = scrape_browser_tokens(
             diagnose=True, all_candidates=True)
         if notes:
             last_note = notes[-1]
-        snapshot = (tuple(refreshes or ()), tuple(hardwares or ()))
-        now = time.time()
-        if snapshot != previous_snapshot:
-            # The reader (re)wrote credentials: it is active. Never spend a
-            # token now -- validating would steal the grant the reader just
-            # received and log the reader out.
-            previous_snapshot = snapshot
-            snapshot_since = now
-            continue
-        if snapshot_since is None:
-            snapshot_since = now
         if not refreshes:
             continue
-        if now - snapshot_since < stable_seconds:
-            continue  # reader not idle long enough yet
         hardware_candidates = _sort_hardware_candidates(hardwares or ())[:3]
-        for candidate in refreshes:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
+        # Try every candidate this round that has not already failed: with
+        # dozens of stale tokens in the storages, a per-round "one candidate
+        # only" rule kept re-testing dead tokens forever and missed the
+        # fresh one sitting right behind them.
+        pending = [c for c in refreshes if c and c not in seen_spent]
+        for candidate in pending:
             validated = None
             for hw in hardware_candidates or [""]:
                 validated = validate_refresh_candidates(
@@ -2017,25 +2016,23 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
                     break
             if validated:
                 return validated[0], validated[1]
+            seen_spent.add(candidate)
             tried += 1
-            # A failed validation does not rotate the token, but the
-            # storage may have changed meanwhile: re-require stability
-            # before spending another candidate.
-            previous_snapshot = None
-            snapshot_since = None
-            break
+        # Candidates exhausted (or none new yet): keep polling. A storage
+        # that keeps changing means the reader is still active or was just
+        # closed; its next background refresh (or the close-flush) writes
+        # a fresh token that a later iteration picks up automatically.
     if tried:
         raise TolinoAuthError(
-            "%d gefundene(n) Refresh-Token-Kandidaten wurden gepr\u00fcft, "
-            "aber keiner war g\u00fcltig (der offene Web Reader verbraucht "
-            "und rotiert den Token im Hintergrund, \u00e4ltere sind "
-            "abgelaufen). Wichtig: Melde dich im Web Reader an, warte bis "
-            "die B\u00fccherliste geladen ist, und SCHLIESSE dann den "
-            "Web-Reader-Tab oder den ganzen Browser. Kein privates/"
-            "Inkognito-Fenster verwenden. Starte die Browser-Anmeldung "
-            "direkt danach erneut \u2013 jetzt \u00fcbernimmt das Plugin "
-            "den Token, ohne dass ihn eine zweite Anwendung verbrauchen "
-            "kann (letzte Meldung: %s)."
+            "%d gefundene(n) Refresh-Token wurden gepr\u00fcft, aber keiner "
+            "war g\u00fcltig. Zuverl\u00e4ssig so: 1) Im Web Reader anmelden "
+            "und die B\u00fccherliste laden. 2) Den Web-Reader-Tab oder den "
+            "ganzen Browser SCHLIESSEN (Chromium schreibt den aktuellen "
+            "Token erst beim Schlie\u00dfen zuverl\u00e4ssig auf die Fest-"
+            "platte). 3) Direkt danach die Browser-Anmeldung starten -- "
+            "sie \u00fcbernimmt den frischen Token dann automatisch, ohne "
+            "dass ihn eine zweite Anwendung verbrauchen kann (letzte "
+            "Meldung: %s)."
             % (tried, last_note or "kein Browser-Storage gelesen")
         )
     raise TolinoAuthError(
