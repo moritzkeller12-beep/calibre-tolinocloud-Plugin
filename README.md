@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.14** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
+Plugin-Version: **0.9.15** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
 
 ## Installation
 
@@ -21,6 +21,8 @@ Im Dialog **Tolino Cloud Sync**: Konto wählen, Partner (z. B. **8 – Books.ch 
 **Frische Kandidaten zuerst (0.9.12):** Browser-Storages enthalten nach jeder Hintergrund-Rotation mehrere Token-Generationen. Das Plugin sortiert die Kandidaten jetzt nach Frische: Die neuesten Schreibvorgänge (Chromium Write-Ahead-Log, Firefox-LSNG-Datenbank mit WAL) werden zuerst geprüft, alte Shadow-Kopien (z. B. `webappsstore.sqlite` eines geschlossenen Firefox) zuletzt.
 
 **Verbrauchte Token merken & weiter pollen (0.9.14):** Kandidaten, die der Token-Endpunkt mit `invalid_grant` abgelehnt hat, sind dauerhaft tot und werden nicht mehr erneut getestet — früher lief der Versuch dadurch endlos ins Leere, während der frische Token unentdeckt blieb. Stattdessen pollt das Plugin weiter (bis zu 5 Minuten) und übernimmt automatisch jeden neu geschriebenen Kandidaten: Der Web Reader schreibt nach jeder Hintergrund-Rotation einen frischen Token, und Chromium schreibt seinen Local Storage beim Schließen des Reader-Tabs zuverlässig auf die Festplatte — genau dann ist der allerfrischeste Token lesbar. Der Leser darf dafür ruhig offen bleiben; verbrauchte Kandidaten blockieren den Ablauf nicht mehr.
+
+**JWT-Alter & schlüsselunabhängiges Sweeping (0.9.15):** Tolino-Refresh-Tokens sind signierte JWTs und tragen ihre Ausstellungszeit (`iat`) unverschlüsselt im Token. Das Plugin liest dieses Alter und sortiert die Kandidaten jetzt nach ihrem **echten Token-Alter** statt nach Storage-Heuristik — der erste Validierungsversuch trifft damit den Token, den der Web Reader gerade benutzt. Zusätzlich wird der komplette Storage **schlüsselunabhängig** nach Token-Formen durchsucht: Der Keycloak-Webreader legt seinen aktuellen Tokensatz unter namenlosen Schlüsseln wie `oidc.user:<issuer>:webreader` ab — genau diesen Live-Token haben frühere Versionen übersehen, während sie nur die historischen (verbrauchten) Kopien fanden. Fehlschläge ohne eindeutiges Urteil (Netzwerkfehler, Bot-Schutz, 5xx) markieren einen Kandidaten nicht mehr als tot, sondern werden nach 30 Sekunden erneut versucht. Die Fehlermeldung nennt jetzt das Alter jedes geprüften Kandidaten (z. B. „1x gerade geschrieben, 3x vor 1 Tagen“), damit erkennbar ist, ob der frische Token überhaupt im Storage angekommen ist.
 
 **Token-Keep-alive:** Keycloak-Refresh-Tokens verfallen nach ca. einer Stunde Untätigkeit (`refresh_expires_in` ≈ 3598). Solange Calibre läuft, rotiert das Plugin deshalb alle 45 Minuten still den gespeicherten Token und speichert die Rotation — der Token bleibt zwischen zwei Synchronisierungen gültig. Nebenwirkung: Der im Browser angemeldete Web Reader muss sich gelegentlich neu anmelden, da auch seine Token bei der Rotation veralten.
 

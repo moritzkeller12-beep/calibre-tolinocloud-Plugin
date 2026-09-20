@@ -18,7 +18,8 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    _diagnostic_formats, metadata_by_id, format_error_details,
                    normalize_title, normalize_inventory_item, custom_column_available,
                    metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN)
-from .tolino import (PARTNERS, TolinoAuthError, callback_redirect_uri,
+from .tolino import (PARTNERS, TolinoAuthError, TolinoApiError,
+                     callback_redirect_uri,
                      TolinoClient, extract_login_tokens, hardware_id,
                      force_legacy_partner_id, normalize_hardware_id,
                      normalize_refresh_token, resolve_partner_id,
@@ -1135,11 +1136,11 @@ class SyncPlanTests(unittest.TestCase):
 
         validations = []
 
-        def fake_validate(partner_id, hw, candidates):
-            validations.extend(candidates)
-            if candidates == ("fresh-1",):
-                return ("rotated-fresh", "hw1")
-            return None
+        def fake_validate(partner_id, hw, candidate):
+            validations.append(candidate)
+            if candidate == "fresh-1":
+                return ("ok", "rotated-fresh", "hw1")
+            return ("spent", None, None)
 
         polls = {"n": 0}
 
@@ -1162,7 +1163,7 @@ class SyncPlanTests(unittest.TestCase):
                    return_value=True), \
              patch("calibre_plugin.tolino.scrape_browser_tokens",
                    side_effect=fake_scrape), \
-             patch("calibre_plugin.tolino.validate_refresh_candidates",
+             patch("calibre_plugin.tolino._validate_one",
                    side_effect=fake_validate), \
              patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
              patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
@@ -1188,14 +1189,14 @@ class SyncPlanTests(unittest.TestCase):
         with patch("calibre_plugin.tolino.webbrowser.open", return_value=True), \
              patch("calibre_plugin.tolino.scrape_browser_tokens",
                    return_value=(["cand1"], ["hw1"], ["note"])), \
-             patch("calibre_plugin.tolino.validate_refresh_candidates",
-                   return_value=None), \
+             patch("calibre_plugin.tolino._validate_one",
+                   return_value=("spent", None, None)), \
              patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
              patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
             with self.assertRaises(TolinoAuthError) as ctx:
                 _keycloak_assisted_login(4, "test_hardware")
         message = str(ctx.exception)
-        self.assertIn("SCHLIESSE", message)
+        self.assertIn("SCHLIESSEN", message)
         self.assertIn("1 gefundene(n)", message)
 
     def test_keycloak_assisted_login_keeps_polling_after_exhausted(self):
@@ -1218,11 +1219,11 @@ class SyncPlanTests(unittest.TestCase):
             # The user closed the reader tab: the fresh token lands late.
             return (["dead-1", "dead-2", "late-fresh"], ["hw1"], ["note"])
 
-        def fake_validate(partner_id, hw, candidates):
-            validations.extend(candidates)
-            if candidates == ("late-fresh",):
-                return ("rotated-late", "hw1")
-            return None
+        def fake_validate(partner_id, hw, candidate):
+            validations.append(candidate)
+            if candidate == "late-fresh":
+                return ("ok", "rotated-late", "hw1")
+            return ("spent", None, None)
 
         clock = {"t": 1000.0}
 
@@ -1234,7 +1235,7 @@ class SyncPlanTests(unittest.TestCase):
                    return_value=True), \
              patch("calibre_plugin.tolino.scrape_browser_tokens",
                    side_effect=fake_scrape), \
-             patch("calibre_plugin.tolino.validate_refresh_candidates",
+             patch("calibre_plugin.tolino._validate_one",
                    side_effect=fake_validate), \
              patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
              patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
@@ -1242,6 +1243,182 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(("rotated-late", "hw1"), (refresh, hardware))
         # The dead pair was validated once and then never again.
         self.assertEqual(["dead-1", "dead-2", "late-fresh"], validations)
+
+    def test_keycloak_assisted_login_retries_unclear_candidates(self):
+        """Unclear verdicts are retried after a cooldown, not declared dead.
+
+        A network error or bot-protection page proves nothing about the
+        token itself: the candidate must stay alive and be retried once
+        the transport recovers. It must not crowd out newer candidates
+        every round either (30 s cooldown per candidate).
+        """
+        from .tolino import _keycloak_assisted_login
+
+        attempts = {"tok": 0}
+        attempts_dead = []
+
+        def fake_validate(partner_id, hw, candidate):
+            if candidate == "tok":
+                attempts["tok"] += 1
+                if attempts["tok"] >= 3:
+                    return ("ok", "rotated", "hw1")
+                return ("unclear", None, None)
+            attempts_dead.append(candidate)
+            return ("spent", None, None)
+
+        polls = {"n": 0}
+
+        def fake_scrape(diagnose=False, all_candidates=False):
+            polls["n"] += 1
+            return (["tok", "dead"], ["hw1"], ["note"])
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 30.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   side_effect=fake_scrape), \
+             patch("calibre_plugin.tolino._validate_one",
+                   side_effect=fake_validate), \
+             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
+        self.assertEqual(("rotated", "hw1"), (refresh, hardware))
+        # Two unclear rounds plus the successful third attempt; the dead
+        # candidate was spent from round one, so it is never retried.
+        self.assertEqual(3, attempts["tok"])
+        self.assertEqual(["dead"], attempts_dead)
+
+    def test_validate_one_classifies_spent_vs_unclear(self):
+        """Only a definitive Keycloak rejection counts as spent."""
+        from .tolino import _validate_one
+
+        def ok_login(self):
+            self.refresh = self.refresh + "-rotated"
+
+        def invalid_grant(self):
+            raise TolinoApiError(
+                'Tolino HTTP 400: {"error": "invalid_grant", '
+                '"error_description": "Token is not active"}')
+
+        def network_down(self):
+            raise TolinoApiError("Tolino request failed: connection reset")
+
+        cases = [
+            (invalid_grant, "spent"),
+            (network_down, "unclear"),
+            (ok_login, "ok"),
+        ]
+        for login_impl, expected in cases:
+            with patch.object(tolino_module.TolinoClient, "_login",
+                              login_impl):
+                verdict, rotated, _hw = _validate_one(4, "hw-x", "tok")
+            self.assertEqual(expected, verdict)
+            if expected == "ok":
+                self.assertEqual("tok-rotated", rotated)
+
+    def test_validate_refresh_candidates_retries_unclear_calls(self):
+        """The list wrapper skips unclear candidates without consuming."""
+        from .tolino import _validate_one
+        attempts = []
+
+        def flaky_login(self):
+            attempts.append(self.refresh)
+            if self.refresh == "flaky":
+                raise TolinoApiError("Tolino request failed: timeout")
+            raise TolinoAuthError("invalid_grant: nope")
+
+        with patch.object(tolino_module.TolinoClient, "_login", flaky_login):
+            self.assertIsNone(validate_refresh_candidates(
+                4, "hw-x", ["flaky", "dead"]))
+        self.assertEqual(["flaky", "dead"], attempts)
+
+    def test_jwt_helpers_parse_iat_and_age(self):
+        """JWT payload parsing extracts iat; age text reflects freshness."""
+        import base64 as b64
+        from .tolino import (_jwt_payload, _refresh_token_iat,
+                             _candidate_age_text, _jwt_shaped)
+
+        def make_jwt(payload):
+            head = b64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+            body = b64.urlsafe_b64encode(json.dumps(payload).encode())
+            return "%s.%s.sig" % (head.decode().rstrip("="),
+                                  body.decode().rstrip("="))
+
+        now = time.time()
+        fresh = make_jwt({"iat": now - 30, "typ": "Refresh"})
+        old = make_jwt({"iat": now - 3 * 3600, "typ": "Refresh"})
+        self.assertEqual(now - 30, _refresh_token_iat(fresh))
+        self.assertIsNone(_refresh_token_iat("plain-not-a-jwt"))
+        self.assertTrue(_jwt_shaped(fresh))
+        self.assertFalse(_jwt_shaped("short.not.jwt"))
+        self.assertIn("gerade geschrieben", _candidate_age_text(fresh, now))
+        self.assertIn("3 h", _candidate_age_text(old, now))
+
+    def test_sort_candidates_orders_jwt_tokens_by_issue_time(self):
+        """Tokens with a JWT iat sort newest-first, ahead of opaque ones."""
+        import base64 as b64
+        from .tolino import _sort_candidates_by_recency, _RECENCY_BUCKETS
+
+        def make_jwt(iat):
+            body = b64.urlsafe_b64encode(json.dumps({"iat": iat}).encode())
+            return "h.%s.s" % body.decode().rstrip("=")
+
+        now = time.time()
+        old_jwt = make_jwt(now - 7200)
+        fresh_jwt = make_jwt(now - 60)
+        opaque = "o" * 120
+        try:
+            _RECENCY_BUCKETS.clear()
+            _RECENCY_BUCKETS[opaque] = 0  # freshest storage tier
+            ordered = _sort_candidates_by_recency([old_jwt, opaque, fresh_jwt])
+            self.assertEqual([fresh_jwt, old_jwt, opaque], ordered)
+        finally:
+            _RECENCY_BUCKETS.clear()
+
+    def test_extract_all_tokens_sweeps_opaque_oidc_keys(self):
+        """The Keycloak reader's oidc.user blob must yield its token.
+
+        The web reader stores its CURRENT token set under a key like
+        'oidc.user:<issuer>:webreader' whose name carries no credential
+        hint, while only historical copies sit under refresh_token keys.
+        The sweep must find the live token through shape detection.
+        """
+        import base64 as b64
+        from .tolino import _extract_all_tokens_from_storage
+
+        body = b64.urlsafe_b64encode(json.dumps({
+            "iat": time.time() - 30, "typ": "Refresh"}).encode())
+        fresh_jwt = "eyJhbGciOiJIUzUxMiJ9.%s.sigpart9sigpart9" % (
+            body.decode().rstrip("="))
+
+        storage = {
+            "webreader.mytolino.com/refresh_token": "spent-old",
+            "webreader.mytolino.com/oidc.user:https://issuer:webreader":
+                json.dumps({"refresh_token": fresh_jwt,
+                            "hardware_id": "hw-oidc"}),
+        }
+        refreshes, hardwares = _extract_all_tokens_from_storage(storage)
+        self.assertIn("spent-old", refreshes)
+        self.assertIn(fresh_jwt, refreshes)
+        self.assertIn("hw-oidc", hardwares)
+
+    def test_extract_all_tokens_does_not_sweep_unrelated_values(self):
+        """Swept non-credential values must never become candidates."""
+        from .tolino import _extract_all_tokens_from_storage
+
+        storage = {
+            "webreader.mytolino.com/settings":
+                '{"font": "serif", "theme": "dark"}',
+            "webreader.mytolino.com/lastPage": "42",
+            "webreader.mytolino.com/refresh_token": "spent-old",
+        }
+        refreshes, _hardwares = _extract_all_tokens_from_storage(storage)
+        self.assertEqual(["spent-old"], refreshes)
 
     def test_keepalive_refresh_rotates_and_persists(self):
         """Keep-alive must silently rotate the stored token and persist it."""

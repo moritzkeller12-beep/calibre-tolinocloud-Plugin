@@ -1478,15 +1478,26 @@ def _recency_tier(value):
 
 
 def _sort_candidates_by_recency(candidates):
-    """Return candidates sorted freshest-first, deduplicated, order kept."""
+    """Return candidates sorted freshest-first, deduplicated, order kept.
+
+    Tolino web-reader refresh tokens are JWTs carrying their issue time in
+    the unencrypted payload ("iat"), so when available the true token age
+    outranks the storage-level recency heuristic -- the newest written copy
+    is exactly the one the reader is currently using.
+    """
     ordered = []
     for candidate in candidates:
         if candidate and candidate not in ordered:
             ordered.append(candidate)
-    return sorted(
-        ordered,
-        key=lambda value: (_recency_tier(value), -len(value)),
-    )
+
+    def _rank(value):
+        issued = _refresh_token_iat(value)
+        if issued is not None:
+            # Newest token first; negate so bigger iat sorts first.
+            return (0, -issued, _recency_tier(value))
+        return (1, 0, _recency_tier(value))
+
+    return sorted(ordered, key=_rank)
 
 
 def _sort_hardware_candidates(candidates):
@@ -1575,6 +1586,110 @@ def extract_login_tokens(storage):
     return refresh, hardware
 
 
+def _jwt_payload(token):
+    """Decode the unverified payload of a JWT-style token (or None).
+
+    Tolino web-reader refresh tokens are signed JWTs whose payload carries
+    "iat"/"exp"/"sid" in plain base64url. The signature is not checked here
+    (we never trust the token, we hand it to the token endpoint); only the
+    metadata is read to order and describe candidates.
+    """
+    try:
+        parts = str(token or "").split(".")
+        if len(parts) != 3 or not parts[1]:
+            return None
+        seg = parts[1]
+        seg += "=" * (-len(seg) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(seg.encode("ascii")))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _refresh_token_iat(token):
+    """Issue time (unix seconds) of a JWT refresh token; None if unknown."""
+    payload = _jwt_payload(token)
+    if not payload:
+        return None
+    try:
+        value = payload.get("iat")
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _jwt_shaped(text):
+    """True when the text itself looks like a JWT (three base64url parts).
+
+    Used when sweeping storage values whose KEY carries no credential
+    name: only a real JWT (or a JSON object with credential fields) is
+    accepted there, so unrelated storage clutter is never mistaken for a
+    refresh token.
+    """
+    text = str(text or "")
+    parts = text.split(".")
+    if len(parts) != 3 or len(text) < 80:
+        return False
+    try:
+        return all(part and re.fullmatch(r"[A-Za-z0-9_\-]+", part)
+                   for part in parts)
+    except TypeError:
+        return False
+
+
+def _candidate_age_text(token, now=None):
+    """Human-readable age of a JWT refresh token ('gerade geschrieben')."""
+    issued = _refresh_token_iat(token)
+    if issued is None:
+        return "Alter unbekannt (kein JWT)"
+    if now is None:
+        now = time.time()
+    minutes = int(max(0, now - issued) // 60)
+    if minutes <= 0:
+        return "gerade geschrieben"
+    if minutes < 60:
+        return "vor %d min" % minutes
+    hours = minutes // 60
+    if hours < 24:
+        return "vor %d h %d min" % (hours, minutes % 60)
+    return "vor %d Tagen" % (hours // 24)
+
+
+def _validate_one(partner_id, hardware_id, candidate):
+    """Validate one scraped refresh token against the token endpoint.
+
+    Returns ("ok", rotated_refresh, hardware) when the endpoint accepted
+    the grant, ("spent", None, None) after a definitive Keycloak rejection
+    ("invalid_grant" / "Session not active": this token can never come
+    back), and ("unclear", None, None) for network/protection/5xx errors
+    that prove nothing about the token itself -- callers should retry
+    those later instead of discarding a possibly-live token.
+    """
+    candidate = (candidate or "").strip()
+    if not candidate:
+        return ("spent", None, None)
+    client = TolinoClient(partner_id, hardware_id or "")
+    client.refresh = candidate
+    try:
+        client._login()
+    except TolinoAuthError:
+        return ("spent", None, None)
+    except (TolinoApiError, OSError, ValueError, TypeError) as exc:
+        # A transport/server error proves nothing about the token -- but a
+        # Keycloak verdict inside the message is definitive even when it
+        # surfaces through an unexpected exception type.
+        folded = str(exc).casefold()
+        if ("invalid_grant" in folded or "not active" in folded
+                or "reuse exceeded" in folded):
+            return ("spent", None, None)
+        return ("unclear", None, None)
+    return ("ok", client.refresh or candidate,
+            client.hardware or hardware_id)
+
+
 def validate_refresh_candidates(partner_id, hardware_id, candidates):
     """Live-validate scraped refresh tokens; return the fresh pair or None.
 
@@ -1583,20 +1698,14 @@ def validate_refresh_candidates(partner_id, hardware_id, candidates):
     order against the token endpoint. The rotated refresh token of the first
     accepted grant is returned together with the hardware ID (the login
     spends one candidate per attempt; a candidate that is already spent
-    cannot be adopted anyway).
+    cannot be adopted anyway). Unclear failures skip the candidate just
+    like a spent one; ``_validate_one`` callers can tell the difference.
     """
     for candidate in candidates or ():
-        candidate = (candidate or "").strip()
-        if not candidate:
-            continue
-        client = TolinoClient(partner_id, hardware_id or "")
-        client.refresh = candidate
-        try:
-            client._login()
-        except Exception:
-            continue  # spent or rejected -> try the next candidate
-        if client.refresh and client.refresh != candidate:
-            return client.refresh, (client.hardware or hardware_id)
+        verdict, rotated, hw = _validate_one(partner_id, hardware_id,
+                                             candidate)
+        if verdict == "ok":
+            return rotated, hw
     return None
 
 
@@ -1641,8 +1750,15 @@ def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
         found.append(text.strip())
         return found
 
-    def shaped(value, mode):
-        """Best non-ciphertext token text for a storage value (or None)."""
+    def shaped(value, mode, trusted):
+        """Best non-ciphertext token text for a storage value (or None).
+
+        ``trusted`` marks values found under a credential-named key: only
+        those may return arbitrary plain text. Swept values without a
+        known key name must themselves look like a credential (JWT shape
+        or a JSON object carrying a credential field) so storage clutter
+        is never mistaken for a refresh token.
+        """
         names = TOKEN_VALUE_KEYS if mode == "refresh" else HARDWARE_VALUE_KEYS
         for plain in candidates_for(value, mode):
             if not plain:
@@ -1650,7 +1766,11 @@ def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
             try:
                 parsed = json.loads(plain)
             except ValueError:
-                if not plain.startswith("{") and not plain.startswith("U2FsdGVk"):
+                if trusted:
+                    if not plain.startswith("{") and not plain.startswith("U2FsdGVk"):
+                        return plain
+                    continue
+                if _jwt_shaped(plain):
                     return plain
                 continue
             if not isinstance(parsed, dict):
@@ -1667,25 +1787,24 @@ def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
                             return plain_inner
         return None
 
+    # Sweep EVERY storage value for credential shapes, regardless of its
+    # key name. The Keycloak web reader stores its current token set inside
+    # an opaque blob under keys like "oidc.user:<issuer>:webreader" -- a
+    # key-name filter ("refresh", "t_auth", ...) misses exactly the entry
+    # that holds the LIVE token, which is why past runs kept adopting only
+    # the historical (spent) copies while the current token stayed hidden.
     for key, value in storage_data.items():
         key_lower = str(key).casefold()
-        if any(name in key_lower for name in ("refresh", "t_auth", "usertoken")):
-            remember(shaped(value, "refresh"), refresh_candidates)
-        if any(name in key_lower for name in ("hardware", "device", "userinfos")):
-            remember(shaped(value, "hardware"), hardware_candidates)
-
-    if not refresh_candidates:
-        for value in storage_data.values():
-            candidate = shaped(value, "refresh")
-            if candidate:
-                remember(candidate, refresh_candidates)
-                break
-    if not hardware_candidates:
-        for value in storage_data.values():
-            candidate = shaped(value, "hardware")
-            if candidate:
-                remember(candidate, hardware_candidates)
-                break
+        refresh_trusted = any(name in key_lower
+                              for name in ("refresh", "t_auth", "usertoken"))
+        hw_trusted = any(name in key_lower
+                         for name in ("hardware", "device", "userinfos"))
+        candidate = shaped(value, "refresh", refresh_trusted)
+        if candidate:
+            remember(candidate, refresh_candidates)
+        hw_candidate = shaped(value, "hardware", hw_trusted)
+        if hw_candidate:
+            remember(hw_candidate, hardware_candidates)
     return refresh_candidates, hardware_candidates
 
 
@@ -1941,6 +2060,31 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 LOCAL_CALLBACK_UNSUPPORTED_RESELLERS = ("8",)
 
 
+def _refresh_token_iat_sort_key(value):
+    issued = _refresh_token_iat(value)
+    return issued if issued is not None else 0.0
+
+
+def _candidate_ages_summary(candidates, now=None):
+    """Compact, redacted age overview for diagnostics ('2x vor 3 h ...')."""
+    if not candidates:
+        return "keine"
+    ages = []
+    for token in candidates:
+        try:
+            ages.append(_candidate_age_text(token, now))
+        except Exception:
+            ages.append("Alter unbekannt")
+    counts = {}
+    order = []
+    for age in ages:
+        if age not in counts:
+            order.append(age)
+            counts[age] = 0
+        counts[age] += 1
+    return ", ".join("%dx %s" % (counts[a], a) for a in order)
+
+
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     """Guided browser sign-in for Keycloak partners without local callback.
 
@@ -1990,7 +2134,8 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     # the tab (Chromium flushes its Local Storage to disk on close). That
     # closes the "all candidates spent" gap in which earlier versions gave
     # up even though the freshest token had not been written yet.
-    seen_spent = set()
+    seen_spent = set()   # definitively rejected: never retried
+    unclear_at = {}      # candidate -> last unclear attempt (time.time)
     tried = 0
     last_note = ""
     while time.time() < deadline:
@@ -2002,22 +2147,34 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         if not refreshes:
             continue
         hardware_candidates = _sort_hardware_candidates(hardwares or ())[:3]
-        # Try every candidate this round that has not already failed: with
-        # dozens of stale tokens in the storages, a per-round "one candidate
-        # only" rule kept re-testing dead tokens forever and missed the
-        # fresh one sitting right behind them.
-        pending = [c for c in refreshes if c and c not in seen_spent]
+        # Try every candidate this round that has not already failed
+        # definitively: with dozens of stale tokens in the storages, a
+        # per-round "one candidate only" rule kept re-testing dead tokens
+        # forever and missed the fresh one sitting right behind them.
+        now = time.time()
+        pending = []
+        for candidate in refreshes:
+            if not candidate or candidate in seen_spent:
+                continue
+            if candidate in unclear_at and now - unclear_at[candidate] < 30:
+                continue  # unclear verdict: retry at most every 30 s
+            pending.append(candidate)
         for candidate in pending:
-            validated = None
+            verdict = "spent"
             for hw in hardware_candidates or [""]:
-                validated = validate_refresh_candidates(
-                    partner_id, hw, (candidate,))
-                if validated:
-                    break
-            if validated:
-                return validated[0], validated[1]
-            seen_spent.add(candidate)
-            tried += 1
+                hw_verdict, rotated, adopted_hw = _validate_one(
+                    partner_id, hw, candidate)
+                if hw_verdict == "ok":
+                    return rotated, adopted_hw
+                if hw_verdict == "unclear":
+                    verdict = "unclear"
+            if verdict == "spent":
+                seen_spent.add(candidate)
+                tried += 1
+            else:
+                # Network/protection/server trouble: keep the candidate
+                # alive for a later round instead of declaring it dead.
+                unclear_at[candidate] = time.time()
         # Candidates exhausted (or none new yet): keep polling. A storage
         # that keeps changing means the reader is still active or was just
         # closed; its next background refresh (or the close-flush) writes
@@ -2025,15 +2182,19 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     if tried:
         raise TolinoAuthError(
             "%d gefundene(n) Refresh-Token wurden gepr\u00fcft, aber keiner "
-            "war g\u00fcltig. Zuverl\u00e4ssig so: 1) Im Web Reader anmelden "
-            "und die B\u00fccherliste laden. 2) Den Web-Reader-Tab oder den "
-            "ganzen Browser SCHLIESSEN (Chromium schreibt den aktuellen "
-            "Token erst beim Schlie\u00dfen zuverl\u00e4ssig auf die Fest-"
-            "platte). 3) Direkt danach die Browser-Anmeldung starten -- "
-            "sie \u00fcbernimmt den frischen Token dann automatisch, ohne "
-            "dass ihn eine zweite Anwendung verbrauchen kann (letzte "
-            "Meldung: %s)."
-            % (tried, last_note or "kein Browser-Storage gelesen")
+            "war g\u00fcltig. Pr\u00fcfe: 1) Bist du im WEB READER (B\u00fccherliste "
+            "sichtbar) angemeldet, nicht nur im Shop? 2) Lade den Web Reader "
+            "einmal neu (F5) und starte die Browser-Anmeldung direkt danach "
+            "-- das Plugin \u00fcbernimmt dann den frisch geschriebenen Token "
+            "automatisch. 3) Hilft das nicht, den Browser einmal vollst\u00e4ndig "
+            "SCHLIESSEN und erneut versuchen: Chromium h\u00e4lt die neuesten "
+            "Storage-Schreibvorg\u00e4nge teils im RAM und schreibt sie erst beim "
+            "Schlie\u00dfen auf die Festplatte. Kandidaten nach Alter: %s "
+            "(letzte Meldung: %s)."
+            % (tried,
+               _candidate_ages_summary(sorted(
+                   seen_spent, key=_refresh_token_iat_sort_key), None),
+               last_note or "kein Browser-Storage gelesen")
         )
     raise TolinoAuthError(
         "Nach dem Anmelden im Browser wurde kein frischer Tolino-"
