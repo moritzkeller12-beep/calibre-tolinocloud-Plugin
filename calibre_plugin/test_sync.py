@@ -1121,6 +1121,69 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(1, len(opened))
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1", opened[0])
 
+    def test_keycloak_assisted_login_reports_close_reader_hint(self):
+        """When candidates were harvested but all were rejected, the error
+        must tell the user to CLOSE the Web Reader before retrying: an open
+        reader consumes/rotates the token in the background, which is the
+        most common reason every candidate is already spent."""
+        from .tolino import _keycloak_assisted_login
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 10.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open", return_value=True), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   return_value=(["cand1"], ["hw1"], ["note"])), \
+             patch("calibre_plugin.tolino.validate_refresh_candidates",
+                   return_value=None), \
+             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                _keycloak_assisted_login(4, "test_hardware")
+        message = str(ctx.exception)
+        self.assertIn("SCHLIESSE", message)
+        self.assertIn("1 gefundene(n)", message)
+
+    def test_keepalive_refresh_rotates_and_persists(self):
+        """Keep-alive must silently rotate the stored token and persist it."""
+        persisted = []
+
+        class FakeClient:
+            def __init__(self, partner, hw, token, username, password,
+                         token_callback=None):
+                self.token = token
+                self.token_callback = token_callback
+
+            def login(self):
+                self.refresh = self.token + "-rotated"
+                if self.token_callback:
+                    self.token_callback(self.refresh)
+
+        creds = {"partner_id": 4, "hardware_id": "hw", "refresh_token": "tok",
+                 "username": "u", "password": "p"}
+        with patch("calibre_plugin.tolino.TolinoClient", FakeClient):
+            result = tolino_module.keepalive_refresh(
+                lambda: creds, persisted.append)
+        self.assertEqual("tok-rotated", result)
+        self.assertEqual(["tok-rotated"], persisted)
+
+    def test_keepalive_refresh_skips_without_token(self):
+        with patch("calibre_plugin.tolino.TolinoClient") as client_mock:
+            result = tolino_module.keepalive_refresh(lambda: {}, None)
+        self.assertIsNone(result)
+        client_mock.assert_not_called()
+
+    def test_keepalive_refresh_skips_when_already_running(self):
+        with tolino_module._KEEPALIVE_LOCK, \
+             patch("calibre_plugin.tolino.TolinoClient") as client_mock:
+            result = tolino_module.keepalive_refresh(
+                lambda: {"refresh_token": "tok"}, None)
+        self.assertIsNone(result)
+        client_mock.assert_not_called()
+
     def test_keycloak_assisted_login_opens_web_reader_not_authorize_url(self):
         """Keycloak partners must open the Web Reader page itself.
 

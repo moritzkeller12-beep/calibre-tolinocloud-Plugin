@@ -1842,6 +1842,7 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
 
     deadline = time.time() + max(30, timeout)
     seen = set()
+    tried = 0
     last_note = ""
     while time.time() < deadline:
         time.sleep(2)
@@ -1857,6 +1858,21 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
                 partner_id, hardwares[0] if hardwares else "", (candidate,))
             if validated:
                 return validated[0], validated[1]
+            tried += 1
+    if tried:
+        raise TolinoAuthError(
+            "%d gefundene(n) Refresh-Token-Kandidaten wurden gepr\u00fcft, "
+            "aber keiner war g\u00fcltig (der offene Web Reader verbraucht "
+            "und rotiert den Token im Hintergrund, \u00e4ltere sind "
+            "abgelaufen). Wichtig: Melde dich im Web Reader an, warte bis "
+            "die B\u00fccherliste geladen ist, und SCHLIESSE dann den "
+            "Web-Reader-Tab oder den ganzen Browser. Kein privates/"
+            "Inkognito-Fenster verwenden. Starte die Browser-Anmeldung "
+            "direkt danach erneut \u2013 jetzt \u00fcbernimmt das Plugin "
+            "den Token, ohne dass ihn eine zweite Anwendung verbrauchen "
+            "kann (letzte Meldung: %s)."
+            % (tried, last_note or "kein Browser-Storage gelesen")
+        )
     raise TolinoAuthError(
         "Nach dem Anmelden im Browser wurde kein frischer Tolino-"
         "Refresh-Token gefunden (letzte Meldung: %s). Melde dich im "
@@ -1865,6 +1881,73 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         "erneut."
         % (last_note or "kein Browser-Storage gelesen")
     )
+
+
+# --- Token keep-alive --------------------------------------------------------
+# Keycloak refresh tokens of the Tolino web reader expire after roughly an
+# hour of idleness (token responses report refresh_expires_in ~3598), so a
+# token adopted from the Web Reader dies between two syncs unless it is
+# rotated regularly. The keep-alive thread performs a silent login every
+# interval and persists the rotated token via the provided callback.
+_KEEPALIVE_LOCK = threading.Lock()
+_KEEPALIVE_STOP = threading.Event()
+
+
+def keepalive_refresh(get_credentials, persist):
+    """One silent keep-alive login; returns the rotated token or None.
+
+    Never raises: keep-alive is best-effort and failures (expired token,
+    network down) simply leave the stored token untouched. A module-level
+    lock keeps concurrent keep-alive logins from racing each other.
+    """
+    if not _KEEPALIVE_LOCK.acquire(blocking=False):
+        return None
+    try:
+        creds = get_credentials() or {}
+        token = str(creds.get("refresh_token") or "").strip()
+        if not token:
+            return None
+        last = {"value": token}
+
+        def _persist(value):
+            """Persist rotations once; login may emit the same value twice."""
+            if value and value != last["value"]:
+                last["value"] = value
+                if persist is not None:
+                    persist(value)
+
+        client = TolinoClient(
+            creds.get("partner_id"), creds.get("hardware_id") or "", token,
+            creds.get("username"), creds.get("password"),
+            token_callback=_persist)
+        client.login()
+        _persist(client.refresh)
+        return client.refresh
+    except Exception:
+        return None
+    finally:
+        _KEEPALIVE_LOCK.release()
+
+
+def start_token_keepalive(get_credentials, persist, interval=45 * 60):
+    """Rotate the stored refresh token every `interval` seconds.
+
+    Runs as a daemon thread for the lifetime of the process; the callback
+    pair keeps it decoupled from the config/UI modules. Calling it twice
+    starts only one keep-alive loop.
+    """
+    if getattr(start_token_keepalive, "_started", False):
+        return None
+    start_token_keepalive._started = True
+
+    def loop():
+        while not _KEEPALIVE_STOP.wait(max(60, interval)):
+            keepalive_refresh(get_credentials, persist)
+
+    thread = threading.Thread(target=loop, name="tolino-token-keepalive",
+                              daemon=True)
+    thread.start()
+    return thread
 
 
 def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):

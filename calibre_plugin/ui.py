@@ -34,7 +34,7 @@ try:
                        update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error,
-                         scrape_browser_tokens,
+                         scrape_browser_tokens, start_token_keepalive,
                          validate_refresh_candidates)
 except ImportError:
     bootstrapper = None
@@ -50,7 +50,7 @@ except ImportError:
                       update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         hardware_id, normalize_refresh_token, sanitize_error,
-                        scrape_browser_tokens,
+                        scrape_browser_tokens, start_token_keepalive,
                         validate_refresh_candidates)
 
 
@@ -1096,6 +1096,36 @@ class TolinoSyncAction(InterfaceAction):
         self.qaction.triggered.connect(self.show_dashboard)
         self.menu = self.qaction
         _apply_toolbar_icon(self)
+        # Keycloak refresh tokens expire after ~1h idle (refresh_expires_in
+        # ~3598); the keep-alive rotates the stored token every 45 minutes
+        # while Calibre runs, so an adopted token survives between syncs.
+        try:
+            start_token_keepalive(self._keepalive_credentials,
+                                  self._keepalive_persist)
+        except Exception:
+            pass  # keep-alive must never break plugin loading
+
+    def _keepalive_credentials(self):
+        try:
+            cfg = settings()
+        except Exception:
+            return {}
+        return {
+            "partner_id": cfg.get("partner_id"),
+            "hardware_id": cfg.get("hardware_id") or "",
+            "refresh_token": cfg.get("refresh_token") or "",
+            "username": cfg.get("username"),
+            "password": cfg.get("password"),
+        }
+
+    def _keepalive_persist(self, refresh):
+        try:
+            cfg = settings()
+            name = cfg.get("account_name")
+            if name and refresh:
+                save_account(name, {"refresh_token": refresh}, active=name)
+        except Exception:
+            pass  # best-effort persistence
 
     def show_dashboard(self):
         dialog = SyncDashboard(self.gui)
