@@ -1059,16 +1059,67 @@ class SyncPlanTests(unittest.TestCase):
             ]
             self.assertEqual(["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"], values)
 
+    def test_bundled_toolbar_icon_is_a_real_png(self):
+        """The bundled image must be a real PNG.
+
+        It shipped as a WebP file with a .png extension once; Qt picks the
+        decoder by extension, fails to decode, and the toolbar icon stayed
+        empty.
+        """
+        with zipfile.ZipFile(Path(__file__).resolve().parents[1] / "tolino_cloud_sync.zip") as plugin:
+            data = plugin.read("images/tolino_cloud_sync.png")
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"),
+                        "bundled icon is not a PNG: %r" % data[:12])
+
     def test_browser_login_works_for_all_partners_with_auth_url(self):
-        for partner_id in (1, 2, 4, 5, 6, 7):
-            partner = PARTNERS[partner_id]
-            if partner.get("auth_url") and partner.get("token_url"):
-                try:
-                    browser_login(partner_id, "test_hardware")
-                except TolinoAuthError as exc:
-                    error_msg = str(exc)
-                    self.assertNotIn("local browser callback is not supported", error_msg)
-                    self.assertNotIn("only registers its Web Reader redirect URI", error_msg)
+        with patch("calibre_plugin.tolino.webbrowser.open", return_value=False):
+            for partner_id in (1, 2, 4, 5, 6, 7):
+                partner = PARTNERS[partner_id]
+                if partner.get("auth_url") and partner.get("token_url"):
+                    try:
+                        browser_login(partner_id, "test_hardware")
+                    except TolinoAuthError as exc:
+                        error_msg = str(exc)
+                        self.assertNotIn("local browser callback is not supported", error_msg)
+                        self.assertNotIn("only registers its Web Reader redirect URI", error_msg)
+
+    def test_browser_login_routes_keycloak_partner_to_assisted_login(self):
+        """Orell Füssli (reseller 8) must use the guided Web Reader login.
+
+        Its Keycloak rejects localhost callback redirect URIs with
+        "Ungültiger Parameter: redirect_uri". The routing keys on the
+        stable reseller_id, not the internal partner id (4 after
+        renumbering) - the v0.9.9 guided login was never reached because
+        the old check compared against the historic id 8.
+        """
+        opened = []
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 1000.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   side_effect=lambda url: opened.append(url) or True), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   return_value=(None, [], [])), \
+             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            with self.assertRaises(TolinoAuthError):
+                browser_login(4, "test_hardware")
+        self.assertEqual(1, len(opened))
+        self.assertEqual(PARTNERS[4]["reader_url"], opened[0])
+        self.assertNotIn("127.0.0.1", opened[0])
+        self.assertNotIn("redirect_uri", opened[0])
+
+    def test_browser_login_keeps_localhost_callback_for_other_partners(self):
+        opened = []
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   side_effect=lambda url: opened.append(url) or True):
+            with self.assertRaises(TolinoAuthError):
+                browser_login(1, "test_hardware", timeout=0.2)
+        self.assertEqual(1, len(opened))
+        self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1", opened[0])
 
     def test_keycloak_assisted_login_opens_web_reader_not_authorize_url(self):
         """Keycloak partners must open the Web Reader page itself.

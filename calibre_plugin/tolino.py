@@ -1803,10 +1803,13 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         return
 
 
-# Partners whose OAuth endpoint does not accept localhost redirect URIs:
-# Orell Füssli (8) is Keycloak-based and registers only its Web Reader
-# redirect URIs, so the code flow cannot complete on 127.0.0.1.
-LOCAL_CALLBACK_UNSUPPORTED_PARTNERS = (8,)
+# Partners whose OAuth endpoint does not accept localhost redirect URIs,
+# identified by the stable Tolino reseller_id (the plugin-internal partner
+# ID was renumbered before): Orell Füssli (reseller 8) is Keycloak-based
+# and registers only its Web Reader redirect URIs, so the code flow cannot
+# complete on 127.0.0.1 and Keycloak answers with "Ungültiger Parameter:
+# redirect_uri".
+LOCAL_CALLBACK_UNSUPPORTED_RESELLERS = ("8",)
 
 
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
@@ -1892,7 +1895,7 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
             "Use a Web Reader refresh token in the configuration as fallback."
         )
 
-    if int(partner_id) in LOCAL_CALLBACK_UNSUPPORTED_PARTNERS:
+    if str(partner.get("reseller_id")) in LOCAL_CALLBACK_UNSUPPORTED_RESELLERS:
         return _keycloak_assisted_login(int(partner_id), hardware, timeout)
 
     state = uuid.uuid4().hex

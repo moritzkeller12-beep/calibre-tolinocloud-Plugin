@@ -1103,36 +1103,20 @@ class TolinoSyncAction(InterfaceAction):
 
 
 def _apply_toolbar_icon(action):
-    """Give the toolbar action its icon (bundled PNG, then embedded SVG)."""
+    """Give the toolbar action its icon via the robust fallback chain."""
     try:
-        from qt.core import QIcon
-        from calibre.gui2 import get_icons
+        from .icons import toolbar_icon
     except ImportError:
+        from icons import toolbar_icon
+    except Exception:
         return
-    icon = QIcon()
-    # get_icons must be called with the plugin name as context so it reads
-    # the resources loaded from the plugin zip (no context = main-Calibre
-    # icons, where this image does not exist and the icon stays empty).
-    context = getattr(action, "name", None) or ""
-    for resource_context in (context, None):
-        try:
-            icon = get_icons("images/tolino_cloud_sync.png",
-                             context=resource_context)
-        except Exception:
-            icon = QIcon()
-        if icon is not None and not icon.isNull():
-            break
+    try:
+        icon = toolbar_icon()
+    except Exception:
+        icon = None
     if icon is None or icon.isNull():
-        icon = QIcon()
-        try:
-            from .icons import TOLINO_ICON_SVG
-            # loadFromData expects the raw SVG bytes, not base64.
-            icon.loadFromData(TOLINO_ICON_SVG.encode("utf-8"),
-                              "image/svg+xml")
-        except Exception:
-            pass
-    if icon is not None and not icon.isNull():
-        try:
-            action.qaction.setIcon(icon)
-        except Exception:
-            action.setIcon(icon)
+        return
+    try:
+        action.qaction.setIcon(icon)
+    except Exception:
+        action.setIcon(icon)

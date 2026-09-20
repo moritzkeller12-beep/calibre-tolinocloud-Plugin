@@ -1,56 +1,120 @@
 """
-Embedded icons for the Tolino Cloud Sync plugin.
-SVG icons encoded as base64 for easy distribution.
+Icons for the Tolino Cloud Sync plugin.
+
+The bundled toolbar image lives at images/tolino_cloud_sync.png (a real
+PNG, 256x256 RGBA, rendered from the SVG below). The SVG is kept as an
+in-process fallback in case the bundled resource cannot be located.
 """
 
-import base64
-
-# Tolino Cloud Sync icon - Blue cloud with book
+# Flat-bottom cloud in Tolino blue, contributed artwork (original: 90x90
+# art space, fill rgb(0,137,239)).
 TOLINO_ICON_SVG = """<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <defs>
-    <linearGradient id="tolinoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0066CC"/>
-      <stop offset="100%" style="stop-color:#004499"/>
-    </linearGradient>
-  </defs>
-  <!-- Cloud shape -->
-  <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"
-        fill="url(#tolinoGradient)" stroke="#003366" stroke-width="0.5"/>
-  <!-- Book shape on cloud -->
-  <rect x="10" y="11" width="6" height="4" rx="0.5" fill="white" stroke="#003366" stroke-width="0.3"/>
-  <path d="M10 13h6" stroke="#003366" stroke-width="0.5"/>
-  <rect x="11" y="10" width="4" height="1" fill="white" stroke="#003366" stroke-width="0.2"/>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="256" height="256" viewBox="0 0 90 90">
+  <g fill="#0089EF">
+    <circle cx="36.89" cy="43.88" r="20.12"/>
+    <circle cx="21.5" cy="52" r="11"/>
+    <circle cx="56" cy="50" r="13"/>
+    <rect x="0" y="45.05" width="90" height="21.64" rx="5.635" ry="5.635"/>
+  </g>
 </svg>
 """
 
-# Simple book icon as fallback
-BOOK_ICON_SVG = """<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15v-5H7v-2h4V5h2v5h4v2h-4v5h-2z"
-        fill="#0066CC"/>
-</svg>
-"""
+
+def _png_bytes():
+    """Return the bundled PNG bytes, or None if it cannot be located."""
+    try:
+        from importlib import resources
+        pkg = __package__ or "calibre_plugin"
+        files = resources.files(pkg)
+        return (files / "images" / "tolino_cloud_sync.png").read_bytes()
+    except Exception:
+        pass
+    # Fallback for exotic loaders (e.g. zipimport in some Calibre builds):
+    # read the PNG straight out of this package's plugin zip.
+    try:
+        import zipfile
+        import os
+        module_file = globals().get("__file__") or ""
+        if module_file.endswith(".zip"):
+            with zipfile.ZipFile(module_file) as archive:
+                return archive.read("images/tolino_cloud_sync.png")
+        base = os.path.dirname(os.path.abspath(module_file))
+        with open(os.path.join(base, "images", "tolino_cloud_sync.png"), "rb") as handle:
+            return handle.read()
+    except Exception:
+        return None
+
+
+def _svg_bytes():
+    return TOLINO_ICON_SVG.encode("utf-8")
+
+
+def pixmap_from_bytes(data, fmt=None):
+    """Decode bytes into a QPixmap; returns a null pixmap on failure."""
+    from qt.core import QByteArray, QPixmap
+    pixmap = QPixmap()
+    if not data:
+        return pixmap
+    try:
+        if pixmap.loadFromData(QByteArray(data), fmt):
+            return pixmap
+    except Exception:
+        pass
+    try:
+        pixmap = QPixmap()
+        if pixmap.loadFromData(bytes(data)):
+            return pixmap
+    except Exception:
+        pass
+    return pixmap
+
+
+def toolbar_icon():
+    """Build the toolbar QIcon with a robust fallback chain.
+
+    1. Calibre's resource system (reads images/… from the plugin zip).
+    2. The bundled PNG bytes decoded directly.
+    3. The embedded SVG decoded via QPixmap (QIcon itself has no
+       loadFromData - routing the bytes through a QPixmap is required).
+    """
+    from qt.core import QIcon
+
+    icon = QIcon()
+    try:
+        from calibre.gui2 import get_icons
+        icon = get_icons("images/tolino_cloud_sync.png", "tolino_cloud_sync")
+    except Exception:
+        icon = QIcon()
+    if icon is not None and not icon.isNull():
+        return icon
+
+    png = _png_bytes()
+    if png:
+        pixmap = pixmap_from_bytes(png, "png")
+        if not pixmap.isNull():
+            return QIcon(pixmap)
+
+    pixmap = pixmap_from_bytes(_svg_bytes(), "svg")
+    if not pixmap.isNull():
+        return QIcon(pixmap)
+    return QIcon()
 
 
 def get_icon_pixmap():
-    """Get icon as QPixmap for Qt GUI."""
+    """Get the icon as a QPixmap for Qt GUI code (None when unavailable)."""
     try:
-        from qt.core import QPixmap, QByteArray, QBuffer, QImage
-        import io
-        
-        # Create SVG bytes
-        svg_bytes = TOLINO_ICON_SVG.encode('utf-8')
-        
-        # Try to create pixmap from SVG
-        pixmap = QPixmap()
-        if pixmap.loadFromData(svg_bytes):
+        pixmap = pixmap_from_bytes(_png_bytes() or b"", "png")
+        if not pixmap.isNull():
             return pixmap
-        
-        # Fallback: Return None and let Calibre use default
-        return None
-    except ImportError:
-        return None
+    except Exception:
+        pass
+    try:
+        pixmap = pixmap_from_bytes(_svg_bytes(), "svg")
+        if not pixmap.isNull():
+            return pixmap
+    except Exception:
+        pass
+    return None
 
 
 def get_icon_data():
