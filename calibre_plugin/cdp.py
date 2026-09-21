@@ -240,9 +240,14 @@ class _Ws:
     def recv_json(self, timeout=10):
         deadline = time.time() + max(1, timeout)
         while True:
-            first = self._read_exact(2, deadline)[0]
-            opcode = first & 0x0F
-            length = self._read_exact(1, deadline)[0]
+            # RFC 6455 frame header: byte 0 = FIN/opcode, byte 1 = MASK bit
+            # + 7-bit length. The first version dropped byte 1 and read a
+            # third byte as the length -- every CDP response was then cut
+            # at the wrong offsets and Runtime.evaluate never returned a
+            # usable value (the "plugin finds nothing" bug report).
+            header = self._read_exact(2, deadline)
+            opcode = header[0] & 0x0F
+            length = header[1]
             masked = length & 0x80
             length &= 0x7F
             if length == 126:

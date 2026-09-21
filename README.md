@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.18** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
+Plugin-Version: **0.9.19** — synchronisiert Bücher aus Calibre mit der Tolino Cloud.
 
 ## Installation
 
@@ -23,6 +23,8 @@ Im Dialog **Tolino Cloud Sync**: Konto wählen, Partner (z. B. **8 – Books.ch 
 **Verbrauchte Token merken & weiter pollen (0.9.14):** Kandidaten, die der Token-Endpunkt mit `invalid_grant` abgelehnt hat, sind dauerhaft tot und werden nicht mehr erneut getestet — früher lief der Versuch dadurch endlos ins Leere, während der frische Token unentdeckt blieb. Stattdessen pollt das Plugin weiter (bis zu 5 Minuten) und übernimmt automatisch jeden neu geschriebenen Kandidaten: Der Web Reader schreibt nach jeder Hintergrund-Rotation einen frischen Token, und Chromium schreibt seinen Local Storage beim Schließen des Reader-Tabs zuverlässig auf die Festplatte — genau dann ist der allerfrischeste Token lesbar. Der Leser darf dafür ruhig offen bleiben; verbrauchte Kandidaten blockieren den Ablauf nicht mehr.
 
 **JWT-Alter & schlüsselunabhängiges Sweeping (0.9.15):** Tolino-Refresh-Tokens sind signierte JWTs und tragen ihre Ausstellungszeit (`iat`) unverschlüsselt im Token. Das Plugin liest dieses Alter und sortiert die Kandidaten jetzt nach ihrem **echten Token-Alter** statt nach Storage-Heuristik — der erste Validierungsversuch trifft damit den Token, den der Web Reader gerade benutzt. Zusätzlich wird der komplette Storage **schlüsselunabhängig** nach Token-Formen durchsucht: Der Keycloak-Webreader legt seinen aktuellen Tokensatz unter namenlosen Schlüsseln wie `oidc.user:<issuer>:webreader` ab — genau diesen Live-Token haben frühere Versionen übersehen, während sie nur die historischen (verbrauchten) Kopien fanden. Fehlschläge ohne eindeutiges Urteil (Netzwerkfehler, Bot-Schutz, 5xx) markieren einen Kandidaten nicht mehr als tot, sondern werden nach 30 Sekunden erneut versucht. Die Fehlermeldung nennt jetzt das Alter jedes geprüften Kandidaten (z. B. „1x gerade geschrieben, 3x vor 1 Tagen“), damit erkennbar ist, ob der frische Token überhaupt im Storage angekommen ist.
+
+**WebSocket-Parser & Live-Cutoff korrigiert (0.9.19):** Der minimale WebSocket-Client des Live-Grabs hatte einen Frame-Header-Fehler: Das zweite Header-Byte (Länge + Masken-Bit) wurde verworfen, deshalb zerfiel jede DevTools-Antwort an falschen Offsets und der Live-Grab fand „nichts“, obwohl das Anmeldefenster angemeldet war — der berichtete Fehler „ich melde mich an, das Plugin findet nichts“ (Reader-Tab sichtbar auf Port 9223, aber kein Token). Der Parser liest Header jetzt RFC-6455-konform (Regressionstest mit echtem In-Process-WS-Server). Außerdem akzeptiert der Altersfilter des Live-Grabs jetzt Tokens bis 30 Minuten statt 2 Minuten: Keycloak-Refresh-Tokens leben ~1 Stunde, und wer für die Anmeldung länger als zwei Minuten braucht, bekam bisher seinen völlig gültigen Live-Token weggefiltert.
 
 **Flatpak- und Snap-Browser (0.9.18):** Chromium/Brave als Flatpak (unter `~/.var/app/...`) oder Snap werden jetzt über ihren offiziellen Launcher (`flatpak run`/`snap run`) gestartet statt über Binary-Pfade aus dem Store — die laufen ohne die Sandbox-Runtime nicht. Damit funktioniert die Live-Anmeldung auch auf Systemen, die nur Flatpak-Browser installiert haben.
 

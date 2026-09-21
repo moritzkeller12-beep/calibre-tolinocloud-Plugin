@@ -2277,7 +2277,7 @@ class LiveGrabTests(unittest.TestCase):
         from .tolino import _filter_live_candidates
         now = time.time()
         fresh = self._jwt(now - 10, "sess-1")
-        stale = self._jwt(now - 600, "sess-1")
+        stale = self._jwt(now - 3600, "sess-1")  # 1 h: ueber dem 30-min-Cutoff
         undated = "plainopaquevalue-not-a-jwt"
         kept = _filter_live_candidates([fresh, stale, undated])
         self.assertEqual([fresh, undated], kept)
@@ -2312,12 +2312,12 @@ class LiveGrabTests(unittest.TestCase):
     def test_grab_live_refresh_rejects_only_stale_candidates(self):
         """Nur veraltete Kandidaten => klare Fehlermeldung statt Replay."""
         from .tolino import grab_live_refresh
-        stale = self._jwt(time.time() - 900, "sess-old")
+        stale = self._jwt(time.time() - 7200, "sess-old")  # 2 h alt
         with patch("calibre_plugin.cdp.grab_live_tokens",
                    return_value={"refresh": [stale], "hardware": []}):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        self.assertIn("2 Minuten", str(ctx.exception))
+        self.assertIn("30 Minuten", str(ctx.exception))
 
     def test_grab_live_refresh_rejection_recommends_fresh_grab(self):
         """Wird der Live-Token abgelehnt, wird KEIN zweiter Kandidat
@@ -2376,6 +2376,101 @@ class LiveGrabTests(unittest.TestCase):
             result = _keycloak_assisted_login(4, "test_hardware")
         self.assertEqual(("disk-rotated", "disk-hw"), result)
         disk.assert_called_once()
+
+    def test_ws_recv_json_parses_rfc6455_header_correctly(self):
+        """Der minimale WS-Client liest den Länge+MASK-Header korrekt.
+
+        Regression zu 0.9.18: das zweite Header-Byte (Länge) wurde
+        verworfen und ein drittes Byte als Länge gelesen -- jede CDP-
+        Antwort zerfiel an falschen Offsets und der Live-Grab fand
+        "nichts", obwohl das Anmeldefenster angemeldet war.
+        """
+        import socket as socket_module
+        import threading
+        from .cdp import _Ws
+
+        server_ready = threading.Event()
+        bound = {}
+
+        def server():
+            listener = socket_module.socket()
+            listener.setsockopt(socket_module.SOL_SOCKET,
+                                socket_module.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            bound["port"] = listener.getsockname()[1]
+            server_ready.set()
+            conn, _addr = listener.accept()
+            # Handshake minimal beantworten (Key egal, Client prueft nur 101)
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                         b"Upgrade: websocket\r\n"
+                         b"Connection: Upgrade\r\n"
+                         b"Sec-WebSocket-Accept: x\r\n\r\n")
+            # Masked client frame empfangen
+            def read_exact(n):
+                data = b""
+                while len(data) < n:
+                    chunk = conn.recv(n - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                return data
+            header = read_exact(2)
+            assert (header[0] & 0x0F) == 0x1
+            length = header[1] & 0x7F
+            assert header[1] & 0x80, "client frames must be masked"
+            mask = read_exact(4)
+            payload = read_exact(length)
+            unmasked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            # Unmaskierte JSON-Antwort als UNMASKED Server-Frame zurueck
+            # (auf > 125 Byte gepolstert, damit der 126er-Extended-
+            # Length-Pfad mitgetestet wird)
+            value = unmasked.decode() + "|" + "p" * 60
+            reply = json.dumps({"id": 1, "result": {"value": value}}).encode()
+            assert len(reply) > 125, "reply too short: %d" % len(reply)
+            # Server-Frame korrekt kodieren: ab 126 Byte Extended Length.
+            import struct as struct_module
+            frame = bytearray([0x81, 126])
+            frame += struct_module.pack(">H", len(reply))
+            conn.sendall(bytes(frame) + reply)
+            conn.close()
+            listener.close()
+
+        thread = threading.Thread(target=server, daemon=True)
+        thread.start()
+        server_ready.wait(5)
+
+        # Der Server-Thread meldet seinen gebundenen Port zurueck.
+        port = bound["port"]
+
+        ws = _Ws.connect("127.0.0.1", port, "/devtools/page/test", timeout=5)
+        try:
+            ws.send_json({"id": 1, "method": "Runtime.evaluate",
+                          "params": {"expression": "1+1"}})
+            message = ws.recv_json(timeout=5)
+        finally:
+            ws.close()
+        self.assertEqual(1, message.get("id"))
+        # Value ist das vom Server korrekt entmaskierte Echo des Requests:
+        self.assertTrue(message["result"]["value"].startswith(
+            '{"id": 1, "method": "Runtime.evaluate"'))
+
+    def test_filter_live_cutoff_accepts_tokens_from_older_signin(self):
+        """Tokens bis 30 Minuten Alter ueberleben den Live-Cutoff.
+
+        Der Nutzer braucht fuer die Anmeldung oft laenger als 2 Minuten;
+        Keycloak-Refresh-Tokens leben ~1 Stunde, der 2-Minuten-Cutoff von
+        0.9.18 warf daher den gueltigen Live-Token weg.
+        """
+        from .tolino import _filter_live_candidates
+        now = time.time()
+        ten_minutes_old = self._jwt(now - 600, "sess-1")
+        kept = _filter_live_candidates([ten_minutes_old])
+        self.assertEqual([ten_minutes_old], kept)
+        # Ausdruecklich mit dem Default aufgerufen bleibt es bei 1800s:
+        self.assertIn("1800",
+                      _filter_live_candidates.__defaults__[0].__str__())
 
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht

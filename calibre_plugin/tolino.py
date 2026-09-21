@@ -2160,7 +2160,7 @@ def _candidate_ages_summary(candidates, now=None):
     return ", ".join("%dx %s" % (counts[a], a) for a in order)
 
 
-def _filter_live_candidates(candidates, max_age_seconds=120):
+def _filter_live_candidates(candidates, max_age_seconds=1800):
     """Keep only JWT candidates issued within the last minutes.
 
     The live grab returns the reader's CURRENT token set; anything much
@@ -2168,6 +2168,12 @@ def _filter_live_candidates(candidates, max_age_seconds=120):
     instead of being replayed (a replayed token can trip Keycloak's reuse
     protection and kill the live session). Non-JWT candidates pass
     through -- they cannot be dated and stay the caller's responsibility.
+
+    The default cutoff is deliberately generous: Keycloak refresh tokens
+    live about an hour (exp - iat = 3600 s in observed tokens), and the
+    user may take a while between signing in and the grab completing. A
+    2-minute cutoff (the first attempt) rejected the perfectly valid
+    current token of anyone who had signed in more than two minutes ago.
     """
     now = time.time()
     kept = []
@@ -2201,7 +2207,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     if not fresh:
         raise TolinoAuthError(
             "Im Web Reader wurde kein aktueller Refresh-Token gefunden: "
-            "alle gelesenen Kandidaten waren aelter als 2 Minuten. Bitte "
+            "alle gelesenen Kandidaten waren aelter als 30 Minuten. Bitte "
             "im Anmeldefenster neu anmelden (Buecherliste laden) und es "
             "direkt danach erneut versuchen.")
     fresh.sort(key=_refresh_token_iat_sort_key, reverse=True)
