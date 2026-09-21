@@ -727,12 +727,19 @@ class SyncDashboard(QDialog):
             QMessageBox.warning(
                 self, "Keine Token gefunden / No tokens found",
                 "Es wurden keine Tolino-Web-Reader-Tokens gefunden "
-                "(Plugin-Version %s). Der Browser darf dabei offen "
-                "bleiben. Wichtig:\n"
+                "(Plugin-Version %s). Wichtig:\n"
                 "1. Im Tolino **Web Reader** (Bibliothek) angemeldet "
                 "sein – nicht nur im Shop\n"
                 "2. Den Web Reader einmal vollständig geladen haben "
-                "(Bücherliste sichtbar)\n\n"
+                "(Bücherliste sichtbar)\n"
+                "3. ALLE Browser-Fenster SCHLIESSEN und diesen Knopf "
+                "direkt danach drücken – ein offener Reader rotiert den "
+                "Token laufend, und nur der neueste Token einer "
+                "Keycloak-Sitzung ist gültig.\n\n"
+                "Tipp: Der Knopf \u201eIm Browser anmelden\u201c ist der "
+                "empfohlene Weg – er liest den aktuellen Token direkt aus "
+                "einem privaten Browser-Fenster, ohne den Umweg über "
+                "Festplatten-Kopien.\n\n"
                 "Befund:\n%s" % (
                     ".".join(str(v) for v in _plugin_version()), detail)
             )
@@ -756,12 +763,17 @@ class SyncDashboard(QDialog):
             self, "Token verbraucht / Tokens spent",
             "Es wurden %d Refresh-Token gefunden, aber alle waren bereits "
             "verbraucht (invalid grant).\n\n"
-            "Der Web Reader rotiert den Token bei jedem Hintergrund-"
-            "Refresh; sobald ein frischer Token im Browser-Storage "
-            "ankommt, übernimmt das Plugin ihn automatisch.\n\n"
-            "Jetzt alle 30 Sekunden für 5 Minuten weiterprüfen? Lasse "
-            "dazu den Web Reader geöffnet (Bücherliste geladen) und lade "
-            "ihn ggf. einmal neu (F5).\n\n"
+            "Grund: Der Web Reader rotiert den Token bei jedem "
+            "Hintergrund-Refresh, und nur der NEUESTE Token einer "
+            "Keycloak-Sitzung ist gültig – alle Festplatten-Kopien sind "
+            "damit zwangsläufig alt.\n\n"
+            "Empfehlung: Benutze den Knopf \u201eIm Browser anmelden\u201c "
+            "– er liest den aktuellen Token live aus einem privaten "
+            "Browser-Fenster.\n\n"
+            "Oder: ALLE Browser-Fenster SCHLIESSEN (der Reader schreibt "
+            "seinen letzten Token beim Schließen auf die Festplatte) und "
+            "dann diesen Knopf erneut drücken.\n\n"
+            "Jetzt alle 30 Sekunden für 5 Minuten weiterprüfen?\n\n"
             "Befund:\n%s" % (count, detail),
             QMessageBox.Yes | QMessageBox.No)
         if answer != QMessageBox.Yes:
@@ -907,10 +919,10 @@ class SyncDashboard(QDialog):
         partner_id = self.partner.currentData()
         self.browser.setEnabled(False)
         self.status.setText(
-            "Browser-Anmeldung läuft: im Web Reader (Bibliothek) anmelden "
-            "und Bücherliste laden lassen, dann warten – der Token wird "
-            "übernommen, sobald sich der Reader beruhigt hat (ca. 20–30 s). "
-            "Der Web Reader kann sich dabei abmelden, das ist normal.")
+            "Browser-Anmeldung läuft: im geöffneten Anmeldefenster im "
+            "Web Reader (Bibliothek) anmelden und die Bücherliste laden. "
+            "Der aktuelle Token wird live übernommen – das Fenster "
+            "geöffnet lassen, bis die Meldung kommt.")
         thread = QThread()  # no parent: dialog may close first
         worker = BrowserLoginWorker(partner_id, self.hardware.text().strip())
         worker.moveToThread(thread)

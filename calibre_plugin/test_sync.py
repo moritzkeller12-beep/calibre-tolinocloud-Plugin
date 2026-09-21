@@ -1,3 +1,4 @@
+import base64
 import unittest
 import ast
 import json
@@ -1040,6 +1041,7 @@ class SyncPlanTests(unittest.TestCase):
                 "config.py",
                 "sync.py",
                 "tolino.py",
+                "cdp.py",
                 "icons.py",
                 "bootstrapper.py",
                 "images/tolino_cloud_sync.png",
@@ -2172,6 +2174,146 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(
             storage.get("https+++webreader.mytolino.com/refresh_token"),
             "fresh-lsng-token")
+
+class LiveGrabTests(unittest.TestCase):
+    """v0.9.17: Der Live-Grab (CDP) ist der Primaerpfad der Browser-Anmeldung.
+
+    Die Disk-Scrape-Validierung replays historische Tokens; Keycloaks
+    Wiederverwendungsschutz reagiert darauf mit Session-Widerruf -- genau
+    deshalb meldete der Web Reader die Benutzer sofort wieder ab. Der
+    Live-Grab liest den AKTUELLEN Token aus dem Seiten-Speicher und
+    tauscht ihn genau EINMAL am Token-Endpunkt.
+    """
+
+    def _jwt(self, iat, sid=None):
+        head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+        payload = {"iat": int(iat), "typ": "Refresh"}
+        if sid:
+            payload["sid"] = sid
+        body = base64.urlsafe_b64encode(
+            json.dumps(payload).encode("utf-8"))
+        return "%s.%s.sig" % (head.decode().rstrip("="),
+                              body.decode().rstrip("="))
+
+    def test_filter_live_candidates_drops_stale_jwts(self):
+        """JWT-Kandidaten aelter als 2 Minuten werden verworfen."""
+        from .tolino import _filter_live_candidates
+        now = time.time()
+        fresh = self._jwt(now - 10, "sess-1")
+        stale = self._jwt(now - 600, "sess-1")
+        undated = "plainopaquevalue-not-a-jwt"
+        kept = _filter_live_candidates([fresh, stale, undated])
+        self.assertEqual([fresh, undated], kept)
+
+    def test_grab_live_refresh_exchanges_freshest_token_once(self):
+        """Der frischeste Live-Kandidat wird GENAU EINMAL getauscht."""
+        from .tolino import grab_live_refresh
+
+        now = time.time()
+        fresh = self._jwt(now - 5, "sess-live")
+        stale = self._jwt(now - 30, "sess-live")
+        logins = []
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = "fake-hw"
+
+            def _login(self):
+                logins.append(self.refresh)
+                self.refresh = "rotated-token"
+
+        grabbed = {"refresh": [stale, fresh], "hardware": ["hw-live"]}
+        with patch("calibre_plugin.tolino.TolinoClient", FakeClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value=grabbed):
+            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertEqual("rotated-token", refresh)
+        self.assertEqual("fake-hw", hardware)
+        self.assertEqual([fresh], logins)
+
+    def test_grab_live_refresh_rejects_only_stale_candidates(self):
+        """Nur veraltete Kandidaten => klare Fehlermeldung statt Replay."""
+        from .tolino import grab_live_refresh
+        stale = self._jwt(time.time() - 900, "sess-old")
+        with patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [stale], "hardware": []}):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertIn("2 Minuten", str(ctx.exception))
+
+    def test_grab_live_refresh_rejection_recommends_fresh_grab(self):
+        """Wird der Live-Token abgelehnt, wird KEIN zweiter Kandidat
+        replayt -- der Fehler verweist auf einen erneuten Grab."""
+        from .tolino import grab_live_refresh
+        logins = []
+
+        class FailingClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                logins.append(self.refresh)
+                raise TolinoAuthError(
+                    'Tolino HTTP 400: {"error": "invalid_grant"}')
+
+        fresh = self._jwt(time.time() - 5, "sess-live")
+        other = self._jwt(time.time() - 8, "sess-other")
+        with patch("calibre_plugin.tolino.TolinoClient", FailingClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [fresh, other],
+                                 "hardware": []}):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        message = str(ctx.exception)
+        self.assertIn("erneut starten", message)
+        # Genau ein Login-Versuch: der zweite Kandidat wird bewusst
+        # NICHT mehr probiert (kein Replay-Feuerwerk).
+        self.assertEqual([fresh], logins)
+
+    def test_keycloak_assisted_login_uses_live_grab_first(self):
+        """browser_login(4) geht ueber den Live-Grab und beruehrt weder
+        webbrowser.open noch den Disk-Scrape."""
+        from .tolino import _keycloak_assisted_login
+        with patch("calibre_plugin.tolino.grab_live_refresh",
+                   return_value=("rotated", "hw-live")) as grab, \
+             patch("calibre_plugin.tolino.webbrowser.open",
+                   side_effect=AssertionError("webbrowser.open called")), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   side_effect=AssertionError("scrape called")):
+            result = _keycloak_assisted_login(4, "test_hardware")
+        self.assertEqual(("rotated", "hw-live"), result)
+        grab.assert_called_once()
+
+    def test_keycloak_assisted_login_falls_back_without_chromium(self):
+        """Fehlt ein Chromium-Browser, greift der Disk-Scrape-Flow."""
+        from .tolino import _keycloak_assisted_login
+        with patch("calibre_plugin.tolino.grab_live_refresh",
+                   side_effect=TolinoAuthError(
+                       "Kein Chromium-Browser gefunden (Chrome/Chromium/"
+                       "Brave/Edge). Die Browser-Anmeldung ben\u00f6tigt "
+                       "eines davon.")), \
+             patch("calibre_plugin.tolino._disk_assisted_login",
+                   return_value=("disk-rotated", "disk-hw")) as disk:
+            result = _keycloak_assisted_login(4, "test_hardware")
+        self.assertEqual(("disk-rotated", "disk-hw"), result)
+        disk.assert_called_once()
+
+    def test_keycloak_assisted_login_propagates_grab_errors(self):
+        """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht
+        -- kein stiller Wechsel in den Replay-gefaehrdeten Disk-Pfad."""
+        from .tolino import _keycloak_assisted_login
+        with patch("calibre_plugin.tolino.grab_live_refresh",
+                   side_effect=TolinoAuthError(
+                       "Timeout: Im Anmeldefenster wurde keine Web-"
+                       "Reader-Anmeldung erkannt.")), \
+             patch("calibre_plugin.tolino._disk_assisted_login",
+                   side_effect=AssertionError("fallback called")):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                _keycloak_assisted_login(4, "test_hardware")
+        self.assertIn("Timeout", str(ctx.exception))
+
 
 class ToolbarIconTests(unittest.TestCase):
     """The toolbar action must receive an icon in real Calibre runs."""

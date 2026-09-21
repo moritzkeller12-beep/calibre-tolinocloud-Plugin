@@ -2160,8 +2160,94 @@ def _candidate_ages_summary(candidates, now=None):
     return ", ".join("%dx %s" % (counts[a], a) for a in order)
 
 
+def _filter_live_candidates(candidates, max_age_seconds=120):
+    """Keep only JWT candidates issued within the last minutes.
+
+    The live grab returns the reader's CURRENT token set; anything much
+    older in that set can only be leftover history, so it is dropped
+    instead of being replayed (a replayed token can trip Keycloak's reuse
+    protection and kill the live session). Non-JWT candidates pass
+    through -- they cannot be dated and stay the caller's responsibility.
+    """
+    now = time.time()
+    kept = []
+    for token in candidates or ():
+        issued = _refresh_token_iat(token)
+        if issued is None or now - issued <= max_age_seconds:
+            kept.append(token)
+    return kept
+
+
+def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
+    """Read the Web Reader's CURRENT token via a private CDP window.
+
+    Opens a dedicated Chromium window (private profile, DevTools port) on
+    the partner's Web Reader, lets the user sign in there, and reads the
+    token set the live page holds in its JavaScript storage (Chrome
+    DevTools Protocol, see cdp.py). The freshest JWT candidate is then
+    exchanged at the token endpoint -- exactly ONCE, because a token this
+    fresh is the only live one of its session and any replay would only
+    risk Keycloak's reuse protection (the session killer of v0.9.16 and
+    before).
+
+    Returns (rotated_refresh, hardware_id). Raises TolinoAuthError when
+    no Chromium browser is installed -- callers fall back to the
+    historical disk-scrape flow in that case.
+    """
+    from . import cdp as cdp_module
+    grabbed = cdp_module.grab_live_tokens(partner_id, hardware,
+                                          timeout=timeout, progress=progress)
+    fresh = _filter_live_candidates(grabbed.get("refresh") or [])
+    if not fresh:
+        raise TolinoAuthError(
+            "Im Web Reader wurde kein aktueller Refresh-Token gefunden: "
+            "alle gelesenen Kandidaten waren aelter als 2 Minuten. Bitte "
+            "im Anmeldefenster neu anmelden (Buecherliste laden) und es "
+            "direkt danach erneut versuchen.")
+    fresh.sort(key=_refresh_token_iat_sort_key, reverse=True)
+    hardware_candidates = [normalize_hardware_id(value)
+                           for value in (grabbed.get("hardware") or ())]
+    hardware_candidates = [value for value in hardware_candidates if value]
+    hardware_id = hardware_candidates[0] if hardware_candidates else hardware
+    candidate = fresh[0]
+    client = TolinoClient(partner_id, hardware_id or "")
+    client.refresh = candidate
+    try:
+        client._login()
+    except TolinoAuthError as exc:
+        # The exchange consumed one grant; a retry would only replay.
+        raise TolinoAuthError(
+            "Der live gelesene Token wurde am Token-Endpunkt abgelehnt "
+            "(%s). Bitte die Browser-Anmeldung erneut starten -- dabei "
+            "wird der aktuelle Token direkt aus dem ge\u00f6ffneten Web "
+            "Reader frisch gelesen." % exc) from exc
+    return client.refresh or candidate, client.hardware or hardware_id
+
+
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     """Guided browser sign-in for Keycloak partners without local callback.
+
+    Primary path: a private Chromium window (Chrome DevTools Protocol) in
+    which the user signs into the Web Reader; the CURRENT token is read
+    from the live page and exchanged exactly once -- no replay of
+    historical storage copies, which is what kept tripping Keycloak's
+    reuse protection and killing the session in earlier versions.
+
+    Fallback (no Chromium browser installed): the historical disk-scrape
+    flow (``_disk_assisted_login``), which validates harvested storage
+    tokens against the endpoint; there the reader must be CLOSED so the
+    newest token is actually flushed to disk.
+    """
+    try:
+        return grab_live_refresh(partner_id, hardware, timeout=timeout)
+    except TolinoAuthError as exc:
+        if "Kein Chromium-Browser gefunden" not in str(exc):
+            raise
+        return _disk_assisted_login(partner_id, hardware, timeout)
+
+
+def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
+    """Disk-scrape fallback for Keycloak partners (no Chromium browser).
 
     Opens the partner's real Web Reader page (never a hand-built authorize
     URL: Keycloak rejects unregistered redirect URIs with "Ungueltiger
