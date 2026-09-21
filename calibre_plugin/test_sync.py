@@ -1293,6 +1293,165 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(3, attempts["tok"])
         self.assertEqual(["dead"], attempts_dead)
 
+    def test_validate_one_network_failure_is_unclear_not_spent(self):
+        """A transport failure wrapped by _login must NOT burn a candidate.
+
+        TolinoClient._login wraps every underlying error (network reset,
+        WAF page, 5xx) in TolinoAuthError. Only a definitive Keycloak
+        verdict inside the message means the token is dead; anything else
+        must stay retryable ("unclear"), otherwise a single hiccup makes
+        the flow abandon a still-live token forever.
+        """
+        from .tolino import _validate_one
+
+        def wrapped_network_error(self):
+            raise TolinoAuthError(
+                "Tolino authentication failed: <urlopen error [Errno -3] "
+                "Temporary failure in name resolution>")
+
+        def bot_protection_page(self):
+            raise TolinoAuthError(
+                "Tolino authentication failed: Zugriff geblockt")
+
+        def session_not_active(self):
+            raise TolinoAuthError(
+                'Tolino HTTP 400: {"error": "invalid_grant", '
+                '"error_description": "Token is not active"}')
+
+        cases = [
+            (wrapped_network_error, "unclear"),
+            (bot_protection_page, "unclear"),
+            (session_not_active, "spent"),
+        ]
+        for login_impl, expected in cases:
+            with patch.object(tolino_module.TolinoClient, "_login",
+                              login_impl):
+                verdict, rotated, _hw = _validate_one(4, "hw-x", "tok")
+            self.assertEqual(expected, verdict)
+
+    def test_keycloak_assisted_login_one_post_per_candidate(self):
+        """Each candidate gets exactly ONE token-endpoint attempt.
+
+        The token exchange does not involve the hardware ID, so the old
+        loop over up to three hardware candidates sent redundant replays;
+        a replayed token can trip Keycloak's reuse protection and kill
+        the session. Every verdict must now come from a single call.
+        """
+        from .tolino import _keycloak_assisted_login
+
+        validations = []
+
+        def fake_validate(partner_id, hw, candidate):
+            validations.append((candidate, hw))
+            if candidate == "fresh-1":
+                return ("ok", "rotated-fresh", "hw1")
+            return ("spent", None, None)
+
+        polls = {"n": 0}
+
+        def fake_scrape(diagnose=False, all_candidates=False):
+            polls["n"] += 1
+            if polls["n"] == 1:
+                return (["spent-1", "spent-2"], ["hw1", "hw2"], ["note"])
+            return (["spent-1", "spent-2", "fresh-1"], ["hw1", "hw2"],
+                    ["note"])
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 5.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   side_effect=fake_scrape), \
+             patch("calibre_plugin.tolino._validate_one",
+                   side_effect=fake_validate), \
+             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
+        self.assertEqual(("rotated-fresh", "hw1"), (refresh, hardware))
+        # Every candidate validated exactly once -- not once per hardware ID.
+        self.assertEqual(
+            [("spent-1", "test_hardware"), ("spent-2", "test_hardware"),
+             ("fresh-1", "test_hardware")],
+            validations)
+
+    def test_keycloak_assisted_login_prefers_newest_token_per_session(self):
+        """Only the freshest sibling of one Keycloak session is validated.
+
+        All refresh tokens of one web-reader login share the 'sid' claim;
+        within a session only the newest 'iat' can be valid, and replaying
+        an older sibling may trigger Keycloak's reuse protection and kill
+        the live session. The selector must therefore validate at most one
+        token per session -- the newest -- and skip sessions that already
+        produced a spent token during this run.
+        """
+        from .tolino import _keycloak_assisted_login, _select_candidate_round
+
+        import base64 as b64
+
+        def jwt(payload):
+            head = b64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+            body = b64.urlsafe_b64encode(json.dumps(payload).encode())
+            return "%s.%s.sig" % (head.decode().rstrip("="),
+                                  body.decode().rstrip("="))
+
+        old_sibling = jwt({"iat": 100, "sid": "sess-A", "typ": "Refresh"})
+        new_sibling = jwt({"iat": 900, "sid": "sess-A", "typ": "Refresh"})
+        other_session_newest = jwt({"iat": 500, "sid": "sess-B",
+                                    "typ": "Refresh"})
+        older_b = jwt({"iat": 400, "sid": "sess-B", "typ": "Refresh"})
+        no_sid = jwt({"iat": 950, "typ": "Refresh"})
+
+        # Pure selector behaviour: freshest per session, order preserved.
+        picked = _select_candidate_round(
+            [old_sibling, new_sibling, older_b, other_session_newest, no_sid],
+            set())
+        self.assertEqual([new_sibling, other_session_newest, no_sid], picked)
+
+        # A session with a spent sibling is skipped entirely.
+        picked = _select_candidate_round(
+            [new_sibling, other_session_newest], {old_sibling})
+        self.assertEqual([other_session_newest], picked)
+
+        validations = []
+
+        def fake_validate(partner_id, hw, candidate):
+            validations.append(candidate)
+            return ("spent", None, None)
+
+        polls = {"n": 0}
+
+        def fake_scrape(diagnose=False, all_candidates=False):
+            polls["n"] += 1
+            return ([old_sibling, new_sibling, older_b,
+                     other_session_newest, no_sid], ["hw1"], ["note"])
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            clock["t"] += 5.0
+            return clock["t"]
+
+        with patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.scrape_browser_tokens",
+                   side_effect=fake_scrape), \
+             patch("calibre_plugin.tolino._validate_one",
+                   side_effect=fake_validate), \
+             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
+             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+            with self.assertRaises(TolinoAuthError):
+                _keycloak_assisted_login(4, "test_hardware")
+        # Exactly one endpoint attempt per session (the newest sibling of
+        # sess-A and sess-B each) plus the sid-less token; the OLDER
+        # siblings old_sibling and older_b were never replayed, and the
+        # dead sessions were not retried in later rounds.
+        self.assertEqual([new_sibling, other_session_newest, no_sid],
+                         validations)
+
     def test_validate_one_classifies_spent_vs_unclear(self):
         """Only a definitive Keycloak rejection counts as spent."""
         from .tolino import _validate_one

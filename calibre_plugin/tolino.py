@@ -1658,6 +1658,73 @@ def _candidate_age_text(token, now=None):
     return "vor %d Tagen" % (hours // 24)
 
 
+def _keycloak_verdict(text):
+    """True when an error message carries a definitive Keycloak rejection.
+
+    Matches the raw OAuth response ("invalid_grant") as well as the
+    client's rewritten messages ("Session not active", "reused or
+    invalid"). Anything else -- WAF pages, network resets, 5xx -- proves
+    nothing about the token itself and must not burn a candidate.
+    """
+    folded = str(text).casefold()
+    return ("invalid_grant" in folded or "not active" in folded
+            or "reuse exceeded" in folded
+            or "reused or invalid" in folded)
+
+
+def _jwt_claim(token, name):
+    """One claim from a JWT refresh token's unencrypted payload; None if absent."""
+    payload = _jwt_payload(token) or {}
+    value = payload.get(name)
+    return str(value) if value is not None else None
+
+
+def _candidate_sid(token):
+    """Keycloak session id ('sid' claim) of a refresh token; None if absent."""
+    return _jwt_claim(token, "sid")
+
+
+def _select_candidate_round(refreshes, seen_spent):
+    """Pick the best untried candidates for one validation round.
+
+    Keycloak binds every refresh token of one web-reader login to a session
+    ('sid'); within a session only the NEWEST issued token is ever valid,
+    and replaying a spent sibling can trigger Keycloak's reuse protection
+    and kill the live session outright. So: group the untried candidates by
+    session, keep only the freshest 'iat' per session (candidates without a
+    sid are their own group), and never touch candidates from sessions that
+    already produced a spent token this run -- Keycloak's reuse
+    protection is not picky about WHICH sibling was replayed, so one
+    definitively rejected token marks the whole session dead.
+    """
+    by_sid = {}
+    order = []
+    for token in refreshes or ():
+        if not token or token in seen_spent:
+            continue
+        sid = _candidate_sid(token)
+        key = sid if sid is not None else ("token", token)
+        if key not in by_sid:
+            by_sid[key] = []
+            order.append(key)
+        by_sid[key].append(token)
+    spent_sids = {sid for sid in (_candidate_sid(t) for t in seen_spent)
+                  if sid is not None}
+    picked = []
+    for key in order:
+        group = by_sid[key]
+        if isinstance(key, tuple) and key[0] == "token":
+            picked.append(group[0])
+            continue
+        if key in spent_sids:
+            # A sibling of this session was definitively rejected: the
+            # session is dead, replaying its newest token is pointless
+            # and risks tripping the reuse protection again.
+            continue
+        picked.append(max(group, key=_refresh_token_iat_sort_key))
+    return picked
+
+
 def _validate_one(partner_id, hardware_id, candidate):
     """Validate one scraped refresh token against the token endpoint.
 
@@ -1675,15 +1742,21 @@ def _validate_one(partner_id, hardware_id, candidate):
     client.refresh = candidate
     try:
         client._login()
-    except TolinoAuthError:
-        return ("spent", None, None)
+    except TolinoAuthError as exc:
+        # _login wraps EVERY failure in TolinoAuthError -- including pure
+        # transport trouble ("Tolino authentication failed: <urlopen error
+        # ...>"). Only a definitive Keycloak verdict marks the candidate
+        # spent; a bot-protection page or network hiccup must never burn a
+        # possibly-live token (earlier versions dropped it here, which is
+        # why runs kept failing while the fresh token was still valid).
+        if _keycloak_verdict(exc):
+            return ("spent", None, None)
+        return ("unclear", None, None)
     except (TolinoApiError, OSError, ValueError, TypeError) as exc:
-        # A transport/server error proves nothing about the token -- but a
-        # Keycloak verdict inside the message is definitive even when it
-        # surfaces through an unexpected exception type.
-        folded = str(exc).casefold()
-        if ("invalid_grant" in folded or "not active" in folded
-                or "reuse exceeded" in folded):
+        # Same rule for failures surfacing through other exception types:
+        # a Keycloak verdict inside the message is definitive, everything
+        # else stays retryable.
+        if _keycloak_verdict(exc):
             return ("spent", None, None)
         return ("unclear", None, None)
     return ("ok", client.refresh or candidate,
@@ -1698,10 +1771,12 @@ def validate_refresh_candidates(partner_id, hardware_id, candidates):
     order against the token endpoint. The rotated refresh token of the first
     accepted grant is returned together with the hardware ID (the login
     spends one candidate per attempt; a candidate that is already spent
-    cannot be adopted anyway). Unclear failures skip the candidate just
-    like a spent one; ``_validate_one`` callers can tell the difference.
+    cannot be adopted anyway). Older siblings of the same Keycloak session
+    ('sid') are skipped: only the newest token of a session can be valid.
+    Unclear failures skip the candidate just like a spent one;
+    ``_validate_one`` callers can tell the difference.
     """
-    for candidate in candidates or ():
+    for candidate in _select_candidate_round(candidates, set()):
         verdict, rotated, hw = _validate_one(partner_id, hardware_id,
                                              candidate)
         if verdict == "ok":
@@ -2146,28 +2221,23 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
             last_note = notes[-1]
         if not refreshes:
             continue
-        hardware_candidates = _sort_hardware_candidates(hardwares or ())[:3]
-        # Try every candidate this round that has not already failed
-        # definitively: with dozens of stale tokens in the storages, a
-        # per-round "one candidate only" rule kept re-testing dead tokens
-        # forever and missed the fresh one sitting right behind them.
+        # At most ONE endpoint POST per candidate: the token exchange does
+        # not involve the hardware ID (verified against the Web Reader's
+        # own request), so the earlier per-candidate loop over up to three
+        # hardware IDs only burned two extra replay attempts -- and a
+        # replayed token can trip Keycloak's reuse protection, killing the
+        # whole session.
         now = time.time()
         pending = []
-        for candidate in refreshes:
-            if not candidate or candidate in seen_spent:
-                continue
+        for candidate in _select_candidate_round(refreshes, seen_spent):
             if candidate in unclear_at and now - unclear_at[candidate] < 30:
                 continue  # unclear verdict: retry at most every 30 s
             pending.append(candidate)
         for candidate in pending:
-            verdict = "spent"
-            for hw in hardware_candidates or [""]:
-                hw_verdict, rotated, adopted_hw = _validate_one(
-                    partner_id, hw, candidate)
-                if hw_verdict == "ok":
-                    return rotated, adopted_hw
-                if hw_verdict == "unclear":
-                    verdict = "unclear"
+            verdict, rotated, adopted_hw = _validate_one(
+                partner_id, hardware, candidate)
+            if verdict == "ok":
+                return rotated, adopted_hw or hardware
             if verdict == "spent":
                 seen_spent.add(candidate)
                 tried += 1
@@ -2182,15 +2252,18 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     if tried:
         raise TolinoAuthError(
             "%d gefundene(n) Refresh-Token wurden gepr\u00fcft, aber keiner "
-            "war g\u00fcltig. Pr\u00fcfe: 1) Bist du im WEB READER (B\u00fccherliste "
-            "sichtbar) angemeldet, nicht nur im Shop? 2) Lade den Web Reader "
-            "einmal neu (F5) und starte die Browser-Anmeldung direkt danach "
-            "-- das Plugin \u00fcbernimmt dann den frisch geschriebenen Token "
-            "automatisch. 3) Hilft das nicht, den Browser einmal vollst\u00e4ndig "
-            "SCHLIESSEN und erneut versuchen: Chromium h\u00e4lt die neuesten "
-            "Storage-Schreibvorg\u00e4nge teils im RAM und schreibt sie erst beim "
-            "Schlie\u00dfen auf die Festplatte. Kandidaten nach Alter: %s "
-            "(letzte Meldung: %s)."
+            "war g\u00fcltig. Jeder Kandidat wurde genau einmal am Token-"
+            "Endpunkt probiert; \u00e4ltere Tokens derselben Keycloak-Sitzung "
+            "werden bewusst \u00fcbersprungen (nur der neueste Token einer "
+            "Sitzung ist g\u00fcltig). Pr\u00fcfe: 1) Bist du im WEB READER "
+            "(B\u00fccherliste sichtbar) angemeldet, nicht nur im Shop? "
+            "2) Lade den Web Reader einmal neu (F5) und starte die Browser-"
+            "Anmeldung direkt danach -- das Plugin \u00fcbernimmt dann den "
+            "frisch geschriebenen Token automatisch. 3) Hilft das nicht, "
+            "den Browser einmal vollst\u00e4ndig SCHLIESSEN und erneut "
+            "versuchen: Chromium h\u00e4lt die neuesten Storage-Schreibvorg\u00e4nge "
+            "teils im RAM und schreibt sie erst beim Schlie\u00dfen auf die "
+            "Festplatte. Kandidaten nach Alter: %s (letzte Meldung: %s)."
             % (tried,
                _candidate_ages_summary(sorted(
                    seen_spent, key=_refresh_token_iat_sort_key), None),

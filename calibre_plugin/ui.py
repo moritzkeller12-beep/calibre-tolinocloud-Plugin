@@ -679,21 +679,16 @@ class SyncDashboard(QDialog):
     def _validate_scraped_candidates(self, refreshes, hardwares):
         """Validate scraped candidates live; return the fresh pair or None.
 
-        The hardware ID must match the one the refresh token was issued
-        for. Storages may hold several historical device IDs, and
-        ``scrape_browser_tokens`` already ranks them (UUID-shaped and
-        freshest first), so the top candidates are tried in order.
+        The token exchange itself does not involve the hardware ID (the
+        Web Reader's own token POST carries none either), so ONE pass over
+        the candidates is enough: the earlier loop over up to three
+        hardware IDs sent two redundant replays per token, and a replayed
+        token can trip Keycloak's reuse protection and kill the session.
+        The adopted hardware ID comes back from the token/device flow via
+        ``validate_refresh_candidates``.
         """
-        hardwares = [str(hw) for hw in (hardwares or ()) if hw]
-        for hw in hardwares[:3]:
-            validated = validate_refresh_candidates(
-                self.partner.currentData(), hw, refreshes)
-            if validated:
-                return validated
-        if not hardwares:
-            return validate_refresh_candidates(
-                self.partner.currentData(), "", refreshes)
-        return None
+        return validate_refresh_candidates(
+            self.partner.currentData(), "", refreshes)
 
     def scrape_browser_tokens(self):
         """Extract a working refresh_token and hardware_id from browsers.
