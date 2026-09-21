@@ -2206,6 +2206,48 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
                            for value in (grabbed.get("hardware") or ())]
     hardware_candidates = [value for value in hardware_candidates if value]
     hardware_id = hardware_candidates[0] if hardware_candidates else hardware
+    partner = PARTNERS[int(partner_id)]
+
+    # Erster Weg: den Grant IN der Reader-Seite ausfuehren (in-page
+    # fetch). Der Bot-Schutz vor dem Token-Endpunkt akzeptiert die
+    # Anfrage, weil sie denselben TLS-Fingerprint und dieselbe Header-
+    # Familie wie der Web Reader selbst hat -- der Reader stellt sie
+    # ja staendig selbst. Der Plugin-eigene POST (curl_cffi/curl/
+    # urllib) wird dagegen gelegentlich mit dem WAF-403 "Zugriff
+    # geblockt" abgewiesen, obwohl der Token voellig gueltig war.
+    try:
+        from . import cdp as cdp_module
+        ws_url = cdp_module.reader_ws_url()
+    except Exception:
+        cdp_module = None
+        ws_url = None
+    if ws_url:
+        form = urlencode({
+            "client_id": partner["client_id"],
+            "grant_type": "refresh_token",
+            "refresh_token": candidate,
+            "scope": partner["scope"],
+        })
+        status, body = cdp_module.exchange_refresh_in_browser(
+            ws_url, partner["token_url"], form)
+        if status == 200:
+            try:
+                data = json.loads(body)
+            except ValueError:
+                data = {}
+            client = TolinoClient(partner_id, hardware_id or "")
+            client.refresh = candidate
+            try:
+                client._apply_token_response(data)
+            except TolinoAuthError:
+                raise
+            return client.refresh or candidate, client.hardware or hardware_id
+        browser_note = "Browser-Tausch HTTP %s: %s" % (
+            status, _compact_error_text(sanitize_error(body))[:200])
+    else:
+        browser_note = "kein Anmeldefenster offen"
+
+    # Fallback: Plugin-eigener POST (alter Weg, WAF-anfaellig).
     client = TolinoClient(partner_id, hardware_id or "")
     client.refresh = candidate
     try:
@@ -2214,9 +2256,10 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
         # The exchange consumed one grant; a retry would only replay.
         raise TolinoAuthError(
             "Der live gelesene Token wurde am Token-Endpunkt abgelehnt "
-            "(%s). Bitte die Browser-Anmeldung erneut starten -- dabei "
-            "wird der aktuelle Token direkt aus dem ge\u00f6ffneten Web "
-            "Reader frisch gelesen." % exc) from exc
+            "(%s; Browser-Tausch: %s). Bitte die Browser-Anmeldung "
+            "erneut starten -- dabei wird der aktuelle Token direkt aus "
+            "dem ge\u00f6ffneten Web Reader frisch gelesen."
+            % (exc, browser_note)) from exc
     return client.refresh or candidate, client.hardware or hardware_id
 
 
@@ -2818,6 +2861,39 @@ class TolinoClient:
                 return self.refresh
             return self._login()
 
+    def _apply_token_response(self, data):
+        """Store the token endpoint response; returns the rotated refresh.
+
+        Split out of ``_login`` so the browser-executed exchange (cdp
+        exchange_refresh_in_browser, same TLS fingerprint as the reader)
+        can reuse exactly the same post-processing: rotation, immediate
+        token_callback persistence, expiry bookkeeping.
+        """
+        if not data.get("access_token"):
+            raise TolinoAuthError("Tolino token response did not contain access_token.")
+        previous_refresh = self.refresh
+        self.access = data["access_token"]
+        new_refresh = data.get("refresh_token", self.refresh)
+        try:
+            refresh_expires_in = int(data.get("refresh_expires_in", 0))
+        except (TypeError, ValueError):
+            refresh_expires_in = 0
+        self.refresh_expires_at = (
+            time.time() + refresh_expires_in if refresh_expires_in > 0 else 0)
+
+        # CRITICAL: Save the new refresh token IMMEDIATELY before any further use
+        # Tolino invalidates refresh tokens after single use, so we must persist
+        # the new token before making any authenticated requests with it
+        if new_refresh != previous_refresh:
+            self.refresh = new_refresh
+            if self.token_callback:
+                self.token_callback(self.refresh)
+        else:
+            self.refresh = new_refresh
+
+        self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
+        return self.refresh
+
     def _login(self):
         if self.refresh:
             if not self.partner.get("token_url"):
@@ -2876,30 +2952,7 @@ class TolinoClient:
                     "do not test this token repeatedly."
                 ) from exc
             raise TolinoAuthError("Tolino authentication failed: %s" % exc)
-        if not data.get("access_token"):
-            raise TolinoAuthError("Tolino token response did not contain access_token.")
-        previous_refresh = self.refresh
-        self.access = data["access_token"]
-        new_refresh = data.get("refresh_token", self.refresh)
-        try:
-            refresh_expires_in = int(data.get("refresh_expires_in", 0))
-        except (TypeError, ValueError):
-            refresh_expires_in = 0
-        self.refresh_expires_at = (
-            time.time() + refresh_expires_in if refresh_expires_in > 0 else 0)
-        
-        # CRITICAL: Save the new refresh token IMMEDIATELY before any further use
-        # Tolino invalidates refresh tokens after single use, so we must persist
-        # the new token before making any authenticated requests with it
-        if new_refresh != previous_refresh:
-            self.refresh = new_refresh
-            if self.token_callback:
-                self.token_callback(self.refresh)
-        else:
-            self.refresh = new_refresh
-        
-        self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
-        return self.refresh
+        return self._apply_token_response(data)
 
     @property
     def refresh_expires_in(self):

@@ -2629,6 +2629,87 @@ class LiveGrabTests(unittest.TestCase):
             refresh, hardware = try_live_grab_first(4, "hw")
         self.assertEqual("rotated-net", refresh)
 
+    def test_exchange_refresh_in_browser_parses_page_reply(self):
+        """In-page-fetch-Antwort (status/body) wird korrekt geparst."""
+        from . import cdp as cdp_module
+        page_reply = json.dumps({
+            "status": 200,
+            "body": json.dumps({"access_token": "a", "refresh_token": "r"}),
+        })
+        with patch("calibre_plugin.cdp._evaluate_raw_in_target",
+                   return_value={"ok": True, "value": page_reply,
+                                 "exception": None}):
+            status, body = cdp_module.exchange_refresh_in_browser(
+                "ws://127.0.0.1:9223/devtools/page/x",
+                "https://www.orellfuessli.ch/auth/oauth2/token",
+                "client_id=webreader&grant_type=refresh_token")
+        self.assertEqual(200, status)
+        self.assertIn("refresh_token", body)
+
+    def test_exchange_refresh_in_browser_reports_page_failure(self):
+        """Ein fehlgeschlagener Page-Evaluate gibt status=0 zurueck."""
+        from . import cdp as cdp_module
+        with patch("calibre_plugin.cdp._evaluate_raw_in_target",
+                   return_value={"ok": False, "value": None,
+                                 "exception": "page blew up"}):
+            status, body = cdp_module.exchange_refresh_in_browser(
+                "ws://127.0.0.1:9223/devtools/page/x", "https://x/token",
+                "a=b")
+        self.assertEqual(0, status)
+        self.assertIn("page blew up", body)
+
+    def test_exchange_grabbed_token_prefers_browser_exchange(self):
+        """200er Browser-Tausch schlaegt den Plugin-POST -- kein WAF-403."""
+        from .tolino import _exchange_grabbed_token
+        fresh = self._jwt(time.time() - 5, "sess-live")
+        logins = []
+
+        def fake_browser_exchange(ws_url, token_url, form_body, timeout=25):
+            self.assertIn("grant_type=refresh_token", form_body)
+            return 200, json.dumps({
+                "access_token": "a", "refresh_token": "rotated-browser"})
+
+        with patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.exchange_refresh_in_browser",
+                   side_effect=fake_browser_exchange), \
+             patch("calibre_plugin.tolino.TolinoClient") as client_cls:
+            client_cls.return_value.refresh = fresh
+            client_cls.return_value.hardware = "hw-grab"
+            client_cls.return_value._apply_token_response.side_effect = \
+                lambda data: logins.append(data) or setattr(
+                    client_cls.return_value, "refresh",
+                    data["refresh_token"])
+            refresh, hardware = _exchange_grabbed_token(
+                4, "hw-grab", {"refresh": [fresh], "hardware": ["hw-grab"]},
+                [fresh])
+        self.assertEqual("rotated-browser", refresh)
+        self.assertEqual("hw-grab", hardware)
+        # Der Plugin-Client wurde NIE _login (Plugin-POST) aufgerufen:
+        self.assertEqual(1, len(logins))
+
+    def test_exchange_grabbed_token_falls_back_to_plugin_post(self):
+        """Browser-Tausch fehlgeschlagen (0/nicht-200) -> Plugin-POST."""
+        from .tolino import _exchange_grabbed_token
+        fresh = self._jwt(time.time() - 5, "sess-live")
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = fresh
+                self.hardware = hw
+
+            def _login(self):
+                self.refresh = "rotated-plugin"
+
+        with patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.exchange_refresh_in_browser",
+                   return_value=(403, "Zugriff geblockt")), \
+             patch("calibre_plugin.tolino.TolinoClient", FakeClient):
+            refresh, hardware = _exchange_grabbed_token(
+                4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
+        self.assertEqual("rotated-plugin", refresh)
+
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht
         -- kein stiller Wechsel in den Replay-gefaehrdeten Disk-Pfad."""

@@ -523,6 +523,55 @@ def grab_from_existing_reader(port=9222, timeout=15):
     return {"refresh": [], "hardware": []}
 
 
+def _evaluate_raw_in_target(ws_url, expression, timeout=10,
+                            await_promise=False):
+    """Like _evaluate_in_target but returns CDP's full result dict.
+
+    Returns ``{"ok": bool, "value": <decoded JSON value or raw string>,
+    "exception": str}`` -- callers that need the exceptionDetails (e.g.
+    an in-page fetch whose failure text matters) use this variant.
+    """
+    try:
+        path = ws_url[len("ws://"):]
+        host, port, ws_path = _ws_path_to_host_port(path)
+        ws = _Ws.connect(host, port, ws_path, timeout=timeout)
+    except (OSError, ValueError):
+        return {"ok": False, "value": None, "exception": "connect failed"}
+    try:
+        ws.send_json({"id": 1, "method": "Runtime.evaluate", "params": {
+            "expression": expression, "returnByValue": True,
+            "awaitPromise": bool(await_promise),
+        }})
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            message = ws.recv_json(timeout=max(1, deadline - time.time()))
+            if message.get("id") != 1:
+                continue
+            if "error" in message:
+                return {"ok": False, "value": None,
+                        "exception": str(message.get("error"))[:200]}
+            result = (message.get("result") or {}).get("result") or {}
+            details = (message.get("result") or {}).get("exceptionDetails")
+            if details:
+                text = str((details.get("exception") or {}).get("description")
+                           or details.get("text") or "page error")
+                return {"ok": False, "value": None,
+                        "exception": text[:300]}
+            if result.get("type") == "string":
+                return {"ok": True, "value": result.get("value"),
+                        "exception": None}
+            if "value" in result:
+                return {"ok": True, "value": result.get("value"),
+                        "exception": None}
+            return {"ok": False, "value": None,
+                    "exception": "no value returned"}
+        return {"ok": False, "value": None, "exception": "evaluate timeout"}
+    except OSError as exc:
+        return {"ok": False, "value": None, "exception": str(exc)[:200]}
+    finally:
+        ws.close()
+
+
 def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
     """Run a JS expression in a DevTools page target, return its JSON value.
 
@@ -678,6 +727,57 @@ def grab_once_from_grabber(port=None, timeout=12):
                         grabbed[bucket].append(value)
         return grabbed
     return None
+
+
+# Fuehrt den OAuth-Refresh-Grant IN der Reader-Seite aus: gleiches TLS,
+# gleiche Sec-Fetch-Familie, gleicher Origin-Kontext wie der Web Reader
+# selbst -- der Bot-Schutz vor dem Token-Endpunkt blockt genau diesen
+# Anfragen nicht (der Reader macht sie ja staendig selbst).
+_EXCHANGE_SNIPPET = r"""
+(function (tokenUrl, body) {
+  return fetch(tokenUrl, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body,
+    credentials: 'omit',
+    referrer: 'https://webreader.mytolino.com/'
+  }).then(function (response) {
+    return response.text().then(function (text) {
+      return JSON.stringify({
+        status: response.status,
+        body: text.substring(0, 4096)
+      });
+    });
+  }).catch(function (err) {
+    return JSON.stringify({status: 0, body: 'fetch failed: ' + err});
+  });
+})(TOKEN_URL_PLACEHOLDER, BODY_PLACEHOLDER)
+"""
+
+
+def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
+    """Run the refresh-token grant inside the reader page via in-page fetch.
+
+    Returns ``(status, body_text)``. ``status`` mirrors the endpoint's
+    HTTP code (0 when the in-page fetch itself failed). The bot-protection
+    WAF in front of the token endpoint accepts this request because it is
+    the reader's own fingerprint -- the exact request family the reader
+    performs on every background rotation.
+    """
+    expression = (_EXCHANGE_SNIPPET
+                  .replace("TOKEN_URL_PLACEHOLDER",
+                           json.dumps(str(token_url)))
+                  .replace("BODY_PLACEHOLDER", json.dumps(str(form_body))))
+    raw = _evaluate_raw_in_target(ws_url, expression, timeout,
+                                  await_promise=True)
+    if not raw.get("ok"):
+        return 0, "page evaluate failed: %s" % (raw.get("exception") or "?")
+    try:
+        payload = json.loads(raw.get("value") or "{}")
+    except ValueError:
+        return 0, "unparseable page reply"
+    return (int(payload.get("status") or 0),
+            str(payload.get("body") or ""))
 
 
 def reader_ws_url(port=None):
