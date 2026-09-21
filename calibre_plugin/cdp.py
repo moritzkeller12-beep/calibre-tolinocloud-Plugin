@@ -33,9 +33,10 @@ import tempfile
 import time
 
 try:
-    from .tolino import PARTNERS, TolinoAuthError
+    from .tolino import PARTNERS, TolinoAuthError, normalize_hardware_id
 except ImportError:  # direkter Import (außerhalb des Plugin-Pakets)
-    from tolino import PARTNERS, TolinoAuthError
+    from tolino import (PARTNERS, TolinoAuthError,
+                        normalize_hardware_id)
 
 
 # ---------------------------------------------------------------- Vorbedingungen
@@ -795,7 +796,27 @@ def reader_ws_url(port=None):
     return None
 
 
-def await_token_response(ws_url, timeout=120, progress=None):
+def _hardware_from_headers(headers):
+    """hardware-id/device-id aus Request-Headern extrahieren (oder None).
+
+    Die Reader-Requests gegen api.pageplace.de tragen die Geraete-ID der
+    AKTUELLEN Sitzung im Header ("hardware-id"/"device-id") -- genau die
+    ID, die zu den Tokens dieser Sitzung gehoert. Storage-Kopien enthalten
+    dagegen haeufig noch IDs frueherer Anmeldungen.
+    """
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        folded = str(key).strip().casefold().replace("_", "-")
+        if folded in ("hardware-id", "device-id"):
+            value = str(value or "").strip()
+            if len(value) >= 8:
+                return normalize_hardware_id(value) or value
+    return None
+
+
+def await_token_response(ws_url, timeout=120, progress=None,
+                         reload_page=False):
     """Catch a FRESH refresh_token out of the reader's own token response.
 
     Enables CDP Fetch interception on the reader tab and waits for the
@@ -803,6 +824,15 @@ def await_token_response(ws_url, timeout=120, progress=None):
     and its refresh_token (plus any hardware fields) returned. This is
     the one token guaranteed unused: it is the response the reader is
     about to consume itself.
+
+    With ``reload_page=True`` the reader tab is reloaded first -- the
+    reload makes the reader rotate its token immediately, so the
+    interception does not depend on the reader's own background timer.
+
+    While listening, the reader's requests to api.pageplace.de are read
+    passively: their ``hardware-id`` header carries the device ID of the
+    CURRENT session, which is returned alongside the token (older
+    storage copies often still carry device IDs from earlier sign-ins).
 
     Returns ``{"refresh": [...], "hardware": [...]}`` or None when the
     reader tab goes away before a token response was caught.
@@ -822,6 +852,18 @@ def await_token_response(ws_url, timeout=120, progress=None):
             "patterns": [{"urlPattern": "*token*", "requestStage":
                           "Response"}],
         }})
+        # Netzwerk-Mitlesen: die Reader-Requests tragen die hardware-id
+        # des Geraets der AKTUELLEN Sitzung im Header -- genau die ID,
+        # die zu den Tokens dieser Sitzung gehoert.
+        ws.send_json({"id": 2, "method": "Network.enable", "params": {}})
+        if reload_page:
+            # Rotations-Anstoss: der Reload bringt den Reader dazu, seine
+            # Tokens frisch zu laden und dabei den Token-Endpunkt
+            # aufzurufen -- dessen Antwort wird unten abgefangen.
+            ws.send_json({"id": 3, "method": "Page.enable", "params": {}})
+            ws.send_json({"id": 4, "method": "Page.reload",
+                          "params": {"ignoreCache": False}})
+        seen_hw = []
         while time.time() < deadline:
             try:
                 message = ws.recv_json(timeout=max(1, deadline - time.time()))
@@ -830,6 +872,13 @@ def await_token_response(ws_url, timeout=120, progress=None):
             method = str(message.get("method") or "")
             params = message.get("params") or {}
             if message.get("id") == 101:  # getResponseBody reply (late)
+                continue
+            if method == "Network.requestWillBeSent":
+                hw = _hardware_from_headers(
+                    ((message.get("params") or {}).get("request") or {})
+                    .get("headers") or {})
+                if hw and hw not in seen_hw:
+                    seen_hw.append(hw)
                 continue
             if method != "Fetch.requestPaused":
                 continue
@@ -878,6 +927,9 @@ def await_token_response(ws_url, timeout=120, progress=None):
                 if isinstance(hw, str) and hw:
                     out["hardware"].append(hw)
             if out["refresh"]:
+                for hw in seen_hw:
+                    if hw not in out["hardware"]:
+                        out["hardware"].append(hw)
                 return out
             # Antwort ohne refresh_token (z. B. Password-Grant-Preheat):
             # weiter lauschen, bis eine Token-Rotation kommt.

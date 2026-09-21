@@ -2382,6 +2382,132 @@ class LiveGrabTests(unittest.TestCase):
         self.assertEqual(("disk-rotated", "disk-hw"), result)
         disk.assert_called_once()
 
+    def test_hardware_from_headers_reads_reader_request_headers(self):
+        """hardware-id/device-id aus Reader-Request-Headern mitlesen.
+
+        Die Geraete-ID der AKTUELLEN Reader-Sitzung steht im Header
+        (Nutzerdump: "hardware-id: eb22e4cf-..."); Storage-Kopien
+        enthalten dagegen oft noch IDs frueherer Anmeldungen.
+        """
+        from .cdp import _hardware_from_headers
+        hw = "eb22e4cf-bb01-4550-bff7-334446bb20b1"
+        self.assertEqual(hw, _hardware_from_headers(
+            {"hardware-id": hw, "reseller-id": "8"}))
+        self.assertEqual(hw, _hardware_from_headers(
+            {"device-id": hw, "reseller-id": "8"}))
+        self.assertEqual(hw, _hardware_from_headers(
+            {"Device-Id": hw, "X-Other": "x"}))
+        # Kompakte Variante wird in die UUID-Form gebracht:
+        self.assertEqual(hw, _hardware_from_headers(
+            {"hardware-id": hw.replace("-", "")}))
+        self.assertIsNone(_hardware_from_headers(None))
+        self.assertIsNone(_hardware_from_headers({}))
+        self.assertIsNone(_hardware_from_headers({"reseller-id": "8"}))
+        self.assertIsNone(_hardware_from_headers({"hardware-id": "kurz"}))
+
+    def test_await_token_response_captures_hardware_and_reloads(self):
+        """await_token_response sendet Page.reload und liest die
+        hardware-id passiv aus Network.requestWillBeSent mit."""
+        import threading
+        from . import cdp as cdp_module
+
+        ready = threading.Event()
+        bound = {}
+
+        def server():
+            import socket as socket_module
+            import struct as struct_module
+            srv = socket_module.socket()
+            srv.setsockopt(socket_module.SOL_SOCKET,
+                           socket_module.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(1)
+            bound["port"] = srv.getsockname()[1]
+            ready.set()
+            conn, _addr = srv.accept()
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                         b"Upgrade: websocket\r\n"
+                         b"Connection: Upgrade\r\n"
+                         b"Sec-WebSocket-Accept: x\r\n\r\n")
+
+            def read_exact(n):
+                data = b""
+                while len(data) < n:
+                    chunk = conn.recv(n - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                return data
+
+            def send_raw(body):
+                frame = bytearray([0x81])
+                if len(body) < 126:
+                    frame.append(len(body))
+                else:
+                    frame += bytes([126]) + struct_module.pack(
+                        ">H", len(body))
+                conn.sendall(bytes(frame) + body)
+
+            def send_event(event):
+                send_raw(json.dumps(event).encode())
+
+            while True:
+                header = read_exact(2)
+                if len(header) < 2:
+                    break
+                length = header[1] & 0x7F
+                if header[1] & 0x80:
+                    mask = read_exact(4)
+                    payload = bytes(b ^ mask[i % 4] for i, b in
+                                    enumerate(read_exact(length)))
+                else:
+                    payload = read_exact(length)
+                try:
+                    message = json.loads(payload.decode())
+                except ValueError:
+                    continue
+                mid = message.get("id")
+                if mid == 4:  # Page.reload bestätigt -> Events abspielen
+                    send_event({
+                        "method": "Network.requestWillBeSent",
+                        "params": {"request": {
+                            "url": "https://api.pageplace.de/v8/inventory",
+                            "headers": {
+                                "hardware-id":
+                                    "eb22e4cf-bb01-4550-bff7-334446bb20b1",
+                                "reseller-id": "8"}}}})
+                    send_event({
+                        "method": "Fetch.requestPaused",
+                        "params": {
+                            "requestId": "r1",
+                            "request": {"url": "https://www.orellfuessli.ch"
+                                        "/auth/oauth2/token"},
+                            "response": {"status": 200}}})
+                    body = base64.b64encode(
+                        b'{"refresh_token": "caught-fresh-token-with-'
+                        b'sufficient-length-for-validation"}').decode()
+                    send_raw(json.dumps({
+                        "id": 101, "result": {"body": body,
+                                              "base64Encoded": True},
+                    }).encode())
+                # Continue/Fulfill-Requests (id 100/102) und Page.enable
+                # brauchen keine echte Antwort.
+            conn.close()
+
+        thread = threading.Thread(target=server, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(5))
+        result = cdp_module.await_token_response(
+            "ws://127.0.0.1:%d/devtools/page/x" % bound["port"],
+            timeout=15, reload_page=True)
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            ["caught-fresh-token-with-sufficient-length-for-validation"],
+            result["refresh"])
+        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"],
+                         result["hardware"])
+
     def test_ws_recv_json_parses_rfc6455_header_correctly(self):
         """Der minimale WS-Client liest den Länge+MASK-Header korrekt.
 
@@ -2709,6 +2835,113 @@ class LiveGrabTests(unittest.TestCase):
             refresh, hardware = _exchange_grabbed_token(
                 4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
         self.assertEqual("rotated-plugin", refresh)
+
+    def test_grab_live_refresh_forces_reload_after_rejected_storage(self):
+        """Am Endpoint abgelehnter Storage-Token => Page.reload + frische
+        abgefangene Rotation wird getauscht (statt zu scheitern)."""
+        from .tolino import grab_live_refresh
+        stale = self._jwt(time.time() - 10, "sess-live")
+        calls = []
+
+        def fake_await(ws_url, timeout=120, progress=None,
+                       reload_page=False):
+            calls.append(reload_page)
+            self.assertTrue(reload_page)
+            return {"refresh": ["caught-fresh"],
+                    "hardware": ["eb22e4cf-bb01-4550-bff7-334446bb20b1"]}
+
+        logins = []
+
+        class FirstFails(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = stale
+                self.hardware = hw
+
+            def _login(self):
+                logins.append(self.refresh)
+                raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
+
+        class SecondWorks(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = "caught-fresh"
+                self.hardware = hw
+
+            def _login(self):
+                logins.append(self.refresh)
+                self.refresh = "rotated-after-reload"
+
+        clients = [FirstFails, SecondWorks]
+
+        def fake_client(partner_id, hw):
+            return clients.pop(0)(partner_id, hw)
+
+        with patch("calibre_plugin.tolino.TolinoClient", fake_client), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [stale], "hardware": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.await_token_response",
+                   side_effect=fake_await):
+            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertEqual([True], calls)
+        self.assertEqual("rotated-after-reload", refresh)
+        # Die live erfasste Hardware-ID (aktuelle Reader-Sitzung) gewinnt
+        # gegen die konfigurierte:
+        self.assertEqual("eb22e4cf-bb01-4550-bff7-334446bb20b1", hardware)
+
+    def test_exchange_uses_grabbed_hardware_over_configured(self):
+        """Die aus dem Reader mitgelesene Hardware-ID wird beim Tausch
+        verwendet -- nicht die alte konfigurierte (Nutzerfall: Plugin
+        speicherte da284d4b..., Reader-Sitzung lief mit eb22e4cf...)."""
+        from .tolino import _exchange_grabbed_token
+        fresh = self._jwt(time.time() - 5, "sess-live")
+        seen_hw = []
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                seen_hw.append(hw)
+                self.refresh = fresh
+                self.hardware = hw
+
+            def _login(self):
+                self.refresh = "rotated"
+
+        with patch("calibre_plugin.cdp.reader_ws_url", return_value=None), \
+             patch("calibre_plugin.tolino.TolinoClient", FakeClient):
+            _exchange_grabbed_token(
+                4, "da284d4b-6348-43c8-b0ab-17edcddfb25d",
+                {"refresh": [fresh],
+                 "hardware": ["eb22e4cf-bb01-4550-bff7-334446bb20b1"]},
+                [fresh])
+        self.assertEqual(
+            ["eb22e4cf-bb01-4550-bff7-334446bb20b1"], seen_hw)
+
+    def test_grab_live_refresh_still_fails_when_reload_yields_nothing(self):
+        """Weder Storage noch erzwungene Rotation => klare Fehlermeldung
+        mit dem ersten Endpoint-Fehler."""
+        from .tolino import grab_live_refresh
+        stale = self._jwt(time.time() - 10, "sess-live")
+
+        class FailingClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = stale
+                self.hardware = hw
+
+            def _login(self):
+                raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
+
+        with patch("calibre_plugin.tolino.TolinoClient", FailingClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [stale], "hardware": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.await_token_response",
+                   return_value=None):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        message = str(ctx.exception)
+        self.assertIn("weder ein frischer Token", message)
+        self.assertIn("Letzter Fehler", message)
 
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht
