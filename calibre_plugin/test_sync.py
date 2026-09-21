@@ -2195,6 +2195,83 @@ class LiveGrabTests(unittest.TestCase):
         return "%s.%s.sig" % (head.decode().rstrip("="),
                               body.decode().rstrip("="))
 
+    def test_chromium_candidates_detects_flatpak_installs(self):
+        """Flatpak-Browser werden als `flatpak run`-Launcher erkannt.
+
+        Direkte Binary-Pfade aus dem Flatpak-Store (~/.var/app/...) laufen
+        ohne die Sandbox-Runtime nicht -- der Launcher muss `flatpak run`
+        sein (Nutzerreport: Chromium/Brave unter ~/.var/app).
+        """
+        import tempfile
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with tempfile.TemporaryDirectory() as home:
+            for app_id in ("com.brave.Browser", "org.chromium.Chromium"):
+                os.makedirs(os.path.join(home, ".var", "app", app_id))
+            fake_flatpak = os.path.join(home, "bin", "flatpak")
+            os.makedirs(os.path.dirname(fake_flatpak))
+            with open(fake_flatpak, "w") as handle:
+                handle.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake_flatpak, 0o755)
+            with _patch("shutil.which",
+                        side_effect=lambda name: fake_flatpak
+                        if name == "flatpak" else None):
+                candidates = cdp_module.chromium_candidates(home=home)
+        labels = [label for _argv, label in candidates]
+        self.assertIn("Brave (Flatpak)", labels)
+        self.assertIn("Chromium (Flatpak)", labels)
+        brave = dict((label, argv) for argv, label in candidates)[
+            "Brave (Flatpak)"]
+        self.assertEqual(["run"], brave[1:2])
+        self.assertIn("--command=brave", brave[2])
+        self.assertEqual("com.brave.Browser", brave[3])
+
+    def test_chromium_candidates_skips_flatpak_without_launcher(self):
+        """Ohne `flatpak`-Binary im PATH gibt es keinen Flatpak-Kandidaten."""
+        import tempfile
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".var", "app", "com.brave.Browser"))
+            with _patch("shutil.which", return_value=None):
+                candidates = cdp_module.chromium_candidates(home=home)
+        self.assertEqual([], candidates)
+
+    def test_launch_reader_window_appends_flags_to_argv_prefix(self):
+        """Der Launcher-Prefix (z. B. flatpak run) wird vor die Flags
+        gesetzt, nicht damit verschmolzen."""
+        import tempfile
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        spawned = {}
+
+        class FakePopen(object):
+            def __init__(self, args, **kwargs):
+                spawned["args"] = list(args)
+
+        with tempfile.TemporaryDirectory() as home:
+            prefix = ["/usr/bin/flatpak", "run", "--command=brave",
+                      "com.brave.Browser"]
+            with _patch.object(cdp_module, "pick_chromium",
+                               return_value=(prefix, "Brave (Flatpak)")), \
+                 _patch.object(cdp_module, "_clean_profile_dir"), \
+                 _patch.object(cdp_module, "_profile_dir",
+                               return_value=os.path.join(home, "prof")), \
+                 _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
+                 _patch.object(cdp_module, "_http_get_json",
+                               side_effect=[None, {"webSocketDebuggerUrl":
+                                                   "ok"}]), \
+                 _patch.object(cdp_module.time, "sleep"):
+                _binary, port = cdp_module.launch_reader_window(4)
+        args = spawned["args"]
+        self.assertEqual(prefix, args[:4])
+        self.assertIn("--remote-debugging-port=%d" % port, args)
+        self.assertTrue(any(a.startswith("--user-data-dir=") for a in args))
+        self.assertIn("mytolino.com", args[-1])
+
     def test_filter_live_candidates_drops_stale_jwts(self):
         """JWT-Kandidaten aelter als 2 Minuten werden verworfen."""
         from .tolino import _filter_live_candidates

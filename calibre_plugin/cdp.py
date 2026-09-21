@@ -40,16 +40,18 @@ except ImportError:  # direkter Import (außerhalb des Plugin-Pakets)
 
 # ---------------------------------------------------------------- Vorbedingungen
 
-def chromium_candidates():
+def chromium_candidates(home=None):
     """Installed Chromium-family browsers, most common first.
 
-    On Linux both the native installs and the Flatpak/Snap variants are
-    considered (the user's report showed Flatpak paths under ~/.var/app).
-    Windows/macOS paths are included so the module works wherever Calibre
-    runs; on Windows the token storage model differs, but the live grab
-    via CDP does not care about the storage format at all.
+    Returns ``(argv_prefix, label)`` pairs: native installs launch via
+    their binary path, Flatpak installs via ``flatpak run`` (launching
+    the sandboxed binary directly fails outside its runtime), Snap via
+    ``snap run``. On Linux the Flatpak detection matters in practice:
+    the user's storage paths showed Chromium/Brave under ~/.var/app,
+    which only the Flatpak launcher can start. Windows/macOS path-based
+    detection is included so the module works wherever Calibre runs.
     """
-    home = os.path.expanduser("~")
+    home = home or os.path.expanduser("~")
     flat = os.path.join(home, ".var", "app")
     snap = os.path.join(home, "snap")
     execs = [
@@ -68,22 +70,27 @@ def chromium_candidates():
     for exe, label in execs:
         path = shutil.which(exe)
         if path:
-            found.append((path, label))
-    # Flatpak/Snap installs have no binary on PATH; their launcher is a
-    # sandbox wrapper, so fall back to the well-known binary locations.
-    flatpak_bins = [
-        (os.path.join(flat, "org.chromium.Chromium", "current", "active",
-                      "files", "chrome", "chrome"), "Chromium (Flatpak)"),
-        (os.path.join(flat, "com.brave.Browser", "current", "active",
-                      "files", "brave", "brave"), "Brave (Flatpak)"),
-        (os.path.join(flat, "com.google.Chrome", "current", "active",
-                      "files", "chrome", "chrome"), "Chrome (Flatpak)"),
-        (os.path.join(snap, "chromium", "current", "usr", "lib",
-                      "chromium-browser", "chromium"), "Chromium (Snap)"),
+            found.append(([path], label))
+    # Flatpak: only offer an app whose installation directory actually
+    # exists AND whose launcher binary is available (sandboxed binaries
+    # cannot be executed directly -- they need the flatpak runtime).
+    flatpak_apps = [
+        ("org.chromium.Chromium", "chrome", "Chromium (Flatpak)"),
+        ("com.brave.Browser", "brave", "Brave (Flatpak)"),
+        ("com.google.Chrome", "chrome", "Chrome (Flatpak)"),
+        ("com.vivaldi.Vivaldi", "vivaldi", "Vivaldi (Flatpak)"),
     ]
-    for path, label in flatpak_bins:
-        if path not in found and os.path.isfile(path):
-            found.append((path, label))
+    flatpak_bin = shutil.which("flatpak")
+    if flatpak_bin and os.path.isdir(flat):
+        for app_id, command, label in flatpak_apps:
+            if os.path.isdir(os.path.join(flat, app_id)):
+                found.append(([flatpak_bin, "run", "--command=%s" % command,
+                               app_id], label))
+    # Snap: the snap shim usually sits on PATH already (covered above);
+    # keep the snap run fallback for stripped-down environments.
+    if shutil.which("snap") and os.path.isdir(os.path.join(snap, "chromium")):
+        found.append(([shutil.which("snap"), "run", "chromium"],
+                      "Chromium (Snap)"))
     return found
 
 
@@ -104,8 +111,8 @@ def _windows_chrome_paths():
     for base in program_dirs:
         for rel, label in rel_paths:
             path = os.path.join(base, rel)
-            if os.path.isfile(path) and path not in found:
-                found.append((path, label))
+            if os.path.isfile(path) and not any(label == f[1] for f in found):
+                found.append(([path], label))
     return found
 
 
@@ -122,13 +129,18 @@ def _macos_chrome_paths():
     for base in roots:
         for rel, label in bundles:
             path = os.path.join(base, rel)
-            if os.path.isfile(path) and path not in found:
-                found.append((path, label))
+            if os.path.isfile(path) and not any(label == f[1] for f in found):
+                found.append(([path], label))
     return found
 
 
 def pick_chromium():
-    """Best available Chromium-family browser, or None."""
+    """Best available Chromium-family browser, or None.
+
+    Returns ``(argv_prefix, label)``; the argv prefix is either a binary
+    path or a flatpak/snap launcher followed by nothing yet -- the
+    Chromium flags are appended by the caller.
+    """
     found = chromium_candidates()
     if sys.platform == "win32":
         found = found + _windows_chrome_paths()
@@ -449,8 +461,7 @@ def launch_reader_window(partner_id):
     if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
         return binary, port
     _clean_profile_dir()
-    args = [
-        binary,
+    args = list(binary) + [
         "--user-data-dir=%s" % _profile_dir(),
         "--remote-debugging-port=%d" % port,
         "--no-first-run", "--no-default-browser-check",
