@@ -818,20 +818,59 @@ def _hardware_from_headers(headers):
 # In-Page-Snippet: nur Access-Tokens ungueltig schreiben (Refresh-Tokens
 # unberuehrt), damit der Reader beim naechsten API-Call auf 401 laeuft und
 # seinen AKTUELLEN Refresh-Token sofort selbst tauscht.
+# In-Page-Snippet: nur Access-Tokens ungueltig schreiben (Refresh-Tokens
+# unberuehrt), damit der Reader beim naechsten API-Call auf 401 laeuft und
+# seinen AKTUELLEN Refresh-Token sofort selbst tauscht. Zwei Formen:
+#  a) Key-Namen wie "access_token" (einfache Stores),
+#  b) JSON-Blobs ("oidc.user:..." von oidc-client-ts & Co.), deren
+#     access_token-EIGENSCHAFT ersetzt wird; expires_at wird auf 0
+#     gesetzt, damit der Reader proaktiv erneuert statt den toten Token
+#     zu verwenden.
 _INVALIDATE_ACCESS_TOKENS_EXPRESSION = (
-    "(() => { let touched = 0;"
+    "(() => {"
     "  const dead = 'invalidated-by-calibre-plugin';"
-    "  try { for (let i = 0; i < localStorage.length; i++) {"
-    "    const k = localStorage.key(i);"
-    "    if (/access[_-]?token/i.test(k))"
-    "        { localStorage.setItem(k, dead); touched++; } } }"
-    "  catch (e) {}"
-    "  try { for (let i = 0; i < sessionStorage.length; i++) {"
-    "    const k = sessionStorage.key(i);"
-    "    if (/access[_-]?token/i.test(k))"
-    "        { sessionStorage.setItem(k, dead); touched++; } } }"
-    "  catch (e) {}"
+    "  let touched = 0;"
+    "  const stores = [];"
+    "  try { stores.push(window.localStorage); } catch (e) {}"
+    "  try { stores.push(window.sessionStorage); } catch (e) {}"
+    "  for (const store of stores) {"
+    "    let keys = [];"
+    "    try { for (let i = 0; i < store.length; i++)"
+    "      keys.push(store.key(i)); } catch (e) { continue; }"
+    "    for (const k of keys) {"
+    "      let v = null;"
+    "      try { v = store.getItem(k); } catch (e) { continue; }"
+    "      if (typeof v !== 'string' || v.length < 20) continue;"
+    "      if (/access[_-]?token/i.test(k))"
+    "        { try { store.setItem(k, dead); touched++; } catch (e) {}"
+    "          continue; }"
+    "      if (v.indexOf('access_token') === -1) continue;"
+    "      try {"
+    "        const obj = JSON.parse(v);"
+    "        if (obj && typeof obj === 'object'"
+    "            && typeof obj.access_token === 'string'"
+    "            && obj.access_token.length > 20) {"
+    "          obj.access_token = dead;"
+    "          if ('expires_at' in obj) obj.expires_at = 0;"
+    "          try { store.setItem(k, JSON.stringify(obj)); touched++; }"
+    "          catch (e) {}"
+    "        }"
+    "      } catch (e) {}"
+    "    }"
+    "  }"
     "  return touched; })()"
+)
+
+# Notfall-Anstoss, falls die Invalidierung nichts traf (unbekanntes
+# Layout): Storage komplett leeren. Der Reader gilt dann als
+# abgemeldet, re-authentifiziert sich beim Reload aber still ueber das
+# Keycloak-SSO-Cookie und schreibt dabei BRANDNEUE Tokens in den
+# Storage, die das Polling unten uebernimmt.
+_CLEAR_STORAGE_EXPRESSION = (
+    "(() => {"
+    "  try { window.localStorage.clear(); } catch (e) {}"
+    "  try { window.sessionStorage.clear(); } catch (e) {}"
+    "  return 1; })()"
 )
 
 
@@ -863,32 +902,34 @@ def _force_reader_token_rotation(ws_url, timeout=10):
 
 
 def await_token_response(ws_url, timeout=120, progress=None,
-                         reload_page=False, trigger_rotation=False):
-    """Catch a FRESH refresh_token out of the reader's own token response.
+                         reload_page=False, trigger_rotation=False,
+                         exclude_refresh=None):
+    """Catch a FRESH refresh_token after forcing the reader to rotate.
 
-    Enables CDP Fetch interception on the reader tab and waits for the
-    next POST to the OAuth token endpoint; the response body is parsed
-    and its refresh_token (plus any hardware fields) returned. This is
-    the one token guaranteed unused: it is the response the reader is
-    about to consume itself.
+    Drei Fangwege, in dieser Reihenfolge:
 
-    With ``reload_page=True`` the reader tab is reloaded first.
+    1. **CDP Fetch-Interception** am Reader-Tab: die naechste 200er
+       Token-Antwort wird abgefangen, bevor der Reader sie verbraucht
+       (garantiert ungenutzt). Beachtet NICHT Requests, die ein Service
+       Worker stellt -- daher nur erster, nicht einziger Weg.
+    2. **Storage-Polling** (alle 3 s, per Runtime.evaluate): nach der
+       erzwungenen Rotation schreibt der Reader seine neuen Tokens in
+       den Seiten-Speicher; Kandidaten, die NICHT in ``exclude_refresh``
+       liegen (die zuvor schon erfolglos getauschten Kopien), werden
+       uebernommen. Immun gegen Service-Worker-Routing.
+    3. **Hardware-ID passiv**: ``hardware-id``/``device-id``-Header der
+       Reader-Requests (und die Grab-Ergebnisse) liefern die Geraete-ID
+       der AKTUELLEN Sitzung.
 
-    With ``trigger_rotation=True`` the page's stored access tokens are
-    invalidated first (refresh tokens untouched): the reader's next API
-    call hits 401 and it exchanges its CURRENT refresh token at once --
-    the caught response is then guaranteed unused. Combined with a
-    reload the invalidation is written BEFORE the reload, so the freshly
-    loaded page starts with a dead access token and rotates within
-    seconds instead of on its own ~50-minute timer.
-
-    While listening, the reader's requests to api.pageplace.de are read
-    passively: their ``hardware-id`` header carries the device ID of the
-    CURRENT session, which is returned alongside the token (older
-    storage copies often still carry device IDs from earlier sign-ins).
+    Mit ``trigger_rotation=True`` wird die Rotation ANGESTOSSEN: die
+    Access-Tokens im Seiten-Speicher werden ungueltig geschrieben
+    (JSON-Blobs inklusive; Refresh-Tokens unberuehrt). Traf die
+    Invalidierung nichts (unbekanntes Storage-Layout), wird der Storage
+    komplett geleert -- der Reader re-authentifiziert sich beim Reload
+    still ueber das Keycloak-SSO-Cookie und schreibt frische Tokens.
 
     Returns ``{"refresh": [...], "hardware": [...]}`` or None when the
-    reader tab goes away before a token response was caught.
+    reader tab goes away before anything was caught.
     """
     if not ws_url or not str(ws_url).startswith("ws://"):
         return None
@@ -899,42 +940,112 @@ def await_token_response(ws_url, timeout=120, progress=None,
     except (OSError, ValueError):
         return None
     deadline = time.time() + max(15, timeout)
-    paused = None
+    exclude = set(exclude_refresh or ())
+    eval_kinds = {5: "invalidate"}
+    invalidate_value = [None]
+    clear_sent = [False]
+    reload_sent = [not reload_page]
+    next_poll_id = [200]
+    last_poll = [0.0]
+    found_refresh = []
+    seen_hw = []
+
+    def _send_poll():
+        eid = next_poll_id[0]
+        next_poll_id[0] += 1
+        eval_kinds[eid] = "grab"
+        try:
+            ws.send_json({"id": eid, "method": "Runtime.evaluate",
+                          "params": {"expression": _GRAB_SNIPPET,
+                                     "returnByValue": True,
+                                     "awaitPromise": True}})
+        except OSError:
+            raise
+        last_poll[0] = time.time()
+
+    def _handle_eval_reply(message):
+        kind = eval_kinds.pop(message.get("id"), None)
+        result = ((message.get("result") or {}).get("result") or {})
+        value = result.get("value")
+        if kind == "invalidate":
+            try:
+                invalidate_value[0] = int(value or 0)
+            except (TypeError, ValueError):
+                invalidate_value[0] = 0
+        elif kind == "grab" and isinstance(value, dict):
+            for token in value.get("refresh") or []:
+                if token and token not in exclude \
+                        and token not in found_refresh:
+                    found_refresh.append(token)
+            for hw in value.get("hardware") or []:
+                if hw and hw not in seen_hw:
+                    seen_hw.append(hw)
+
     try:
         ws.send_json({"id": 1, "method": "Fetch.enable", "params": {
             "patterns": [{"urlPattern": "*token*", "requestStage":
                           "Response"}],
         }})
         # Netzwerk-Mitlesen: die Reader-Requests tragen die hardware-id
-        # des Geraets der AKTUELLEN Sitzung im Header -- genau die ID,
-        # die zu den Tokens dieser Sitzung gehoert.
+        # des Geraets der AKTUELLEN Sitzung im Header.
         ws.send_json({"id": 2, "method": "Network.enable", "params": {}})
         if trigger_rotation:
-            # Rotations-Anstoss auf DERSELBEN Verbindung (fire-and-
-            # forget, id 5): den Access-Token im Seiten-Speicher
-            # ungueltig schreiben (Refresh-Tokens unberuehrt). Ohne
-            # Reload laeuft der naechste API-Call des Readers auf 401
-            # und er tauscht SOFORT selbst; mit Reload startet die
-            # frisch geladene Seite direkt mit totem Access-Token.
+            # Rotations-Anstoss auf DERSELBEN Verbindung (id 5).
             ws.send_json({"id": 5, "method": "Runtime.evaluate",
                           "params": {
                               "expression":
                                   _INVALIDATE_ACCESS_TOKENS_EXPRESSION,
                               "returnByValue": True}})
-        if reload_page:
+        elif reload_page:
             ws.send_json({"id": 3, "method": "Page.enable", "params": {}})
             ws.send_json({"id": 4, "method": "Page.reload",
                           "params": {"ignoreCache": False}})
-        seen_hw = []
+            reload_sent[0] = True
         while time.time() < deadline:
+            # Reload erst senden, wenn die Invalidation-Entscheidung da
+            # ist (CDP verarbeitet Befehle in Reihenfolge -- der Clear
+            # muss VOR dem Reload in derselben Seite ankommen).
+            if (trigger_rotation and invalidate_value[0] is not None
+                    and not reload_sent[0]):
+                if invalidate_value[0] == 0 and not clear_sent[0]:
+                    eval_kinds[6] = "clear"
+                    try:
+                        ws.send_json({"id": 6, "method": "Runtime.evaluate",
+                                      "params": {
+                                          "expression":
+                                              _CLEAR_STORAGE_EXPRESSION,
+                                          "returnByValue": True}})
+                    except OSError:
+                        break
+                    clear_sent[0] = True
+                try:
+                    ws.send_json({"id": 3, "method": "Page.enable",
+                                  "params": {}})
+                    ws.send_json({"id": 4, "method": "Page.reload",
+                                  "params": {"ignoreCache": False}})
+                except OSError:
+                    break
+                reload_sent[0] = True
+            if found_refresh:
+                break
+            # Storage-Poll (nur nach Reload bzw. ohne Reload-Zwang):
+            # die frisch rotierten Tokens landen im Seiten-Speicher.
+            if reload_sent[0] and time.time() - last_poll[0] >= 3:
+                try:
+                    _send_poll()
+                except OSError:
+                    break
             try:
                 message = ws.recv_json(timeout=max(1, deadline - time.time()))
             except OSError:
                 break  # tab closed / ws dropped
             method = str(message.get("method") or "")
-            params = message.get("params") or {}
-            if message.get("id") in (101, 5):  # getResponseBody /
-                continue                       # Anstoss-Evaluate (late)
+            mid = message.get("id")
+            if mid == 101:  # getResponseBody reply (late)
+                continue
+            if mid in eval_kinds:
+                _handle_eval_reply(message)
+                continue
             if method == "Network.requestWillBeSent":
                 hw = _hardware_from_headers(
                     ((message.get("params") or {}).get("request") or {})
@@ -944,6 +1055,7 @@ def await_token_response(ws_url, timeout=120, progress=None,
                 continue
             if method != "Fetch.requestPaused":
                 continue
+            params = message.get("params") or {}
             paused = params.get("requestId")
             request = params.get("request") or {}
             response = params.get("response") or {}
@@ -952,7 +1064,6 @@ def await_token_response(ws_url, timeout=120, progress=None,
             if status != 200 or "token" not in url:
                 ws.send_json({"id": 100, "method": "Fetch.continueRequest",
                               "params": {"requestId": paused}})
-                paused = None
                 continue
             # 200-er Token-Antwort: Body abgreifen, dann die Antwort an
             # den Reader durchreichen (er verbraucht sie ganz normal --
@@ -974,8 +1085,7 @@ def await_token_response(ws_url, timeout=120, progress=None,
             ws.send_json({"id": 102, "method": "Fetch.fulfillRequest",
                           "params": {"requestId": paused,
                                      "responseCode": status}})
-            paused = None
-            out = {"refresh": [], "hardware": []}
+            out = {"refresh": [], "hardware": list(seen_hw)}
             try:
                 payload = json.loads(body or "{}")
             except ValueError:
@@ -989,12 +1099,8 @@ def await_token_response(ws_url, timeout=120, progress=None,
                 if isinstance(hw, str) and hw:
                     out["hardware"].append(hw)
             if out["refresh"]:
-                for hw in seen_hw:
-                    if hw not in out["hardware"]:
-                        out["hardware"].append(hw)
                 return out
-            # Antwort ohne refresh_token (z. B. Password-Grant-Preheat):
-            # weiter lauschen, bis eine Token-Rotation kommt.
+            # Antwort ohne refresh_token: weiter lauschen.
     except OSError:
         pass
     finally:
@@ -1002,6 +1108,9 @@ def await_token_response(ws_url, timeout=120, progress=None,
             ws.close()
         except OSError:
             pass
+    if found_refresh:
+        return {"refresh": list(found_refresh),
+                "hardware": list(seen_hw)}
     return None
 
 

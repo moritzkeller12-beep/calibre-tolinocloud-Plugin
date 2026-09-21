@@ -2405,6 +2405,278 @@ class LiveGrabTests(unittest.TestCase):
         self.assertIsNone(_hardware_from_headers({"reseller-id": "8"}))
         self.assertIsNone(_hardware_from_headers({"hardware-id": "kurz"}))
 
+    def test_invalidate_expression_covers_json_blobs_and_key_names(self):
+        """Die Invalidierung erfasst auch JSON-Blobs (oidc.user:...),
+        deren access_token-EIGENSCHAFT ersetzt wird -- plus einfache
+        Key-Namen. Refresh-Tokens bleiben unberuehrt."""
+        from . import cdp as cdp_module
+        expr = cdp_module._INVALIDATE_ACCESS_TOKENS_EXPRESSION
+        self.assertIn("JSON.parse", expr)
+        self.assertIn("obj.access_token", expr)
+        self.assertIn("expires_at", expr)
+        self.assertIn("access[_-]?token", expr)
+        self.assertIn("localStorage", expr)
+        self.assertIn("sessionStorage", expr)
+        # Refresh-Tokens unberuehrt:
+        self.assertNotIn("refresh_token", expr.replace("access_token", ""))
+
+    def test_grab_live_refresh_excludes_already_rejected_candidates(self):
+        """Die beim Grab gelesenen (bereits abgelehnten) Kandidaten werden
+        als exclude_refresh an die Fangphase uebergeben -- sonst wuerde
+        das Storage-Polling dieselbe alte Kopie zurueckliefern."""
+        from .tolino import grab_live_refresh
+        stale = self._jwt(time.time() - 10, "sess-live")
+
+        class FailingClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = stale
+                self.hardware = hw
+
+            def _login(self):
+                raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
+
+        with patch("calibre_plugin.tolino.TolinoClient", FailingClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [stale], "hardware": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.await_token_response",
+                   return_value=None) as await_mock:
+            with self.assertRaises(TolinoAuthError):
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        kwargs = await_mock.call_args[1]
+        self.assertIn(stale, kwargs["exclude_refresh"])
+        self.assertTrue(kwargs["trigger_rotation"])
+        self.assertTrue(kwargs["reload_page"])
+
+    def test_await_token_response_clears_storage_when_invalidation_misses(self):
+        """Traf die Blob-Invalidierung nichts (Wert 0), wird der Storage
+        komplett geleert und DANACH erst neu geladen -- der Reader re-
+        authentifiziert sich still per SSO und schreibt frische Tokens."""
+        import threading
+        from . import cdp as cdp_module
+
+        ready = threading.Event()
+        bound = {}
+        order = []
+
+        def server():
+            import socket as socket_module
+            import struct as struct_module
+            srv = socket_module.socket()
+            srv.setsockopt(socket_module.SOL_SOCKET,
+                           socket_module.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(1)
+            bound["port"] = srv.getsockname()[1]
+            ready.set()
+            conn, _addr = srv.accept()
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                         b"Upgrade: websocket\r\n"
+                         b"Connection: Upgrade\r\n"
+                         b"Sec-WebSocket-Accept: x\r\n\r\n")
+
+            def read_exact(n):
+                data = b""
+                while len(data) < n:
+                    chunk = conn.recv(n - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                return data
+
+            def send_raw(body):
+                frame = bytearray([0x81])
+                if len(body) < 126:
+                    frame.append(len(body))
+                else:
+                    frame += bytes([126]) + struct_module.pack(
+                        ">H", len(body))
+                conn.sendall(bytes(frame) + body)
+
+            while True:
+                header = read_exact(2)
+                if len(header) < 2:
+                    break
+                length = header[1] & 0x7F
+                if length == 126:
+                    length = struct_module.unpack(
+                        ">H", read_exact(2))[0]
+                elif length == 127:
+                    length = struct_module.unpack(
+                        ">Q", read_exact(8))[0]
+                if header[1] & 0x80:
+                    mask = read_exact(4)
+                    payload = bytes(b ^ mask[i % 4] for i, b in
+                                    enumerate(read_exact(length)))
+                else:
+                    payload = read_exact(length)
+                try:
+                    message = json.loads(payload.decode())
+                except ValueError:
+                    continue
+                method = message.get("method")
+                expr = str((message.get("params") or {})
+                           .get("expression", ""))
+                if (method == "Runtime.evaluate"
+                        and "invalidated-by-calibre-plugin" in expr):
+                    order.append("invalidate")
+                    send_raw(json.dumps({
+                        "id": message["id"],
+                        "result": {"result": {"value": 0}}}).encode())
+                elif (method == "Runtime.evaluate"
+                        and "localStorage.clear" in expr):
+                    order.append("clear")
+                    send_raw(json.dumps({
+                        "id": message["id"],
+                        "result": {"result": {"value": 1}}}).encode())
+                elif message.get("id") == 4:  # Page.reload
+                    order.append("reload")
+                    send_raw(json.dumps({
+                        "method": "Network.requestWillBeSent",
+                        "params": {"request": {
+                            "url": "https://api.pageplace.de/v8/inventory",
+                            "headers": {
+                                "hardware-id":
+                                    "eb22e4cf-bb01-4550-bff7-334446bb20b1",
+                                "reseller-id": "8"}}}}).encode())
+                    send_raw(json.dumps({
+                        "method": "Fetch.requestPaused",
+                        "params": {
+                            "requestId": "r1",
+                            "request": {"url": "https://www.orellfuessli"
+                                        ".ch/auth/oauth2/token"},
+                            "response": {"status": 200}}}).encode())
+                    body = base64.b64encode(
+                        b'{"refresh_token": "fresh-after-clear-token-'
+                        b'with-enough-length"}').decode()
+                    send_raw(json.dumps({
+                        "id": 101, "result": {"body": body,
+                                              "base64Encoded": True},
+                    }).encode())
+            conn.close()
+
+        thread = threading.Thread(target=server, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(5))
+        result = cdp_module.await_token_response(
+            "ws://127.0.0.1:%d/devtools/page/x" % bound["port"],
+            timeout=15, reload_page=True, trigger_rotation=True)
+        # Reihenfolge: Invalidierung -> (0 Treffer) -> Clear -> Reload:
+        self.assertEqual(["invalidate", "clear", "reload"], order)
+        self.assertIsNotNone(result)
+        self.assertEqual(["fresh-after-clear-token-with-enough-length"],
+                         result["refresh"])
+        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"],
+                         result["hardware"])
+
+    def test_await_token_response_storage_poll_returns_new_token(self):
+        """Ohne abfangbare Token-Antwort (z. B. Service-Worker-Routing)
+        liefert das Storage-Polling die frisch rotierten Tokens."""
+        import threading
+        from . import cdp as cdp_module
+
+        ready = threading.Event()
+        bound = {}
+
+        def server():
+            import socket as socket_module
+            import struct as struct_module
+            srv = socket_module.socket()
+            srv.setsockopt(socket_module.SOL_SOCKET,
+                           socket_module.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(1)
+            bound["port"] = srv.getsockname()[1]
+            ready.set()
+            conn, _addr = srv.accept()
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                         b"Upgrade: websocket\r\n"
+                         b"Connection: Upgrade\r\n"
+                         b"Sec-WebSocket-Accept: x\r\n\r\n")
+
+            def read_exact(n):
+                data = b""
+                while len(data) < n:
+                    chunk = conn.recv(n - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                return data
+
+            def send_raw(body):
+                frame = bytearray([0x81])
+                if len(body) < 126:
+                    frame.append(len(body))
+                else:
+                    frame += bytes([126]) + struct_module.pack(
+                        ">H", len(body))
+                conn.sendall(bytes(frame) + body)
+
+            while True:
+                header = read_exact(2)
+                if len(header) < 2:
+                    break
+                length = header[1] & 0x7F
+                if length == 126:
+                    length = struct_module.unpack(
+                        ">H", read_exact(2))[0]
+                elif length == 127:
+                    length = struct_module.unpack(
+                        ">Q", read_exact(8))[0]
+                if header[1] & 0x80:
+                    mask = read_exact(4)
+                    payload = bytes(b ^ mask[i % 4] for i, b in
+                                    enumerate(read_exact(length)))
+                else:
+                    payload = read_exact(length)
+                try:
+                    message = json.loads(payload.decode())
+                except ValueError:
+                    continue
+                mid = message.get("id")
+                method = message.get("method")
+                if (method == "Runtime.evaluate"
+                        and "invalidated-by-calibre-plugin" in str(
+                            (message.get("params") or {})
+                            .get("expression", ""))):
+                    send_raw(json.dumps({
+                        "id": mid,
+                        "result": {"result": {"value": 2}}}).encode())
+                elif mid == 4:  # Page.reload bestätigt
+                    send_raw(json.dumps({
+                        "method": "Network.requestWillBeSent",
+                        "params": {"request": {
+                            "url": "https://api.pageplace.de/v8/inventory",
+                            "headers": {"hardware-id":
+                                        "eb22e4cf-bb01-4550-bff7-"
+                                        "334446bb20b1"}}}}).encode())
+                elif isinstance(mid, int) and mid >= 200:  # Storage-Poll
+                    send_raw(json.dumps({
+                        "id": mid,
+                        "result": {"result": {"value": {
+                            "refresh":
+                                ["caught-via-storage-poll-new-token-xyz"],
+                            "hardware":
+                                ["eb22e4cf-bb01-4550-bff7-334446bb20b1"],
+                        }}}}).encode())
+            conn.close()
+
+        thread = threading.Thread(target=server, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(5))
+        result = cdp_module.await_token_response(
+            "ws://127.0.0.1:%d/devtools/page/x" % bound["port"],
+            timeout=15, reload_page=True, trigger_rotation=True,
+            exclude_refresh=["old-rejected-copy-not-returned-again"])
+        self.assertIsNotNone(result)
+        self.assertEqual(["caught-via-storage-poll-new-token-xyz"],
+                         result["refresh"])
+        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"],
+                         result["hardware"])
+
     def test_force_reader_token_rotation_invalidates_access_tokens(self):
         """Der In-Page-Snippet schreibt nur Access-Tokens tot; Erfolg,
         Misserfolg und Null-Treffer werden korrekt ausgewertet."""
@@ -2898,7 +3170,8 @@ class LiveGrabTests(unittest.TestCase):
         calls = []
 
         def fake_await(ws_url, timeout=120, progress=None,
-                       reload_page=False, trigger_rotation=False):
+                       reload_page=False, trigger_rotation=False,
+                       exclude_refresh=None):
             calls.append((reload_page, trigger_rotation))
             self.assertTrue(reload_page)
             self.assertTrue(trigger_rotation)

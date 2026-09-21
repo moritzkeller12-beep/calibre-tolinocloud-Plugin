@@ -2321,7 +2321,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     # id-Header liefern zudem die Geraete-ID der AKTUELLEN Sitzung.
     ws_url = cdp_module.reader_ws_url()
     caught = cdp_module.await_token_response(
-        ws_url, timeout=180, trigger_rotation=True, reload_page=True)
+        ws_url, timeout=180, trigger_rotation=True, reload_page=True,
+        exclude_refresh=list(grabbed.get("refresh") or []))
     if not caught or not (caught.get("refresh") or []):
         raise TolinoAuthError(
             "Im Web Reader wurde weder ein frischer Token im Seiten-"
@@ -2373,7 +2374,8 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
     # meist Sekunden.
     caught = cdp_module.await_token_response(
         cdp_module.reader_ws_url(), timeout=60, trigger_rotation=True,
-        reload_page=True)
+        reload_page=True,
+        exclude_refresh=list((grabbed or {}).get("refresh") or []))
     if caught and (caught.get("refresh") or []):
         return _exchange_grabbed_token(partner_id, hardware, caught,
                                        caught.get("refresh") or [])
