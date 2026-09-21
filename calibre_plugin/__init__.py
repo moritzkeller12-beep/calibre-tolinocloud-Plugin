@@ -7,7 +7,7 @@ except ImportError:  # Allows deterministic helper tests outside a Calibre insta
 class TolinoSyncPlugin(InterfaceActionBase):
     name = "Tolino Cloud Sync"
     description = "Synchronize the Calibre library with Tolino Cloud"
-    version = (0, 9, 20)
+    version = (0, 9, 21)
     author = "moritzkeller12-beep"
     type = "InterfaceAction"
     supported_platforms = ["linux", "windows", "osx"]

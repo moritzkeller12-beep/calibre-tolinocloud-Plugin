@@ -2184,6 +2184,42 @@ def _filter_live_candidates(candidates, max_age_seconds=1800):
     return kept
 
 
+def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
+    """Exchange the freshest grabbed candidate; returns (refresh, hardware).
+
+    Split out of ``grab_live_refresh`` so the UI's one-shot live grab can
+    reuse exactly the same endpoint logic (typ-preferring candidate
+    order, single exchange, no replay of the remaining candidates).
+    """
+    # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sind
+    # kurzlebig und haben denselben JWT-Aufbau -- ein Access-Token am
+    # Token-Endpunkt "zu verbrauchen" hilft niemandem und der eigentliche
+    # Refresh-Token wird dann womoeglich gar nicht erst probiert.
+    def _is_refresh_typ(token):
+        payload = _jwt_payload(token) or {}
+        return str(payload.get("typ", "")).casefold() == "refresh"
+
+    ordered = sorted(fresh, key=_refresh_token_iat_sort_key, reverse=True)
+    ordered.sort(key=lambda token: 0 if _is_refresh_typ(token) else 1)
+    candidate = ordered[0]
+    hardware_candidates = [normalize_hardware_id(value)
+                           for value in (grabbed.get("hardware") or ())]
+    hardware_candidates = [value for value in hardware_candidates if value]
+    hardware_id = hardware_candidates[0] if hardware_candidates else hardware
+    client = TolinoClient(partner_id, hardware_id or "")
+    client.refresh = candidate
+    try:
+        client._login()
+    except TolinoAuthError as exc:
+        # The exchange consumed one grant; a retry would only replay.
+        raise TolinoAuthError(
+            "Der live gelesene Token wurde am Token-Endpunkt abgelehnt "
+            "(%s). Bitte die Browser-Anmeldung erneut starten -- dabei "
+            "wird der aktuelle Token direkt aus dem ge\u00f6ffneten Web "
+            "Reader frisch gelesen." % exc) from exc
+    return client.refresh or candidate, client.hardware or hardware_id
+
+
 def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     """Read the Web Reader's CURRENT token via a private CDP window.
 
@@ -2210,45 +2246,50 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             "alle gelesenen Kandidaten waren aelter als 30 Minuten. Bitte "
             "im Anmeldefenster neu anmelden (Buecherliste laden) und es "
             "direkt danach erneut versuchen.")
-    fresh.sort(key=_refresh_token_iat_sort_key, reverse=True)
-    hardware_candidates = [normalize_hardware_id(value)
-                           for value in (grabbed.get("hardware") or ())]
-    hardware_candidates = [value for value in hardware_candidates if value]
-    hardware_id = hardware_candidates[0] if hardware_candidates else hardware
-    candidate = fresh[0]
-    client = TolinoClient(partner_id, hardware_id or "")
-    client.refresh = candidate
-    try:
-        client._login()
-    except TolinoAuthError as exc:
-        # The exchange consumed one grant; a retry would only replay.
-        raise TolinoAuthError(
-            "Der live gelesene Token wurde am Token-Endpunkt abgelehnt "
-            "(%s). Bitte die Browser-Anmeldung erneut starten -- dabei "
-            "wird der aktuelle Token direkt aus dem ge\u00f6ffneten Web "
-            "Reader frisch gelesen." % exc) from exc
-    return client.refresh or candidate, client.hardware or hardware_id
+    return _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
 
 
-def try_live_grab_first(partner_id, hardware, timeout=300, progress=None):
+def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
     """Read the current token from a running grabber window, if any.
 
-    Returns (refresh, hardware) when the DevTools endpoint of the
-    "Im Browser anmelden" window answers AND a fresh token could be read
-    and exchanged. Returns None when no grabber window is running -- the
-    caller should then use the historical disk-scrape flow.
+    ONE in-page read + at most one endpoint exchange -- no polling loop.
+    The extract button runs on the Calibre GUI thread; blocking it for
+    minutes (the earlier polling version) froze Calibre until the OS
+    killed the session (the "Failed to contact running instance" startup
+    error afterwards).
+
+    Returns (refresh, hardware) when a grabber window is alive AND its
+    page yielded an exchangeable token. Returns None when no grabber
+    window is running -- the caller should then use the historical
+    disk-scrape flow.
 
     A window that IS running but yields no exchangeable token raises
-    TolinoAuthError: silently scraping the disks instead would replay
-    stale storage copies against a session that is open right there in
-    the window -- the exact reuse-protection trap this whole flow
-    exists to avoid.
+    TolinoAuthError (with a redacted page-state summary): silently
+    scraping the disks instead would replay stale storage copies against
+    a session that is open right there in the window -- the exact
+    reuse-protection trap this whole flow exists to avoid.
     """
     from . import cdp as cdp_module
     if not cdp_module.devtools_port_alive():
         return None
-    return grab_live_refresh(partner_id, hardware, timeout=timeout,
-                             progress=progress)
+    grabbed = cdp_module.grab_once_from_grabber(timeout=timeout)
+    state = cdp_module.describe_grab_state(timeout=timeout)
+    if not grabbed or not (grabbed.get("refresh") or []):
+        raise TolinoAuthError(
+            "Im offenen Anmeldefenster wurde kein aktueller Refresh-"
+            "Token gefunden (%s). Bist du dort im WEB READER (B\u00fccher"
+            "liste sichtbar) angemeldet? Lade die Seite einmal neu (F5) "
+            "und dr\u00fccke diesen Knopf direkt danach erneut -- oder "
+            "schlie\u00dfe das Fenster und alle anderen Browser-Fenster, "
+            "um stattdessen die Festplatten-Kopien zu pr\u00fcfen." % state)
+    fresh = _filter_live_candidates(grabbed.get("refresh") or [])
+    if not fresh:
+        raise TolinoAuthError(
+            "Alle im Anmeldefenster gelesenen Kandidaten waren \u00e4lter "
+            "als 30 Minuten (%s). Bitte im Fenster einmal neu anmelden "
+            "(F5 gen\u00fcgt oft) und den Knopf direkt danach erneut "
+            "dr\u00fccken." % state)
+    return _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
 
 
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):

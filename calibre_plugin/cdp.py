@@ -336,55 +336,163 @@ def _ws_path_to_host_port(path):
 #   - klassische localStorage/IndexedDB-ähnliche Keys (refresh_token, t_auth)
 _GRAB_SNIPPET = r"""
 (function () {
-  var out = {refresh: [], hardware: []};
+  var out = {refresh: [], hardware: [], idb: []};
   function push(val, bucket) {
-    if (typeof val === 'string' && val.length > 20 && out[bucket].indexOf(val) < 0) {
+    if (typeof val === 'string' && val.length > 20 &&
+        out[bucket].indexOf(val) < 0) {
       out[bucket].push(val);
     }
   }
-  function fromObj(obj) {
-    if (!obj || typeof obj !== 'object') return;
-    var r = obj.refresh_token || obj.refreshToken || obj['refresh-token']
-      || obj.t_auth_token || (obj.credential && obj.credential.refresh_token);
-    if (typeof r === 'string') push(r, 'refresh');
-    var h = obj.hardware_id || obj.hardwareId || obj.device_id
-      || obj.deviceId || obj.hardwareId;
-    if (typeof h === 'string') push(h, 'hardware');
-  }
-  try {
-    for (var i = 0; i < localStorage.length; i++) {
-      var k = localStorage.key(i);
-      var v = localStorage.getItem(k);
-      if (!v) continue;
-      fromObj(tryParse(v));
-      if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(v)) {
-        push(v, 'refresh');
-      }
-      if (/^[0-9a-fA-F-]{8,}$/.test(v) && /hardware|device/i.test(k)) {
-        push(v, 'hardware');
-      }
-    }
-  } catch (e) {}
-  try {
-    for (var i = 0; i < sessionStorage.length; i++) {
-      var k = sessionStorage.key(i);
-      fromObj(tryParse(sessionStorage.getItem(k)));
-    }
-  } catch (e) {}
-  try {
-    if (window.indexedDB && indexedDB.databases) {
-      indexedDB.databases().then(function (dbs) {
-        // IndexedDB-Inhalt wird vom Grabber nicht synchron gelesen; der
-        // oidc.user-Blob im localStorage enthält bei Keycloak-Partnern
-        // den aktuellen Token bereits vollständig.
-      });
-    }
-  } catch (e) {}
   function tryParse(text) {
     try { return JSON.parse(text); } catch (e) { return null; }
   }
-  return JSON.stringify(out);
+  function walk(value, depth, seen) {
+    if (!value || depth > 6) return;
+    if (typeof value === 'string') {
+      // JWT-Form: drei base64url-Teile. Der Refresh-Token ist ein JWT
+      // mit typ "Refresh"; Access-Tokens sind kurzlebiger und werden
+      // vom Grabber spaeter depriorisiert, nicht ausgefiltert.
+      if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
+        push(value, 'refresh');
+      }
+      return;
+    }
+    if (typeof value !== 'object') return;
+    if (seen.indexOf(value) >= 0) return;
+    seen.push(value);
+    for (var key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      var v = value[key];
+      if (typeof v === 'string') {
+        if (/refresh/i.test(key)) walk(v, depth + 1, seen);
+        if (/hardware|device/i.test(key) &&
+            /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
+        var parsed = tryParse(v);
+        if (parsed) walk(parsed, depth + 1, seen);
+      } else if (v && typeof v === 'object') {
+        walk(v, depth + 1, seen);
+      }
+    }
+  }
+  function scanStore(store) {
+    if (!store) return;
+    try {
+      for (var i = 0; i < store.length; i++) {
+        var value = store.getItem(store.key(i));
+        if (value) walk(value, 0, []);
+      }
+    } catch (e) {}
+  }
+  scanStore(localStorage);
+  scanStore(sessionStorage);
+  // Der keycloak-js/oidc-Client des Readers legt Tokensets haeufig in
+  // IndexedDB ab -- der Inhalt wird per zweitem CDP-Aufruf gelesen,
+  // hier genuegt die Datenbankliste (Promise + awaitPromise=True).
+  return new Promise(function (resolve) {
+    var settled = false;
+    function finish() {
+      if (!settled) { settled = true; resolve(JSON.stringify(out)); }
+    }
+    try {
+      if (window.indexedDB && indexedDB.databases) {
+        indexedDB.databases().then(function (dbs) {
+          for (var i = 0; i < dbs.length; i++) {
+            if (dbs[i] && dbs[i].name) out.idb.push(String(dbs[i].name));
+          }
+          finish();
+        }, finish);
+        setTimeout(finish, 800);
+        return;
+      }
+    } catch (e) {}
+    finish();
+  });
 })()
+"""
+
+
+# Liest Token-/Hardware-Werte aus allen Object-Stores einer IndexedDB.
+# Der keycloak-js/oidc-Client des Web Readers legt sein Token-Set (mit dem
+# AKTUELLEN Refresh-Token) haeufig hier ab statt im localStorage -- genau
+# deshalb fand der vorherige Grab bei angemeldetem Fenster nichts.
+_IDB_SNIPPET = r"""
+(function (dbname) {
+  return new Promise(function (resolve) {
+    var out = {refresh: [], hardware: []};
+    function push(val, bucket) {
+      if (typeof val === 'string' && val.length > 20 &&
+          out[bucket].indexOf(val) < 0) {
+        out[bucket].push(val);
+      }
+    }
+    function tryParse(text) {
+      try { return JSON.parse(text); } catch (e) { return null; }
+    }
+    function walk(value, depth, seen) {
+      if (!value || depth > 6) return;
+      if (typeof value === 'string') {
+        if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
+          push(value, 'refresh');
+        }
+        return;
+      }
+      if (typeof value !== 'object') return;
+      if (seen.indexOf(value) >= 0) return;
+      seen.push(value);
+      for (var key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        var v = value[key];
+        if (typeof v === 'string') {
+          if (/refresh/i.test(key)) push(v, 'refresh');
+          if (/hardware|device/i.test(key) &&
+              /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
+          var parsed = tryParse(v);
+          if (parsed) walk(parsed, depth + 1, seen);
+        } else if (v && typeof v === 'object') {
+          walk(v, depth + 1, seen);
+        }
+      }
+    }
+    var settled = false;
+    function finish() {
+      if (!settled) { settled = true; resolve(JSON.stringify(out)); }
+    }
+    setTimeout(finish, 3000);
+    try {
+      var open = indexedDB.open(dbname);
+      open.onsuccess = function (event) {
+        var db = event.target.result;
+        var names = [];
+        for (var i = 0; i < (db.objectStoreNames || []).length; i++) {
+          names.push(db.objectStoreNames[i]);
+        }
+        var remaining = names.length;
+        if (!remaining) { db.close(); finish(); return; }
+        names.forEach(function (storeName) {
+          try {
+            var tx = db.transaction(storeName, 'readonly');
+            var req = tx.objectStore(storeName).getAll();
+            req.onsuccess = function () {
+              (req.result || []).forEach(function (entry) {
+                walk(entry, 0, []);
+              });
+              remaining -= 1;
+              if (remaining <= 0) { db.close(); finish(); }
+            };
+            req.onerror = function () {
+              remaining -= 1;
+              if (remaining <= 0) { db.close(); finish(); }
+            };
+          } catch (e) {
+            remaining -= 1;
+            if (remaining <= 0) { finish(); }
+          }
+        });
+      };
+      open.onerror = function () { finish(); };
+    } catch (e) { finish(); }
+  });
+})('%s')
 """
 
 
@@ -407,15 +515,21 @@ def grab_from_existing_reader(port=9222, timeout=15):
             ws_url = str(target.get("webSocketDebuggerUrl") or "")
             if not ws_url.startswith("ws://"):
                 continue
-            result = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout)
+            result = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
+                                         await_promise=True)
             if result:
                 return result
         time.sleep(0.5)
     return {"refresh": [], "hardware": []}
 
 
-def _evaluate_in_target(ws_url, expression, timeout=10):
-    """Run a JS expression in a DevTools page target, return its JSON value."""
+def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
+    """Run a JS expression in a DevTools page target, return its JSON value.
+
+    ``await_promise=True`` makes CDP resolve a Promise returned by the
+    expression -- the grab snippet returns one while it enumerates
+    IndexedDB databases (keycloak-js stores the token set there).
+    """
     try:
         path = ws_url[len("ws://"):]
         host, port, ws_path = _ws_path_to_host_port(path)
@@ -425,6 +539,7 @@ def _evaluate_in_target(ws_url, expression, timeout=10):
     try:
         ws.send_json({"id": 1, "method": "Runtime.evaluate", "params": {
             "expression": expression, "returnByValue": True,
+            "awaitPromise": bool(await_promise),
         }})
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -445,6 +560,8 @@ def _evaluate_in_target(ws_url, expression, timeout=10):
                                 if isinstance(t, str)],
                     "hardware": [t for t in parsed.get("hardware", [])
                                  if isinstance(t, str)],
+                    "idb": [t for t in parsed.get("idb", [])
+                            if isinstance(t, str)],
                 }
             return None
         return None
@@ -508,6 +625,77 @@ def launch_reader_window(partner_id):
         "Chromium-Fenster und versuche es erneut." % port)
 
 
+def read_idb_tokens(ws_url, db_names, timeout=10):
+    """Walk every IndexedDB database's object stores for token values.
+
+    Returns the merged ``{"refresh": [...], "hardware": [...]}`` dict;
+    databases that fail to open are skipped (the localStorage/session
+    scan already ran in the main grab).
+    """
+    merged = {"refresh": [], "hardware": []}
+    for name in db_names or []:
+        if not name or not str(name).strip():
+            continue
+        expression = _IDB_SNIPPET % str(name).replace("'", "\\'")
+        result = _evaluate_in_target(ws_url, expression, timeout,
+                                     await_promise=True)
+        if not result:
+            continue
+        for bucket in ("refresh", "hardware"):
+            for value in result.get(bucket) or []:
+                if value not in merged[bucket]:
+                    merged[bucket].append(value)
+    return merged
+
+
+def grab_once_from_grabber(port=None, timeout=12):
+    """ONE grab attempt against the running grabber window (no polling).
+
+    Returns the grabbed dict (refresh/hardware/idb lists, possibly empty)
+    or None when no reader tab exists. Used by the extract button so the
+    Calibre GUI never blocks for minutes waiting for a sign-in that may
+    not happen -- the user just clicks the button again after signing in.
+    """
+    port = port or _start_port()
+    targets = _http_get_json("http://127.0.0.1:%d/json/list" % port) or []
+    for target in targets:
+        if target.get("type") != "page":
+            continue
+        if "mytolino.com" not in str(target.get("url") or ""):
+            continue
+        ws_url = str(target.get("webSocketDebuggerUrl") or "")
+        if not ws_url.startswith("ws://"):
+            continue
+        grabbed = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
+                                      await_promise=True) or \
+            {"refresh": [], "hardware": [], "idb": []}
+        idb_names = grabbed.pop("idb", []) or []
+        if idb_names:
+            idb_tokens = read_idb_tokens(ws_url, idb_names, timeout)
+            for bucket in ("refresh", "hardware"):
+                for value in idb_tokens.get(bucket) or []:
+                    if value not in grabbed[bucket]:
+                        grabbed[bucket].append(value)
+        return grabbed
+    return None
+
+
+def describe_grab_state(port=None, timeout=12):
+    """Short diagnostic: reader tab present? any token values visible?
+
+    Redacted by construction -- only counts and store names, never
+    token values.
+    """
+    grabbed = grab_once_from_grabber(port, timeout)
+    if grabbed is None:
+        return "kein Web-Reader-Tab im Anmeldefenster offen"
+    return ("%d Refresh-Kandidat(en), %d Hardware-Kandidat(en) live in der "
+            "Seite (IndexedDB-Datenbanken: %s)" % (
+                len(grabbed.get("refresh") or []),
+                len(grabbed.get("hardware") or []),
+                ", ".join(sorted(set(grabbed.get("idb") or []))) or "keine"))
+
+
 def collect_grab(partner_id, port, timeout=180, progress=None):
     """Poll the grabber window until the reader exposes the current token.
 
@@ -541,7 +729,8 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
         target_seen = True
         ws_url = str(reader.get("webSocketDebuggerUrl") or "")
         if ws_url.startswith("ws://"):
-            result = _evaluate_in_target(ws_url, _GRAB_SNIPPET, 10)
+            result = _evaluate_in_target(ws_url, _GRAB_SNIPPET, 10,
+                                         await_promise=True)
             if result and result.get("refresh"):
                 return result
             if progress:
@@ -570,3 +759,6 @@ def grab_live_tokens(partner_id, hardware, timeout=300, progress=None):
         progress("Aktueller Token aus dem Web Reader gelesen -- werde "
                  "ihn jetzt am Token-Endpunkt tauschen ...")
     return grabbed
+
+
+

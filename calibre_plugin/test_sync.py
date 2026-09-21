@@ -2482,15 +2482,28 @@ class LiveGrabTests(unittest.TestCase):
             self.assertIsNone(try_live_grab_first(4, "hw"))
 
     def test_try_live_grab_first_grabs_when_window_alive(self):
-        """Laufendes Fenster -> Live-Grab-Ergebnis direkt durchgereicht."""
+        """Laufendes Fenster -> EIN Seiten-Lesen, EIN Tausch, Ergebnis."""
         from .tolino import try_live_grab_first
+        fresh = self._jwt(time.time() - 5, "sess-live")
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = fresh
+                self.hardware = "hw-from-grab"
+
+            def _login(self):
+                self.refresh = "rotated-token"
+
         with patch("calibre_plugin.cdp.devtools_port_alive",
                    return_value=True), \
-             patch("calibre_plugin.tolino.grab_live_refresh",
-                   return_value=("rotated", "hw-live")) as grab:
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value={"refresh": [fresh], "hardware": ["hw-live"],
+                                 "idb": []}), \
+             patch("calibre_plugin.cdp.describe_grab_state",
+                   return_value="ok"), \
+             patch("calibre_plugin.tolino.TolinoClient", FakeClient):
             result = try_live_grab_first(4, "hw")
-        self.assertEqual(("rotated", "hw-live"), result)
-        grab.assert_called_once_with(4, "hw", timeout=300, progress=None)
+        self.assertEqual(("rotated-token", "hw-from-grab"), result)
 
     def test_try_live_grab_first_raises_when_window_dead_yields_nothing(self):
         """Fenster lebt, liefert aber nichts -> Fehler statt Disk-Scrape.
@@ -2502,10 +2515,57 @@ class LiveGrabTests(unittest.TestCase):
         from .tolino import try_live_grab_first
         with patch("calibre_plugin.cdp.devtools_port_alive",
                    return_value=True), \
-             patch("calibre_plugin.tolino.grab_live_refresh",
-                   side_effect=TolinoAuthError("Timeout im Anmeldefenster")):
-            with self.assertRaises(TolinoAuthError):
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value={"refresh": [], "hardware": [], "idb": []}), \
+             patch("calibre_plugin.cdp.describe_grab_state",
+                   return_value="0 Refresh-Kandidat(en)"):
+            with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
+        self.assertIn("WEB READER", str(ctx.exception))
+
+    def test_exchange_prefers_refresh_typ_over_newer_access_token(self):
+        """Access-JWTs (kurzlebig) werden nicht vor dem Refresh-JWT
+        verbraten, auch wenn ihr iat neuer ist."""
+        from .tolino import _exchange_grabbed_token
+        now = time.time()
+        access = self._jwt(now - 2, "sess-live")
+        # Access-Variante: gleicher Aufbau, aber typ nicht "Refresh"
+        head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+        body = base64.urlsafe_b64encode(json.dumps(
+            {"iat": int(now - 2), "typ": "Bearer"}).encode())
+        access = "%s.%s.sig" % (head.decode().rstrip("="),
+                                body.decode().rstrip("="))
+        refresh = self._jwt(now - 30, "sess-live")
+        logins = []
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                logins.append(self.refresh)
+                self.refresh = "rotated"
+
+        grabbed = {"refresh": [access, refresh], "hardware": []}
+        with patch("calibre_plugin.tolino.TolinoClient", FakeClient):
+            result = _exchange_grabbed_token(4, "hw", grabbed,
+                                             [access, refresh])
+        self.assertEqual([refresh], logins)
+        self.assertEqual("rotated", result[0])
+
+    def test_try_live_grab_first_error_includes_page_state(self):
+        """Fehlermeldung enthaelt die redigierte Seiten-Zusammenfassung."""
+        from .tolino import try_live_grab_first
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=True), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value=None), \
+             patch("calibre_plugin.cdp.describe_grab_state",
+                   return_value="kein Web-Reader-Tab"):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                try_live_grab_first(4, "hw")
+        self.assertIn("kein Web-Reader-Tab", str(ctx.exception))
 
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht

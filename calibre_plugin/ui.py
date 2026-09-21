@@ -706,8 +706,7 @@ class SyncDashboard(QDialog):
             # live read first; scrape the disks only when no grabber
             # window is running.
             grabbed = try_live_grab_first(
-                self.partner.currentData(), self.hardware.text().strip(),
-                timeout=60)
+                self.partner.currentData(), self.hardware.text().strip())
             if grabbed:
                 refresh_token, hardware_id_value = grabbed
                 if hardware_id_value:
