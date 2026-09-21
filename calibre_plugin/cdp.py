@@ -680,6 +680,117 @@ def grab_once_from_grabber(port=None, timeout=12):
     return None
 
 
+def reader_ws_url(port=None):
+    """WebSocket-Debugger-URL des ersten mytolino-Reader-Tabs (oder None)."""
+    port = port or _start_port()
+    targets = _http_get_json("http://127.0.0.1:%d/json/list" % port) or []
+    for target in targets:
+        if target.get("type") != "page":
+            continue
+        if "mytolino.com" not in str(target.get("url") or ""):
+            continue
+        ws_url = str(target.get("webSocketDebuggerUrl") or "")
+        if ws_url.startswith("ws://"):
+            return ws_url
+    return None
+
+
+def await_token_response(ws_url, timeout=120, progress=None):
+    """Catch a FRESH refresh_token out of the reader's own token response.
+
+    Enables CDP Fetch interception on the reader tab and waits for the
+    next POST to the OAuth token endpoint; the response body is parsed
+    and its refresh_token (plus any hardware fields) returned. This is
+    the one token guaranteed unused: it is the response the reader is
+    about to consume itself.
+
+    Returns ``{"refresh": [...], "hardware": [...]}`` or None when the
+    reader tab goes away before a token response was caught.
+    """
+    if not ws_url or not str(ws_url).startswith("ws://"):
+        return None
+    try:
+        path = ws_url[len("ws://"):]
+        host, port, ws_path = _ws_path_to_host_port(path)
+        ws = _Ws.connect(host, port, ws_path, timeout=10)
+    except (OSError, ValueError):
+        return None
+    deadline = time.time() + max(15, timeout)
+    paused = None
+    try:
+        ws.send_json({"id": 1, "method": "Fetch.enable", "params": {
+            "patterns": [{"urlPattern": "*token*", "requestStage":
+                          "Response"}],
+        }})
+        while time.time() < deadline:
+            try:
+                message = ws.recv_json(timeout=max(1, deadline - time.time()))
+            except OSError:
+                break  # tab closed / ws dropped
+            method = str(message.get("method") or "")
+            params = message.get("params") or {}
+            if message.get("id") == 101:  # getResponseBody reply (late)
+                continue
+            if method != "Fetch.requestPaused":
+                continue
+            paused = params.get("requestId")
+            request = params.get("request") or {}
+            response = params.get("response") or {}
+            status = int(response.get("status") or 0)
+            url = str(request.get("url") or "")
+            if status != 200 or "token" not in url:
+                ws.send_json({"id": 100, "method": "Fetch.continueRequest",
+                              "params": {"requestId": paused}})
+                paused = None
+                continue
+            # 200-er Token-Antwort: Body abgreifen, dann die Antwort an
+            # den Reader durchreichen (er verbraucht sie ganz normal --
+            # wir sind nur stiller Mitleser).
+            ws.send_json({"id": 101, "method": "Fetch.getResponseBody",
+                          "params": {"requestId": paused}})
+            body, encoded = "", False
+            inner_deadline = time.time() + 8
+            while time.time() < inner_deadline:
+                reply = ws.recv_json(timeout=max(1, inner_deadline -
+                                                time.time()))
+                if reply.get("id") == 101:
+                    result = reply.get("result") or {}
+                    body = result.get("body") or ""
+                    encoded = bool(result.get("base64Encoded"))
+                    break
+            if encoded and body:
+                body = base64.b64decode(body).decode("utf-8", "replace")
+            ws.send_json({"id": 102, "method": "Fetch.fulfillRequest",
+                          "params": {"requestId": paused,
+                                     "responseCode": status}})
+            paused = None
+            out = {"refresh": [], "hardware": []}
+            try:
+                payload = json.loads(body or "{}")
+            except ValueError:
+                payload = {}
+            if isinstance(payload, dict):
+                refresh = payload.get("refresh_token")
+                if isinstance(refresh, str) and len(refresh) > 20:
+                    out["refresh"].append(refresh)
+                hw = (payload.get("hardware_id")
+                      or payload.get("hardwareId"))
+                if isinstance(hw, str) and hw:
+                    out["hardware"].append(hw)
+            if out["refresh"]:
+                return out
+            # Antwort ohne refresh_token (z. B. Password-Grant-Preheat):
+            # weiter lauschen, bis eine Token-Rotation kommt.
+    except OSError:
+        pass
+    finally:
+        try:
+            ws.close()
+        except OSError:
+            pass
+    return None
+
+
 def describe_grab_state(port=None, timeout=12):
     """Short diagnostic: reader tab present? any token values visible?
 

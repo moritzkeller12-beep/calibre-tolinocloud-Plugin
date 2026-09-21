@@ -2240,13 +2240,26 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     grabbed = cdp_module.grab_live_tokens(partner_id, hardware,
                                           timeout=timeout, progress=progress)
     fresh = _filter_live_candidates(grabbed.get("refresh") or [])
-    if not fresh:
+    if fresh:
+        return _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
+    # Storage-Grab leer (oder nur alte Kopien): auf die Netzwerk-
+    # Interception ausweichen. Die naechste Token-Rotation des Readers
+    # wird abgefangen, BEVOR der Reader sie selbst verbraucht -- dieser
+    # Token ist garantiert ungenutzt, egal was im Storage liegt.
+    if progress:
+        progress("Kein frischer Token im Seiten-Speicher -- lausche auf "
+                 "die naechste Token-Rotation des Readers (bis zu 3 "
+                 "Minuten; einfach im Fenster angemeldet bleiben) ...")
+    ws_url = cdp_module.reader_ws_url()
+    caught = cdp_module.await_token_response(ws_url, timeout=180)
+    if not caught or not (caught.get("refresh") or []):
         raise TolinoAuthError(
-            "Im Web Reader wurde kein aktueller Refresh-Token gefunden: "
-            "alle gelesenen Kandidaten waren aelter als 30 Minuten. Bitte "
-            "im Anmeldefenster neu anmelden (Buecherliste laden) und es "
-            "direkt danach erneut versuchen.")
-    return _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
+            "Im Web Reader wurde weder ein frischer Token im Seiten-"
+            "Speicher gefunden noch eine Token-Rotation abgefangen. "
+            "Bitte im Anmeldefenster einmal neu anmelden (F5, Buecher-"
+            "liste laden) und die Browser-Anmeldung erneut starten.")
+    return _exchange_grabbed_token(partner_id, hardware, caught,
+                                   caught.get("refresh") or [])
 
 
 def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
@@ -2274,22 +2287,26 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
         return None
     grabbed = cdp_module.grab_once_from_grabber(timeout=timeout)
     state = cdp_module.describe_grab_state(timeout=timeout)
-    if not grabbed or not (grabbed.get("refresh") or []):
-        raise TolinoAuthError(
-            "Im offenen Anmeldefenster wurde kein aktueller Refresh-"
-            "Token gefunden (%s). Bist du dort im WEB READER (B\u00fccher"
-            "liste sichtbar) angemeldet? Lade die Seite einmal neu (F5) "
-            "und dr\u00fccke diesen Knopf direkt danach erneut -- oder "
-            "schlie\u00dfe das Fenster und alle anderen Browser-Fenster, "
-            "um stattdessen die Festplatten-Kopien zu pr\u00fcfen." % state)
-    fresh = _filter_live_candidates(grabbed.get("refresh") or [])
-    if not fresh:
-        raise TolinoAuthError(
-            "Alle im Anmeldefenster gelesenen Kandidaten waren \u00e4lter "
-            "als 30 Minuten (%s). Bitte im Fenster einmal neu anmelden "
-            "(F5 gen\u00fcgt oft) und den Knopf direkt danach erneut "
-            "dr\u00fccken." % state)
-    return _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
+    fresh = _filter_live_candidates((grabbed or {}).get("refresh") or [])
+    if fresh:
+        return _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
+    # Weder frische noch ueberhaupt Kandidaten im Seiten-Speicher: eine
+    # kurze Netzwerk-Lauschphase (bis zu 60 s) -- die naechste Rotation
+    # des Readers liefert den garantiert ungenutzten Token. Danach erst
+    # scheitern.
+    # Nur alte/keine Storage-Kopien: eine kurze Netzwerk-Lauschphase
+    # (bis zu 60 s) -- die naechste Rotation des Readers liefert den
+    # garantiert ungenutzten Token. Danach erst scheitern.
+    caught = cdp_module.await_token_response(cdp_module.reader_ws_url(),
+                                             timeout=60)
+    if caught and (caught.get("refresh") or []):
+        return _exchange_grabbed_token(partner_id, hardware, caught,
+                                       caught.get("refresh") or [])
+    raise TolinoAuthError(
+        "Alle im Anmeldefenster gelesenen Kandidaten waren \u00e4lter "
+        "als 30 Minuten und keine frische Rotation wurde abgefangen "
+        "(%s). Bitte im Fenster einmal neu anmelden (F5 gen\u00fcgt "
+        "oft) und den Knopf direkt danach erneut dr\u00fccken." % state)
 
 
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):

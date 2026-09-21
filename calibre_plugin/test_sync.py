@@ -2310,14 +2310,19 @@ class LiveGrabTests(unittest.TestCase):
         self.assertEqual([fresh], logins)
 
     def test_grab_live_refresh_rejects_only_stale_candidates(self):
-        """Nur veraltete Kandidaten => klare Fehlermeldung statt Replay."""
+        """Nur veraltete Kandidaten => Netzwerk-Lauschphase (leer) =>
+        klare Fehlermeldung statt Replay."""
         from .tolino import grab_live_refresh
         stale = self._jwt(time.time() - 7200, "sess-old")  # 2 h alt
         with patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [stale], "hardware": []}):
+                   return_value={"refresh": [stale], "hardware": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.await_token_response",
+                   return_value=None):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        self.assertIn("30 Minuten", str(ctx.exception))
+        self.assertIn("weder ein frischer Token", str(ctx.exception))
 
     def test_grab_live_refresh_rejection_recommends_fresh_grab(self):
         """Wird der Live-Token abgelehnt, wird KEIN zweiter Kandidat
@@ -2518,10 +2523,12 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value={"refresh": [], "hardware": [], "idb": []}), \
              patch("calibre_plugin.cdp.describe_grab_state",
-                   return_value="0 Refresh-Kandidat(en)"):
+                   return_value="0 Refresh-Kandidat(en)"), \
+             patch("calibre_plugin.cdp.await_token_response",
+                   return_value=None):
             with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
-        self.assertIn("WEB READER", str(ctx.exception))
+        self.assertIn("30 Minuten", str(ctx.exception))
 
     def test_exchange_prefers_refresh_typ_over_newer_access_token(self):
         """Access-JWTs (kurzlebig) werden nicht vor dem Refresh-JWT
@@ -2566,6 +2573,61 @@ class LiveGrabTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
         self.assertIn("kein Web-Reader-Tab", str(ctx.exception))
+
+    def test_grab_live_refresh_falls_back_to_network_intercept(self):
+        """Leerer Storage-Grab -> abgefangene Rotation wird getauscht."""
+        from .tolino import grab_live_refresh
+        caught = self._jwt(time.time() - 1, "sess-net")
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                self.refresh = "rotated-net"
+
+        with patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [], "hardware": [],
+                                 "idb": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.await_token_response",
+                   return_value={"refresh": [caught],
+                                 "hardware": ["hw-caught"]}), \
+             patch("calibre_plugin.tolino.TolinoClient", FakeClient):
+            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertEqual("rotated-net", refresh)
+        self.assertEqual("hw-caught", hardware)
+
+    def test_try_live_grab_first_uses_network_fallback(self):
+        """Einmal-Lesen ohne frischen Kandidaten -> 60 s Lauschphase."""
+        from .tolino import try_live_grab_first
+        caught = self._jwt(time.time() - 1, "sess-net")
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                self.refresh = "rotated-net"
+
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=True), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value={"refresh": [], "hardware": [],
+                                 "idb": []}), \
+             patch("calibre_plugin.cdp.describe_grab_state",
+                   return_value="0 Kandidaten"), \
+             patch("calibre_plugin.cdp.reader_ws_url",
+                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+             patch("calibre_plugin.cdp.await_token_response",
+                   return_value={"refresh": [caught],
+                                 "hardware": ["hw-caught"]}), \
+             patch("calibre_plugin.tolino.TolinoClient", FakeClient):
+            refresh, hardware = try_live_grab_first(4, "hw")
+        self.assertEqual("rotated-net", refresh)
 
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht
