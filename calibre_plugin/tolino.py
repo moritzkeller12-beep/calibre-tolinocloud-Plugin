@@ -2230,6 +2230,27 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     return client.refresh or candidate, client.hardware or hardware_id
 
 
+def try_live_grab_first(partner_id, hardware, timeout=300, progress=None):
+    """Read the current token from a running grabber window, if any.
+
+    Returns (refresh, hardware) when the DevTools endpoint of the
+    "Im Browser anmelden" window answers AND a fresh token could be read
+    and exchanged. Returns None when no grabber window is running -- the
+    caller should then use the historical disk-scrape flow.
+
+    A window that IS running but yields no exchangeable token raises
+    TolinoAuthError: silently scraping the disks instead would replay
+    stale storage copies against a session that is open right there in
+    the window -- the exact reuse-protection trap this whole flow
+    exists to avoid.
+    """
+    from . import cdp as cdp_module
+    if not cdp_module.devtools_port_alive():
+        return None
+    return grab_live_refresh(partner_id, hardware, timeout=timeout,
+                             progress=progress)
+
+
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     """Guided browser sign-in for Keycloak partners without local callback.
 

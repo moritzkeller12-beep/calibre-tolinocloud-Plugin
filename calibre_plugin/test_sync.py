@@ -2472,6 +2472,41 @@ class LiveGrabTests(unittest.TestCase):
         self.assertIn("1800",
                       _filter_live_candidates.__defaults__[0].__str__())
 
+    def test_try_live_grab_first_returns_none_without_window(self):
+        """Ohne laufendes Grabber-Fenster -> None (Disk-Scrape erlaubt)."""
+        from .tolino import try_live_grab_first
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=False), \
+             patch("calibre_plugin.tolino.grab_live_refresh",
+                   side_effect=AssertionError("grab called")):
+            self.assertIsNone(try_live_grab_first(4, "hw"))
+
+    def test_try_live_grab_first_grabs_when_window_alive(self):
+        """Laufendes Fenster -> Live-Grab-Ergebnis direkt durchgereicht."""
+        from .tolino import try_live_grab_first
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.grab_live_refresh",
+                   return_value=("rotated", "hw-live")) as grab:
+            result = try_live_grab_first(4, "hw")
+        self.assertEqual(("rotated", "hw-live"), result)
+        grab.assert_called_once_with(4, "hw", timeout=300, progress=None)
+
+    def test_try_live_grab_first_raises_when_window_dead_yields_nothing(self):
+        """Fenster lebt, liefert aber nichts -> Fehler statt Disk-Scrape.
+
+        Wuerde der Aufrufer hier still scrapen, replayte er alte Storage-
+        Kopien gegen die im Fenster offene Sitzung -- der Reuse-Schutz-
+        fall, den der Live-Weg gerade vermeiden soll.
+        """
+        from .tolino import try_live_grab_first
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.grab_live_refresh",
+                   side_effect=TolinoAuthError("Timeout im Anmeldefenster")):
+            with self.assertRaises(TolinoAuthError):
+                try_live_grab_first(4, "hw")
+
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht
         -- kein stiller Wechsel in den Replay-gefaehrdeten Disk-Pfad."""

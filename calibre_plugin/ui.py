@@ -36,7 +36,7 @@ try:
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error,
                          scrape_browser_tokens, start_token_keepalive,
-                         validate_refresh_candidates)
+                         try_live_grab_first, validate_refresh_candidates)
 except ImportError:
     bootstrapper = None
     from config import save_account, save_settings, settings
@@ -52,7 +52,7 @@ except ImportError:
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         hardware_id, normalize_refresh_token, sanitize_error,
                         scrape_browser_tokens, start_token_keepalive,
-                        validate_refresh_candidates)
+                        try_live_grab_first, validate_refresh_candidates)
 
 
 def _plugin_version():
@@ -699,6 +699,27 @@ class SyncDashboard(QDialog):
         rotated token of the accepted grant is persisted.
         """
         try:
+            # A grabber window from "Im Browser anmelden" (or an earlier
+            # extract attempt) holds the CURRENT token of the signed-in
+            # reader -- always better than any disk copy, whose tokens
+            # are history after the reader's background rotation. Try the
+            # live read first; scrape the disks only when no grabber
+            # window is running.
+            grabbed = try_live_grab_first(
+                self.partner.currentData(), self.hardware.text().strip(),
+                timeout=60)
+            if grabbed:
+                refresh_token, hardware_id_value = grabbed
+                if hardware_id_value:
+                    self.hardware.setText(str(hardware_id_value))
+                self.persist_refresh_token(refresh_token)
+                QMessageBox.information(
+                    self, "Token extrahiert / Tokens extracted",
+                    "Aktueller Token live aus dem ge\u00f6ffneten Web "
+                    "Reader gelesen und gespeichert (Hardware-ID: %s). "
+                    "Das Anmeldefenster kann jetzt geschlossen werden."
+                    % (hardware_id_value or "unver\u00e4ndert"))
+                return
             refreshes, hardwares, notes = scrape_browser_tokens(
                 diagnose=True, all_candidates=True)
             if refreshes:
@@ -743,6 +764,14 @@ class SyncDashboard(QDialog):
                 "Befund:\n%s" % (
                     ".".join(str(v) for v in _plugin_version()), detail)
             )
+        except TolinoAuthError as exc:
+            QMessageBox.warning(
+                self, "Live-\u00dcbernahme / Live grab",
+                "%s\n\nDas Anmeldefenster ist noch offen: melde dich dort "
+                "im Web Reader an (B\u00fccherliste laden) und dr\u00fccke "
+                "diesen Knopf erneut -- oder schlie\u00dfe das Fenster und "
+                "alle anderen Browser-Fenster, um stattdessen die "
+                "Festplatten-Kopien zu pr\u00fcfen." % sanitize_error(exc))
         except Exception as exc:
             QMessageBox.critical(
                 self, "Fehler / Error",

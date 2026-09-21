@@ -169,6 +169,17 @@ def _reader_url(partner_id):
             or "https://webreader.mytolino.com/library/index.html")
 
 
+def devtools_port_alive(port=None):
+    """True when a grabber window's DevTools endpoint answers right now.
+
+    Used by callers that want to reuse the running "Im Browser anmelden"
+    window before falling back to disk scraping: a live window always
+    holds the reader's CURRENT token, while disk copies are historical.
+    """
+    return bool(_http_get_json(
+        "http://127.0.0.1:%d/json/version" % (port or _start_port()), 2))
+
+
 # ---------------------------------------------------------------- WebSocket
 
 class _Ws:
