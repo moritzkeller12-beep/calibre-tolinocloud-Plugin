@@ -815,8 +815,55 @@ def _hardware_from_headers(headers):
     return None
 
 
+# In-Page-Snippet: nur Access-Tokens ungueltig schreiben (Refresh-Tokens
+# unberuehrt), damit der Reader beim naechsten API-Call auf 401 laeuft und
+# seinen AKTUELLEN Refresh-Token sofort selbst tauscht.
+_INVALIDATE_ACCESS_TOKENS_EXPRESSION = (
+    "(() => { let touched = 0;"
+    "  const dead = 'invalidated-by-calibre-plugin';"
+    "  try { for (let i = 0; i < localStorage.length; i++) {"
+    "    const k = localStorage.key(i);"
+    "    if (/access[_-]?token/i.test(k))"
+    "        { localStorage.setItem(k, dead); touched++; } } }"
+    "  catch (e) {}"
+    "  try { for (let i = 0; i < sessionStorage.length; i++) {"
+    "    const k = sessionStorage.key(i);"
+    "    if (/access[_-]?token/i.test(k))"
+    "        { sessionStorage.setItem(k, dead); touched++; } } }"
+    "  catch (e) {}"
+    "  return touched; })()"
+)
+
+
+def _force_reader_token_rotation(ws_url, timeout=10):
+    """Den Access-Token der Reader-Seite gezielt ablaufen lassen.
+
+    Der Reader rotiert seinen Refresh-Token nur, wenn sein Access-Token
+    abgelaufen ist (Gueltigkeit ~50 Minuten) -- ein Page.reload allein
+    stoesst deshalb KEINE Rotation an, solange der Access-Token noch
+    gilt. Schreibt man ihm hingegen einen ungueltigen Access-Token in
+    den Seiten-Speicher, laeuft sein naechster API-Call auf 401, der
+    Reader tauscht SOFORT selbst mit seinem aktuellen Refresh-Token --
+    und genau diese Token-Antwort faengt await_token_response ab
+    (garantiert ungenutzt, inklusive frischem Access-Token). Die
+    Refresh-Tokens werden unberuehrt gelassen.
+
+    Returns True when at least one access-token entry was invalidated.
+    """
+    if not ws_url or not str(ws_url).startswith("ws://"):
+        return False
+    result = _evaluate_raw_in_target(
+        ws_url, _INVALIDATE_ACCESS_TOKENS_EXPRESSION, timeout=timeout)
+    if not result.get("ok"):
+        return False
+    try:
+        return int(result.get("value")) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def await_token_response(ws_url, timeout=120, progress=None,
-                         reload_page=False):
+                         reload_page=False, trigger_rotation=False):
     """Catch a FRESH refresh_token out of the reader's own token response.
 
     Enables CDP Fetch interception on the reader tab and waits for the
@@ -825,9 +872,15 @@ def await_token_response(ws_url, timeout=120, progress=None,
     the one token guaranteed unused: it is the response the reader is
     about to consume itself.
 
-    With ``reload_page=True`` the reader tab is reloaded first -- the
-    reload makes the reader rotate its token immediately, so the
-    interception does not depend on the reader's own background timer.
+    With ``reload_page=True`` the reader tab is reloaded first.
+
+    With ``trigger_rotation=True`` the page's stored access tokens are
+    invalidated first (refresh tokens untouched): the reader's next API
+    call hits 401 and it exchanges its CURRENT refresh token at once --
+    the caught response is then guaranteed unused. Combined with a
+    reload the invalidation is written BEFORE the reload, so the freshly
+    loaded page starts with a dead access token and rotates within
+    seconds instead of on its own ~50-minute timer.
 
     While listening, the reader's requests to api.pageplace.de are read
     passively: their ``hardware-id`` header carries the device ID of the
@@ -856,10 +909,19 @@ def await_token_response(ws_url, timeout=120, progress=None,
         # des Geraets der AKTUELLEN Sitzung im Header -- genau die ID,
         # die zu den Tokens dieser Sitzung gehoert.
         ws.send_json({"id": 2, "method": "Network.enable", "params": {}})
+        if trigger_rotation:
+            # Rotations-Anstoss auf DERSELBEN Verbindung (fire-and-
+            # forget, id 5): den Access-Token im Seiten-Speicher
+            # ungueltig schreiben (Refresh-Tokens unberuehrt). Ohne
+            # Reload laeuft der naechste API-Call des Readers auf 401
+            # und er tauscht SOFORT selbst; mit Reload startet die
+            # frisch geladene Seite direkt mit totem Access-Token.
+            ws.send_json({"id": 5, "method": "Runtime.evaluate",
+                          "params": {
+                              "expression":
+                                  _INVALIDATE_ACCESS_TOKENS_EXPRESSION,
+                              "returnByValue": True}})
         if reload_page:
-            # Rotations-Anstoss: der Reload bringt den Reader dazu, seine
-            # Tokens frisch zu laden und dabei den Token-Endpunkt
-            # aufzurufen -- dessen Antwort wird unten abgefangen.
             ws.send_json({"id": 3, "method": "Page.enable", "params": {}})
             ws.send_json({"id": 4, "method": "Page.reload",
                           "params": {"ignoreCache": False}})
@@ -871,8 +933,8 @@ def await_token_response(ws_url, timeout=120, progress=None,
                 break  # tab closed / ws dropped
             method = str(message.get("method") or "")
             params = message.get("params") or {}
-            if message.get("id") == 101:  # getResponseBody reply (late)
-                continue
+            if message.get("id") in (101, 5):  # getResponseBody /
+                continue                       # Anstoss-Evaluate (late)
             if method == "Network.requestWillBeSent":
                 hw = _hardware_from_headers(
                     ((message.get("params") or {}).get("request") or {})

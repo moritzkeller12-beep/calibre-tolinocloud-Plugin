@@ -2405,6 +2405,35 @@ class LiveGrabTests(unittest.TestCase):
         self.assertIsNone(_hardware_from_headers({"reseller-id": "8"}))
         self.assertIsNone(_hardware_from_headers({"hardware-id": "kurz"}))
 
+    def test_force_reader_token_rotation_invalidates_access_tokens(self):
+        """Der In-Page-Snippet schreibt nur Access-Tokens tot; Erfolg,
+        Misserfolg und Null-Treffer werden korrekt ausgewertet."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with _patch("calibre_plugin.cdp._evaluate_raw_in_target",
+                    return_value={"ok": True, "value": 2,
+                                  "exception": None}) as evaluate:
+            self.assertTrue(cdp_module._force_reader_token_rotation(
+                "ws://127.0.0.1:9223/devtools/page/x"))
+        expression = evaluate.call_args[0][1]
+        self.assertIn("invalidated-by-calibre-plugin", expression)
+        # Refresh-Tokens bleiben unberuehrt:
+        self.assertNotIn("refresh", expression.lower()
+                         .replace("access[_-]?token", ""))
+        self.assertIn("access[_-]?token", expression)
+
+        with _patch("calibre_plugin.cdp._evaluate_raw_in_target",
+                    return_value={"ok": False, "value": None,
+                                  "exception": "gone"}):
+            self.assertFalse(cdp_module._force_reader_token_rotation(
+                "ws://127.0.0.1:9223/devtools/page/x"))
+        with _patch("calibre_plugin.cdp._evaluate_raw_in_target",
+                    return_value={"ok": True, "value": 0,
+                                  "exception": None}):
+            self.assertFalse(cdp_module._force_reader_token_rotation(
+                "ws://127.0.0.1:9223/devtools/page/x"))
+
     def test_await_token_response_captures_hardware_and_reloads(self):
         """await_token_response sendet Page.reload und liest die
         hardware-id passiv aus Network.requestWillBeSent mit."""
@@ -2457,6 +2486,12 @@ class LiveGrabTests(unittest.TestCase):
                 if len(header) < 2:
                     break
                 length = header[1] & 0x7F
+                if length == 126:  # 16-Bit-Extended-Length (große Frames)
+                    ext = read_exact(2)
+                    length = struct_module.unpack(">H", ext)[0]
+                elif length == 127:
+                    ext = read_exact(8)
+                    length = struct_module.unpack(">Q", ext)[0]
                 if header[1] & 0x80:
                     mask = read_exact(4)
                     payload = bytes(b ^ mask[i % 4] for i, b in
@@ -2468,7 +2503,23 @@ class LiveGrabTests(unittest.TestCase):
                 except ValueError:
                     continue
                 mid = message.get("id")
-                if mid == 4:  # Page.reload bestätigt -> Events abspielen
+                if (message.get("method") == "Runtime.evaluate"
+                        and "invalidated-by-calibre-plugin" in str(
+                            message.get("params", {}).get("expression",
+                                                          ""))):
+                    # Runtime.evaluate des Rotations-Anstosses: 2 Treffer
+                    order.append("invalidate")
+                    reply = json.dumps({
+                        "id": 5, "result": {"result": {"value": 2}}}).encode()
+                    frame = bytearray([0x81])
+                    if len(reply) < 126:
+                        frame.append(len(reply))
+                    else:
+                        frame += bytes([126]) + struct_module.pack(
+                            ">H", len(reply))
+                    conn.sendall(bytes(frame) + reply)
+                elif mid == 4:  # Page.reload bestätigt -> Events abspielen
+                    order.append("reload")
                     send_event({
                         "method": "Network.requestWillBeSent",
                         "params": {"request": {
@@ -2495,12 +2546,15 @@ class LiveGrabTests(unittest.TestCase):
                 # brauchen keine echte Antwort.
             conn.close()
 
+        order = []
         thread = threading.Thread(target=server, daemon=True)
         thread.start()
         self.assertTrue(ready.wait(5))
         result = cdp_module.await_token_response(
             "ws://127.0.0.1:%d/devtools/page/x" % bound["port"],
-            timeout=15, reload_page=True)
+            timeout=15, reload_page=True, trigger_rotation=True)
+        # Der Anstoss (Access-Token invalidieren) lief VOR dem Reload:
+        self.assertEqual(["invalidate", "reload"], order)
         self.assertIsNotNone(result)
         self.assertEqual(
             ["caught-fresh-token-with-sufficient-length-for-validation"],
@@ -2844,9 +2898,10 @@ class LiveGrabTests(unittest.TestCase):
         calls = []
 
         def fake_await(ws_url, timeout=120, progress=None,
-                       reload_page=False):
-            calls.append(reload_page)
+                       reload_page=False, trigger_rotation=False):
+            calls.append((reload_page, trigger_rotation))
             self.assertTrue(reload_page)
+            self.assertTrue(trigger_rotation)
             return {"refresh": ["caught-fresh"],
                     "hardware": ["eb22e4cf-bb01-4550-bff7-334446bb20b1"]}
 
@@ -2883,7 +2938,7 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.cdp.await_token_response",
                    side_effect=fake_await):
             refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
-        self.assertEqual([True], calls)
+        self.assertEqual([(True, True)], calls)
         self.assertEqual("rotated-after-reload", refresh)
         # Die live erfasste Hardware-ID (aktuelle Reader-Sitzung) gewinnt
         # gegen die konfigurierte:

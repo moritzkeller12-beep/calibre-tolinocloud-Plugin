@@ -2313,13 +2313,15 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                      "zu 3 Minuten; einfach im Fenster angemeldet "
                      "bleiben) ...")
     # Storage-Grab leer ODER Token abgelehnt: die naechste Token-Rotation
-    # des Readers ERZWINGEN (Page.reload) und die frische Token-Antwort
-    # abfangen, BEVOR der Reader sie selbst verbraucht. Dieser Token ist
-    # garantiert ungenutzt; die mitgelesenen hardware-id-Header liefern
-    # zudem die Geraete-ID der AKTUELLEN Sitzung.
+    # des Readers ERZWINGEN und die frische Token-Antwort abfangen, BEVOR
+    # der Reader sie selbst verbraucht. Der Anstoss: Access-Token im
+    # Seiten-Speicher ungueltig schreiben, dann neu laden -- der Reader
+    # startet mit totem Access-Token und tauscht binnen Sekunden selbst.
+    # Dieser Token ist garantiert ungenutzt; die mitgelesenen hardware-
+    # id-Header liefern zudem die Geraete-ID der AKTUELLEN Sitzung.
     ws_url = cdp_module.reader_ws_url()
-    caught = cdp_module.await_token_response(ws_url, timeout=180,
-                                             reload_page=True)
+    caught = cdp_module.await_token_response(
+        ws_url, timeout=180, trigger_rotation=True, reload_page=True)
     if not caught or not (caught.get("refresh") or []):
         raise TolinoAuthError(
             "Im Web Reader wurde weder ein frischer Token im Seiten-"
@@ -2369,8 +2371,9 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
     # Rotation ERZWINGEN (Page.reload) und die frische Token-Antwort
     # abfangen. Bis zu 60 s; dank erzwungenem Reload in der Praxis
     # meist Sekunden.
-    caught = cdp_module.await_token_response(cdp_module.reader_ws_url(),
-                                             timeout=60, reload_page=True)
+    caught = cdp_module.await_token_response(
+        cdp_module.reader_ws_url(), timeout=60, trigger_rotation=True,
+        reload_page=True)
     if caught and (caught.get("refresh") or []):
         return _exchange_grabbed_token(partner_id, hardware, caught,
                                        caught.get("refresh") or [])
