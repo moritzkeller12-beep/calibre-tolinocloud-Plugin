@@ -756,6 +756,34 @@ _EXCHANGE_SNIPPET = r"""
 """
 
 
+def _oauth_rejection_reason(body):
+    """Short 'error: description' for a Keycloak/OAuth error frame; '' otherwise.
+
+    WAF HTML pages ("Zugriff geblockt"), fetch failures and unexpected
+    payloads return '' -- they prove nothing about the token itself and
+    must never abort the exchange.
+    """
+    text = str(body or "")
+    lowered = text.casefold()
+    for marker in ("invalid_grant", "invalid_client",
+                   "unauthorized_client", "invalid_request",
+                   "unsupported_grant_type"):
+        if marker not in lowered:
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        code = str(data.get("error") or marker)
+        description = str(data.get("error_description") or "").strip()[:200]
+        if description and description.casefold() != code.casefold():
+            return "%s: %s" % (code, description)
+        return code
+    return ""
+
+
 def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     """Run the refresh-token grant inside the reader page via in-page fetch.
 
@@ -764,6 +792,10 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     WAF in front of the token endpoint accepts this request because it is
     the reader's own fingerprint -- the exact request family the reader
     performs on every background rotation.
+
+    Raises TolinoAuthError on a definitive OAuth rejection of this
+    candidate (invalid_grant & friends): replaying a spent grant cannot
+    succeed, so the callers' forced-rotation fallback takes over.
     """
     expression = (_EXCHANGE_SNIPPET
                   .replace("TOKEN_URL_PLACEHOLDER",
@@ -777,8 +809,25 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
         payload = json.loads(raw.get("value") or "{}")
     except ValueError:
         return 0, "unparseable page reply"
-    return (int(payload.get("status") or 0),
-            str(payload.get("body") or ""))
+    status = int(payload.get("status") or 0)
+    body = str(payload.get("body") or "")
+    # A 400/401/403 carrying a recognisable OAuth error frame is a
+    # GENUINE answer from the token endpoint (the reader's own TLS
+    # fingerprint got past the bot protection), not a transport failure.
+    # Raising TolinoAuthError here skips the plugin-own fallback POST --
+    # replaying an already-spent grant could only produce a second
+    # rejection plus WAF noise -- and it is exactly the signal the
+    # callers expect: grab_live_refresh / try_live_grab_first catch it
+    # and force a fresh token rotation inside the reader window.
+    reason = _oauth_rejection_reason(body) if status in (400, 401, 403) else ""
+    if reason:
+        raise TolinoAuthError(
+            "Der live gelesene Token wurde am Token-Endpunkt abgelehnt "
+            "(HTTP %d, %s) -- dieser Refresh-Token ist bereits verbraucht "
+            "oder widerrufen." % (status, reason))
+    # Everything else is passed through unchanged for the caller's
+    # diagnostics (page failures, WAF HTML pages, unexpected payloads).
+    return status, body
 
 
 def reader_ws_url(port=None):
@@ -815,9 +864,6 @@ def _hardware_from_headers(headers):
     return None
 
 
-# In-Page-Snippet: nur Access-Tokens ungueltig schreiben (Refresh-Tokens
-# unberuehrt), damit der Reader beim naechsten API-Call auf 401 laeuft und
-# seinen AKTUELLEN Refresh-Token sofort selbst tauscht.
 # In-Page-Snippet: nur Access-Tokens ungueltig schreiben (Refresh-Tokens
 # unberuehrt), damit der Reader beim naechsten API-Call auf 401 laeuft und
 # seinen AKTUELLEN Refresh-Token sofort selbst tauscht. Zwei Formen:
