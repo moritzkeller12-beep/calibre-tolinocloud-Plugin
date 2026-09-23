@@ -461,6 +461,9 @@ class BrowserLoginWorker(QObject):
     """Runs browser_login off the GUI thread (it polls for minutes)."""
     completed = pyqtSignal(object, object)
     failed = pyqtSignal(str)
+    # Live-Fortschrittstexte des Grabs ("Fenster offen -- anmelden",
+    # "Rotation wird erzwungen ...") direkt in die Statuszeile.
+    progress = pyqtSignal(str)
 
     def __init__(self, partner_id, hardware):
         QObject.__init__(self)
@@ -469,7 +472,9 @@ class BrowserLoginWorker(QObject):
 
     def run(self):
         try:
-            refresh, hardware = browser_login(self.partner_id, self.hardware)
+            refresh, hardware = browser_login(
+                self.partner_id, self.hardware,
+                progress=self.progress.emit)
         except Exception as exc:
             self.failed.emit("%s: %s" % (type(exc).__name__,
                                          sanitize_error(exc)))
@@ -954,6 +959,7 @@ class SyncDashboard(QDialog):
         thread = QThread()  # no parent: dialog may close first
         worker = BrowserLoginWorker(partner_id, self.hardware.text().strip())
         worker.moveToThread(thread)
+        worker.progress.connect(self._login_progress)
         thread.started.connect(worker.run)
         worker.completed.connect(thread.quit)
         worker.failed.connect(thread.quit)
@@ -985,6 +991,13 @@ class SyncDashboard(QDialog):
             self._login_cleanup()
             QMessageBox.warning(self, "Browser-Anmeldung / Browser sign-in",
                                 sanitize_error(message))
+        except RuntimeError:
+            pass  # dialog already destroyed (Calibre shutdown)
+
+    def _login_progress(self, text):
+        """Live-Hinweise des Browser-Grabs in der Statuszeile zeigen."""
+        try:
+            self.status.setText(str(text))
         except RuntimeError:
             pass  # dialog already destroyed (Calibre shutdown)
 

@@ -3286,6 +3286,296 @@ class LiveGrabTests(unittest.TestCase):
         self.assertIn("Timeout", str(ctx.exception))
 
 
+    def test_collect_grab_waits_while_window_is_on_partner_login_page(self):
+        """Feldbefund 0.9.27: Waehrend der Anmeldung verlaesst der Tab
+        mytolino.com zugunsten der Keycloak-Seite des Partners (andere
+        Domain) -- das darf NIEMALS als "Fenster geschlossen" gemeldet
+        werden, solange der DevTools-Endpunkt antwortet."""
+        from . import cdp as cdp_module
+        pages = [
+            [{"type": "page",
+              "url": "https://www.orellfuessli.ch/keycloak/realms/37/"
+                     "protocol/openid-connect/auth",
+              "webSocketDebuggerUrl": "ws://x"}],
+            [{"type": "page",
+              "url": "https://webreader.mytolino.com/library/index.html",
+              "webSocketDebuggerUrl":
+                  "ws://127.0.0.1:9223/devtools/page/x"}],
+        ]
+        messages = []
+        with patch("calibre_plugin.cdp._http_get_json",
+                   side_effect=pages), \
+             patch("calibre_plugin.cdp._grab_page_tokens",
+                   return_value={"refresh": ["fresh-from-reader-token"],
+                                 "hardware": [], "idb": []}), \
+             patch("calibre_plugin.cdp.time.sleep", lambda _s: None):
+            result = cdp_module.collect_grab(4, 9223, timeout=30,
+                                             progress=messages.append)
+        self.assertEqual(["fresh-from-reader-token"], result["refresh"])
+        self.assertTrue(any("offen" in text for text in messages))
+        self.assertTrue(all("geschlossen" not in text
+                            for text in messages))
+
+    def test_collect_grab_reports_closed_only_when_endpoint_is_gone(self):
+        """Erst wenn das DevTools-Endpunkt mehrfach in Folge nicht
+        antwortet, ist das Fenster wirklich zu (kein Einzel-Aussetzer)."""
+        from . import cdp as cdp_module
+        with patch("calibre_plugin.cdp._http_get_json",
+                   return_value=None), \
+             patch("calibre_plugin.cdp.time.sleep", lambda _s: None):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                cdp_module.collect_grab(4, 9223, timeout=30,
+                                        progress=lambda _t: None)
+        self.assertIn("wurde geschlossen", str(ctx.exception))
+
+    def test_collect_grab_timeout_without_reader_tab_has_login_hint(self):
+        """Bleibt der Tab die ganze Zeit ohne Web-Reader (z. B. Anmeldung
+        nicht abgeschlossen), gibt es einen Timeout-Hinweis -- keine
+        geschlossene-Fenster-Meldung."""
+        from . import cdp as cdp_module
+        with self.assertRaises(TolinoAuthError) as ctx:
+            cdp_module.collect_grab(4, 9223, timeout=0)
+        message = str(ctx.exception)
+        self.assertIn("Timeout", message)
+        self.assertIn("nicht abgeschlossen", message)
+        self.assertNotIn("wurde geschlossen", message)
+
+    def _ws_run_server(self, thread_state, handler):
+        """Minimaler In-Process-WS-Server (Schema der 0.9.19-Tests):
+        bindet, meldet den Port via thread_state["ready"], beantwortet
+        Client-Frames per `handler(message, send_raw)`."""
+        import socket as socket_module
+        import struct as struct_module
+        srv = socket_module.socket()
+        srv.setsockopt(socket_module.SOL_SOCKET,
+                       socket_module.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        thread_state["port"] = srv.getsockname()[1]
+        thread_state["ready"].set()
+        conn, _addr = srv.accept()
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                     b"Upgrade: websocket\r\n"
+                     b"Connection: Upgrade\r\n"
+                     b"Sec-WebSocket-Accept: x\r\n\r\n")
+
+        def read_exact(n):
+            data = b""
+            while len(data) < n:
+                chunk = conn.recv(n - len(data))
+                if not chunk:
+                    break
+                data += chunk
+            return data
+
+        def send_raw(body):
+            frame = bytearray([0x81])
+            if len(body) < 126:
+                frame.append(len(body))
+            else:
+                frame += bytes([126]) + struct_module.pack(">H", len(body))
+            conn.sendall(bytes(frame) + body)
+
+        try:
+            while True:
+                header = read_exact(2)
+                if len(header) < 2:
+                    break
+                length = header[1] & 0x7F
+                if length == 126:
+                    length = struct_module.unpack(">H", read_exact(2))[0]
+                elif length == 127:
+                    length = struct_module.unpack(">Q", read_exact(8))[0]
+                if header[1] & 0x80:
+                    mask = read_exact(4)
+                    payload = bytes(b ^ mask[i % 4] for i, b in
+                                    enumerate(read_exact(length)))
+                else:
+                    payload = read_exact(length)
+                try:
+                    message = json.loads(payload.decode())
+                except ValueError:
+                    continue
+                handler(message, send_raw)
+        finally:
+            conn.close()
+
+    def _ws_start_server(self, handler):
+        """Server-Thread starten; Rückgabe: State mit ready/port."""
+        import threading
+        state = {"ready": threading.Event(), "port": None}
+        threading.Thread(target=self._ws_run_server,
+                         args=(state, handler), daemon=True).start()
+        return state
+
+    @staticmethod
+    def _send_cdp_value(send_raw, message_id, value):
+        send_raw(json.dumps({
+            "id": message_id,
+            "result": {"result": {"value": value}}}).encode())
+
+    def test_await_token_response_parses_snippet_string_replies(self):
+        """Regression 0.9.27: der Grab-Snippet antwortet mit
+        JSON.stringify(out) -- einem STRING. Die fruehere
+        isinstance-(dict)-Pruefung verwarf jede Poll-Antwort STILL (nur
+        die alten Test-Server antworteten mit dict, deshalb fiel die
+        Regression nicht auf): das Fangnetz gegen Service-Worker-Routing
+        traf in der Feldpraxis nie ("kein frischer Token")."""
+        from . import cdp as cdp_module
+
+        def handler(message, send_raw):
+            expr = str((message.get("params") or {}).get("expression", ""))
+            if (message.get("method") == "Runtime.evaluate"
+                    and "JSON.stringify(out)" in expr):
+                payload = {"refresh": ["string-reply-caught-token-xyz"],
+                           "hardware": [], "idb": []}
+                self._send_cdp_value(send_raw, message["id"],
+                                     json.dumps(payload))
+
+        state = self._ws_start_server(handler)
+        self.assertTrue(state["ready"].wait(5))
+        result = cdp_module.await_token_response(
+            "ws://127.0.0.1:%d/devtools/page/x" % state["port"],
+            timeout=15)
+        self.assertIsNotNone(result)
+        self.assertEqual(["string-reply-caught-token-xyz"],
+                         result["refresh"])
+
+    def test_await_token_response_reads_indexeddb_when_poll_lists_dbs(self):
+        """Der Storage-Poll liest die gemeldeten IndexedDB-Datenbanken
+        mit: der Reader legt sein Token-Set haeufig genau dort ab, und
+        bei Service-Worker-Routing ist die Fetch-Interception blind."""
+        from . import cdp as cdp_module
+        state = {"polls": 0}
+
+        def handler(message, send_raw):
+            expr = str((message.get("params") or {}).get("expression", ""))
+            if message.get("method") != "Runtime.evaluate":
+                return None
+            if "objectStoreNames" in expr:
+                payload = {"refresh": ["idb-caught-token-xyz"],
+                           "hardware": []}
+                self._send_cdp_value(send_raw, message["id"],
+                                     json.dumps(payload))
+                return None
+            if "JSON.stringify(out)" in expr:
+                state["polls"] += 1
+                if state["polls"] == 1:
+                    payload = {"refresh": [], "hardware": [],
+                               "idb": ["reader-token-db"]}
+                else:
+                    payload = {"refresh": [], "hardware": [], "idb": []}
+                self._send_cdp_value(send_raw, message["id"],
+                                     json.dumps(payload))
+            return None
+
+        srv_state = self._ws_start_server(handler)
+        self.assertTrue(srv_state["ready"].wait(5))
+        result = cdp_module.await_token_response(
+            "ws://127.0.0.1:%d/devtools/page/x" % srv_state["port"],
+            timeout=15)
+        self.assertIsNotNone(result)
+        self.assertEqual(["idb-caught-token-xyz"], result["refresh"])
+
+    def test_await_token_response_fulfills_with_original_response(self):
+        """Eine abgefangene NICHT-200-Token-Antwort wird mit Original-
+        Status, Headern (minus Kompression) und Body an den Reader
+        durchgereicht (vorher: leerer 200er bzw. Continue am
+        Response-Stage, der den Request haengen lassen kann); die
+        Lauschphase laeuft weiter und nimmt den dann frisch rotierten
+        Token auf."""
+        from . import cdp as cdp_module
+        captured = {"fulfill": None, "polls": 0}
+
+        def handler(message, send_raw):
+            method = message.get("method")
+            mid = message.get("id")
+            expr = str((message.get("params") or {}).get("expression", ""))
+            if method == "Runtime.evaluate" and "objectStoreNames" in expr:
+                return None
+            if method == "Runtime.evaluate" and "JSON.stringify(out)" in expr:
+                captured["polls"] += 1
+                if captured["polls"] == 1:
+                    # Statt Poll-Antwort: eine abgefangene 400er
+                    # Token-Antwort des Readers vormerken.
+                    send_raw(json.dumps({
+                        "method": "Fetch.requestPaused",
+                        "params": {
+                            "requestId": "r1",
+                            "request": {"url": "https://www.orellfuessli"
+                                        ".ch/auth/oauth2/token"},
+                            "response": {"status": 400,
+                                         "headers": {
+                                             "Content-Type":
+                                                 "application/json",
+                                             "Content-Encoding":
+                                                 "gzip"}}},
+                    }).encode())
+                else:
+                    payload = {"refresh":
+                               ["token-after-error-response-xyz"],
+                               "hardware": [], "idb": []}
+                    self._send_cdp_value(send_raw, mid,
+                                         json.dumps(payload))
+                return None
+            if mid == 101:  # Fetch.getResponseBody
+                body = base64.b64encode(
+                    b'{"error": "invalid_grant"}').decode()
+                send_raw(json.dumps({
+                    "id": 101, "result": {"body": body,
+                                          "base64Encoded": True}},
+                ).encode())
+                return None
+            if mid == 102:  # Fetch.fulfillRequest des Plugins
+                params = message.get("params") or {}
+                raw_body = params.get("body") or ""
+                captured["fulfill"] = {
+                    "status": params.get("responseCode"),
+                    "body": (base64.b64decode(raw_body).decode()
+                             if raw_body else ""),
+                    "headers": params.get("responseHeaders") or [],
+                }
+            return None
+
+        srv_state = self._ws_start_server(handler)
+        self.assertTrue(srv_state["ready"].wait(5))
+        result = cdp_module.await_token_response(
+            "ws://127.0.0.1:%d/devtools/page/x" % srv_state["port"],
+            timeout=15)
+        self.assertIsNotNone(result)
+        self.assertEqual(["token-after-error-response-xyz"],
+                         result["refresh"])
+        fulfill = captured["fulfill"] or {}
+        self.assertEqual(400, fulfill.get("status"))
+        self.assertIn("invalid_grant", fulfill.get("body", ""))
+        header_names = [str(item.get("name"))
+                        for item in fulfill.get("headers")]
+        self.assertIn("Content-Type", header_names)
+        self.assertNotIn("Content-Encoding", header_names)
+
+    def test_grab_snippets_parse_json_blob_store_values(self):
+        """Top-Level-Speicher-Werte sind Strings: JSON-Blobs
+        (oidc.user:...) muessen geparst werden, sonst ist der aktuelle
+        Token unsichtbar (Feldbefund 0.9.27 "kein frischer Token")."""
+        from .cdp import _GRAB_SNIPPET, _IDB_SNIPPET
+        for snippet in (_GRAB_SNIPPET, _IDB_SNIPPET):
+            self.assertIn("tryParse(value)", snippet)
+
+    def test_browser_login_forwards_progress_into_live_grab(self):
+        """Die Dialog-Fortschrittstexte (Fenster offen, Rotation
+        erzwungen) muessen bis zum Live-Grab durchreichen."""
+        progress_cb = lambda _text: None
+        with patch("calibre_plugin.tolino.grab_live_refresh",
+                   return_value=("rotated", "hw-live")) as grab:
+            result = browser_login(4, "test_hardware",
+                                   progress=progress_cb)
+        self.assertEqual(("rotated", "hw-live"), result)
+        grab.assert_called_once()
+        self.assertIs(progress_cb, grab.call_args[1].get("progress"))
+
+
+
 class ToolbarIconTests(unittest.TestCase):
     """The toolbar action must receive an icon in real Calibre runs."""
 

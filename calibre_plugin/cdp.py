@@ -242,7 +242,14 @@ class _Ws:
             if remaining <= 0:
                 raise OSError("websocket read timeout")
             self.sock.settimeout(min(remaining, 5))
-            chunk = self.sock.recv(65536)
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                # Zeitfenster ohne Daten: DIE Deadline entscheidet,
+                # nicht das 5-Sekunden-Slice. Frueher wanderte dieser
+                # timeout als OSError nach oben und tötete den Lauscher
+                # bei jeder laengeren Stillphase des Readers.
+                continue
             if not chunk:
                 raise OSError("websocket closed")
             self.buf += chunk
@@ -355,6 +362,16 @@ _GRAB_SNIPPET = r"""
       // vom Grabber spaeter depriorisiert, nicht ausgefiltert.
       if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
         push(value, 'refresh');
+        return;
+      }
+      // JSON-Blob (oidc.user:...): localStorage/sessionStorage-Werte
+      // sind IMMER Strings -- ohne diesen Parse-Schritt bleiben alle
+      // Tokens unsichtbar, die der Reader als Blob ablegt (Feldbefund
+      // 0.9.27: "kein frischer Token" trotz angemeldetem Fenster,
+      // waehlerhaft nur ein alter Blankett-JWT gefunden).
+      var topParsed = tryParse(value);
+      if (topParsed && typeof topParsed === 'object') {
+        walk(topParsed, depth + 1, seen);
       }
       return;
     }
@@ -434,6 +451,13 @@ _IDB_SNIPPET = r"""
       if (typeof value === 'string') {
         if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
           push(value, 'refresh');
+          return;
+        }
+        // Auch IDB-Eintrage koennen als JSON-Blob-String abliegen --
+        // top-level parsten, sonst ist der aktuelle Token unsichtbar.
+        var topParsed = tryParse(value);
+        if (topParsed && typeof topParsed === 'object') {
+          walk(topParsed, depth + 1, seen);
         }
         return;
       }
@@ -444,7 +468,17 @@ _IDB_SNIPPET = r"""
         if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
         var v = value[key];
         if (typeof v === 'string') {
-          if (/refresh/i.test(key)) push(v, 'refresh');
+          if (/refresh/i.test(key)) {
+            // Ein Blob-Wert unter refresh-achtigem Schluessel wird
+            // geparst statt roh als Kandidat gepusht (roh wuerde die
+            // JSON-Geometrie als Refresh-Token durchgehen).
+            var underRefresh = tryParse(v);
+            if (underRefresh && typeof underRefresh === 'object') {
+              walk(underRefresh, depth + 1, seen);
+            } else {
+              push(v, 'refresh');
+            }
+          }
           if (/hardware|device/i.test(key) &&
               /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
           var parsed = tryParse(v);
@@ -675,6 +709,11 @@ def launch_reader_window(partner_id):
         "Chromium-Fenster und versuche es erneut." % port)
 
 
+def _idb_expression(db_name):
+    """JS expression that walks one IndexedDB database for token values."""
+    return _IDB_SNIPPET % str(db_name).replace("'", "\\'")
+
+
 def read_idb_tokens(ws_url, db_names, timeout=10):
     """Walk every IndexedDB database's object stores for token values.
 
@@ -686,8 +725,7 @@ def read_idb_tokens(ws_url, db_names, timeout=10):
     for name in db_names or []:
         if not name or not str(name).strip():
             continue
-        expression = _IDB_SNIPPET % str(name).replace("'", "\\'")
-        result = _evaluate_in_target(ws_url, expression, timeout,
+        result = _evaluate_in_target(ws_url, _idb_expression(name), timeout,
                                      await_promise=True)
         if not result:
             continue
@@ -696,6 +734,31 @@ def read_idb_tokens(ws_url, db_names, timeout=10):
                 if value not in merged[bucket]:
                     merged[bucket].append(value)
     return merged
+
+
+def _grab_page_tokens(ws_url, timeout=10):
+    """ONE full storage grab: localStorage, sessionStorage, IndexedDB.
+
+    The main snippet only LISTS the page's IndexedDB database names (it
+    must resolve quickly), while many reader versions keep their CURRENT
+    token set exclusively in those databases --0.9.21 added the separate
+    per-database read, but only the extract button used it. Every live
+    read (extract button, login wait) now goes through this helper so
+    the IndexedDB sets are merged in everywhere.
+    """
+    grabbed = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
+                                  await_promise=True) or {}
+    for bucket in ("refresh", "hardware", "idb"):
+        if not isinstance(grabbed.get(bucket), list):
+            grabbed[bucket] = []
+    idb_names = list(grabbed.get("idb"))
+    if idb_names:
+        idb_tokens = read_idb_tokens(ws_url, idb_names, timeout)
+        for bucket in ("refresh", "hardware"):
+            for value in idb_tokens.get(bucket) or []:
+                if value not in grabbed[bucket]:
+                    grabbed[bucket].append(value)
+    return grabbed
 
 
 def grab_once_from_grabber(port=None, timeout=12):
@@ -716,17 +779,9 @@ def grab_once_from_grabber(port=None, timeout=12):
         ws_url = str(target.get("webSocketDebuggerUrl") or "")
         if not ws_url.startswith("ws://"):
             continue
-        grabbed = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
-                                      await_promise=True) or \
-            {"refresh": [], "hardware": [], "idb": []}
-        idb_names = grabbed.pop("idb", []) or []
-        if idb_names:
-            idb_tokens = read_idb_tokens(ws_url, idb_names, timeout)
-            for bucket in ("refresh", "hardware"):
-                for value in idb_tokens.get(bucket) or []:
-                    if value not in grabbed[bucket]:
-                        grabbed[bucket].append(value)
-        return grabbed
+        # idb-Behaeltnis bleibt erhalten: describe_grab_state nennt
+        # sonst immer "IndexedDB-Datenbanken: keine".
+        return _grab_page_tokens(ws_url, timeout)
     return None
 
 
@@ -995,6 +1050,7 @@ def await_token_response(ws_url, timeout=120, progress=None,
     last_poll = [0.0]
     found_refresh = []
     seen_hw = []
+    idb_last_scan = {}
 
     def _send_poll():
         eid = next_poll_id[0]
@@ -1018,7 +1074,21 @@ def await_token_response(ws_url, timeout=120, progress=None,
                 invalidate_value[0] = int(value or 0)
             except (TypeError, ValueError):
                 invalidate_value[0] = 0
-        elif kind == "grab" and isinstance(value, dict):
+        elif kind == "grab":
+            # Der Grab-Snippet antwortet mit JSON.stringify(out) --
+            # einem STRING. Die fruehere isinstance-(dict)-Pruefung
+            # verwarf jede Poll-Antwort STILL (nur die Test-Server
+            # antworteten mit dict, deshalb fiel der Regression nicht
+            # auf): das Fangnetz gegen Service-Worker-Routing traf in
+            # der Feldpraxis nie -- Feldbefund 0.9.27 "kein frischer
+            # Token" trotz angemeldetem Fenster.
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    value = None
+            if not isinstance(value, dict):
+                return
             for token in value.get("refresh") or []:
                 if token and token not in exclude \
                         and token not in found_refresh:
@@ -1026,6 +1096,29 @@ def await_token_response(ws_url, timeout=120, progress=None,
             for hw in value.get("hardware") or []:
                 if hw and hw not in seen_hw:
                     seen_hw.append(hw)
+            # IndexedDB mitlesen: der Reader legt sein Token-Set haeufig
+            # genau hier ab, und bei Service-Worker-Routing ist die
+            # Fetch-Interception blind -- der Poll ist dann der einzige
+            # Fangweg. Gedrosselt (pro DB alle 6 s), damit jede
+            # Poll-Ration nicht alles neu liest.
+            for name in value.get("idb") or []:
+                name = str(name).strip()
+                if not name:
+                    continue
+                if idb_last_scan.get(name, 0) > time.time() - 6:
+                    continue
+                idb_last_scan[name] = time.time()
+                eid = next_poll_id[0]
+                next_poll_id[0] += 1
+                eval_kinds[eid] = "grab"
+                try:
+                    ws.send_json({"id": eid, "method": "Runtime.evaluate",
+                                  "params": {
+                                      "expression": _idb_expression(name),
+                                      "returnByValue": True,
+                                      "awaitPromise": True}})
+                except OSError:
+                    return
 
     try:
         ws.send_json({"id": 1, "method": "Fetch.enable", "params": {
@@ -1037,6 +1130,13 @@ def await_token_response(ws_url, timeout=120, progress=None,
         ws.send_json({"id": 2, "method": "Network.enable", "params": {}})
         if trigger_rotation:
             # Rotations-Anstoss auf DERSELBEN Verbindung (id 5).
+            if progress:
+                progress("Erzwinge eine frische Token-Rotation im "
+                         "Anmeldefenster: die Seite wird neu geladen, "
+                         "der Reader tauscht seinen Token dann sofort "
+                         "selbst. Falls danach eine Anmeldeseite "
+                         "erscheint: dort einfach neu anmelden -- der "
+                         "neue Token wird automatisch übernommen.")
             ws.send_json({"id": 5, "method": "Runtime.evaluate",
                           "params": {
                               "expression":
@@ -1081,9 +1181,19 @@ def await_token_response(ws_url, timeout=120, progress=None,
                     _send_poll()
                 except OSError:
                     break
+            # Empfang in kurzen Zeitfenstern: nur so laeuft die
+            # Schleife in Stillperioden regelmaessig wieder an das
+            # Poll-Gate zurueck. Blockierte recv laengere Zeit (frueher
+            # bis das 5-Sekunden-Socket-Timeout als Fehler durchlief),
+            # nie wieder ein Poll -- die erzwungene Rotation wurde dann
+            # nie abgefangen (Feldbefund "kein frischer Token").
+            slice_timeout = min(3, max(1, deadline - time.time()))
             try:
-                message = ws.recv_json(timeout=max(1, deadline - time.time()))
-            except OSError:
+                message = ws.recv_json(timeout=slice_timeout)
+            except OSError as exc:
+                message_text = str(exc).casefold()
+                if "timeout" in message_text or "timed out" in message_text:
+                    continue  # Stille: Poll-Gate oben erneut pruefen
                 break  # tab closed / ws dropped
             method = str(message.get("method") or "")
             mid = message.get("id")
@@ -1107,13 +1217,20 @@ def await_token_response(ws_url, timeout=120, progress=None,
             response = params.get("response") or {}
             status = int(response.get("status") or 0)
             url = str(request.get("url") or "")
-            if status != 200 or "token" not in url:
+            if "token" not in url:
+                # Das Muster laesst eigentlich nur *token*-URLs zu --
+                # defensiv trotzdem als normaler Continue behandeln.
                 ws.send_json({"id": 100, "method": "Fetch.continueRequest",
                               "params": {"requestId": paused}})
                 continue
-            # 200-er Token-Antwort: Body abgreifen, dann die Antwort an
-            # den Reader durchreichen (er verbraucht sie ganz normal --
-            # wir sind nur stiller Mitleser).
+            # Token-Antwort (JEDER Status): Body abgreifen und die
+            # ORIGINAL-Antwort unveraendert an den Reader
+            # durchreichen -- frueher wurde hier OHNE Body fulfittet,
+            # der Reader bekam also einen leeren 200er und konnte seine
+            # eigene Rotation nicht verarbeiten, und Nicht-200er liefen
+            # in einen Continue, der am Response-Stage hängen bleiben
+            # kann. Header bleiben erhalten (ausser Kompression: der
+            # Body liegt dekodiert vor), damit Status/CORS ankommen.
             ws.send_json({"id": 101, "method": "Fetch.getResponseBody",
                           "params": {"requestId": paused}})
             body, encoded = "", False
@@ -1128,9 +1245,25 @@ def await_token_response(ws_url, timeout=120, progress=None,
                     break
             if encoded and body:
                 body = base64.b64decode(body).decode("utf-8", "replace")
+            fulfill = {"requestId": paused, "responseCode": status}
+            headers = []
+            for key, value in (response.get("headers") or {}).items():
+                if str(key).strip().casefold() in (
+                        "content-encoding", "content-length",
+                        "transfer-encoding", "connection", "keep-alive"):
+                    continue
+                headers.append({"name": str(key), "value": str(value)})
+            if headers:
+                fulfill["responseHeaders"] = headers
+            if body:
+                fulfill["body"] = base64.b64encode(
+                    body.encode("utf-8")).decode("ascii")
             ws.send_json({"id": 102, "method": "Fetch.fulfillRequest",
-                          "params": {"requestId": paused,
-                                     "responseCode": status}})
+                          "params": fulfill})
+            if status != 200:
+                # Fehlerantwort (z. B. 400 invalid_grant) kam beim
+                # Reader an -- fuer uns ist nur die 200er interessant.
+                continue
             out = {"refresh": [], "hardware": list(seen_hw)}
             try:
                 payload = json.loads(body or "{}")
@@ -1183,12 +1316,38 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
     there is no replay risk; we simply wait (up to `timeout` seconds) for
     the user to complete the Web Reader sign-in. The moment a token
     appears it is returned together with any hardware candidate.
+
+    "Window closed" is decided by the DevTools ENDPOINT, never by the
+    URL of the tab: during sign-in the tab leaves mytolino.com for the
+    partner's Keycloak page (e.g. www.orellfuessli.ch/...), and a
+    transient /json/list failure looked identical --0.9.26 reported
+    "Das Anmeldefenster wurde geschlossen" while the user had not even
+    signed in yet (field report). While the endpoint answers, the
+    window counts as open and we keep waiting with a hint; only several
+    consecutive endpoint misses in a row mean the window is gone.
     """
     deadline = time.time() + timeout
-    target_seen = False
+    endpoint_misses = 0
+    saw_reader = False
     while time.time() < deadline:
-        targets = _http_get_json("http://127.0.0.1:%d/json/list" % port) or []
+        targets = _http_get_json("http://127.0.0.1:%d/json/list" % port)
+        if not isinstance(targets, list):
+            # Endpoint antwortet nicht (Fenster weg oder kurz gestoert).
+            # Erst mehrere Fehlschlaege in Folge sind ein geschlossenes
+            # Fenster -- ein einzelner war der False-Positive.
+            endpoint_misses += 1
+            if endpoint_misses >= 3:
+                if progress:
+                    progress("Fenster geschlossen -- Abbruch.")
+                raise TolinoAuthError(
+                    "Das Anmeldefenster wurde geschlossen, bevor ein Token "
+                    "gelesen werden konnte. Bitte erneut versuchen und das "
+                    "Fenster offen lassen, bis die Übernahme durch ist.")
+            time.sleep(1)
+            continue
+        endpoint_misses = 0
         reader = None
+        foreign_page = False
         for target in targets:
             if target.get("type") != "page":
                 continue
@@ -1196,31 +1355,43 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
             if "mytolino.com" in url:
                 reader = target
                 break
+            if not url.startswith(("about:", "chrome:", "edge:",
+                                   "devtools://")):
+                foreign_page = True
         if reader is None:
-            if target_seen and progress:
-                progress("Fenster geschlossen -- Abbruch.")
-            if target_seen:
-                raise TolinoAuthError(
-                    "Das Anmeldefenster wurde geschlossen, bevor ein Token "
-                    "gelesen werden konnte. Bitte erneut versuchen und das "
-                    "Fenster offen lassen, bis die Übernahme durch ist.")
-            time.sleep(1)
+            # Fenster lebt, aber kein Reader-Tab: die Anmeldung laeuft
+            # auf der Partner-/Keycloak-Seite (andere Domain) oder der
+            # Tab lädt gerade. Beides ist KEIN geschlossenes Fenster.
+            if progress:
+                if foreign_page:
+                    progress("Anmeldefenster ist offen -- bitte im Web "
+                             "Reader anmelden und die Bücherliste laden "
+                             "(der Tab zeigt gerade die Anmeldeseite des "
+                             "Buchhändlers) ...")
+                else:
+                    progress("Anmeldefenster ist offen -- der Web Reader "
+                             "wird geladen ...")
+            time.sleep(2)
             continue
-        target_seen = True
+        saw_reader = True
         ws_url = str(reader.get("webSocketDebuggerUrl") or "")
         if ws_url.startswith("ws://"):
-            result = _evaluate_in_target(ws_url, _GRAB_SNIPPET, 10,
-                                         await_promise=True)
+            result = _grab_page_tokens(ws_url, 10)
             if result and result.get("refresh"):
                 return result
             if progress:
                 progress("Warte auf Web-Reader-Anmeldung "
                          "(Bücherliste laden) ...")
         time.sleep(2)
+    if saw_reader:
+        raise TolinoAuthError(
+            "Timeout: Im Anmeldefenster wurde keine Web-Reader-Anmeldung "
+            "erkannt. Bitte im Fenster anmelden, bis die Bücherliste sichtbar "
+            "ist, und es erneut versuchen.")
     raise TolinoAuthError(
-        "Timeout: Im Anmeldefenster wurde keine Web-Reader-Anmeldung "
-        "erkannt. Bitte im Fenster anmelden, bis die Bücherliste sichtbar "
-        "ist, und es erneut versuchen.")
+        "Timeout: Das Anmeldefenster blieb ohne Web-Reader-Tab -- die "
+        "Anmeldung im Fenster wurde nicht abgeschlossen. Bitte dort bis "
+        "zur Bücherliste anmelden und die Browser-Anmeldung erneut starten.")
 
 
 def grab_live_tokens(partner_id, hardware, timeout=300, progress=None):

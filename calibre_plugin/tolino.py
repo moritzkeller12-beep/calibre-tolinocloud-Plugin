@@ -2306,6 +2306,10 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             # Token intern schon weiterrotiert, der Storage hinkt
             # hinterher. Unten wird die Rotation jetzt ERZWUNGEN.
             first_error = str(exc)
+            if progress:
+                progress("Der gelesene Token wurde am Token-Endpunkt "
+                         "abgelehnt -- erzwinge jetzt eine frische "
+                         "Token-Rotation im Anmeldefenster ...")
     else:
         if progress:
             progress("Kein frischer Token im Seiten-Speicher -- lausche "
@@ -2321,14 +2325,22 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     # id-Header liefern zudem die Geraete-ID der AKTUELLEN Sitzung.
     ws_url = cdp_module.reader_ws_url()
     caught = cdp_module.await_token_response(
-        ws_url, timeout=180, trigger_rotation=True, reload_page=True,
+        ws_url, timeout=180, progress=progress, trigger_rotation=True,
+        reload_page=True,
         exclude_refresh=list(grabbed.get("refresh") or []))
     if not caught or not (caught.get("refresh") or []):
+        try:
+            state = cdp_module.describe_grab_state()
+        except Exception:
+            state = "Zustand der Seite nicht lesbar"
         raise TolinoAuthError(
             "Im Web Reader wurde weder ein frischer Token im Seiten-"
-            "Speicher gefunden noch eine Token-Rotation abgefangen. "
-            "Bitte im Anmeldefenster einmal neu anmelden (F5, Buecher-"
-            "liste laden) und die Browser-Anmeldung erneut starten."
+            "Speicher gefunden noch eine Token-Rotation abgefangen "
+            "(%s). Wenn im Anmeldefenster eine Anmeldeseite zu sehen "
+            "ist: dort neu anmelden, bis die Bücherliste lädt, und die "
+            "Browser-Anmeldung erneut starten; sonst F5 im Fenster und "
+            "den Knopf direkt danach erneut drücken."
+            % state
             + (" Letzter Fehler: %s" % first_error if first_error else ""))
     return _exchange_grabbed_token(partner_id, hardware, caught,
                                    caught.get("refresh") or [])
@@ -2389,7 +2401,8 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
                     if first_error else "")))
 
 
-def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
+def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
+                             progress=None):
     """Guided browser sign-in for Keycloak partners without local callback.
 
     Primary path: a private Chromium window (Chrome DevTools Protocol) in
@@ -2404,7 +2417,8 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     newest token is actually flushed to disk.
     """
     try:
-        return grab_live_refresh(partner_id, hardware, timeout=timeout)
+        return grab_live_refresh(partner_id, hardware, timeout=timeout,
+                                 progress=progress)
     except TolinoAuthError as exc:
         if "Kein Chromium-Browser gefunden" not in str(exc):
             raise
@@ -2597,7 +2611,8 @@ def start_token_keepalive(get_credentials, persist, interval=45 * 60):
     return thread
 
 
-def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
+def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
+                  progress=None):
     """Sign in via the partner's OAuth authorization endpoint.
 
     For most partners (Thalia ecosystem) the authorization endpoint accepts
@@ -2626,7 +2641,8 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         )
 
     if str(partner.get("reseller_id")) in LOCAL_CALLBACK_UNSUPPORTED_RESELLERS:
-        return _keycloak_assisted_login(int(partner_id), hardware, timeout)
+        return _keycloak_assisted_login(int(partner_id), hardware, timeout,
+                                        progress=progress)
 
     state = uuid.uuid4().hex
     created_at = time.time()
