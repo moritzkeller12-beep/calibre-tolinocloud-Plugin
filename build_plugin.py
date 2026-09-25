@@ -17,6 +17,19 @@ EXPECTED = {
     "images/tolino_cloud_sync.png",
 }
 
+def _plugin_version(source_path):
+    """PLUGIN_VERSION tuple declared by an __init__.py copy."""
+    for line in source_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("PLUGIN_VERSION"):
+            return line
+    raise RuntimeError("%s does not declare PLUGIN_VERSION" % source_path)
+
+
+_PACKAGED_VERSION = _plugin_version(ROOT / "__init__.py")
+if _PACKAGED_VERSION != _plugin_version(SOURCE / "__init__.py"):
+    raise RuntimeError("PLUGIN_VERSION drift between packaged and test copies:\n  %s\n  %s"
+                       % (_PACKAGED_VERSION, _plugin_version(SOURCE / "__init__.py")))
+
 with ZipFile(ROOT / "tolino_cloud_sync.zip", "w", ZIP_DEFLATED) as archive:
     archive.write(ROOT / "__init__.py", "__init__.py")
     archive.writestr(MARKER, "")

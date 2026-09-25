@@ -98,30 +98,3 @@ def toolbar_icon():
     if not pixmap.isNull():
         return QIcon(pixmap)
     return QIcon()
-
-
-def get_icon_pixmap():
-    """Get the icon as a QPixmap for Qt GUI code (None when unavailable)."""
-    try:
-        pixmap = pixmap_from_bytes(_png_bytes() or b"", "png")
-        if not pixmap.isNull():
-            return pixmap
-    except Exception:
-        pass
-    try:
-        pixmap = pixmap_from_bytes(_svg_bytes(), "svg")
-        if not pixmap.isNull():
-            return pixmap
-    except Exception:
-        pass
-    return None
-
-
-def get_icon_data():
-    """Return raw SVG icon data."""
-    return TOLINO_ICON_SVG
-
-
-def get_icon_path():
-    """Return path to icon file if available, otherwise None."""
-    return None
