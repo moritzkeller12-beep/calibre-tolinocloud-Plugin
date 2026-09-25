@@ -2231,6 +2231,13 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     to ~90 s) until the reader itself writes a NEW candidate, which is
     then exchanged. If none appears, TolinoAuthError with instructions.
 
+    The grabber window is closed before returning (token adopted) and
+    before the final failure (the page held nothing exchangeable): a
+    leftover window would keep rotating the very copy the plugin just
+    spent, and its stale profile would poison the next attempt. Every
+    later run therefore starts with a fresh window and a real sign-in
+    page.
+
     Returns (rotated_refresh, hardware_id). Raises TolinoAuthError when
     no Chromium browser is installed -- callers fall back to the
     historical disk-scrape flow in that case.
@@ -2249,8 +2256,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             if progress:
                 progress("Tausche den gelesenen Token am Token-Endpunkt ...")
             try:
-                return _exchange_grabbed_token(partner_id, hardware,
-                                               grabbed, fresh)
+                result = _exchange_grabbed_token(partner_id, hardware,
+                                                 grabbed, fresh)
             except TolinoAuthError as exc:
                 # Endgueltige Ablehnung: diese Kopie und ihre Geschwister
                 # derselben Sitzung sind verbraucht und werden nie wieder
@@ -2261,6 +2268,17 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                 if progress:
                     progress("Token am Token-Endpunkt abgelehnt -- warte "
                              "auf eine frische Rotation des Web Readers ...")
+            else:
+                # Der Token gehoert ab jetzt Calibre. Fenster zu: ein
+                # offener Reader rotiert im Hintergrund weiter und wuerde
+                # die uebernommene Kopie verbrauchen -- der Reuse-Schutz
+                # widerruft dann die ganze Sitzung (der Kreislauf hinter
+                # "invalid_grant: Invalid refresh token").
+                if progress:
+                    progress("Token übernommen -- das Anmeldefenster "
+                             "wird geschlossen.")
+                cdp_module.close_grabber_window()
+                return result
         if attempt >= _NEW_TOKEN_ATTEMPTS:
             break
         if progress:
@@ -2275,13 +2293,18 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         state = cdp_module.describe_grab_state()
     except Exception:
         state = "Zustand der Seite nicht lesbar"
+    # Nichts Tauschbares im Fenster: offen zu lassen wuerde den
+    # naechsten Versuch wieder zum Loop machen (dieselbe tote Kopie,
+    # dieselbe Ablehnung). Schliessen -> naechster Start mit frischem
+    # Profil und echter Anmeldeseite statt gecachter Buecherliste.
+    cdp_module.close_grabber_window()
     raise TolinoAuthError(
         "Im Web Reader wurde weder ein frischer Token im Seiten-"
         "Speicher gefunden noch innerhalb der Wartezeit nachgeschoben "
-        "(%s). Wenn im Anmeldefenster eine Anmeldeseite zu sehen "
-        "ist: dort neu anmelden, bis die Bücherliste lädt, und die "
-        "Browser-Anmeldung erneut starten; sonst F5 im Fenster und "
-        "den Knopf direkt danach erneut drücken."
+        "(%s). Das Anmeldefenster wurde geschlossen, weil dort nur ein "
+        "verbrauchter Token liegt: die Browser-Anmeldung erneut "
+        "starten und im neuen Fenster anmelden, bis die Bücherliste "
+        "lädt."
         % state
         + (" Letzter Fehler: %s" % first_error if first_error else ""))
 
@@ -2296,9 +2319,11 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
     error afterwards).
 
     Returns (refresh, hardware) when a grabber window is alive AND its
-    page yielded an exchangeable token. Returns None when no grabber
-    window is running -- the caller should then use the historical
-    disk-scrape flow.
+    page yielded an exchangeable token; the window is closed first --
+    the plugin owns the session now, and a reader left running would
+    rotate the adopted copy away (reuse protection kills the session).
+    Returns None when no grabber window is running -- the caller should
+    then use the historical disk-scrape flow.
 
     A window that IS running but yields no exchangeable token raises
     TolinoAuthError (with a redacted page-state summary): silently
@@ -2315,13 +2340,18 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
     first_error = ""
     if fresh:
         try:
-            return _exchange_grabbed_token(partner_id, hardware, grabbed,
-                                           fresh)
+            result = _exchange_grabbed_token(partner_id, hardware, grabbed,
+                                             fresh)
         except TolinoAuthError as exc:
             # Endgueltig abgelehnte Kopie: nie erneut probieren, und den
             # GUI-Thread nicht mit einer Lauschphase blockieren -- die
             # Fehlermeldung unten sagt F5 + Knopf erneut druecken.
             first_error = str(exc)
+        else:
+            # Token gehoert ab jetzt Calibre -- Fenster zu, damit der
+            # Reader die uebernommene Kopie nicht weiter rotiert.
+            cdp_module.close_grabber_window()
+            return result
     raise TolinoAuthError(
         "Im Anmeldefenster war kein tauschbarer Token zu gewinnen: "
         "Kandidaten \u00e4lter als 30 Minuten oder am Endpoint "

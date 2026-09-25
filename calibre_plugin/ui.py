@@ -722,7 +722,7 @@ class SyncDashboard(QDialog):
                     self, "Token extrahiert / Tokens extracted",
                     "Aktueller Token live aus dem ge\u00f6ffneten Web "
                     "Reader gelesen und gespeichert (Hardware-ID: %s). "
-                    "Das Anmeldefenster kann jetzt geschlossen werden."
+                    "Das Anmeldefenster wurde geschlossen."
                     % (hardware_id_value or "unver\u00e4ndert"))
                 return
             refreshes, hardwares, notes = scrape_browser_tokens(

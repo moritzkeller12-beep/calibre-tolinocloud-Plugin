@@ -854,6 +854,41 @@ def reader_ws_url(port=None):
     return None
 
 
+def close_grabber_window(timeout=2):
+    """Das private Anmeldefenster schließen; niemals werfend.
+
+    Das Plugin besitzt die Sitzung, sobald ein Tausch erfolgreich war
+    (oder sie als tot feststeht, nachdem der Seiten-Token am Endpunkt
+    abgelehnt wurde). Ein offen gebliebenes Fenster rotiert im
+    Hintergrund weiter und verbraucht damit die soeben übernommene
+    Kopie -- Keycloaks Wiederverwendungsschutz widerruft davon die
+    ganze Sitzung, und der nächste Versuch sieht nur noch eine
+    verbrauchte Kopie (Feldbefund zu 0.9.30). Best effort: ohne
+    laufenden Grabber einfach False, ohne Exception nach oben.
+    """
+    try:
+        version = _http_get_json(
+            "http://127.0.0.1:%d/json/version" % _start_port(), timeout)
+        ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
+        if not ws_url.startswith("ws://"):
+            return False
+        host, port, ws_path = _ws_path_to_host_port(ws_url[len("ws://"):])
+        ws = _Ws.connect(host, port, ws_path, timeout=timeout)
+        try:
+            ws.send_json({"id": 1, "method": "Browser.close"})
+            try:
+                # Die Antwort darf fehlen -- der Browser fährt ja ohnehin
+                # herunter und meldet sich danach nicht mehr.
+                ws.recv_json(timeout=timeout)
+            except OSError:
+                pass
+        finally:
+            ws.close()
+        return True
+    except Exception:
+        return False
+
+
 def describe_grab_state(port=None, timeout=12):
     """Short diagnostic: reader tab present? any token values visible?
 
