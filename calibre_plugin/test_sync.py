@@ -36,21 +36,32 @@ import calibre_plugin.tolino as tolino_module
 # browser the tests never asked for -- every login test that asserts the
 # no-Chromium fallback would then fail or hang. Tests that need a
 # browser patch calibre_plugin.cdp.pick_chromium themselves.
+# close_grabber_window() is stubbed as well (0.9.30): the real one
+# talks to a DevTools endpoint on 127.0.0.1:9223 and must never close
+# a developer's open grabber window while the suite runs. Tests that
+# care about the close patch the name again with their own mock.
 _PICK_CHROMIUM_PATCH = None
+_CLOSE_WINDOW_PATCH = None
 
 
 def setUpModule():
-    global _PICK_CHROMIUM_PATCH
+    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
     _PICK_CHROMIUM_PATCH = patch("calibre_plugin.cdp.pick_chromium",
                                  return_value=None)
     _PICK_CHROMIUM_PATCH.start()
+    _CLOSE_WINDOW_PATCH = patch("calibre_plugin.cdp.close_grabber_window",
+                                return_value=False)
+    _CLOSE_WINDOW_PATCH.start()
 
 
 def tearDownModule():
-    global _PICK_CHROMIUM_PATCH
+    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
     if _PICK_CHROMIUM_PATCH is not None:
         _PICK_CHROMIUM_PATCH.stop()
         _PICK_CHROMIUM_PATCH = None
+    if _CLOSE_WINDOW_PATCH is not None:
+        _CLOSE_WINDOW_PATCH.stop()
+        _CLOSE_WINDOW_PATCH = None
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -1146,6 +1157,85 @@ class SyncPlanTests(unittest.TestCase):
                 browser_login(1, "test_hardware", timeout=0.2)
         self.assertEqual(1, len(opened))
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1", opened[0])
+
+    def _refresh_jwt(self, iat):
+        """Minimal JWT im Format der Reader-Tokens (typ: Refresh)."""
+        head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+        body = base64.urlsafe_b64encode(
+            json.dumps({"iat": int(iat), "typ": "Refresh",
+                        "sid": "sess-close"}).encode("utf-8"))
+        return "%s.%s.sig" % (head.decode().rstrip("="),
+                              body.decode().rstrip("="))
+
+    def test_grab_live_refresh_closes_window_after_adopting_token(self):
+        """Nach dem Tausch gehört die Sitzung Calibre: das
+        Anmeldefenster wird geschlossen, damit der Reader die
+        übernommene Kopie nicht weiter rotiert (0.9.30)."""
+        from .tolino import grab_live_refresh
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = "fake-hw"
+
+            def _login(self):
+                self.refresh = "rotated-token"
+
+        fresh = self._refresh_jwt(time.time() - 5)
+        with patch("calibre_plugin.tolino.TolinoClient", FakeClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [fresh], "hardware": []}), \
+             patch("calibre_plugin.cdp.close_grabber_window") as closer:
+            result = grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertEqual(("rotated-token", "fake-hw"), result)
+        closer.assert_called_once_with()
+
+    def test_grab_live_refresh_closes_window_when_nothing_exchangeable(self):
+        """Ohne tauschbaren Token schließt das Fenster: der nächste
+        Versuch startet mit frischem Profil statt derselben toten
+        Kopie (Feldbefund: invalid_grant-Loop, 0.9.30)."""
+        from .tolino import grab_live_refresh
+        stale = self._refresh_jwt(time.time() - 7200)  # 2 h alt
+        with patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [stale], "hardware": []}), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value=None), \
+             patch("calibre_plugin.cdp.close_grabber_window") as closer, \
+             patch("calibre_plugin.tolino._NEW_TOKEN_ATTEMPTS", 2), \
+             patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        closer.assert_called_once_with()
+        message = str(ctx.exception)
+        self.assertIn("wurde geschlossen", message)
+        self.assertIn("erneut starten", message)
+        self.assertIn("weder ein frischer Token", message)
+
+    def test_try_live_grab_first_closes_window_after_adopting_token(self):
+        """Die Extrahier-Schaltfläche schließt das Fenster nach dem
+        erfolgreichen Übernehmen derselben Sitzung (0.9.30)."""
+        from .tolino import try_live_grab_first
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                self.refresh = "rotated-live"
+
+        fresh = self._refresh_jwt(time.time() - 5)
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=True), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value={"refresh": [fresh], "hardware": [],
+                                 "idb": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url", return_value=None), \
+             patch("calibre_plugin.cdp.close_grabber_window") as closer, \
+             patch("calibre_plugin.tolino.TolinoClient", FakeClient):
+            result = try_live_grab_first(4, "cfg-hw")
+        self.assertEqual(("rotated-live", "cfg-hw"), result)
+        closer.assert_called_once_with()
 
     def test_keycloak_assisted_login_validates_each_new_candidate_once(self):
         """Every newly harvested candidate is validated exactly once.

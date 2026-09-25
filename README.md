@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.29** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
+Plugin-Version: **0.9.30** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -26,7 +26,7 @@ eigenes Chromium-Fenster mit privatem Profil auf dem Web Reader des Partners:
 1. dort **anmelden**, bis die **Bücherliste** lädt,
 2. Fenster in Ruhe lassen — das Plugin liest den Token aus dem Seitenspeicher und
    tauscht ihn am Token-Endpunkt,
-3. bei „Token gespeichert" darf das Fenster zu.
+3. bei „Token gespeichert" wird das Anmeldefenster automatisch geschlossen.
 
 **Ohne Chromium** (kein Chrome/Chromium/Brave/Edge installiert) fällt derselbe Knopf
 automatisch auf den Disk-Fallback zurück: Web Reader im Systems-Browser öffnen,
@@ -50,7 +50,7 @@ ungültig (`invalid_grant`). Kein Inkognito-Fenster.
 | Meldung | Tun |
 |---|---|
 | „… warte auf eine frische Rotation des Web Readers" | Token war verbraucht; das Plugin wartet bis zu ~90 s auf eine neu geschriebene Kopie. Fenster angemeldet lassen. |
-| „… weder frischer Token … noch nachgeschoben" | **F5 im Fenster**, neu anmelden bis die Bücherliste lädt, Knopf direkt danach erneut drücken. |
+| „… weder frischer Token … noch nachgeschoben" | Das Anmeldefenster wurde geschlossen (verbrauchter Token). Knopf erneut drücken und im **neuen** Fenster anmelden, bis die Bücherliste lädt. |
 | `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. |
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz → unten „Bot-Schutz-Komponente installieren". |
 

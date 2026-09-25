@@ -81,8 +81,20 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     bis zu ~90 s alle 3 s erneut gelesen und die erste neu
     geschriebene Kopie getauscht. Kein erzwungener Reload, kein
     Abfangen von Antworten, kein Mithören von Headern.
+12. **Anmeldefenster wird nach dem Lauf geschlossen (0.9.30):** Ein
+    offen gebliebenes Fenster war die Quelle des Dauer-Loops „1 Refresh-
+    Kandidat, invalid_grant, nichts nachgeschoben": Nach einem
+    erfolgreichen Tausch rotiert der Reader im Hintergrund mit der
+    soeben verbrauchten Kopie weiter (Reuse-Schutz widerruft die ganze
+    Sitzung), und ein Fehlschlag hinterließ dasselbe tote Profil, das
+    der nächste Versuch wieder benutzte. Jetzt wird das Fenster
+    geschlossen — nach Erfolg (die Sitzung gehört ab jetzt Calibre)
+    und nach endgültiger Ablehnung (dort lag nur noch ein verbrauchter
+    Token). Der nächste Start arbeitet mit frischem Profil und zeigt
+    eine echte Anmeldeseite. Timeouts (Anmeldung läuft noch) lassen
+    das Fenster bewusst offen.
 
-## Aktuelle Login-Kette (ab 0.9.28)
+## Aktuelle Login-Kette (ab 0.9.30)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
    öffnet den Web Reader; während der Anmeldung zählt das Fenster als
@@ -91,12 +103,14 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
 2. Storage-Grab (localStorage + sessionStorage **inkl. JSON-Blobs** +
    IndexedDB) → frischester `typ: Refresh`-Kandidat.
 3. Tausch **in der Reader-Seite** (in-page fetch) → `_apply_token_response`
-   mit sofortigem Speichern des rotierten Tokens.
+   mit sofortigem Speichern des rotierten Tokens; danach wird das
+   Anmeldefenster geschlossen (die Sitzung gehört ab jetzt Calibre).
 4. Bei Ablehnung/Leere: Seiten-Speicher (inkl. IndexedDB) alle 3 s
    erneut lesen, bis der Reader selbst einen frischen Token schreibt
    (bis zu ~90 s), dann genau einmal tauschen. Kommt nichts Nach-
-   geschobenes, endet der Lauf mit einer Fehlermeldung samt Anleitung
-   (F5 + Knopf erneut) — erzwungene Rotation und Netzwerk-
+   geschobenes, wird das Fenster geschlossen und der Lauf endet mit
+   einer Fehlermeldung (Browser-Anmeldung erneut starten, im neuen
+   Fenster anmelden) — erzwungene Rotation und Netzwerk-
    Interception gibt es seit 0.9.28 nicht mehr.
 5. Ohne Chromium: Disk-Scrape-Fallback (alle Browser schließen, damit der
    letzte Token geflushed wird).
