@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.30** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
+Plugin-Version: **0.9.31** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -50,7 +50,7 @@ ungültig (`invalid_grant`). Kein Inkognito-Fenster.
 | Meldung | Tun |
 |---|---|
 | „… warte auf eine frische Rotation des Web Readers" | Token war verbraucht; das Plugin wartet bis zu ~90 s auf eine neu geschriebene Kopie. Fenster angemeldet lassen. |
-| „… weder frischer Token … noch nachgeschoben" | Das Anmeldefenster wurde geschlossen (verbrauchter Token). Knopf erneut drücken und im **neuen** Fenster anmelden, bis die Bücherliste lädt. |
+| „… weder frischer Token … noch nachgeschoben" | Das Anmeldefenster wurde geschlossen (verbrauchter Token). Knopf erneut drücken und im **neuen** Fenster anmelden, bis die Bücherliste lädt. Das Alter des Kandidaten in der Meldung sagt, ob eine frische Anmeldung (Sekunden) oder eine alte Kopie (Stunden) abgelehnt wurde. |
 | `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. |
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz → unten „Bot-Schutz-Komponente installieren". |
 

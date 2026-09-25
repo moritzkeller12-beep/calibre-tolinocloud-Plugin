@@ -94,7 +94,7 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     eine echte Anmeldeseite. Timeouts (Anmeldung läuft noch) lassen
     das Fenster bewusst offen.
 
-## Aktuelle Login-Kette (ab 0.9.30)
+## Aktuelle Login-Kette (ab 0.9.31)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
    öffnet den Web Reader; während der Anmeldung zählt das Fenster als
@@ -110,7 +110,10 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
    (bis zu ~90 s), dann genau einmal tauschen. Kommt nichts Nach-
    geschobenes, wird das Fenster geschlossen und der Lauf endet mit
    einer Fehlermeldung (Browser-Anmeldung erneut starten, im neuen
-   Fenster anmelden) — erzwungene Rotation und Netzwerk-
+   Fenster anmelden). Die Meldung nennt zusätzlich nur das ALTER des
+   geprüften Kandidaten (JWT-iat, nie der Wert): Sekunden = frische
+   Anmeldung sofort abgelehnt, Stunden = verbrauchte Kopie aus
+   wiederverwendetem Fenster. Erzwungene Rotation und Netzwerk-
    Interception gibt es seit 0.9.28 nicht mehr.
 5. Ohne Chromium: Disk-Scrape-Fallback (alle Browser schließen, damit der
    letzte Token geflushed wird).

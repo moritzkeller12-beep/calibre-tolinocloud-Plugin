@@ -1210,6 +1210,41 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("wurde geschlossen", message)
         self.assertIn("erneut starten", message)
         self.assertIn("weder ein frischer Token", message)
+        # Alter des Kandidaten (ohne Token-Wert) ordnet den Fehler ein.
+        self.assertIn("Sekunden alt", message)
+        self.assertNotIn(stale, message)
+
+    def test_grab_live_refresh_failure_names_the_candidate_age(self):
+        """Die Fehlermeldung nennt nur das Alter des geprüften
+        Kandidaten: „5 Sekunden alt" (frische Anmeldung sofort
+        abgelehnt) unterscheidet sich klar von „3700 Sekunden alt"
+        (verbrauchte Kopie aus wiederverwendetem Fenster) -- und der
+        Token-Wert selbst darf nie in der Meldung stehen."""
+        from .tolino import grab_live_refresh
+        fresh = self._refresh_jwt(time.time() - 5)
+
+        class FailingClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                raise TolinoAuthError(
+                    'Tolino HTTP 400: {"error": "invalid_grant"}')
+
+        with patch("calibre_plugin.tolino.TolinoClient", FailingClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [fresh], "hardware": []}), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value=None), \
+             patch("calibre_plugin.tolino._NEW_TOKEN_ATTEMPTS", 2), \
+             patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        message = str(ctx.exception)
+        self.assertIn("Letzter Fehler", message)
+        self.assertIn("Sekunden alt", message)
+        self.assertNotIn(fresh, message)
 
     def test_try_live_grab_first_closes_window_after_adopting_token(self):
         """Die Extrahier-Schaltfläche schließt das Fenster nach dem
