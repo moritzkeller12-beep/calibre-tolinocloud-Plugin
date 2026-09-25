@@ -30,6 +30,29 @@ from .tolino import (PARTNERS, TolinoAuthError, TolinoApiError,
 import calibre_plugin.tolino as tolino_module
 
 
+# The login helpers must not open a REAL browser window during tests.
+# On machines that have Chrome/Chromium installed (CI runners do),
+# pick_chromium() would succeed and launch_reader_window() would spawn a
+# browser the tests never asked for -- every login test that asserts the
+# no-Chromium fallback would then fail or hang. Tests that need a
+# browser patch calibre_plugin.cdp.pick_chromium themselves.
+_PICK_CHROMIUM_PATCH = None
+
+
+def setUpModule():
+    global _PICK_CHROMIUM_PATCH
+    _PICK_CHROMIUM_PATCH = patch("calibre_plugin.cdp.pick_chromium",
+                                 return_value=None)
+    _PICK_CHROMIUM_PATCH.start()
+
+
+def tearDownModule():
+    global _PICK_CHROMIUM_PATCH
+    if _PICK_CHROMIUM_PATCH is not None:
+        _PICK_CHROMIUM_PATCH.stop()
+        _PICK_CHROMIUM_PATCH = None
+
+
 class SyncPlanTests(unittest.TestCase):
     def setUp(self):
         self.book = {"uuid": "u1", "title": "A", "formats": ["EPUB"], "last_modified": "1"}
@@ -1882,9 +1905,14 @@ class SyncPlanTests(unittest.TestCase):
         import base64 as b64
         import hashlib
         import struct
+        try:
+            # Independent reference implementation of the CryptoJS blob;
+            # without it there is nothing to cross-check against.
+            from Crypto.Cipher import AES
+        except ImportError:
+            self.skipTest("pycryptodome missing: no reference AES available")
 
         def encrypt(plain, phrase=""):
-            from Crypto.Cipher import AES
             salt = os.urandom(8)
             derived = b""
             prev = b""
