@@ -2086,6 +2086,27 @@ def _candidate_ages_summary(candidates, now=None):
     return ", ".join("%dx %s" % (counts[a], a) for a in order)
 
 
+def _candidate_age_note(candidates):
+    """Redaktionsfreier Alters-Hinweis fuer Fehlermeldungen.
+
+    Nennt nur das Alter (JWT-iat) des juesten Kandidaten, nie den Wert:
+    "3 Sekunden alt" bedeutet eine frische Anmeldung wurde sofort
+    abgelehnt (Tausch/Extraktion pruefen), "3700 Sekunden alt" eine
+    verbrauchte Kopie aus einem wiederverwendeten Fenster. Damit
+    unterscheidet die Feldmeldung die beiden Faelle auf einen Blick.
+    """
+    best = None
+    for token in candidates or ():
+        issued = _refresh_token_iat(token)
+        if issued is not None and (best is None or issued > best):
+            best = issued
+    if best is None:
+        return ("Refresh-Kandidat ohne datierbares JWT-alter"
+                if candidates else "")
+    return "Refresh-Kandidat %d Sekunden alt" % max(
+        0, int(time.time() - best))
+
+
 def _filter_live_candidates(candidates, max_age_seconds=1800):
     """Keep only JWT candidates issued within the last minutes.
 
@@ -2298,6 +2319,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     # dieselbe Ablehnung). Schliessen -> naechster Start mit frischem
     # Profil und echter Anmeldeseite statt gecachter Buecherliste.
     cdp_module.close_grabber_window()
+    age_note = _candidate_age_note(
+        tried or (grabbed or {}).get("refresh") or ())
     raise TolinoAuthError(
         "Im Web Reader wurde weder ein frischer Token im Seiten-"
         "Speicher gefunden noch innerhalb der Wartezeit nachgeschoben "
@@ -2306,7 +2329,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         "starten und im neuen Fenster anmelden, bis die Bücherliste "
         "lädt."
         % state
-        + (" Letzter Fehler: %s" % first_error if first_error else ""))
+        + (" Letzter Fehler: %s" % first_error if first_error else "")
+        + (" %s." % age_note if age_note else ""))
 
 
 def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
@@ -2352,6 +2376,7 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
             # Reader die uebernommene Kopie nicht weiter rotiert.
             cdp_module.close_grabber_window()
             return result
+    age_note = _candidate_age_note((grabbed or {}).get("refresh") or ())
     raise TolinoAuthError(
         "Im Anmeldefenster war kein tauschbarer Token zu gewinnen: "
         "Kandidaten \u00e4lter als 30 Minuten oder am Endpoint "
@@ -2359,7 +2384,8 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
         "gen\u00fcgt oft) und den Knopf direkt danach erneut "
         "dr\u00fccken."
         % (state + ("; Letzter Fehler: %s" % first_error
-                    if first_error else "")))
+                    if first_error else ""))
+        + (" %s." % age_note if age_note else ""))
 
 
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
