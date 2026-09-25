@@ -180,14 +180,6 @@ def _extract_wheel(wheel_bytes, target_dir):
             zf.extractall(target_dir)
 
 
-def _sha256_of_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def is_available():
     """True when curl_cffi is importable right now."""
     try:

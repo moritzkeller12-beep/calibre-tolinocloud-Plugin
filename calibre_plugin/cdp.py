@@ -20,7 +20,6 @@ optimaler HTTP-Fallback für den WS-Handshake genutzt.
 """
 
 import base64
-import hashlib
 import json
 import os
 import secrets
@@ -33,10 +32,9 @@ import tempfile
 import time
 
 try:
-    from .tolino import PARTNERS, TolinoAuthError, normalize_hardware_id
+    from .tolino import PARTNERS, TolinoAuthError
 except ImportError:  # direkter Import (außerhalb des Plugin-Pakets)
-    from tolino import (PARTNERS, TolinoAuthError,
-                        normalize_hardware_id)
+    from tolino import PARTNERS, TolinoAuthError
 
 
 # ---------------------------------------------------------------- Vorbedingungen
@@ -313,25 +311,6 @@ def _http_get_json(url, timeout=5):
         return None
 
 
-def _find_page_ws_url(port, needle, timeout=30):
-    """Wait for a DevTools page target whose URL contains `needle`."""
-    deadline = time.time() + timeout
-    path_part = None
-    while time.time() < deadline:
-        targets = _http_get_json("http://127.0.0.1:%d/json/list" % port) or []
-        for target in targets:
-            if target.get("type") != "page":
-                continue
-            url = str(target.get("url") or "")
-            if needle in url:
-                path_part = str(target.get("webSocketDebuggerUrl") or "")
-                if path_part.startswith("ws://"):
-                    path_part = path_part[len("ws://"):]
-                    return path_part
-        time.sleep(0.5)
-    return None
-
-
 def _ws_path_to_host_port(path):
     host, _, rest = path.partition(":")
     port, _, ws_path = rest.partition("/")
@@ -529,33 +508,6 @@ _IDB_SNIPPET = r"""
   });
 })('%s')
 """
-
-
-def grab_from_existing_reader(port=9222, timeout=15):
-    """Read the CURRENT tokens from an already-running Web Reader tab.
-
-    Connects to an existing browser's DevTools endpoint (only useful when
-    that browser was started with --remote-debugging-port, e.g. the user
-    followed the manual fallback). Returns
-    ``{"refresh": [...], "hardware": [...]}`` ordered freshest-first.
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        targets = _http_get_json("http://127.0.0.1:%d/json/list" % port) or []
-        for target in targets:
-            if target.get("type") != "page":
-                continue
-            if "mytolino.com" not in str(target.get("url") or ""):
-                continue
-            ws_url = str(target.get("webSocketDebuggerUrl") or "")
-            if not ws_url.startswith("ws://"):
-                continue
-            result = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
-                                         await_promise=True)
-            if result:
-                return result
-        time.sleep(0.5)
-    return {"refresh": [], "hardware": []}
 
 
 def _evaluate_raw_in_target(ws_url, expression, timeout=10,
@@ -850,7 +802,8 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
 
     Raises TolinoAuthError on a definitive OAuth rejection of this
     candidate (invalid_grant & friends): replaying a spent grant cannot
-    succeed, so the callers' forced-rotation fallback takes over.
+    succeed, so the callers fail fast with instructions instead of
+    retrying the same token.
     """
     expression = (_EXCHANGE_SNIPPET
                   .replace("TOKEN_URL_PLACEHOLDER",
@@ -873,7 +826,8 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     # replaying an already-spent grant could only produce a second
     # rejection plus WAF noise -- and it is exactly the signal the
     # callers expect: grab_live_refresh / try_live_grab_first catch it
-    # and force a fresh token rotation inside the reader window.
+    # and wait briefly for a NEW candidate before failing with a clear
+    # instruction.
     reason = _oauth_rejection_reason(body) if status in (400, 401, 403) else ""
     if reason:
         raise TolinoAuthError(
@@ -897,399 +851,6 @@ def reader_ws_url(port=None):
         ws_url = str(target.get("webSocketDebuggerUrl") or "")
         if ws_url.startswith("ws://"):
             return ws_url
-    return None
-
-
-def _hardware_from_headers(headers):
-    """hardware-id/device-id aus Request-Headern extrahieren (oder None).
-
-    Die Reader-Requests gegen api.pageplace.de tragen die Geraete-ID der
-    AKTUELLEN Sitzung im Header ("hardware-id"/"device-id") -- genau die
-    ID, die zu den Tokens dieser Sitzung gehoert. Storage-Kopien enthalten
-    dagegen haeufig noch IDs frueherer Anmeldungen.
-    """
-    if not isinstance(headers, dict):
-        return None
-    for key, value in headers.items():
-        folded = str(key).strip().casefold().replace("_", "-")
-        if folded in ("hardware-id", "device-id"):
-            value = str(value or "").strip()
-            if len(value) >= 8:
-                return normalize_hardware_id(value) or value
-    return None
-
-
-# In-Page-Snippet: nur Access-Tokens ungueltig schreiben (Refresh-Tokens
-# unberuehrt), damit der Reader beim naechsten API-Call auf 401 laeuft und
-# seinen AKTUELLEN Refresh-Token sofort selbst tauscht. Zwei Formen:
-#  a) Key-Namen wie "access_token" (einfache Stores),
-#  b) JSON-Blobs ("oidc.user:..." von oidc-client-ts & Co.), deren
-#     access_token-EIGENSCHAFT ersetzt wird; expires_at wird auf 0
-#     gesetzt, damit der Reader proaktiv erneuert statt den toten Token
-#     zu verwenden.
-_INVALIDATE_ACCESS_TOKENS_EXPRESSION = (
-    "(() => {"
-    "  const dead = 'invalidated-by-calibre-plugin';"
-    "  let touched = 0;"
-    "  const stores = [];"
-    "  try { stores.push(window.localStorage); } catch (e) {}"
-    "  try { stores.push(window.sessionStorage); } catch (e) {}"
-    "  for (const store of stores) {"
-    "    let keys = [];"
-    "    try { for (let i = 0; i < store.length; i++)"
-    "      keys.push(store.key(i)); } catch (e) { continue; }"
-    "    for (const k of keys) {"
-    "      let v = null;"
-    "      try { v = store.getItem(k); } catch (e) { continue; }"
-    "      if (typeof v !== 'string' || v.length < 20) continue;"
-    "      if (/access[_-]?token/i.test(k))"
-    "        { try { store.setItem(k, dead); touched++; } catch (e) {}"
-    "          continue; }"
-    "      if (v.indexOf('access_token') === -1) continue;"
-    "      try {"
-    "        const obj = JSON.parse(v);"
-    "        if (obj && typeof obj === 'object'"
-    "            && typeof obj.access_token === 'string'"
-    "            && obj.access_token.length > 20) {"
-    "          obj.access_token = dead;"
-    "          if ('expires_at' in obj) obj.expires_at = 0;"
-    "          try { store.setItem(k, JSON.stringify(obj)); touched++; }"
-    "          catch (e) {}"
-    "        }"
-    "      } catch (e) {}"
-    "    }"
-    "  }"
-    "  return touched; })()"
-)
-
-# Notfall-Anstoss, falls die Invalidierung nichts traf (unbekanntes
-# Layout): Storage komplett leeren. Der Reader gilt dann als
-# abgemeldet, re-authentifiziert sich beim Reload aber still ueber das
-# Keycloak-SSO-Cookie und schreibt dabei BRANDNEUE Tokens in den
-# Storage, die das Polling unten uebernimmt.
-_CLEAR_STORAGE_EXPRESSION = (
-    "(() => {"
-    "  try { window.localStorage.clear(); } catch (e) {}"
-    "  try { window.sessionStorage.clear(); } catch (e) {}"
-    "  return 1; })()"
-)
-
-
-def _force_reader_token_rotation(ws_url, timeout=10):
-    """Den Access-Token der Reader-Seite gezielt ablaufen lassen.
-
-    Der Reader rotiert seinen Refresh-Token nur, wenn sein Access-Token
-    abgelaufen ist (Gueltigkeit ~50 Minuten) -- ein Page.reload allein
-    stoesst deshalb KEINE Rotation an, solange der Access-Token noch
-    gilt. Schreibt man ihm hingegen einen ungueltigen Access-Token in
-    den Seiten-Speicher, laeuft sein naechster API-Call auf 401, der
-    Reader tauscht SOFORT selbst mit seinem aktuellen Refresh-Token --
-    und genau diese Token-Antwort faengt await_token_response ab
-    (garantiert ungenutzt, inklusive frischem Access-Token). Die
-    Refresh-Tokens werden unberuehrt gelassen.
-
-    Returns True when at least one access-token entry was invalidated.
-    """
-    if not ws_url or not str(ws_url).startswith("ws://"):
-        return False
-    result = _evaluate_raw_in_target(
-        ws_url, _INVALIDATE_ACCESS_TOKENS_EXPRESSION, timeout=timeout)
-    if not result.get("ok"):
-        return False
-    try:
-        return int(result.get("value")) > 0
-    except (TypeError, ValueError):
-        return False
-
-
-def await_token_response(ws_url, timeout=120, progress=None,
-                         reload_page=False, trigger_rotation=False,
-                         exclude_refresh=None):
-    """Catch a FRESH refresh_token after forcing the reader to rotate.
-
-    Drei Fangwege, in dieser Reihenfolge:
-
-    1. **CDP Fetch-Interception** am Reader-Tab: die naechste 200er
-       Token-Antwort wird abgefangen, bevor der Reader sie verbraucht
-       (garantiert ungenutzt). Beachtet NICHT Requests, die ein Service
-       Worker stellt -- daher nur erster, nicht einziger Weg.
-    2. **Storage-Polling** (alle 3 s, per Runtime.evaluate): nach der
-       erzwungenen Rotation schreibt der Reader seine neuen Tokens in
-       den Seiten-Speicher; Kandidaten, die NICHT in ``exclude_refresh``
-       liegen (die zuvor schon erfolglos getauschten Kopien), werden
-       uebernommen. Immun gegen Service-Worker-Routing.
-    3. **Hardware-ID passiv**: ``hardware-id``/``device-id``-Header der
-       Reader-Requests (und die Grab-Ergebnisse) liefern die Geraete-ID
-       der AKTUELLEN Sitzung.
-
-    Mit ``trigger_rotation=True`` wird die Rotation ANGESTOSSEN: die
-    Access-Tokens im Seiten-Speicher werden ungueltig geschrieben
-    (JSON-Blobs inklusive; Refresh-Tokens unberuehrt). Traf die
-    Invalidierung nichts (unbekanntes Storage-Layout), wird der Storage
-    komplett geleert -- der Reader re-authentifiziert sich beim Reload
-    still ueber das Keycloak-SSO-Cookie und schreibt frische Tokens.
-
-    Returns ``{"refresh": [...], "hardware": [...]}`` or None when the
-    reader tab goes away before anything was caught.
-    """
-    if not ws_url or not str(ws_url).startswith("ws://"):
-        return None
-    try:
-        path = ws_url[len("ws://"):]
-        host, port, ws_path = _ws_path_to_host_port(path)
-        ws = _Ws.connect(host, port, ws_path, timeout=10)
-    except (OSError, ValueError):
-        return None
-    deadline = time.time() + max(15, timeout)
-    exclude = set(exclude_refresh or ())
-    eval_kinds = {5: "invalidate"}
-    invalidate_value = [None]
-    clear_sent = [False]
-    reload_sent = [not reload_page]
-    next_poll_id = [200]
-    last_poll = [0.0]
-    found_refresh = []
-    seen_hw = []
-    idb_last_scan = {}
-
-    def _send_poll():
-        eid = next_poll_id[0]
-        next_poll_id[0] += 1
-        eval_kinds[eid] = "grab"
-        try:
-            ws.send_json({"id": eid, "method": "Runtime.evaluate",
-                          "params": {"expression": _GRAB_SNIPPET,
-                                     "returnByValue": True,
-                                     "awaitPromise": True}})
-        except OSError:
-            raise
-        last_poll[0] = time.time()
-
-    def _handle_eval_reply(message):
-        kind = eval_kinds.pop(message.get("id"), None)
-        result = ((message.get("result") or {}).get("result") or {})
-        value = result.get("value")
-        if kind == "invalidate":
-            try:
-                invalidate_value[0] = int(value or 0)
-            except (TypeError, ValueError):
-                invalidate_value[0] = 0
-        elif kind == "grab":
-            # Der Grab-Snippet antwortet mit JSON.stringify(out) --
-            # einem STRING. Die fruehere isinstance-(dict)-Pruefung
-            # verwarf jede Poll-Antwort STILL (nur die Test-Server
-            # antworteten mit dict, deshalb fiel der Regression nicht
-            # auf): das Fangnetz gegen Service-Worker-Routing traf in
-            # der Feldpraxis nie -- Feldbefund 0.9.27 "kein frischer
-            # Token" trotz angemeldetem Fenster.
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except ValueError:
-                    value = None
-            if not isinstance(value, dict):
-                return
-            for token in value.get("refresh") or []:
-                if token and token not in exclude \
-                        and token not in found_refresh:
-                    found_refresh.append(token)
-            for hw in value.get("hardware") or []:
-                if hw and hw not in seen_hw:
-                    seen_hw.append(hw)
-            # IndexedDB mitlesen: der Reader legt sein Token-Set haeufig
-            # genau hier ab, und bei Service-Worker-Routing ist die
-            # Fetch-Interception blind -- der Poll ist dann der einzige
-            # Fangweg. Gedrosselt (pro DB alle 6 s), damit jede
-            # Poll-Ration nicht alles neu liest.
-            for name in value.get("idb") or []:
-                name = str(name).strip()
-                if not name:
-                    continue
-                if idb_last_scan.get(name, 0) > time.time() - 6:
-                    continue
-                idb_last_scan[name] = time.time()
-                eid = next_poll_id[0]
-                next_poll_id[0] += 1
-                eval_kinds[eid] = "grab"
-                try:
-                    ws.send_json({"id": eid, "method": "Runtime.evaluate",
-                                  "params": {
-                                      "expression": _idb_expression(name),
-                                      "returnByValue": True,
-                                      "awaitPromise": True}})
-                except OSError:
-                    return
-
-    try:
-        ws.send_json({"id": 1, "method": "Fetch.enable", "params": {
-            "patterns": [{"urlPattern": "*token*", "requestStage":
-                          "Response"}],
-        }})
-        # Netzwerk-Mitlesen: die Reader-Requests tragen die hardware-id
-        # des Geraets der AKTUELLEN Sitzung im Header.
-        ws.send_json({"id": 2, "method": "Network.enable", "params": {}})
-        if trigger_rotation:
-            # Rotations-Anstoss auf DERSELBEN Verbindung (id 5).
-            if progress:
-                progress("Erzwinge eine frische Token-Rotation im "
-                         "Anmeldefenster: die Seite wird neu geladen, "
-                         "der Reader tauscht seinen Token dann sofort "
-                         "selbst. Falls danach eine Anmeldeseite "
-                         "erscheint: dort einfach neu anmelden -- der "
-                         "neue Token wird automatisch übernommen.")
-            ws.send_json({"id": 5, "method": "Runtime.evaluate",
-                          "params": {
-                              "expression":
-                                  _INVALIDATE_ACCESS_TOKENS_EXPRESSION,
-                              "returnByValue": True}})
-        elif reload_page:
-            ws.send_json({"id": 3, "method": "Page.enable", "params": {}})
-            ws.send_json({"id": 4, "method": "Page.reload",
-                          "params": {"ignoreCache": False}})
-            reload_sent[0] = True
-        while time.time() < deadline:
-            # Reload erst senden, wenn die Invalidation-Entscheidung da
-            # ist (CDP verarbeitet Befehle in Reihenfolge -- der Clear
-            # muss VOR dem Reload in derselben Seite ankommen).
-            if (trigger_rotation and invalidate_value[0] is not None
-                    and not reload_sent[0]):
-                if invalidate_value[0] == 0 and not clear_sent[0]:
-                    eval_kinds[6] = "clear"
-                    try:
-                        ws.send_json({"id": 6, "method": "Runtime.evaluate",
-                                      "params": {
-                                          "expression":
-                                              _CLEAR_STORAGE_EXPRESSION,
-                                          "returnByValue": True}})
-                    except OSError:
-                        break
-                    clear_sent[0] = True
-                try:
-                    ws.send_json({"id": 3, "method": "Page.enable",
-                                  "params": {}})
-                    ws.send_json({"id": 4, "method": "Page.reload",
-                                  "params": {"ignoreCache": False}})
-                except OSError:
-                    break
-                reload_sent[0] = True
-            if found_refresh:
-                break
-            # Storage-Poll (nur nach Reload bzw. ohne Reload-Zwang):
-            # die frisch rotierten Tokens landen im Seiten-Speicher.
-            if reload_sent[0] and time.time() - last_poll[0] >= 3:
-                try:
-                    _send_poll()
-                except OSError:
-                    break
-            # Empfang in kurzen Zeitfenstern: nur so laeuft die
-            # Schleife in Stillperioden regelmaessig wieder an das
-            # Poll-Gate zurueck. Blockierte recv laengere Zeit (frueher
-            # bis das 5-Sekunden-Socket-Timeout als Fehler durchlief),
-            # nie wieder ein Poll -- die erzwungene Rotation wurde dann
-            # nie abgefangen (Feldbefund "kein frischer Token").
-            slice_timeout = min(3, max(1, deadline - time.time()))
-            try:
-                message = ws.recv_json(timeout=slice_timeout)
-            except OSError as exc:
-                message_text = str(exc).casefold()
-                if "timeout" in message_text or "timed out" in message_text:
-                    continue  # Stille: Poll-Gate oben erneut pruefen
-                break  # tab closed / ws dropped
-            method = str(message.get("method") or "")
-            mid = message.get("id")
-            if mid == 101:  # getResponseBody reply (late)
-                continue
-            if mid in eval_kinds:
-                _handle_eval_reply(message)
-                continue
-            if method == "Network.requestWillBeSent":
-                hw = _hardware_from_headers(
-                    ((message.get("params") or {}).get("request") or {})
-                    .get("headers") or {})
-                if hw and hw not in seen_hw:
-                    seen_hw.append(hw)
-                continue
-            if method != "Fetch.requestPaused":
-                continue
-            params = message.get("params") or {}
-            paused = params.get("requestId")
-            request = params.get("request") or {}
-            response = params.get("response") or {}
-            status = int(response.get("status") or 0)
-            url = str(request.get("url") or "")
-            if "token" not in url:
-                # Das Muster laesst eigentlich nur *token*-URLs zu --
-                # defensiv trotzdem als normaler Continue behandeln.
-                ws.send_json({"id": 100, "method": "Fetch.continueRequest",
-                              "params": {"requestId": paused}})
-                continue
-            # Token-Antwort (JEDER Status): Body abgreifen und die
-            # ORIGINAL-Antwort unveraendert an den Reader
-            # durchreichen -- frueher wurde hier OHNE Body fulfittet,
-            # der Reader bekam also einen leeren 200er und konnte seine
-            # eigene Rotation nicht verarbeiten, und Nicht-200er liefen
-            # in einen Continue, der am Response-Stage hängen bleiben
-            # kann. Header bleiben erhalten (ausser Kompression: der
-            # Body liegt dekodiert vor), damit Status/CORS ankommen.
-            ws.send_json({"id": 101, "method": "Fetch.getResponseBody",
-                          "params": {"requestId": paused}})
-            body, encoded = "", False
-            inner_deadline = time.time() + 8
-            while time.time() < inner_deadline:
-                reply = ws.recv_json(timeout=max(1, inner_deadline -
-                                                time.time()))
-                if reply.get("id") == 101:
-                    result = reply.get("result") or {}
-                    body = result.get("body") or ""
-                    encoded = bool(result.get("base64Encoded"))
-                    break
-            if encoded and body:
-                body = base64.b64decode(body).decode("utf-8", "replace")
-            fulfill = {"requestId": paused, "responseCode": status}
-            headers = []
-            for key, value in (response.get("headers") or {}).items():
-                if str(key).strip().casefold() in (
-                        "content-encoding", "content-length",
-                        "transfer-encoding", "connection", "keep-alive"):
-                    continue
-                headers.append({"name": str(key), "value": str(value)})
-            if headers:
-                fulfill["responseHeaders"] = headers
-            if body:
-                fulfill["body"] = base64.b64encode(
-                    body.encode("utf-8")).decode("ascii")
-            ws.send_json({"id": 102, "method": "Fetch.fulfillRequest",
-                          "params": fulfill})
-            if status != 200:
-                # Fehlerantwort (z. B. 400 invalid_grant) kam beim
-                # Reader an -- fuer uns ist nur die 200er interessant.
-                continue
-            out = {"refresh": [], "hardware": list(seen_hw)}
-            try:
-                payload = json.loads(body or "{}")
-            except ValueError:
-                payload = {}
-            if isinstance(payload, dict):
-                refresh = payload.get("refresh_token")
-                if isinstance(refresh, str) and len(refresh) > 20:
-                    out["refresh"].append(refresh)
-                hw = (payload.get("hardware_id")
-                      or payload.get("hardwareId"))
-                if isinstance(hw, str) and hw:
-                    out["hardware"].append(hw)
-            if out["refresh"]:
-                return out
-            # Antwort ohne refresh_token: weiter lauschen.
-    except OSError:
-        pass
-    finally:
-        try:
-            ws.close()
-        except OSError:
-            pass
-    if found_refresh:
-        return {"refresh": list(found_refresh),
-                "hardware": list(seen_hw)}
     return None
 
 
@@ -1410,6 +971,3 @@ def grab_live_tokens(partner_id, hardware, timeout=300, progress=None):
         progress("Aktueller Token aus dem Web Reader gelesen -- werde "
                  "ihn jetzt am Token-Endpunkt tauschen ...")
     return grabbed
-
-
-

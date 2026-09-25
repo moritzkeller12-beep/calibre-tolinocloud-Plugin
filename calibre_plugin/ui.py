@@ -462,7 +462,8 @@ class BrowserLoginWorker(QObject):
     completed = pyqtSignal(object, object)
     failed = pyqtSignal(str)
     # Live-Fortschrittstexte des Grabs ("Fenster offen -- anmelden",
-    # "Rotation wird erzwungen ...") direkt in die Statuszeile.
+    # "warte auf einen neu geschriebenen Token ...") direkt in die
+    # Statuszeile.
     progress = pyqtSignal(str)
 
     def __init__(self, partner_id, hardware):
@@ -936,16 +937,16 @@ class SyncDashboard(QDialog):
         }
 
     def browser_login(self):
-        """Sign in with the system browser and adopt the fresh token.
+        """Open the private Chromium sign-in window, adopt the fresh token.
 
-        The embedded QtWebEngine window was removed: it produced its own
-        bot-protection fingerprint problems and never completed reliably.
-        The external browser signs in with the user's real fingerprint and
-        the plugin validates every harvested token before adopting it.
+        Primary path: a dedicated Chromium window (DevTools protocol) on
+        the partner's Web Reader, where the CURRENT token is read from the
+        live page; without a Chromium binary the same flow falls back to
+        the disk-scrape login in the system browser (closed windows only).
 
-        The flow polls the browser storages for minutes, so it runs in a
-        worker thread: blocking the GUI thread froze Calibre and could
-        crash it while the frozen window was interacting.
+        Both paths can poll for minutes (the reader writes its fresh token
+        on its own schedule), so the work runs in a worker thread: blocking
+        the GUI thread froze Calibre and could crash it.
         """
         if self.login_thread is not None and self.login_thread.isRunning():
             return  # a sign-in attempt is already running

@@ -1,7 +1,7 @@
 # Browser-Anmeldung: Diagnose-Historie und Lösungsarchitektur
 
 Zusammenfassung der Feldbefunde (Mai–September 2026), die zu den
-Versionen 0.9.16–0.9.27 geführt haben. Keine Token-Werte — nur
+Versionen 0.9.16–0.9.28 geführt haben. Keine Token-Werte — nur
 Struktur und Mechanik.
 
 ## Kernproblem
@@ -67,8 +67,22 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     werden geparst, der Poll liest die IndexedDB-Datenbanken mit, und
     abgefangene Token-Antworten laufen mit Original-Body an den Reader
     durch.
+11. **Erzwungene Rotation und Netzwerk-Interception entfernt
+    (0.9.28):** Die Fangmechanismen der 0.9.22–0.9.26 (Access-Token-
+    Invalidierung plus `Page.reload`, `Fetch`-Interception der
+    Token-Antworten, `hardware-id`-Mitlesen aus Network-Events,
+    Notfall-Clear des Storage) kosteten mehrere hundert Zeilen CDP-
+    Code und waren die Quelle zweier Feldbefunde: „Das Anmeldefenster
+    wurde geschlossen" (obwohl offen) und der Hänger „erzwinge eine
+    frische Token-Rotation im Anmeldefenster ...". Der Web Reader
+    rotiert ohnehin selbst etwa alle 40–60 s — das Plugin liest
+    deshalb nur noch, was der Reader schreibt: nach einer Ablehnung
+    wird der Seiten-Speicher (localStorage, sessionStorage, IndexedDB)
+    bis zu ~90 s alle 3 s erneut gelesen und die erste neu
+    geschriebene Kopie getauscht. Kein erzwungener Reload, kein
+    Abfangen von Antworten, kein Mithören von Headern.
 
-## Aktuelle Login-Kette (0.9.27)
+## Aktuelle Login-Kette (ab 0.9.28)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
    öffnet den Web Reader; während der Anmeldung zählt das Fenster als
@@ -78,9 +92,11 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
    IndexedDB) → frischester `typ: Refresh`-Kandidat.
 3. Tausch **in der Reader-Seite** (in-page fetch) → `_apply_token_response`
    mit sofortigem Speichern des rotierten Tokens.
-4. Bei Ablehnung/Leere: Access-Tokens im Seiten-Speicher invalidieren,
-   `Page.reload`, Token-Antwort per `Fetch`-Interception abfangen
-   (Durchreichen mit Original-Body) **und** Seiten-Speicher inkl.
-   IndexedDB alle 3 s pollen; `hardware-id`-Header mitlesen.
+4. Bei Ablehnung/Leere: Seiten-Speicher (inkl. IndexedDB) alle 3 s
+   erneut lesen, bis der Reader selbst einen frischen Token schreibt
+   (bis zu ~90 s), dann genau einmal tauschen. Kommt nichts Nach-
+   geschobenes, endet der Lauf mit einer Fehlermeldung samt Anleitung
+   (F5 + Knopf erneut) — erzwungene Rotation und Netzwerk-
+   Interception gibt es seit 0.9.28 nicht mehr.
 5. Ohne Chromium: Disk-Scrape-Fallback (alle Browser schließen, damit der
    letzte Token geflushed wird).
