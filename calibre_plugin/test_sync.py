@@ -4069,5 +4069,127 @@ class LoginWindowWaitTests(unittest.TestCase):
         self.assertIn("Sekunden alt", _candidate_age_note([jwt]))
 
 
+class WrappedCandidateTests(unittest.TestCase):
+    """0.9.33: Der Seiten-Speicher des Readers kann Token-Teile gekodiert
+    ablegen -- Feldbefund der Extrahier-Schaltfläche: genau EIN
+    Refresh-Kandidat, "1 Teil, 920 Zeichen", am Endpunkt abgelehnt
+    (invalid_grant) und ohne datierbares JWT-alter. Ein JWT traegt immer
+    zwei Punkte; die Hülle muss vor dem Tausch abgezogen werden."""
+
+    def _refresh_jwt(self, iat):
+        head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+        body = base64.urlsafe_b64encode(
+            json.dumps({"iat": int(iat), "typ": "Refresh",
+                        "sid": "sess-wrap"}).encode("utf-8"))
+        return "%s.%s.sig" % (head.decode().rstrip("="),
+                              body.decode().rstrip("="))
+
+    def test_unwrap_recovers_base64_wrapped_jwt(self):
+        """base64- und doppelt gehüllte JWTs werden bis zum Kern
+        entpackt (Feldform: 920 Zeichen ohne Punkt)."""
+        from .tolino import _unwrap_refresh_candidate
+        fresh = self._refresh_jwt(time.time() - 5)
+        wrapped = base64.urlsafe_b64encode(
+            fresh.encode("utf-8")).decode().rstrip("=")
+        self.assertEqual(fresh, _unwrap_refresh_candidate(wrapped))
+        double = base64.b64encode(wrapped.encode("utf-8")).decode()
+        self.assertEqual(fresh, _unwrap_refresh_candidate(double))
+
+    def test_unwrap_recovers_quoted_and_percent_encoded_jwt(self):
+        """JSON-Zeichenkette und Prozent-Code (inkl. kodierter Punkte)
+        sind ebenfalls bekannte Hüllen."""
+        from .tolino import _unwrap_refresh_candidate
+        fresh = self._refresh_jwt(time.time() - 5)
+        self.assertEqual(fresh, _unwrap_refresh_candidate(json.dumps(fresh)))
+        percent = fresh.replace(".", "%2E")
+        self.assertEqual(fresh, _unwrap_refresh_candidate(percent))
+
+    def test_unwrap_leaves_opaque_and_broken_values_untouched(self):
+        """Opake (echt punktlose) Tokens und unlesbare Zeichenketten
+        bleiben unverändert -- nur ein JWT-Treffer gewinnt."""
+        from .tolino import _unwrap_refresh_candidate
+        opaque = "a3f9" * 230  # 920 Zeichen wie im Feldbefund
+        self.assertEqual(opaque, _unwrap_refresh_candidate(opaque))
+        broken = "aaa.bbb.ccc"
+        self.assertEqual(broken, _unwrap_refresh_candidate(broken))
+        short = "plainopaquevalue-not-a-jwt"
+        self.assertEqual(short, _unwrap_refresh_candidate(short))
+
+    def test_normalize_makes_wrapped_stale_copy_fail_age_filter(self):
+        """Gekodete alte Kopien passieren den 30-Minuten-Filter NICHT
+        mehr: erst nach dem Entpacken sind sie datierbar und fallen
+        unter den Cutoff statt am Endpunkt verbrannt zu werden."""
+        from .tolino import _filter_live_candidates, _normalize_live_grab
+        stale = self._refresh_jwt(time.time() - 7200)
+        wrapped = base64.urlsafe_b64encode(stale.encode("utf-8")).decode()
+        normalized = _normalize_live_grab({"refresh": [wrapped],
+                                           "hardware": []})
+        self.assertEqual([stale], normalized["refresh"])
+        self.assertEqual([], _filter_live_candidates(normalized["refresh"]))
+        # Unveränderte Grabs werden nicht umsonst kopiert.
+        plain = {"refresh": [stale], "hardware": []}
+        self.assertIs(plain, _normalize_live_grab(plain))
+
+    def test_grab_live_refresh_exchanges_the_unwrapped_jwt(self):
+        """Der Endpunkt sieht das entpackte JWT -- nie die Hülle."""
+        from .tolino import grab_live_refresh
+        fresh = self._refresh_jwt(time.time() - 5)
+        wrapped = base64.urlsafe_b64encode(
+            fresh.encode("utf-8")).decode().rstrip("=")
+        logins = []
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = "fake-hw"
+
+            def _login(self):
+                logins.append(self.refresh)
+                self.refresh = "rotated-token"
+
+        with patch("calibre_plugin.tolino.TolinoClient", FakeClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [wrapped], "hardware": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url", return_value=None):
+            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertEqual(("rotated-token", "fake-hw"),
+                         (refresh, hardware))
+        self.assertEqual([fresh], logins)
+
+    def test_try_live_grab_first_dates_the_unwrapped_candidate(self):
+        """Feldmeldung nach dem Fix: das ALTER des Kandidaten statt der
+        Struktur-Notiz -- und nie der Wert selbst."""
+        from .tolino import try_live_grab_first
+        fresh = self._refresh_jwt(time.time() - 5)
+        wrapped = base64.urlsafe_b64encode(
+            fresh.encode("utf-8")).decode().rstrip("=")
+
+        class FailingClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
+
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=True), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value={"refresh": [wrapped], "hardware": [],
+                                 "idb": []}), \
+             patch("calibre_plugin.cdp.describe_grab_state",
+                   return_value="1 Refresh-Kandidat(en)"), \
+             patch("calibre_plugin.cdp.reader_ws_url", return_value=None), \
+             patch("calibre_plugin.tolino.TolinoClient", FailingClient):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                try_live_grab_first(4, "hw")
+        message = str(ctx.exception)
+        self.assertIn("Letzter Fehler", message)
+        self.assertIn("Sekunden alt", message)
+        self.assertNotIn("ohne datierbares JWT-alter", message)
+        self.assertNotIn(wrapped, message)
+        self.assertNotIn(fresh, message)
+
+
 if __name__ == "__main__":
     unittest.main()
