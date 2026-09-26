@@ -4325,5 +4325,151 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
         self.assertNotIn(blob, message)
 
 
+class BoshDeviceRecoveryTests(unittest.TestCase):
+    """0.9.35: Ein authentifizierter BOSH-400 (leeres "{}") loest eine
+    Geraete-Recovery aus: das registrierte Geraet des Kontos wird
+    uebernommen, sonst wird unsere Hardware-ID per registerhw
+    registriert -- dann genau EIN Retry.
+
+    Feldbefund: Login lief, inventory/delta starb mit "Tolino HTTP 400:
+    {}" (Vorbereitung fehlgeschlagen). Die Referenz-Clients
+    (tolino-python, pytolino) registrieren vor jedem BOSH-Aufruf oder
+    adoptieren das Geraet der Liste -- dieses Plugin tat keins von
+    beiden, und fetch_hardware_id war tot angeloetet."""
+
+    INVENTORY_BODY = b'{"PublicationInventory": {"edata": []}}'
+
+    def _client(self, hardware="configured-hw"):
+        from .tolino import TolinoClient
+        client = TolinoClient(4, hardware, "refresh-token-value")
+        client.access = "access-value"
+        client.expires_at = time.time() + 3600
+        return client
+
+    def _response(self, body, status=200):
+        outer_body, outer_status = body, status
+
+        class Response(object):
+            status = outer_status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return outer_body
+        return Response()
+
+    def _error400(self, body):
+        from urllib.error import HTTPError
+        error = HTTPError("https://bosh.pageplace.de/bosh/rest/x", 400,
+                          "Bad Request", {}, None)
+        error.read = lambda: body
+        return error
+
+    def test_error_text_surfaces_response_info_message(self):
+        """BOSH meldet Fehler als ResponseInfo.message -- ohne diesen
+        Schluessel zeigte die Meldung nur ein nutzloses "{}"."""
+        from .tolino import TolinoApiError
+        client = self._client()
+
+        def fake_urlopen(request, timeout=None):
+            raise self._error400(
+                b'{"ResponseInfo": {"message": "hardware not registered"}}')
+
+        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
+             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
+                   side_effect=Exception("no devices")), \
+             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
+                   return_value=False):
+            with self.assertRaises(TolinoApiError) as ctx:
+                client.inventory()
+        self.assertIn("hardware not registered", str(ctx.exception))
+        self.assertIn("hardware not registered", client.last_error_text)
+
+    def test_inventory_adopts_registered_device_and_retries(self):
+        """Ein fremdes, konfiguriertes Geraet wird durch das
+        registrierte des Kontos ersetzt, danach folgt GENAU ein Retry."""
+        seen = []
+        adopted = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.full_url)
+            if len(seen) == 1:
+                raise self._error400(b"{}")
+            return self._response(self.INVENTORY_BODY)
+
+        client = self._client("stale-hw-000")
+        client.hardware_callback = adopted.append
+        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
+             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
+                   return_value="eb22e4cf-bb01-4550-bff7-334446bb20b1"), \
+             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
+                   side_effect=AssertionError("register must not run")):
+            data = client.inventory()
+        self.assertEqual([], data)
+        self.assertEqual(2, len(seen))
+        self.assertEqual(seen[0], seen[1])
+        self.assertEqual("eb22e4cf-bb01-4550-bff7-334446bb20b1",
+                         client.hardware)
+        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"], adopted)
+
+    def test_inventory_registers_hardware_when_device_list_unavailable(self):
+        """Ohne Geraeteliste wird die eigene Hardware-ID per registerhw
+        registriert (wie die Referenz-Clients), dann der Retry."""
+        seen = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append((request.full_url,
+                         {key.casefold(): value
+                          for key, value in request.headers.items()}))
+            if "registerhw" in request.full_url:
+                return self._response(b"{}")
+            inventory_calls = len([1 for url, _ in seen
+                                   if "inventory" in url])
+            if inventory_calls == 1:
+                raise self._error400(b"{}")
+            return self._response(self.INVENTORY_BODY)
+
+        client = self._client("configured-hw")
+        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
+             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
+                   side_effect=Exception("no devices")):
+            data = client.inventory()
+        self.assertEqual([], data)
+        self.assertEqual(3, len(seen))
+        self.assertIn("/inventory/delta", seen[0][0])
+        self.assertIn("v2/registerhw", seen[1][0])
+        self.assertIn("/inventory/delta", seen[2][0])
+        register_headers = seen[1][1]
+        self.assertEqual("HTML5", register_headers.get("hardware_type"))
+        self.assertEqual("TOLINO_WEBREADER",
+                         register_headers.get("client_type"))
+        self.assertEqual("configured-hw", client.hardware)
+
+    def test_registered_current_device_raises_without_extra_calls(self):
+        """Ist das konfigurierte Geraet bereits das registrierte, kommt
+        kein Retry und kein registerhw -- der echte Fehler 400 (andere
+        Ursache) bleibt sichtbar."""
+        from .tolino import TolinoApiError
+        client = self._client("configured-hw")
+        seen = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.full_url)
+            raise self._error400(b"{}")
+
+        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
+             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
+                   return_value="configured-hw"), \
+             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
+                   side_effect=AssertionError("register must not run")):
+            with self.assertRaises(TolinoApiError):
+                client.inventory()
+        self.assertEqual(1, len(seen))
+
+
 if __name__ == "__main__":
     unittest.main()
