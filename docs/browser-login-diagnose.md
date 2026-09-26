@@ -173,6 +173,28 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     Versuch; der Diagnose-Button baut seinen Client zusätzlich über
     `_cloud_client()` (gleiche Callbacks wie der Sync-Lauf).
 
+17. **Erste 403 nach der Browser-Anmeldung (0.9.38):** Feldbefund nach
+    0.9.37: „Diagnose – Tolino-Antwort testen" warf direkt nach der
+    Browser-Anmeldung `Tolino authentication failed: … (403): Zugriff
+    geblockt layout-fehlerseite …` (System-curl am Token-Endpunkt, erster Transport im Prozess), während
+    der Sync-Lauf Sekunden später lief. Die Bot-Schutz-Laufzeitbahn
+    lehnt den ersten Server-Grant nach dem Browser-Grant kurzfristig
+    ab. Ursache: `_impersonate_session()` verwarf die von
+    `import_from_plugin_dir()` gelieferte Session-Fabrik und rief den
+    ungebundenen Namen `Session` auf (NameError → None) — der ERSTE
+    Token-Aufruf im Prozess landete damit immer beim systemweiten,
+    WAF-geblockten System-curl, dessen 403 sofort abbrach, bevor
+    urllib mit den Browser-Headern drankam; der Bootstrap-Seiten-
+    effekt heilte erst die späteren Läufe (Diagnose rot, Sync grün).
+    Fix: die Fabrik wird jetzt verwendet, 403-Bot-Seiten fallen bei
+    Token-Aufrufen auf den nächsten Transport durch (OAuth-Fehler wie
+    invalid_grant brechen weiterhin sofort ab — kein Grant-Replay),
+    erst danach greifen zwei Warteversuche (2 s, 5 s), bevor der
+    Fehler mit curl_cffi-Hinweis erscheint. Daneben
+    Benutzerführung im Bestandsvergleich: Zeilen sortiert (Upload-
+    Auswahl, Titel, Autoren), neue Spalten „In Calibre"/"In Cloud",
+    Tooltips zu den Cloud-Aktionen.
+
 ## Aktuelle Login-Kette (ab 0.9.35)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)

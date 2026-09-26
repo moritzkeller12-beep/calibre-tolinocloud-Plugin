@@ -823,12 +823,59 @@ class SyncPlanTests(unittest.TestCase):
         client = TolinoClient(4, "", "old-refresh")
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
                 patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
-                        patch("calibre_plugin.tolino.urlopen", side_effect=error):
+                        patch("calibre_plugin.tolino.urlopen", side_effect=error), \
+                        patch("calibre_plugin.tolino.time.sleep"):
             with self.assertRaisesRegex(TolinoAuthError, "Access denied"):
                 client.login()
         self.assertEqual(403, client.last_http_status)
         self.assertIn("Access denied", client.last_error_text)
         self.assertEqual("urllib", client.last_transport)
+
+    def test_waf_403_on_token_endpoint_waits_and_retries(self):
+        """Feldbefund 0.9.38: der erste Token-Aufruf nach der Browser-
+        Anmeldung traf 403 (Bot-Schutz-Laufzeitbahn), jeder spaetere
+        Klick lief -- jetzt wird kurz gewartet und zwei Mal wiederholt."""
+        from urllib.error import HTTPError
+
+        bot = HTTPError("https://example.invalid/token", 403, "Forbidden",
+                        {}, None)
+        bot.read = lambda: (b"<!doctype html><title>Zugriff geblockt"
+                            b"</title>")
+        calls = []
+        sleeps = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return (b'{"access_token":"access-secret",'
+                        b'"refresh_token":"rotated-refresh","expires_in":3600}')
+
+        def fake_urlopen(request, timeout=None):
+            calls.append(request.full_url)
+            if len(calls) < 3:
+                raise bot
+            return Response()
+
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino._impersonate_session",
+                      return_value=None), \
+                patch("calibre_plugin.tolino.urlopen",
+                      side_effect=fake_urlopen), \
+                patch("calibre_plugin.tolino.time.sleep",
+                      side_effect=sleeps.append):
+            client = TolinoClient(4, "hardware", "old-refresh")
+            self.assertEqual("rotated-refresh", client.login())
+        self.assertEqual(3, len(calls))
+        self.assertEqual([2.0, 5.0], sleeps)
+        self.assertEqual("urllib", client.last_transport)
+        self.assertEqual("rotated-refresh", client.refresh)
 
     def test_other_partner_refresh_payload_keeps_configured_scope(self):
         captured = {}
@@ -3610,7 +3657,8 @@ class CurlTransportTests(unittest.TestCase):
         client = TolinoClient(4, "", "old-refresh")
         with patch.object(tolino_module, "_impersonate_session", return_value=None), \
                 patch.object(tolino_module, "_curl_binary", return_value=None), \
-                patch.object(tolino_module, "urlopen", side_effect=error):
+                patch.object(tolino_module, "urlopen", side_effect=error), \
+                patch.object(tolino_module.time, "sleep"):
             with self.assertRaisesRegex(TolinoAuthError, "curl_cffi"):
                 client.login()
 
@@ -3625,7 +3673,8 @@ class CurlTransportTests(unittest.TestCase):
         with patch.object(tolino_module, "_impersonate_session",
                           return_value=object()), \
                 patch.object(tolino_module, "_curl_binary", return_value=None), \
-                patch.object(tolino_module, "urlopen", side_effect=error):
+                patch.object(tolino_module, "urlopen", side_effect=error), \
+                patch.object(tolino_module.time, "sleep"):
             with self.assertRaisesRegex(TolinoAuthError, "Zugriff geblockt"):
                 client.login()
         self.assertNotIn("curl_cffi", str(getattr(client, "last_error_text", "")))
@@ -3723,6 +3772,109 @@ class CurlTransportTests(unittest.TestCase):
         self.assertEqual("curl", client.last_transport)
         self.assertEqual(1, len(curl_calls))
         self.assertEqual("a6", client.access)
+
+    def test_impersonate_session_uses_bootstrap_factory_on_first_call(self):
+        """Feldbefund 0.9.38: import_from_plugin_dir() liefert die
+        Session-Fabrik; frueher wurde sie verworfen und der ungebundene
+        Name ``Session`` aufgerufen (NameError -> None). Der erste
+        Token-Aufruf im Prozess landete so beim WAF-geblockten
+        System-curl -- Diagnose rot, nach dem Side-Effekt alles gruen."""
+        import calibre_plugin.tolino as tolino_module
+        from . import bootstrapper
+
+        class Factory:
+            def __init__(self, impersonate=None):
+                self.impersonate = impersonate
+
+            def post(self, *_args, **_kwargs):
+                raise AssertionError("not used in this test")
+
+        with patch.dict("sys.modules", {"curl_cffi": None,
+                                        "curl_cffi.requests": None}), \
+                patch.object(bootstrapper, "import_from_plugin_dir",
+                             return_value=Factory):
+            session = tolino_module._impersonate_session()
+        self.assertIsNotNone(session)
+        self.assertEqual("chrome", session.impersonate)
+        self.assertTrue(callable(session.post))
+
+    def test_token_403_bot_page_falls_through_to_urllib(self):
+        """Feldbefund 0.9.38: curl_cffi UND System-curl werden von der
+        Bot-Schutz-Laufzeitbahn mit 403 geblockt -- dann entscheidet
+        urllib (Browser-Header), statt dass der Aufruch abbricht."""
+        import calibre_plugin.tolino as tolino_module
+
+        bot = b"<!doctype html><title>Zugriff geblockt</title>"
+        transports = []
+
+        def fake_cffi(*_args, **_kwargs):
+            transports.append("curl_cffi")
+            return 403, bot
+
+        def fake_curl(url, body, headers, timeout):
+            transports.append("curl")
+            return 403, bot
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "access_token": "a9", "refresh_token": "r9",
+                    "expires_in": 3600, "refresh_expires_in": 3598,
+                }).encode("utf-8")
+
+        def fake_urlopen(request, timeout=None):
+            transports.append("urllib")
+            return Response()
+
+        client = self._client()
+        with patch.object(tolino_module, "_impersonate_session",
+                          return_value=object()), \
+                patch.object(tolino_module, "_http_post_via_curl_cffi",
+                             fake_cffi), \
+                patch.object(tolino_module, "_curl_binary",
+                             return_value="/usr/bin/curl"), \
+                patch.object(tolino_module, "_http_post_via_curl",
+                             fake_curl), \
+                patch.object(tolino_module, "urlopen", fake_urlopen):
+            client.login()
+        self.assertEqual(["curl_cffi", "curl", "urllib"], transports)
+        self.assertEqual("urllib", client.last_transport)
+        self.assertEqual("a9", client.access)
+        self.assertEqual("r9", client.refresh)
+
+    def test_token_oauth_error_never_falls_through(self):
+        """invalid_grant (400) darf nie den naechsten Transport probieren
+        -- ein replizierter Grant koennte Keycloak's Reuse-Schutz
+        ausloesen. Sofortiger Abbruch wie gehabt."""
+        import calibre_plugin.tolino as tolino_module
+
+        def must_not_run(*_args, **_kwargs):
+            raise AssertionError("replay not allowed")
+
+        def fake_cffi(*_args, **_kwargs):
+            return 400, (b'{"error":"invalid_grant",'
+                         b'"error_description":"Token expired"}')
+
+        with patch.object(tolino_module, "_impersonate_session",
+                          return_value=object()), \
+                patch.object(tolino_module, "_http_post_via_curl_cffi",
+                             fake_cffi), \
+                patch.object(tolino_module, "_curl_binary",
+                             return_value="/usr/bin/curl"), \
+                patch.object(tolino_module, "_http_post_via_curl",
+                             must_not_run), \
+                patch.object(tolino_module, "urlopen", must_not_run):
+            with self.assertRaisesRegex(TolinoAuthError,
+                                        "verbraucht oder widerrufen"):
+                self._client().login()
 
     def test_http_post_via_curl_raises_without_binary(self):
         import calibre_plugin.tolino as tolino_module
@@ -4323,6 +4475,33 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
         self.assertIn("Sekunden alt", message)
         self.assertNotIn("ohne datierbares JWT-alter", message)
         self.assertNotIn(blob, message)
+
+
+class ComparisonSortTests(unittest.TestCase):
+    """Bestandsvergleich (0.9.38): Upload-Auswahl gruppiert oben, dann
+    alphabetisch nach Titel und Autoren."""
+
+    def test_upload_group_first_then_title_then_authors(self):
+        from .sync import sort_comparison_rows
+        rows = [
+            {"selected": False, "title": "Alpha", "authors": "A", "book_id": 1},
+            {"selected": True, "title": "Zulu", "authors": "Z", "book_id": 2},
+            {"selected": False, "title": "beta", "authors": "B", "book_id": 3},
+            {"selected": True, "title": "alpha", "authors": "M", "book_id": 4},
+        ]
+        ordered = sort_comparison_rows(rows)
+        self.assertEqual([4, 2, 1, 3],
+                         [row["book_id"] for row in ordered])
+        # Eingabeliste bleibt unverändert.
+        self.assertEqual([1, 2, 3, 4], [row["book_id"] for row in rows])
+
+    def test_missing_fields_do_not_crash(self):
+        from .sync import sort_comparison_rows
+        rows = [{"book_id": None, "tolino_id": "cloud-only"},
+                {"selected": True, "title": "Titel", "book_id": 7}]
+        ordered = sort_comparison_rows(rows)
+        self.assertEqual([7, None], [row["book_id"] for row in ordered])
+        self.assertEqual("cloud-only", ordered[1]["tolino_id"])
 
 
 class BoshDeviceRecoveryTests(unittest.TestCase):

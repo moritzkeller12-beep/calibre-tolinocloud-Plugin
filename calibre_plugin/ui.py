@@ -27,7 +27,7 @@ try:
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
                        load_state, metadata_by_id, plan_sync,
                        selected_book_ids, selected_table_rows,
-                       sync_summary,
+                       sort_comparison_rows, sync_summary,
                        normalize_formats, safe_format_path, cover_bytes,
                        unpack_plan_result, unpack_upload_record,
                        diagnose_preparation, format_diagnostic_report,
@@ -43,7 +43,7 @@ except ImportError:
     from sync import (compare_inventory, format_error_details, iter_book_ids,
                       load_state, metadata_by_id, plan_sync,
                       selected_book_ids, selected_table_rows,
-                      sync_summary,
+                      sort_comparison_rows, sync_summary,
                       normalize_formats, safe_format_path, cover_bytes,
                       unpack_plan_result, unpack_upload_record,
                       diagnose_preparation, format_diagnostic_report,
@@ -95,21 +95,24 @@ class SyncJob:
 
 
 class InventoryDialog(QDialog):
-    HEADERS = ("Upload", "Status", "Titel", "Autor",
-               "ISBN", "Tolino-ID", "Hinweis")
+    HEADERS = ("Upload", "Status", "In Calibre", "In Cloud", "Titel",
+               "Autor", "ISBN", "Tolino-ID", "Hinweis")
 
     def __init__(self, rows, parent=None, client_factory=None):
         QDialog.__init__(self, parent)
-        self.rows = list(rows)
+        # Sortierung: erst die Upload-Auswahl, dann Titel, dann Autoren --
+        # Zeilen und Häkchen bleiben identisch, nur die Reihenfolge.
+        self.rows = sort_comparison_rows(list(rows))
         self.client_factory = client_factory
         self.setWindowTitle("Bestandsvergleich")
-        self.setMinimumSize(900, 420)
+        self.setMinimumSize(1080, 460)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Häkchen setzen, was hochgeladen werden soll, dann \u201eAuswahl "
-            "synchronisieren\u201c klicken. Cloud-Aktionen wirken auf die "
-            "markierte Zeile."))
-        self.table = QTableWidget(len(rows), len(self.HEADERS))
+            "„In Calibre“ = das Buch liegt in deiner Bibliothek, „In Cloud“ "
+            "= es liegt im Tolino-Konto. Zeilen mit Upload-Häkchen stehen "
+            "oben; „Auswahl synchronisieren“ lädt genau sie hoch. Die "
+            "Cloud-Aktionen unten wirken nur auf die markierte Zeile."))
+        self.table = QTableWidget(len(self.rows), len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.checks = []
         status_text = {
@@ -120,7 +123,7 @@ class InventoryDialog(QDialog):
             "duplicate_tolino": "Doppelter Tolino-Titel",
             "not_matchable": "Nicht matchbar",
         }
-        for row_index, row in enumerate(rows):
+        for row_index, row in enumerate(self.rows):
             check = QCheckBox()
             check.setChecked(bool(row.get("selected")))
             check.setEnabled(row.get("book_id") is not None)
@@ -128,6 +131,8 @@ class InventoryDialog(QDialog):
             self.table.setCellWidget(row_index, 0, check)
             values = (
                 status_text.get(row["status"], row["status"]),
+                "✓" if row.get("book_id") is not None else "",
+                "✓" if row.get("tolino_id") else "",
                 row.get("title", ""),
                 row.get("authors", ""),
                 row.get("isbn", ""),
@@ -142,12 +147,26 @@ class InventoryDialog(QDialog):
 
         # Cloud actions live inside this window and use its own table, so
         # they can never outlive it (the deleted-QTableWidget crash).
-        actions = QGroupBox("Aktionen für die markierte Zeile")
+        actions = QGroupBox(
+            "Cloud-Aktionen für die markierte Zeile (wirken nur im "
+            "Tolino-Konto, nicht in Calibre)")
         action_row = QHBoxLayout()
         self.download_btn = QPushButton("Herunterladen")
+        self.download_btn.setToolTip(
+            "Lädt das markierte Buch aus der Tolino Cloud als EPUB auf "
+            "diesen Rechner.")
         self.collection_add_btn = QPushButton("Zur Sammlung")
+        self.collection_add_btn.setToolTip(
+            "Ordnet das markierte Cloud-Buch einer Sammlung („Ordner“ in "
+            "der Tolino Cloud) zu -- der Name wird abgefragt.")
         self.collection_rm_btn = QPushButton("Aus Sammlung")
+        self.collection_rm_btn.setToolTip(
+            "Nimmt das markierte Cloud-Buch aus einer Sammlung der "
+            "Tolino Cloud heraus -- der Name wird abgefragt.")
         self.mark_read_btn = QPushButton("Gelesen markieren")
+        self.mark_read_btn.setToolTip(
+            "Setzt im Tolino-Konto die Lese-Marke „gelesen“ für das "
+            "markierte Cloud-Buch.")
         for button in (self.download_btn, self.collection_add_btn,
                        self.collection_rm_btn, self.mark_read_btn):
             action_row.addWidget(button)
@@ -515,12 +534,25 @@ class SyncDashboard(QDialog):
         self.status = QLabel()
         self.browser = QPushButton(
             "Im Browser anmelden (frischen Token holen)")
+        self.browser.setToolTip(
+            "Öffnet ein eigenes Chromium-Fenster auf dem Web Reader: dort "
+            "anmelden, Bücherliste laden -- das Plugin liest den Token "
+            "live und speichert ihn. Danach schließt sich das Fenster "
+            "selbst.")
         self.browser.clicked.connect(self.browser_login)
         self.scrape_browser = QPushButton(
             "Token aus laufendem Web Reader übernehmen")
+        self.scrape_browser.setToolTip(
+            "Liest den aktuellen Token aus einem schon offenen Reader-"
+            "Fenster; ohne solches werden die Festplatten-Kopien der "
+            "Browser geprüft (alle Fenster vorher schließen).")
         self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
         self.install_curl_cffi = QPushButton(
             "Bot-Schutz-Komponente installieren (einmalig)")
+        self.install_curl_cffi.setToolTip(
+            "Lädt die curl_cffi-Bibliothek (gegen den Bot-Schutz am "
+            "Token-Endpunkt) einmalig in den Calibre-Plugin-Ordner -- "
+            "ohne pip und ohne Neustart.")
         self.install_curl_cffi.clicked.connect(self.install_curl_cffi_clicked)
         setup_form.addRow("Buchhändler", self.partner)
         setup_form.addRow("", self.browser)

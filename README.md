@@ -15,7 +15,11 @@ laden**, dann Calibre neu starten.
 ## Einrichtung
 
 Dialog **Tolino Cloud Sync**: Buchhändler und Hardware-ID prüfen, Refresh-Token
-eintragen, Formate festlegen → **3. Synchronisierung starten**.
+eintragen, Formate festlegen → **3. Synchronisierung starten**. Der
+Bestandsvergleich gruppiert die Upload-Auswahl nach oben (danach Titel, Autoren),
+zeigt in **In Calibre**/**In Cloud**, wo jedes Buch liegt, und die
+Cloud-Aktionen (Herunterladen, Sammlungen, Gelesen) erklären sich über
+Tooltipps.
 
 ## Refresh-Token beschaffen
 
@@ -46,7 +50,7 @@ Kein Inkognito-Fenster.
 | „… weder frischer Token … noch nachgeschoben", **„Fenster ist noch offen"** | Das Fenster zeigt die Anmeldeseite: **dort** neu anmelden (Bücherliste laden) und den Knopf erneut drücken — das Fenster bleibt offen und wird wiederverwendet. |
 | dieselbe Meldung, „Fenster wurde geschlossen" | Verbrauchter Token: Browser-Anmeldung erneut starten und im **neuen** Fenster anmelden, bis die Bücherliste lädt. |
 | `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. Gekoderte und verschlüsselte Kandidaten entpackt das Plugin automatisch vor dem Tausch. |
-| HTTP 403 „Zugriff geblockt" | Bot-Schutz → unten „Bot-Schutz-Komponente installieren". |
+| HTTP 403 „Zugriff geblockt" | Bot-Schutz. Am Token-Endpunkt wartet das Plugin kurz und wiederholt den Aufruf automatisch (2×); bleibt die 403, → unten „Bot-Schutz-Komponente installieren". |
 | „Tolino HTTP 400: {}" / „Vorbereitung fehlgeschlagen" | Unbekannte Hardware-ID am BOSH-Dienst: ab 0.9.35 übernimmt bzw. registriert das Plugin das Gerät automatisch und wiederholt den Aufruf (seit 0.9.37 mit kurzer Wartezeit nach `registerhw`); die echte Servermeldung steht jetzt im Fehler. |
 
 Feldbefunde und Architektur-Historie: `docs/browser-login-diagnose.md`.
@@ -66,8 +70,11 @@ Feldbefunde und Architektur-Historie: `docs/browser-login-diagnose.md`.
 ## 403 und Bot-Schutz
 
 Der Token-Endpunkt prüft TLS-Fingerprints. Transportreihenfolge: **curl_cffi**
-(Chrome-TLS, bei aktivem Bot-Schutz erforderlich) → **curl** → **urllib**. System-curl
-bekommt HTTP 403, curl_cffi passiert die WAF.
+(Chrome-TLS, bei aktivem Bot-Schutz erforderlich) → **curl** → **urllib**. Blockiert ein
+Transport mit 403 (Bot-Schutz-Seite), geht der Aufruf automatisch auf den nächsten
+Transport über — erst wenn alle geblockt sind, wird kurz gewartet und zweimal
+wiederholt. OAuth-Antworten (z. B. `invalid_grant`) brechen dagegen sofort ab, damit kein
+Grant doppelt gesendet wird.
 
 **Ein-Klick:** Button **„Bot-Schutz-Komponente installieren (einmalig)"** lädt die
 curl_cffi-Wheels von PyPI, prüft SHA-256 und entpackt sie in den

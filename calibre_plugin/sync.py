@@ -535,6 +535,23 @@ def selected_book_ids(comparison_rows):
     }
 
 
+def sort_comparison_rows(comparison_rows):
+    """Bestandsvergleich sortieren: erst Upload-Auswahl, dann Titel, dann Autoren.
+
+    Reine Ordnungshilfe für die Dialogliste: die Zeilen selbst (und ihre
+    Häkchen) bleiben unverändert, nur die Anzeige-Reihenfolge wird stabil
+    und alphabetisch -- mit Upload-Häkchen gruppiert oben.
+    """
+    def sort_key(row):
+        return (
+            0 if row.get("selected") else 1,
+            str(row.get("title") or "").casefold(),
+            str(row.get("authors") or "").casefold(),
+            str(row.get("isbn") or ""),
+        )
+    return sorted(comparison_rows, key=sort_key)
+
+
 def fingerprint(metadata, format_name):
     value = "%s|%s|%s|%s" % (
         metadata.get("uuid", ""),

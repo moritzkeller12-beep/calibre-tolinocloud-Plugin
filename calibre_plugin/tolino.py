@@ -139,6 +139,10 @@ OAUTH_STATE_TTL = 300
 # warf noch 400, der naechste Klick Sekunden spaeter lief) -- vor dem
 # ersten und vor dem letzten Retry wird kurz gewartet.
 _REGISTER_SETTLE_SECONDS = 1.5
+# Feldbefund 0.9.38: der erste Token-Aufruf nach der Browser-Anmeldung traf
+# die Bot-Schutz-Laufzeitbahn (403 + HTML-Fehlerseite), jeder spaetere Klick
+# lief durch -- zwei Warteversuche, bevor der Fehler sichtbar wird.
+_WAF_RETRY_SECONDS = (2.0, 5.0)
 
 
 _JWT_PATTERN = re.compile(
@@ -3063,6 +3067,22 @@ def _bot_check_detected(detail):
     return any(marker in str(detail or "").casefold()
                for marker in _BOT_CHECK_MARKERS)
 
+
+def _waf_block_response(status, raw):
+    """True for a 403 bot-protection page at the token endpoint.
+
+    Only such blocks fall through to the next transport: every other
+    non-2xx (400 invalid_grant ...) must fail immediately, because a
+    replayed refresh grant can trip Keycloak's reuse protection.
+    """
+    if status != 403:
+        return False
+    text = (raw.decode("utf-8", "replace") if isinstance(raw, bytes)
+            else str(raw or ""))
+    if not text.strip():
+        return True  # leere 403 ohne OAuth-Body: WAF, nicht Keycloak
+    return _bot_check_detected(text)
+
 def _curl_binary():
     """Return a usable curl binary path, or None if curl is not installed."""
     for name in CURL_BINARIES:
@@ -3078,6 +3098,7 @@ def _curl_binary():
 # without an OAuth error body).
 def _impersonate_session():
     """Return a curl_cffi session that impersonates Chrome, or None."""
+    Session = None
     try:
         from curl_cffi.requests import Session
     except Exception:
@@ -3098,14 +3119,21 @@ def _impersonate_session():
                     break
                 except Exception:
                     continue
-        session = None
+        factory = None
         if bootstrapper is not None:
             try:
-                session = bootstrapper.import_from_plugin_dir()
+                factory = bootstrapper.import_from_plugin_dir()
             except Exception:
-                session = None
-        if session is None:
+                factory = None
+        if factory is None:
             return None
+        # Feldbefund 0.9.38: diese Fabrik wurde frueher verworfen und
+        # danach der nicht gebundene Name ``Session`` aufgerufen
+        # (NameError -> None). Der ERSTE Token-Aufruf im Prozess landete
+        # damit immer beim WAF-geblockten System-curl (403, "Zugriff
+        # geblockt"), spaetere Laeufe liefen -- deshalb Diagnose rot,
+        # danach alles gruen.
+        Session = factory
     try:
         session = Session(impersonate="chrome")
         # ``post`` must exist; guard against stubbed/partial installs.
@@ -3429,6 +3457,19 @@ class TolinoClient:
                                          content_type, _retry=False,
                                          _extra_headers=_extra_headers)
             if exc.code in (401, 403):
+                if (exc.code == 403
+                        and url == self.partner.get("token_url")
+                        and _retry
+                        and _bot_check_detected(self.last_error_text)):
+                    # Kurz warten und den Transport-Wechsel erneut
+                    # probieren (zwei Warteversuche, danach sichtbarer
+                    # Fehler mit curl_cffi-Hinweis).
+                    time.sleep(_WAF_RETRY_SECONDS[0] if _retry is True
+                               else _WAF_RETRY_SECONDS[1])
+                    return self._request(
+                        url, method, data, form, authenticated, content_type,
+                        _retry=1 if _retry is True else False,
+                        _extra_headers=_extra_headers)
                 self.access = None
                 message = (_compact_error_text(self.last_error_text)
                            or "no response detail")
@@ -3461,10 +3502,14 @@ class TolinoClient:
                     if status and status < 400:
                         self.last_error_text = None
                         return _decode(raw)
-                    return _error(
-                        HTTPError(url, status or 400,
-                                  "HTTP Error %s" % (status or "?"), {}, None),
-                        (raw or b"").decode("utf-8", "replace"))
+                    if not _waf_block_response(status, raw):
+                        return _error(
+                            HTTPError(url, status or 400,
+                                      "HTTP Error %s" % (status or "?"), {}, None),
+                            (raw or b"").decode("utf-8", "replace"))
+                    # Bot-Schutz-Block: naechster Transport statt Abbruch
+                    # (Feldbefund 0.9.38: System-curl laeuft dauerhaft in
+                    # die 403, urllib mit den Browser-Headern nicht).
             if _curl_binary() is not None:
                 self.last_transport = "curl"
                 try:
@@ -3477,10 +3522,14 @@ class TolinoClient:
                     if status and status < 400:
                         self.last_error_text = None
                         return _decode(raw)
-                    return _error(
-                        HTTPError(url, status or 400,
-                                  "HTTP Error %s" % (status or "?"), {}, None),
-                        (raw or b"").decode("utf-8", "replace"))
+                    if not _waf_block_response(status, raw):
+                        return _error(
+                            HTTPError(url, status or 400,
+                                      "HTTP Error %s" % (status or "?"), {}, None),
+                            (raw or b"").decode("utf-8", "replace"))
+                    # Bot-Schutz-Block: naechster Transport statt Abbruch
+                    # (Feldbefund 0.9.38: System-curl laeuft dauerhaft in
+                    # die 403, urllib mit den Browser-Headern nicht).
 
         request = Request(url, data=body, headers=headers, method=method)
         self.last_transport = "urllib"
