@@ -95,7 +95,7 @@ class SyncJob:
 
 
 class InventoryDialog(QDialog):
-    HEADERS = ("Upload", "Status", "In Calibre", "In Cloud", "Titel",
+    HEADERS = ("Hochladen", "Status", "In Calibre", "In Cloud", "Titel",
                "Autor", "ISBN", "Tolino-ID", "Hinweis")
 
     def __init__(self, rows, parent=None, client_factory=None):
@@ -108,41 +108,40 @@ class InventoryDialog(QDialog):
         self.setMinimumSize(1080, 460)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "„In Calibre“ = das Buch liegt in deiner Bibliothek, „In Cloud“ "
-            "= es liegt im Tolino-Konto. Zeilen mit Upload-Häkchen stehen "
-            "oben; „Auswahl synchronisieren“ lädt genau sie hoch. Die "
-            "Cloud-Aktionen unten wirken nur auf die markierte Zeile."))
-        self.table = QTableWidget(len(self.rows), len(self.HEADERS))
+            "So funktioniert’s: Häkchen in „Hochladen“ = dieses Buch wird "
+            "in die Cloud geladen (diese Zeilen stehen oben). „In "
+            "Calibre“/„In Cloud“ zeigt, wo das Buch schon liegt. Ein Klick "
+            "auf einen Spaltenkopf sortiert. Die Cloud-Aktionen unten "
+            "wirken nur auf die markierte Zeile."))
+        self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.checks = []
-        status_text = {
-            "new_in_calibre": "Neu in Calibre",
-            "only_tolino": "Nur Tolino",
-            "identical": "Identisch",
-            "changed": "Geändert",
-            "duplicate_tolino": "Doppelter Tolino-Titel",
-            "not_matchable": "Nicht matchbar",
-        }
-        for row_index, row in enumerate(self.rows):
-            check = QCheckBox()
-            check.setChecked(bool(row.get("selected")))
-            check.setEnabled(row.get("book_id") is not None)
-            self.checks.append(check)
-            self.table.setCellWidget(row_index, 0, check)
-            values = (
-                status_text.get(row["status"], row["status"]),
-                "✓" if row.get("book_id") is not None else "",
-                "✓" if row.get("tolino_id") else "",
-                row.get("title", ""),
-                row.get("authors", ""),
-                row.get("isbn", ""),
-                row.get("tolino_id", ""),
-                row.get("explanation", ""),
-            )
-            for column, value in enumerate(values, 1):
-                self.table.setItem(row_index, column, QTableWidgetItem(str(value or "")))
-        self.table.resizeColumnsToContents()
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        header_tooltips = (
+            "Häkchen = mit „Auswahl hochladen“ in die Tolino Cloud laden",
+            "Was sich zwischen Calibre und Cloud unterscheidet",
+            "Buch liegt in der Calibre-Bibliothek (offline)",
+            "Buch liegt im Tolino-Konto (Cloud)",
+            "Buchtitel", "Autoren", "ISBN",
+            "Tolino-Kennung der Cloud-Kopie",
+            "Erklärung dieser Zeile",
+        )
+        for index, text in enumerate(header_tooltips):
+            item = self.table.horizontalHeaderItem(index)
+            if item is not None:
+                item.setToolTip(text)
+        # Spaltenkopf-Klick sortiert (QTableWidget-eigenes Sortieren würde
+        # die Zell-Widgets/Häkchen nicht mit den Zeilen mitziehen -- alles
+        # wird deshalb über _rebuild_table neu aufgebaut).
+        self._sort_column = 0
+        self._sort_descending = False
+        table_header = self.table.horizontalHeader()
+        try:
+            table_header.setSortIndicatorShown(True)
+            table_header.setSortIndicator(0, Qt.AscendingOrder)
+        except Exception:
+            pass  # Sortieranzeige ist nur Kosmetik
+        table_header.sectionClicked.connect(self._sort_by_column)
+        self._rebuild_table(self.rows)
         layout.addWidget(self.table)
 
         # Cloud actions live inside this window and use its own table, so
@@ -178,7 +177,7 @@ class InventoryDialog(QDialog):
         self.mark_read_btn.clicked.connect(self.mark_selected_read)
 
         buttons = QHBoxLayout()
-        confirm = QPushButton("Auswahl synchronisieren")
+        confirm = QPushButton("Auswahl hochladen")
         cancel = QPushButton("Abbrechen")
         confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
@@ -193,6 +192,98 @@ class InventoryDialog(QDialog):
         return selected_book_ids([
             dict(row, selected=check.isChecked()) for row, check in zip(rows, self.checks)
         ])
+
+    _SORT_KEYS = (
+        # 0 Hochladen: gehäckte zuerst, danach Titel/Autoren
+        lambda row: (0 if row.get("selected") else 1,
+                     str(row.get("title") or "").casefold(),
+                     str(row.get("authors") or "").casefold()),
+        # 1 Status
+        lambda row: (str(row.get("status") or ""),
+                     str(row.get("title") or "").casefold()),
+        # 2 In Calibre
+        lambda row: (0 if row.get("book_id") is None else 1,
+                     str(row.get("title") or "").casefold()),
+        # 3 In Cloud
+        lambda row: (0 if not row.get("tolino_id") else 1,
+                     str(row.get("title") or "").casefold()),
+        # 4 Titel / 5 Autoren (mit Titel als Zweitschlüssel)
+        lambda row: (str(row.get("title") or "").casefold(),
+                     str(row.get("authors") or "").casefold()),
+        lambda row: (str(row.get("authors") or "").casefold(),
+                     str(row.get("title") or "").casefold()),
+        # 6 ISBN / 7 Tolino-ID / 8 Hinweis
+        lambda row: (str(row.get("isbn") or ""),
+                     str(row.get("title") or "").casefold()),
+        lambda row: (str(row.get("tolino_id") or ""),
+                     str(row.get("title") or "").casefold()),
+        lambda row: (str(row.get("explanation") or ""),
+                     str(row.get("title") or "").casefold()),
+    )
+
+    def _sort_by_column(self, column):
+        """Spaltenkopf anklicken: aufsteigend <-> absteigend umschalten."""
+        if not 0 <= column < len(self._SORT_KEYS):
+            return
+        # Hächenzustand zuerst in die Zeilen retten, sonst geht nach dem
+        # Umsortieren der GetUser-Auswahl verloren.
+        for row, check in zip(self.rows, self.checks):
+            row["selected"] = bool(check.isChecked())
+        if self._sort_column == column:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_column = column
+            self._sort_descending = False
+        ordered = sorted(self.rows, key=self._SORT_KEYS[column],
+                         reverse=self._sort_descending)
+        try:
+            self.table.horizontalHeader().setSortIndicator(
+                column,
+                Qt.DescendingOrder if self._sort_descending
+                else Qt.AscendingOrder)
+        except Exception:
+            pass  # Sortieranzeige ist nur Kosmetik
+        self._rebuild_table(ordered)
+
+    def _rebuild_table(self, rows):
+        """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen.
+
+        Checks und Zeilen werden immer zusammen erzeugt: Qt verschiebt
+        Zell-Widgets beim Sortieren nicht -- ein Spaltenkopf-Klick darf
+        die Häkchen also nie auf die falsche Zeile ziehen.
+        """
+        self.rows = list(rows)
+        self.checks = []
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(self.rows))
+        status_text = {
+            "new_in_calibre": "Nur in Calibre",
+            "only_tolino": "Nur in der Cloud",
+            "identical": "In beiden – gleich",
+            "changed": "In beiden – geändert",
+            "duplicate_tolino": "Mehrfach in der Cloud",
+            "not_matchable": "Nicht zuordenbar",
+        }
+        for row_index, row in enumerate(self.rows):
+            check = QCheckBox()
+            check.setChecked(bool(row.get("selected")))
+            check.setEnabled(row.get("book_id") is not None)
+            self.checks.append(check)
+            self.table.setCellWidget(row_index, 0, check)
+            values = (
+                status_text.get(row["status"], row["status"]),
+                "✓" if row.get("book_id") is not None else "",
+                "✓" if row.get("tolino_id") else "",
+                row.get("title", ""),
+                row.get("authors", ""),
+                row.get("isbn", ""),
+                row.get("tolino_id", ""),
+                row.get("explanation", ""),
+            )
+            for column, value in enumerate(values, 1):
+                self.table.setItem(
+                    row_index, column, QTableWidgetItem(str(value or "")))
+        self.table.resizeColumnsToContents()
 
     # --- Cloud actions on the currently selected table row ---------------
 
@@ -602,8 +693,14 @@ class SyncDashboard(QDialog):
         self.progress_label = QLabel("Bereit")
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
-        self.start = QPushButton("3. Synchronisierung starten")
+        self.start = QPushButton("3. Vergleichen und hochladen")
+        self.start.setToolTip(
+            "Öffnet den Bestandsvergleich: Häkchen prüfen, dann die "
+            "Auswahl in die Tolino Cloud hochladen.")
         self.debug = QPushButton("Diagnose")
+        self.debug.setToolTip(
+            "Prüfbericht: erst die lokale Vorbereitung, danach optional "
+            "„Tolino-Antwort testen“.")
         self.cancel = QPushButton("Abbrechen")
         self.cancel.setEnabled(False)
         self.start.clicked.connect(self.start_sync)

@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.37** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
+Plugin-Version: **0.9.38** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -15,11 +15,12 @@ laden**, dann Calibre neu starten.
 ## Einrichtung
 
 Dialog **Tolino Cloud Sync**: Buchhändler und Hardware-ID prüfen, Refresh-Token
-eintragen, Formate festlegen → **3. Synchronisierung starten**. Der
-Bestandsvergleich gruppiert die Upload-Auswahl nach oben (danach Titel, Autoren),
-zeigt in **In Calibre**/**In Cloud**, wo jedes Buch liegt, und die
-Cloud-Aktionen (Herunterladen, Sammlungen, Gelesen) erklären sich über
-Tooltipps.
+eintragen, Formate festlegen → **3. Vergleichen und hochladen**. Der
+Bestandsvergleich gruppiert die Auswahl zum Hochladen nach oben (danach Titel,
+Autoren), ein Klick auf den Spaltenkopf sortiert um, **In Calibre**/**In Cloud**
+zeigt, wo jedes Buch liegt, und die Cloud-Aktionen (Herunterladen, Sammlungen,
+Gelesen) erklären sich über Tooltipps. Unten bestätigt **Auswahl hochladen**
+den Upload.
 
 ## Refresh-Token beschaffen
 
