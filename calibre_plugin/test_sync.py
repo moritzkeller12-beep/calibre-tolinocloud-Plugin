@@ -4191,5 +4191,139 @@ class WrappedCandidateTests(unittest.TestCase):
         self.assertNotIn(fresh, message)
 
 
+class ReaderBlobLiveGrabTests(unittest.TestCase):
+    """0.9.34: Der Live-Grab entpackt die CryptoJS-verschluesselten
+    userToken/userInfos-Bloebe des Readers.
+
+    Feldbefund (curl-Export, erneut "1 Teil, 920 Zeichen"): der einzige
+    Refresh-Kandidat war base64("Salted__" + Salt + AES-256-CBC) --
+    verschluesselt, undatiert, am Endpunkt abgelehnt; die Hardware-Id
+    steckte im ebenso verschluesselten userInfos ("0 Hardware-
+    Kandidat(en)"). Die Platten-Version des Plugins konnte dies schon,
+    der Live-Grab nicht."""
+
+    def _refresh_jwt(self, iat):
+        head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+        body = base64.urlsafe_b64encode(
+            json.dumps({"iat": int(iat), "typ": "Refresh",
+                        "sid": "sess-blob"}).encode("utf-8"))
+        return "%s.%s.sig" % (head.decode().rstrip("="),
+                              body.decode().rstrip("="))
+
+    def _encrypt(self, plain, phrase=""):
+        """Unabhaengige Referenz-Implementation des CryptoJS-Blobs."""
+        import hashlib
+        try:
+            from Crypto.Cipher import AES
+        except ImportError:
+            self.skipTest("pycryptodome missing: no reference AES available")
+        salt = os.urandom(8)
+        derived = b""
+        prev = b""
+        while len(derived) < 48:
+            prev = hashlib.md5(prev + phrase.encode() + salt).digest()
+            derived += prev
+        key, iv = derived[:32], derived[32:]
+        data = plain.encode()
+        pad = 16 - len(data) % 16
+        data += bytes([pad]) * pad
+        ct = AES.new(key, AES.MODE_CBC, iv).encrypt(data)
+        return base64.b64encode(b"Salted__" + salt + ct).decode()
+
+    def test_unwrap_decrypts_reader_user_token_blob(self):
+        """Der verschluesselte Kandidat wird zum echten JWT -- und ist
+        damit datierbar (Altersnotiz statt Struktur-Hinweis)."""
+        from .tolino import (_candidate_age_note, _filter_live_candidates,
+                             _normalize_live_grab,
+                             _unwrap_refresh_candidate)
+        fresh = self._refresh_jwt(time.time() - 5)
+        blob = self._encrypt(fresh)
+        self.assertTrue(blob.startswith("U2FsdGVk"))
+        self.assertEqual(fresh, _unwrap_refresh_candidate(blob))
+        normalized = _normalize_live_grab({"refresh": [blob],
+                                           "hardware": []})
+        self.assertEqual([fresh], normalized["refresh"])
+        self.assertEqual([fresh],
+                         _filter_live_candidates(normalized["refresh"]))
+        self.assertIn("Sekunden alt", _candidate_age_note([fresh]))
+
+    def test_unwrap_decrypts_nested_user_token_bundle(self):
+        """Doppelte Schicht: Blob -> {"refresh": Blob} -> JWT."""
+        from .tolino import _unwrap_refresh_candidate
+        fresh = self._refresh_jwt(time.time() - 5)
+        outer = self._encrypt(json.dumps(
+            {"refresh": self._encrypt(fresh), "expireTime": 1}))
+        self.assertEqual(fresh, _unwrap_refresh_candidate(outer))
+
+    def test_normalize_extracts_hardware_from_user_infos_blob(self):
+        """Die im curl-Export gezeigte Hardware-Id steckt im
+        verschluesselten userInfos -- extrahiert, und niemals als
+        Ciphertext weitergereicht."""
+        from .tolino import _normalize_live_grab
+        blob = self._encrypt(json.dumps({
+            "userId": "54389718", "devKey": "dk",
+            "hardwareId": "eb22e4cf-bb01-4550-bff7-334446bb20b1"}))
+        normalized = _normalize_live_grab({"refresh": [],
+                                           "hardware": [blob]})
+        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"],
+                         normalized["hardware"])
+        # Undurchdringbarer Ciphertext verschwindet stillschweigend,
+        # statt als Hardware-Id gespeichert oder getauscht zu werden.
+        opaque = self._encrypt('{"keine": "hardware"}', phrase="fremd")
+        normalized = _normalize_live_grab({"refresh": [],
+                                           "hardware": [opaque]})
+        self.assertEqual([], normalized["hardware"])
+        # Klartext-Hardware-Ids bleiben wie sie sind.
+        plain_hw = "a0b2c3d4-e5f6-7788-99aa-bbccddeeff00"
+        holder = {"refresh": [], "hardware": [plain_hw]}
+        self.assertIs(holder, _normalize_live_grab(holder))
+
+    def test_grab_live_refresh_exchanges_the_decrypted_blob(self):
+        """End-to-end: verschluesselter Kandidat -> Entschluesselung ->
+        Tausch des echten JWT (FakeClient sieht den Klartext)."""
+        from .tolino import grab_live_refresh
+        fresh = self._refresh_jwt(time.time() - 5)
+        blob = self._encrypt(fresh)
+        logins = []
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = "fake-hw"
+
+            def _login(self):
+                logins.append(self.refresh)
+                self.refresh = "rotated-token"
+
+        with patch("calibre_plugin.tolino.TolinoClient", FakeClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [blob], "hardware": []}), \
+             patch("calibre_plugin.cdp.reader_ws_url", return_value=None):
+            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertEqual(("rotated-token", "fake-hw"),
+                         (refresh, hardware))
+        self.assertEqual([fresh], logins)
+
+    def test_try_live_grab_first_dates_the_decrypted_stale_blob(self):
+        """Verschluesselt + zu alt: der Filter greift, die Meldung
+        nennt das Alter -- kein "ohne datierbares JWT-alter" mehr."""
+        from .tolino import try_live_grab_first
+        stale = self._refresh_jwt(time.time() - 7200)
+        blob = self._encrypt(stale)
+        with patch("calibre_plugin.cdp.devtools_port_alive",
+                   return_value=True), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value={"refresh": [blob], "hardware": [],
+                                 "idb": []}), \
+             patch("calibre_plugin.cdp.describe_grab_state",
+                   return_value="1 Refresh-Kandidat(en)"):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                try_live_grab_first(4, "hw")
+        message = str(ctx.exception)
+        self.assertIn("Sekunden alt", message)
+        self.assertNotIn("ohne datierbares JWT-alter", message)
+        self.assertNotIn(blob, message)
+
+
 if __name__ == "__main__":
     unittest.main()

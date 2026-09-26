@@ -2194,6 +2194,80 @@ def _peel_candidate_wrappers(value):
     return out
 
 
+def _decrypt_reader_blob(value):
+    """Plaintexts of a CryptoJS "Salted__" reader blob ([] when none).
+
+    The web reader encrypts its userToken/userInfos entries with
+    CryptoJS.AES.encrypt(value, VERSION.PHRASE) before writing them to
+    storage -- the same OpenSSL format the disk scrape has decrypted
+    all along. The LIVE grab saw only the ciphertext: a 920-character,
+    dot-less "refresh candidate" that no age filter can date and that
+    the endpoint answers with invalid_grant (0.9.34 field report; the
+    curl export shows the exact blob: base64("Salted__" + salt +
+    AES-256-CBC) -- NOT a base64-encoded JWT as 0.9.33 assumed).
+    Decryption runs in Python (stdlib AES, testable without a browser);
+    a wrong phrase or a non-blob simply yields no plaintexts.
+    """
+    text = str(value or "")
+    if not text or ("Salted__" not in text
+                    and not text.lstrip().startswith("U2FsdGVk")):
+        return []
+    out = []
+    for phrase in READER_AES_PHRASES:
+        try:
+            plain = cryptojs_decrypt(text, phrase)
+        except Exception:
+            plain = ""
+        plain = (plain or "").strip()
+        if plain and plain not in out:
+            out.append(plain)
+    return out
+
+
+def _refresh_field_text(json_text):
+    """The refresh-ish string field of a decrypted reader JSON bundle.
+
+    userToken decrypts to {"refresh": "<token-or-nested-blob>",
+    "expireTime": ...}; None for anything else, so an arbitrary
+    decrypted bundle is never mistaken for a credential.
+    """
+    try:
+        parsed = json.loads(json_text)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    for name in ("refresh",) + TOKEN_VALUE_KEYS:
+        nested = parsed.get(name)
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    return None
+
+
+def _hardware_from_reader_blob(value):
+    """hardwareId from a decrypted userInfos blob; '' when there is none.
+
+    The live grab reported "0 Hardware-Kandidat(en)" because userInfos
+    only ever appears as ciphertext (0.9.34 field report -- the very
+    curl export the user pointed at carries the hardware id in plain
+    text as a header, and encrypted in this blob). The ciphertext
+    itself is NEVER returned: an undecryptable blob must not travel on
+    as a bogus hardware id.
+    """
+    for plain in _decrypt_reader_blob(value):
+        try:
+            parsed = json.loads(plain)
+        except ValueError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for name in HARDWARE_VALUE_KEYS:
+            nested = parsed.get(name)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    return ""
+
+
 def _unwrap_refresh_candidate(token, max_depth=3):
     """Recover the JWT behind a wrapped, undatable candidate (0.9.33).
 
@@ -2221,6 +2295,42 @@ def _unwrap_refresh_candidate(token, max_depth=3):
     for _depth in range(max_depth):
         nxt = []
         for value in frontier:
+            # (a) CryptoJS/OpenSSL AES layer (reader userToken/userInfos)
+            #     -- the 0.9.34 field candidate, a Salted__ ciphertext.
+            for plain in _decrypt_reader_blob(value):
+                plain = plain.strip()
+                if not plain:
+                    continue
+                if _jwt_shaped(plain):
+                    # Trusted plaintext under a refresh-ish key: the
+                    # real token even if its payload lacks an iat.
+                    return plain
+                if plain.startswith("U2FsdGVk"):
+                    # Nested blob inside a decrypted userToken bundle.
+                    if plain not in seen:
+                        seen.add(plain)
+                        nxt.append(plain)
+                    continue
+                if plain.startswith(("{", "[")):
+                    if plain.startswith("{"):
+                        nested = _refresh_field_text(plain)
+                        if nested:
+                            if _jwt_shaped(nested):
+                                return nested
+                            if nested.startswith("U2FsdGVk"):
+                                if nested not in seen:
+                                    seen.add(nested)
+                                    nxt.append(nested)
+                            elif (len(nested) > 20
+                                  and nested.isprintable()
+                                  and not nested.startswith(("{", "["))):
+                                return nested
+                    continue
+                # Trusted raw plaintext: an opaque real token beats the
+                # ciphertext every time.
+                if len(plain) > 20 and plain.isprintable():
+                    return plain
+            # (b) structural wrappers (JSON quotes / percent / base64)
             for peeled in _peel_candidate_wrappers(value):
                 if peeled in seen:
                     continue
@@ -2245,7 +2355,9 @@ def _normalize_live_grab(grabbed):
     candidates pass through on purpose) and was then sent to the
     endpoint in a form that provably fails with invalid_grant.
 
-    Returns the input object unchanged when nothing was unwrapped.
+    Encrypted userInfos hardware blobs are decrypted the same way
+    (ciphertext itself is never returned). Returns the input object
+    unchanged when nothing was unwrapped.
     """
     if not isinstance(grabbed, dict):
         return grabbed
@@ -2254,10 +2366,19 @@ def _normalize_live_grab(grabbed):
         unwrapped = _unwrap_refresh_candidate(token)
         if unwrapped and unwrapped not in refresh:
             refresh.append(unwrapped)
-    if refresh == (grabbed.get("refresh") or []):
+    hardware = []
+    for value in grabbed.get("hardware") or ():
+        value = str(value or "").strip()
+        if value.startswith("U2FsdGVk") or "Salted__" in value:
+            value = _hardware_from_reader_blob(value)
+        if value and value not in hardware:
+            hardware.append(value)
+    if (refresh == (grabbed.get("refresh") or [])
+            and hardware == (grabbed.get("hardware") or [])):
         return grabbed
     updated = dict(grabbed)
     updated["refresh"] = refresh
+    updated["hardware"] = hardware
     return updated
 
 

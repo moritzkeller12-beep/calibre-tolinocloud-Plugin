@@ -126,8 +126,28 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     bleiben unverändert); danach Altersfilter, Tausch-Reihenfolge,
     `tried`-Buchung und Altersnotiz dieselbe austauschbare
     Repräsentation.
+15. **Verschlüsselte Kandidaten werden entschlüsselt (0.9.34):** Das
+    curl-Export-Feldbild (zum 0.9.33-Bericht, erneut „1 Teil, 920
+    Zeichen“) zeigte die wahre Hülle: kein base64(JWT), sondern
+    `base64("Salted__" + Salt + AES-256-CBC)` — CryptoJS.AES aus
+    `VERSION.PHRASE` (Leer-Passphrase), exakt das Format, das die
+    Platten-Version seit jeher entschlüsselt. Der Live-Grab pushte den
+    Ciphertext dagegen roh: undatiert, am Endpunkt mit invalid_grant
+    abgelehnt, und `userInfos` (die Hardware-Id) kam gar nicht erst in
+    den Eimer („0 Hardware-Kandidat(en)“) — obwohl derselbe Export
+    beide Werte im Klartext zeigt (Token im eigenen Refresh-Grant,
+    Hardware-Id als `hardware-id`-Header). Fix: die Snippets sammeln
+    `userToken`/`userInfos`-Blobs, `_normalize_live_grab`
+    entschlüsselt (`_decrypt_reader_blob`, `_hardware_from_reader_blob`)
+    und zieht den JWT-Kern bzw. die `hardwareId`; undurchdringbarer
+    Ciphertext wird stillschweigend verworfen, statt getauscht oder
+    gespeichert zu werden. Die Vermutung aus 0.9.33 (base64 eines
+    ~690-Byte-JWT) ist damit widerlegt; der strukturelle Peel bleibt
+    für echte Hüllen erhalten. Verifikation mit dem Feldwert selbst:
+    Entschlüsselung ergab `typ: Refresh`, gleiche `sid` wie der
+    erfolgreiche Grant des Readers, Alter datierbar.
 
-## Aktuelle Login-Kette (ab 0.9.33)
+## Aktuelle Login-Kette (ab 0.9.34)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
    öffnet den Web Reader; während der Anmeldung zählt das Fenster als
@@ -136,7 +156,8 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
 2. Storage-Grab (localStorage + sessionStorage **inkl. JSON-Blobs** +
    IndexedDB) → frischester `typ: Refresh`-Kandidat; in der Ablage
    gekodet liegende Kandidaten (base64/JSON/URL) werden vor dem Tausch
-   entpackt (0.9.33).
+   entpackt (0.9.33), CryptoJS-verschlüsselte userToken/userInfos-Blobs
+   entschlüsselt — Klartext-JWT plus Hardware-Id (0.9.34).
 3. Tausch **in der Reader-Seite** (in-page fetch) → `_apply_token_response`
    mit sofortigem Speichern des rotierten Tokens; danach wird das
    Anmeldefenster geschlossen (die Sitzung gehört ab jetzt Calibre).
