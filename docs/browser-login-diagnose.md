@@ -168,7 +168,7 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     auch `message`/`ResponseInfo.message` (redigiert), nicht mehr
     nur `{}`.
 
-## Aktuelle Login-Kette (ab 0.9.34)
+## Aktuelle Login-Kette (ab 0.9.35)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
    öffnet den Web Reader; während der Anmeldung zählt das Fenster als

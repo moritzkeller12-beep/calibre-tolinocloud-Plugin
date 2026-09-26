@@ -798,7 +798,7 @@ class SyncPlanTests(unittest.TestCase):
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
                 patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
                         patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
-            with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
+            with self.assertRaisesRegex(TolinoAuthError, "verbraucht oder widerrufen"):
                 TolinoClient(4, "", "old-refresh").login()
         self.assertEqual(1, request.call_count)
 
@@ -811,7 +811,7 @@ class SyncPlanTests(unittest.TestCase):
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
                 patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
                         patch("calibre_plugin.tolino.urlopen", side_effect=error):
-            with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
+            with self.assertRaisesRegex(TolinoAuthError, "verbraucht oder widerrufen"):
                 TolinoClient(4, "", "old-refresh").login()
 
     def test_403_bot_protection_reports_response_detail(self):
@@ -939,7 +939,7 @@ class SyncPlanTests(unittest.TestCase):
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
                 patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
                         patch("calibre_plugin.tolino.urlopen", side_effect=error):
-            with self.assertRaisesRegex(TolinoAuthError, "Web Reader again"):
+            with self.assertRaisesRegex(TolinoAuthError, "verbraucht oder widerrufen"):
                 client.login()
         self.assertIn("invalid_grant", client.last_error_text)
         self.assertIn("error_description", client.last_error_text)
