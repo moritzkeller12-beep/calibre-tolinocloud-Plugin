@@ -364,6 +364,14 @@ _GRAB_SNIPPET = r"""
         if (/refresh/i.test(key)) walk(v, depth + 1, seen);
         if (/hardware|device/i.test(key) &&
             /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
+        // userToken/userInfos liegen CryptoJS-verschluesselt vor;
+        // Python entpackt sie (_normalize_live_grab). Ohne diesen
+        // Push ist der Live-Grab fuer Token und Hardware-Id blind
+        // (Feldbefund 0.9.34: "1 Teil, 920 Zeichen", 0 Hardware).
+        if (/usertoken/i.test(key) && v.indexOf('U2FsdGVk') === 0)
+            push(v, 'refresh');
+        if (/userinfos/i.test(key) && v.indexOf('U2FsdGVk') === 0)
+            push(v, 'hardware');
         var parsed = tryParse(v);
         if (parsed) walk(parsed, depth + 1, seen);
       } else if (v && typeof v === 'object') {
@@ -460,6 +468,13 @@ _IDB_SNIPPET = r"""
           }
           if (/hardware|device/i.test(key) &&
               /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
+          // userToken/userInfos liegen CryptoJS-verschluesselt vor;
+          // Python entpackt sie (_normalize_live_grab) -- s. Snippet
+          // oben (Feldbefund 0.9.34).
+          if (/usertoken/i.test(key) && v.indexOf('U2FsdGVk') === 0)
+            push(v, 'refresh');
+          if (/userinfos/i.test(key) && v.indexOf('U2FsdGVk') === 0)
+            push(v, 'hardware');
           var parsed = tryParse(v);
           if (parsed) walk(parsed, depth + 1, seen);
         } else if (v && typeof v === 'object') {
