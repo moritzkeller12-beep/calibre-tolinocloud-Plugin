@@ -134,6 +134,11 @@ def force_legacy_partner_id(value):
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 OAUTH_STATE_TTL = 300
+# registerhw muss am BOSH-Dienst ankommen, bevor die ID akzeptiert wird
+# (Feldbefund 0.9.36: der Diagnose-Test direkt nach der Registrierung
+# warf noch 400, der naechste Klick Sekunden spaeter lief) -- vor dem
+# ersten und vor dem letzten Retry wird kurz gewartet.
+_REGISTER_SETTLE_SECONDS = 1.5
 
 
 _JWT_PATTERN = re.compile(
@@ -3182,6 +3187,7 @@ class TolinoClient:
         self.token_callback = token_callback
         self.hardware_callback = hardware_callback
         self._in_device_recovery = False
+        self._hw_registered_now = False
         self._login_lock = threading.Lock()
 
     def auth_diagnostics(self):
@@ -3393,18 +3399,32 @@ class TolinoClient:
                 return self._request(url, method, data, form, True,
                                      content_type, _retry=False,
                                      _extra_headers=_extra_headers)
-            if (exc.code == 400 and authenticated and _retry
+            if (exc.code == 400 and authenticated
                     and url != self.partner.get("token_url")):
                 # 400 on an authenticated BOSH call: the service answers an
                 # unknown hardware id with an empty "{}" (Feldbefund 0.9.35:
                 # login worked, inventory/delta died in "Vorbereitung
                 # fehlgeschlagen"). Adopt the account's registered device or
-                # register ours, then retry exactly once.
-                try:
-                    recovered = self._recover_device_registration()
-                except Exception:
-                    recovered = False
-                if recovered:
+                # register ours, then retry -- after registerhw with a short
+                # wait, because the freshly registered id is accepted only
+                # moments later (Feldbefund 0.9.36: the immediate retry of
+                # the first Diagnose test still 400'd, every later click ran).
+                if _retry:
+                    self._hw_registered_now = False
+                    try:
+                        recovered = self._recover_device_registration()
+                    except Exception:
+                        recovered = False
+                    if recovered:
+                        if self._hw_registered_now:
+                            time.sleep(_REGISTER_SETTLE_SECONDS)
+                        return self._request(url, method, data, form, True,
+                                             content_type, _retry=False,
+                                             _extra_headers=_extra_headers)
+                elif self._hw_registered_now:
+                    # Exactly one more attempt after the registration wait.
+                    self._hw_registered_now = False
+                    time.sleep(_REGISTER_SETTLE_SECONDS)
                     return self._request(url, method, data, form, True,
                                          content_type, _retry=False,
                                          _extra_headers=_extra_headers)
@@ -3632,7 +3652,9 @@ class TolinoClient:
                 self.hardware = registered
                 self._notify_hardware()
                 return True
-            return self._register_hardware()
+            registered_ok = self._register_hardware()
+            self._hw_registered_now = bool(registered_ok)
+            return registered_ok
         finally:
             self._in_device_recovery = False
 

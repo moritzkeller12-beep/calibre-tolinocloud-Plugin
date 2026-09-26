@@ -166,7 +166,12 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     ist das konfigurierte Gerät bereits das registrierte, bleibt der
     echte Fehler sichtbar. Zusätzlich zeigt der Fehlerfilter jetzt
     auch `message`/`ResponseInfo.message` (redigiert), nicht mehr
-    nur `{}`.
+    nur `{}`. Nachtrag 0.9.37: `registerhw` braucht einen Moment, bis
+    der BOSH-Dienst die ID akzeptiert — der direkte Retry der ersten
+    Diagnose schlug deshalb noch fehl (der nächste Klick lief). Der
+    erste Retry wartet jetzt 1,5 s, dazu gibt es genau einen zweiten
+    Versuch; der Diagnose-Button baut seinen Client zusätzlich über
+    `_cloud_client()` (gleiche Callbacks wie der Sync-Lauf).
 
 ## Aktuelle Login-Kette (ab 0.9.35)
 

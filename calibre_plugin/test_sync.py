@@ -4436,7 +4436,8 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client = self._client("configured-hw")
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=Exception("no devices")):
+                   side_effect=Exception("no devices")), \
+             patch("calibre_plugin.tolino.time.sleep"):
             data = client.inventory()
         self.assertEqual([], data)
         self.assertEqual(3, len(seen))
@@ -4469,6 +4470,67 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
             with self.assertRaises(TolinoApiError):
                 client.inventory()
         self.assertEqual(1, len(seen))
+
+    def test_registration_settles_with_waiting_retries(self):
+        """0.9.36-Feldbefund: Der Diagnose-Test direkt nach registerhw
+        warf noch 400 (die ID war noch nicht angekommen), der naechste
+        Klick Sekunden spaeter lief. Der erste Retry wartet jetzt kurz,
+        und es gibt GENAU EINEN zweiten Versuch danach."""
+        seen = []
+        sleeps = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.full_url)
+            if "registerhw" in request.full_url:
+                return self._response(b"{}")
+            inventory_calls = len([1 for url in seen if "inventory" in url])
+            if inventory_calls <= 2:
+                raise self._error400(b"{}")
+            return self._response(self.INVENTORY_BODY)
+
+        client = self._client("configured-hw")
+        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
+             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
+                   side_effect=Exception("no devices")), \
+             patch("calibre_plugin.tolino.time.sleep",
+                   side_effect=sleeps.append):
+            data = client.inventory()
+        self.assertEqual([], data)
+        self.assertEqual(4, len(seen))
+        self.assertIn("/inventory/delta", seen[0])
+        self.assertIn("v2/registerhw", seen[1])
+        self.assertIn("/inventory/delta", seen[2])
+        self.assertIn("/inventory/delta", seen[3])
+        self.assertEqual([1.5, 1.5], sleeps)
+        # Danach ist die ID bekannt: der naechste Lauf braucht keine
+        # Recovery (Flag ist verbraucht).
+        self.assertFalse(client._hw_registered_now)
+
+    def test_adopted_device_needs_no_settle_wait(self):
+        """Uebernommenes, registriertes Geraet: kein Warten, weiterhin
+        genau ein direkter Retry."""
+        seen = []
+        sleeps = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.full_url)
+            if len(seen) == 1:
+                raise self._error400(b"{}")
+            return self._response(self.INVENTORY_BODY)
+
+        client = self._client("stale-hw-000")
+        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
+             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
+                   return_value="eb22e4cf-bb01-4550-bff7-334446bb20b1"), \
+             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
+                   side_effect=AssertionError("register must not run")), \
+             patch("calibre_plugin.tolino.time.sleep",
+                   side_effect=sleeps.append):
+            data = client.inventory()
+        self.assertEqual([], data)
+        self.assertEqual(2, len(seen))
+        self.assertEqual([], sleeps)
+        self.assertFalse(client._hw_registered_now)
 
 
 if __name__ == "__main__":
