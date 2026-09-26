@@ -15,7 +15,7 @@ import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse, quote as _url_quote
+from urllib.parse import parse_qs, unquote as _unquote, urlencode, urlparse, quote as _url_quote
 from urllib.request import Request, urlopen
 import subprocess
 
@@ -2138,7 +2138,9 @@ def _filter_live_candidates(candidates, max_age_seconds=1800):
     older in that set can only be leftover history, so it is dropped
     instead of being replayed (a replayed token can trip Keycloak's reuse
     protection and kill the live session). Non-JWT candidates pass
-    through -- they cannot be dated and stay the caller's responsibility.
+    through -- they cannot be dated and stay the caller's responsibility
+    (candidates the storage held WRAPPED are unwrapped by
+    ``_normalize_live_grab`` before they ever reach this filter).
 
     The default cutoff is deliberately generous: Keycloak refresh tokens
     live about an hour (exp - iat = 3600 s in observed tokens), and the
@@ -2153,6 +2155,110 @@ def _filter_live_candidates(candidates, max_age_seconds=1800):
         if issued is None or now - issued <= max_age_seconds:
             kept.append(token)
     return kept
+
+
+def _peel_candidate_wrappers(value):
+    """One unwrapping step for a stored candidate; returns peel results.
+
+    The wrappers seen in the field (0.9.33): JSON string quotes,
+    percent-encoding (including encoded dots) and base64/base64url --
+    the three coverings under which the reader hides token parts in its
+    IndexedDB stores. Each layer only yields a candidate when it decodes
+    cleanly; the caller then checks whether the result is a JWT.
+    """
+    out = []
+    stripped = value.strip()
+    if (len(stripped) >= 2 and stripped.startswith('"')
+            and stripped.endswith('"')):
+        try:
+            unquoted = json.loads(stripped)
+        except ValueError:
+            unquoted = None
+        if isinstance(unquoted, str) and unquoted:
+            out.append(unquoted)
+    if "%" in value:
+        decoded = _unquote(value)
+        if decoded and decoded != value:
+            out.append(decoded)
+    compact = "".join(value.split())
+    if len(compact) >= 24 and re.fullmatch(
+            r"[A-Za-z0-9+/\-_]+={0,2}", compact):
+        padded = compact + "=" * (-len(compact) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(
+                padded.encode("ascii")).decode("utf-8")
+        except Exception:
+            decoded = ""
+        if decoded:
+            out.append(decoded)
+    return out
+
+
+def _unwrap_refresh_candidate(token, max_depth=3):
+    """Recover the JWT behind a wrapped, undatable candidate (0.9.33).
+
+    Field report behind this function: exactly ONE live refresh
+    candidate, "1 Teil, 920 Zeichen", rejected by the endpoint (HTTP
+    400, invalid_grant: Invalid refresh token) and undatable ("ohne
+    datierbares JWT-alter"). A JWT always carries two dots -- a dot-less
+    candidate is a WRAPPED form of the token (a ~690-byte JWT
+    base64-encodes to exactly 920 characters), and the wrapped form can
+    never be exchanged: Keycloak cannot parse it at all. So the covering
+    is peeled (up to ``max_depth`` layers: JSON quotes, percent-encoding,
+    base64/base64url) BEFORE the token ever reaches the endpoint.
+
+    A peeled layer only wins when the RESULT itself is a three-part JWT
+    with a readable payload -- a random base64 round-trip of an opaque
+    token passes that test essentially never. If no layer yields a JWT,
+    the original value is returned unchanged (genuinely opaque tokens
+    keep working exactly as before).
+    """
+    text = str(token or "")
+    if not text or _jwt_shaped(text):
+        return text
+    frontier = [text]
+    seen = {text}
+    for _depth in range(max_depth):
+        nxt = []
+        for value in frontier:
+            for peeled in _peel_candidate_wrappers(value):
+                if peeled in seen:
+                    continue
+                if _jwt_shaped(peeled) and _jwt_payload(peeled):
+                    return peeled
+                seen.add(peeled)
+                nxt.append(peeled)
+        if not nxt:
+            break
+        frontier = nxt
+    return text
+
+
+def _normalize_live_grab(grabbed):
+    """Unwrap the refresh candidates of ONE grab result (0.9.33).
+
+    Applied exactly where a grab enters the plugin, so every consumer --
+    the 30-minute age filter, the typ-preferring exchange order, the
+    ``tried`` bookkeeping and the age note -- operates on the
+    exchangeable representation instead of the storage wrapper. Without
+    this, a wrapped candidate slipped past the age filter (undatable
+    candidates pass through on purpose) and was then sent to the
+    endpoint in a form that provably fails with invalid_grant.
+
+    Returns the input object unchanged when nothing was unwrapped.
+    """
+    if not isinstance(grabbed, dict):
+        return grabbed
+    refresh = []
+    for token in grabbed.get("refresh") or ():
+        unwrapped = _unwrap_refresh_candidate(token)
+        if unwrapped and unwrapped not in refresh:
+            refresh.append(unwrapped)
+    if refresh == (grabbed.get("refresh") or []):
+        return grabbed
+    updated = dict(grabbed)
+    updated["refresh"] = refresh
+    return updated
 
 
 def _exchange_fresh_response(partner_id, hardware, ws_url, token_url,
@@ -2302,8 +2408,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     historical disk-scrape flow in that case.
     """
     from . import cdp as cdp_module
-    grabbed = cdp_module.grab_live_tokens(partner_id, hardware,
-                                          timeout=timeout, progress=progress)
+    grabbed = _normalize_live_grab(cdp_module.grab_live_tokens(
+        partner_id, hardware, timeout=timeout, progress=progress))
     tried = set()
     first_error = ""
     attempt = 0
@@ -2356,7 +2462,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                          "Speicher (Versuch %d von %d; im Fenster angemeldet "
                          "bleiben) ..." % (attempt, _NEW_TOKEN_ATTEMPTS))
         time.sleep(_NEW_TOKEN_INTERVAL)
-        more = cdp_module.grab_once_from_grabber()
+        more = _normalize_live_grab(
+            cdp_module.grab_once_from_grabber())
         if more and more.get("refresh"):
             grabbed = more
             continue
@@ -2446,7 +2553,8 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
     from . import cdp as cdp_module
     if not cdp_module.devtools_port_alive():
         return None
-    grabbed = cdp_module.grab_once_from_grabber(timeout=timeout)
+    grabbed = _normalize_live_grab(
+        cdp_module.grab_once_from_grabber(timeout=timeout))
     state = cdp_module.describe_grab_state(timeout=timeout)
     fresh = _filter_live_candidates((grabbed or {}).get("refresh") or [])
     first_error = ""

@@ -109,15 +109,34 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     (Teile-Anzahl, Länge, Payload-Lesbarkeit) — „ohne datierbares
     JWT-alter“ unterscheidet damit opake Werte von JWE bzw. falsch
     extrahierten Zeichenketten.
+14. **Gekodeter Kandidat wird entpackt (0.9.33):** Feldbefund der
+    Extrahier-Schaltfläche: genau ein Refresh-Kandidat, „1 Teil, 920
+    Zeichen“, am Endpunkt abgelehnt (HTTP 400, `invalid_grant: Invalid
+    refresh token`) und ohne datierbares JWT-alter. Ein JWT trägt immer
+    zwei Punkte — der Wert lag also gekodiert im Speicher (base64/
+    base64url; ~690 Bytes JWT ergeben base64 genau 920 Zeichen). Die
+    Hülle kann am Endpunkt nie funktionieren: Keycloak kann sie nicht
+    parsen, und undatierte Kandidaten passieren den 30-Minuten-Filter
+    absichtlich — eine gekoderte Kopie wurde damit geprüft und
+    verbrannte den Lauf. Quelle des Werts ist der rohe Push im
+    IndexedDB-Snippet (unter refresh-achtigen Schlüsseln, sobald der
+    Wert kein JSON-Objekt ist). Jetzt: `_normalize_live_grab` zieht die
+    Hülle bereits beim Eintritt des Grabs ab — nur wenn das Ergebnis
+    eine dreiteilige JWT-Form mit lesbarem Payload ist (opake Tokens
+    bleiben unverändert); danach Altersfilter, Tausch-Reihenfolge,
+    `tried`-Buchung und Altersnotiz dieselbe austauschbare
+    Repräsentation.
 
-## Aktuelle Login-Kette (ab 0.9.32)
+## Aktuelle Login-Kette (ab 0.9.33)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
    öffnet den Web Reader; während der Anmeldung zählt das Fenster als
    offen, solange der DevTools-Endpunkt antwortet (Partner-Keycloak-
    Seite statt `mytolino.com` ist kein Abbruch).
 2. Storage-Grab (localStorage + sessionStorage **inkl. JSON-Blobs** +
-   IndexedDB) → frischester `typ: Refresh`-Kandidat.
+   IndexedDB) → frischester `typ: Refresh`-Kandidat; in der Ablage
+   gekodet liegende Kandidaten (base64/JSON/URL) werden vor dem Tausch
+   entpackt (0.9.33).
 3. Tausch **in der Reader-Seite** (in-page fetch) → `_apply_token_response`
    mit sofortigem Speichern des rotierten Tokens; danach wird das
    Anmeldefenster geschlossen (die Sitzung gehört ab jetzt Calibre).

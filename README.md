@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.32** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
+Plugin-Version: **0.9.33** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -52,7 +52,7 @@ ungültig (`invalid_grant`). Kein Inkognito-Fenster.
 | „… warte auf eine frische Rotation des Web Readers" | Token war verbraucht; das Plugin wartet bis zu ~90 s auf eine neu geschriebene Kopie (auf der Anmeldeseite des Buchhändlers bis zu ~180 s). Fenster offen lassen. |
 | „… weder frischer Token … noch nachgeschoben", **„Fenster ist noch offen"** | Das Fenster zeigt die Anmeldeseite: **dort** im Web Reader neu anmelden (Bücherliste laden) und den Knopf erneut drücken — das Fenster bleibt offen und wird wiederverwendet. |
 | dieselbe Meldung, „Fenster wurde geschlossen" | Verbrauchter Token: Browser-Anmeldung erneut starten und im **neuen** Fenster anmelden, bis die Bücherliste lädt. Das Alter des Kandidaten sagt, ob eine frische Anmeldung (Sekunden) oder eine alte Kopie (Stunden) abgelehnt wurde; „ohne datierbares JWT-alter (Teile, Zeichen)" beschreibt die Struktur des Kandidaten. |
-| `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. |
+| `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. Kam der Kandidat gekodiert vor („1 Teil, 920 Zeichen"), entpackt ihn das Plugin ab 0.9.33 automatisch vor dem Tausch. |
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz → unten „Bot-Schutz-Komponente installieren". |
 
 Feldbefunde und Architektur-Historie: `docs/browser-login-diagnose.md`.
@@ -67,6 +67,10 @@ Feldbefunde und Architektur-Historie: `docs/browser-login-diagnose.md`.
 - **Ein Kandidat, ein Versuch:** frischeste zuerst (JWT-`iat`), abgelehnte Kopien werden
   nie wieder eingesetzt; danach wird bis zu ~90 s alle 3 s auf eine vom Reader selbst
   geschriebene Kopie gewartet.
+- **Gekoderte Kandidaten entpacken:** Liegt der Reader-Token in der Ablage unter einer
+  Hülle (base64/JSON/Prozent-Code — erkennbar an „1 Teil, 920 Zeichen" ohne Punkt),
+  wird die Hülle vor dem Tausch abgezogen — der Endpunkt sieht nur noch das eigentliche
+  JWT, und das Alter lässt sich wieder datieren (0.9.33).
 - **Tausch in der Reader-Seite:** der Refresh-Grant läuft als in-page `fetch` —
   derselbe TLS-Fingerprint wie beim Web Reader, dadurch geht er am Bot-Schutz vorbei.
 - **Token-Keep-alive:** Refresh-Tokens verfallen nach ~1 Stunde Untätigkeit; solange
