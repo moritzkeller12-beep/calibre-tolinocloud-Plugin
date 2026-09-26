@@ -396,7 +396,8 @@ class SyncWorker(QObject):
             client = TolinoClient(self.settings["partner_id"], self.settings["hardware_id"],
                                   self.settings["refresh_token"], self.settings["username"],
                                   self.settings["password"],
-                                  token_callback=self.persist_refresh_token)
+                                  token_callback=self.persist_refresh_token,
+                                  hardware_callback=self.persist_hardware)
             client.login()
             needs_replacement_cleanup = any(job.old_id for job in self.jobs)
             remote_ids = (client.inventory_ids()
@@ -441,6 +442,14 @@ class SyncWorker(QObject):
         self.settings["refresh_token"] = refresh
         save_account(self.settings["account_name"], {
             "refresh_token": refresh, "hardware_id": self.settings["hardware_id"],
+        }, active=self.settings["account_name"])
+
+    def persist_hardware(self, hardware):
+        """Adopted device id from the BOSH recovery (0.9.35)."""
+        self.settings["hardware_id"] = hardware
+        save_account(self.settings["account_name"], {
+            "refresh_token": self.settings["refresh_token"],
+            "hardware_id": hardware,
         }, active=self.settings["account_name"])
 
 
@@ -680,6 +689,14 @@ class SyncDashboard(QDialog):
         save_account(self.account_name, {
             "refresh_token": self.refresh.text(),
             "hardware_id": self.hardware.text().strip() or hardware_id(),
+        }, active=self.account_name)
+
+    def persist_hardware(self, hardware):
+        """Adopted device id from the BOSH recovery (0.9.35)."""
+        self.hardware.setText(str(hardware))
+        save_account(self.account_name, {
+            "refresh_token": self.refresh.text(),
+            "hardware_id": str(hardware),
         }, active=self.account_name)
 
     def _validate_scraped_candidates(self, refreshes, hardwares):
@@ -1025,7 +1042,8 @@ class SyncDashboard(QDialog):
         client = TolinoClient(
             settings["partner_id"], settings["hardware_id"],
             settings["refresh_token"], settings["username"],
-            settings["password"], token_callback=self.persist_refresh_token)
+            settings["password"], token_callback=self.persist_refresh_token,
+            hardware_callback=self.persist_hardware)
         client.login()
         self.set_refresh_token(client.refresh)
         return client
@@ -1063,7 +1081,8 @@ class SyncDashboard(QDialog):
             client = TolinoClient(settings["partner_id"], settings["hardware_id"],
                                   settings["refresh_token"], settings["username"],
                                   settings["password"],
-                                  token_callback=self.persist_refresh_token)
+                                  token_callback=self.persist_refresh_token,
+                                  hardware_callback=self.persist_hardware)
             client.login()
             self.set_refresh_token(client.refresh)
             # CRITICAL: Ensure the new refresh token is persisted immediately

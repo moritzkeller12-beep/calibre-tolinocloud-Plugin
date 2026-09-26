@@ -3163,7 +3163,8 @@ class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
     def __init__(self, partner_id, hardware, refresh=None, username=None,
-                 secret=None, timeout=45, token_callback=None):
+                 secret=None, timeout=45, token_callback=None,
+                 hardware_callback=None):
         partner_id = resolve_partner_id(partner_id)
         if partner_id not in PARTNERS:
             raise TolinoError("Unsupported Tolino partner ID: %s" % partner_id)
@@ -3181,6 +3182,8 @@ class TolinoClient:
         self.last_error_text = None
         self.last_transport = None
         self.token_callback = token_callback
+        self.hardware_callback = hardware_callback
+        self._in_device_recovery = False
         self._login_lock = threading.Lock()
 
     def auth_diagnostics(self):
@@ -3313,7 +3316,8 @@ class TolinoClient:
         return max(0, int(self.refresh_expires_at - time.time()))
 
     def _request(self, url, method="GET", data=None, form=False,
-                 authenticated=True, content_type=None, _retry=True):
+                 authenticated=True, content_type=None, _retry=True,
+                 _extra_headers=None):
         if authenticated and (not self.access or time.time() >= self.expires_at):
             self.login()
         body = None
@@ -3332,6 +3336,8 @@ class TolinoClient:
             # Client-Hints set first, partner-specific Origin/Referer last.
             headers.update(_browser_sec_headers())
             headers.update(self.partner.get("token_headers", {}))
+        if _extra_headers:
+            headers.update(_extra_headers)
         if data is not None:
             if form:
                 body = urlencode(data).encode("utf-8")
@@ -3359,9 +3365,17 @@ class TolinoClient:
                 payload = None
             if isinstance(payload, dict):
                 safe_detail = {
-                    key: payload[key] for key in ("error", "error_description")
+                    key: payload[key] for key in
+                    ("error", "error_description", "message")
                     if key in payload
                 }
+                response_info = payload.get("ResponseInfo")
+                if (isinstance(response_info, dict)
+                        and response_info.get("message")):
+                    # BOSH services report failures as ResponseInfo.message;
+                    # filtering that out showed field reports a mute "{}".
+                    safe_detail.setdefault(
+                        "message", str(response_info["message"])[:300])
                 detail = json.dumps(safe_detail, ensure_ascii=False, sort_keys=True)
             else:
                 detail = raw_detail
@@ -3377,7 +3391,23 @@ class TolinoClient:
                 self.access = None
                 self.login()
                 return self._request(url, method, data, form, True,
-                                     content_type, _retry=False)
+                                     content_type, _retry=False,
+                                     _extra_headers=_extra_headers)
+            if (exc.code == 400 and authenticated and _retry
+                    and url != self.partner.get("token_url")):
+                # 400 on an authenticated BOSH call: the service answers an
+                # unknown hardware id with an empty "{}" (Feldbefund 0.9.35:
+                # login worked, inventory/delta died in "Vorbereitung
+                # fehlgeschlagen"). Adopt the account's registered device or
+                # register ours, then retry exactly once.
+                try:
+                    recovered = self._recover_device_registration()
+                except Exception:
+                    recovered = False
+                if recovered:
+                    return self._request(url, method, data, form, True,
+                                         content_type, _retry=False,
+                                         _extra_headers=_extra_headers)
             if exc.code in (401, 403):
                 self.access = None
                 message = (_compact_error_text(self.last_error_text)
@@ -3540,6 +3570,71 @@ class TolinoClient:
         if not hardware:
             raise TolinoApiError("Tolino device list entry has no deviceId.")
         return str(hardware)
+
+    def _notify_hardware(self):
+        """Tell the UI about an adopted hardware id; never raises."""
+        callback = getattr(self, "hardware_callback", None)
+        if callback:
+            try:
+                callback(self.hardware)
+            except Exception:
+                pass
+
+    def _register_hardware(self):
+        """Register this hardware id at the BOSH service (reference flow).
+
+        tolino-python and pytolino register the device (registerhw)
+        before calling any BOSH endpoint; without a registration the
+        service answers inventory/delta with HTTP 400 and an empty "{}"
+        for hardware ids it does not know (field report 0.9.35). Best
+        effort: False when neither endpoint variant accepts us.
+        """
+        payload = {"hardware_name": "other"}
+        extra = {
+            "hardware_type": "HTML5",
+            "client_type": (self.partner.get("client_type")
+                            or "TOLINO_WEBREADER"),
+            "client_version": self.partner.get("client_version") or "5.2.0",
+        }
+        for url in (BASE_URL + "/v2/registerhw", BASE_URL + "/registerhw"):
+            try:
+                self._request(url, "POST", payload,
+                              content_type="application/json",
+                              _extra_headers=extra)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _recover_device_registration(self):
+        """Adopt or register a hardware id the BOSH service accepts (0.9.35).
+
+        Triggered by a 400 on an authenticated non-token request: first
+        adopt the account's most recently used device from
+        handshake/devices/list (the web reader's own session lives
+        there); when that yields nothing, register the hardware id we
+        carry. Returns True when something changed and a single retry
+        may succeed; never raises -- the original error must surface.
+        """
+        if self._in_device_recovery:
+            return False
+        self._in_device_recovery = True
+        try:
+            try:
+                registered = normalize_hardware_id(self.fetch_hardware_id())
+            except Exception:
+                registered = ""
+            if registered:
+                if registered == normalize_hardware_id(self.hardware):
+                    # Already THE registered device: the 400 has another
+                    # cause -- do not mask it behind a pointless retry.
+                    return False
+                self.hardware = registered
+                self._notify_hardware()
+                return True
+            return self._register_hardware()
+        finally:
+            self._in_device_recovery = False
 
     # --- Download (pytolino-derived): fetch an uploaded ebook back ---------
 

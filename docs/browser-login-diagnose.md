@@ -143,9 +143,30 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     Ciphertext wird stillschweigend verworfen, statt getauscht oder
     gespeichert zu werden. Die Vermutung aus 0.9.33 (base64 eines
     ~690-Byte-JWT) ist damit widerlegt; der strukturelle Peel bleibt
-    für echte Hüllen erhalten. Verifikation mit dem Feldwert selbst:
+    für echte Hüllen erhalten.    Verifikation mit dem Feldwert selbst:
     Entschlüsselung ergab `typ: Refresh`, gleiche `sid` wie der
     erfolgreiche Grant des Readers, Alter datierbar.
+16. **BOSH-400 „{}“ heilt über Geräte-Recovery (0.9.35):** Nach der
+    ersten erfolgreichen Browser-Anmeldung (0.9.34) starb die
+    Vorbereitung mit „Tolino HTTP 400: {}“ bei `inventory/delta`.
+    Der BOSH-Dienst prüft die `hardware_id`-Header gegen seine
+    Geräteliste und antwortet auf unbekannte IDs mit leerem `{}` —
+    die eigentliche Servermeldung (`ResponseInfo.message`) ging durch
+    den Fehlerfilter verloren, der nur error/error_description
+    zuließ. Die Referenz-Clients (tolino-python, pytolino)
+    registrieren vor jedem BOSH-Aufruf (`registerhw`) bzw. adoptieren
+    das zuletzt genutzte Gerät der eigenen Liste
+    (`handshake/devices/list`); das Plugin tat nie eines von beidem —
+    die pytolino-Ableitung `fetch_hardware_id` war tot angelötet.
+    Fix: bei einem authentifizierten 400 (ohne Token-Endpunkt, genau
+    ein Versuch) übernimmt `_recover_device_registration` das
+    registrierte Gerät (gemeldet über `hardware_callback`, damit die
+    UI es speichert) oder registriert die eigene ID (`registerhw`,
+    `v2` dann klassisch, `hardware_type: HTML5`), danach ein Retry;
+    ist das konfigurierte Gerät bereits das registrierte, bleibt der
+    echte Fehler sichtbar. Zusätzlich zeigt der Fehlerfilter jetzt
+    auch `message`/`ResponseInfo.message` (redigiert), nicht mehr
+    nur `{}`.
 
 ## Aktuelle Login-Kette (ab 0.9.34)
 
