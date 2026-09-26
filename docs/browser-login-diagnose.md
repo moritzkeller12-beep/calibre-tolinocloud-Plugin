@@ -93,8 +93,24 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     Token). Der nächste Start arbeitet mit frischem Profil und zeigt
     eine echte Anmeldeseite. Timeouts (Anmeldung läuft noch) lassen
     das Fenster bewusst offen.
+13. **Wartephase unterscheidet den Fensterzustand (0.9.32):** Der
+    Feldbefund „kein Web-Reader-Tab im Anmeldefenster offen“ nach
+    `invalid_grant` vermischte zwei Fälle: Fenster weg (DevTools-
+    Endpunkt antwortet nicht) und Fenster offen, aber der Tab liegt auf
+    der Anmeldeseite des Buchhändlers (die Sitzung ist tot). Beim
+    zweiten schloss das Plugin das Fenster und verlangte einen
+    vollständigen Neustart, obwohl der Nutzer genau dort weitermachen
+    konnte. Jetzt: `grabber_window_state()` (Endpunkt plus Tab-Klasse),
+    Abbruch der Wartezeit nach drei Endpunkt-Fehlschlägen, bei offenem
+    Fenster ohne Reader-Tab verlängerte Wartezeit (+30 Versuche) mit
+    Aufforderung zur erneuten Anmeldung **in diesem Fenster** (bleibt
+    offen, `launch_reader_window` verwendet es wieder), und die
+    Altersnotiz beschreibt undatierte Kandidaten strukturell
+    (Teile-Anzahl, Länge, Payload-Lesbarkeit) — „ohne datierbares
+    JWT-alter“ unterscheidet damit opake Werte von JWE bzw. falsch
+    extrahierten Zeichenketten.
 
-## Aktuelle Login-Kette (ab 0.9.31)
+## Aktuelle Login-Kette (ab 0.9.32)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
    öffnet den Web Reader; während der Anmeldung zählt das Fenster als
@@ -107,13 +123,18 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
    Anmeldefenster geschlossen (die Sitzung gehört ab jetzt Calibre).
 4. Bei Ablehnung/Leere: Seiten-Speicher (inkl. IndexedDB) alle 3 s
    erneut lesen, bis der Reader selbst einen frischen Token schreibt
-   (bis zu ~90 s), dann genau einmal tauschen. Kommt nichts Nach-
-   geschobenes, wird das Fenster geschlossen und der Lauf endet mit
-   einer Fehlermeldung (Browser-Anmeldung erneut starten, im neuen
-   Fenster anmelden). Die Meldung nennt zusätzlich nur das ALTER des
-   geprüften Kandidaten (JWT-iat, nie der Wert): Sekunden = frische
-   Anmeldung sofort abgelehnt, Stunden = verbrauchte Kopie aus
-   wiederverwendetem Fenster. Erzwungene Rotation und Netzwerk-
+   (bis zu ~90 s; zeigt das Fenster die Anmeldeseite des Buchhändlers,
+   bis zu ~180 s mit Aufforderung zur Neu-Anmeldung vor Ort), dann
+   genau einmal tauschen. Kommt nichts Nachgeschobenes: Fenster weg →
+   schließen und Fehlermeldung „Browser-Anmeldung erneut starten, im
+   neuen Fenster anmelden“; Fenster offen ohne Reader-Tab → offen
+   lassen, Neu-Anmeldung in diesem Fenster anstoßen (wird beim
+   nächsten Knopfdruck wiederverwendet). Die Meldung nennt
+   zusätzlich das ALTER des geprüften Kandidaten (JWT-iat, nie der
+   Wert): Sekunden = frische Anmeldung sofort abgelehnt, Stunden =
+   verbrauchte Kopie aus wiederverwendetem Fenster; undatierte
+   Kandidaten werden strukturell beschrieben (Teile, Zeichen,
+   Payload-Lesbarkeit). Erzwungene Rotation und Netzwerk-
    Interception gibt es seit 0.9.28 nicht mehr.
 5. Ohne Chromium: Disk-Scrape-Fallback (alle Browser schließen, damit der
    letzte Token geflushed wird).

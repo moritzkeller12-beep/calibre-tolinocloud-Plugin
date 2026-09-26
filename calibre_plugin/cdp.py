@@ -889,15 +889,63 @@ def close_grabber_window(timeout=2):
         return False
 
 
+def grabber_window_state(port=None, timeout=5):
+    """Structured grabber-window state for the login wait loop (0.9.32).
+
+    Returns ``{"window", "reader_tab", "login_page"}``:
+
+    * ``window`` False  -- the DevTools endpoint is silent: the window is
+      gone and no further token can ever arrive from it.
+    * ``window`` True, ``reader_tab`` False -- the window lives but no
+      tab is on mytolino.com: the session died and the tab sits on the
+      partner's sign-in page (or is still loading). The user can sign in
+      again RIGHT THERE, and ``launch_reader_window`` reuses this window
+      on the next attempt.
+    * ``reader_tab`` True -- the signed-in reader is there.
+
+    Redacted by construction: foreign URLs are only classified, never
+    returned.
+    """
+    port = port or _start_port()
+    targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
+    if not isinstance(targets, list):
+        return {"window": False, "reader_tab": False, "login_page": False}
+    reader_tab = False
+    login_page = False
+    for target in targets:
+        if target.get("type") != "page":
+            continue
+        url = str(target.get("url") or "")
+        if "mytolino.com" in url:
+            reader_tab = True
+            break
+        if not url.startswith(("about:", "chrome:", "edge:",
+                               "devtools://")):
+            login_page = True
+    return {"window": True, "reader_tab": reader_tab,
+            "login_page": login_page}
+
+
 def describe_grab_state(port=None, timeout=12):
     """Short diagnostic: reader tab present? any token values visible?
 
     Redacted by construction -- only counts and store names, never
-    token values.
+    token values. Since 0.9.32 the text separates a vanished window from
+    an open window without a reader tab (partner sign-in page): the two
+    demand different actions from the user, and conflating them produced
+    the field report "kein Web-Reader-Tab im Anmeldefenster offen" for a
+    window that was still open and signable.
     """
+    state = grabber_window_state(port, timeout)
+    if not state["window"]:
+        return "kein Web-Reader-Tab im Anmeldefenster offen"
+    if not state["reader_tab"]:
+        return ("Anmeldefenster offen, aber ohne Web-Reader-Tab (der Tab "
+                "zeigt gerade die Anmeldeseite des Buchhändlers)")
     grabbed = grab_once_from_grabber(port, timeout)
     if grabbed is None:
-        return "kein Web-Reader-Tab im Anmeldefenster offen"
+        return ("Anmeldefenster offen, aber der Web-Reader-Tab war gerade "
+                "nicht lesbar")
     return ("%d Refresh-Kandidat(en), %d Hardware-Kandidat(en) live in der "
             "Seite (IndexedDB-Datenbanken: %s)" % (
                 len(grabbed.get("refresh") or []),
