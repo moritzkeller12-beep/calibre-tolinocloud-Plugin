@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.31** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
+Plugin-Version: **0.9.32** — synchronisiert Bücher aus Calibre mit der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -49,8 +49,9 @@ ungültig (`invalid_grant`). Kein Inkognito-Fenster.
 
 | Meldung | Tun |
 |---|---|
-| „… warte auf eine frische Rotation des Web Readers" | Token war verbraucht; das Plugin wartet bis zu ~90 s auf eine neu geschriebene Kopie. Fenster angemeldet lassen. |
-| „… weder frischer Token … noch nachgeschoben" | Das Anmeldefenster wurde geschlossen (verbrauchter Token). Knopf erneut drücken und im **neuen** Fenster anmelden, bis die Bücherliste lädt. Das Alter des Kandidaten in der Meldung sagt, ob eine frische Anmeldung (Sekunden) oder eine alte Kopie (Stunden) abgelehnt wurde. |
+| „… warte auf eine frische Rotation des Web Readers" | Token war verbraucht; das Plugin wartet bis zu ~90 s auf eine neu geschriebene Kopie (auf der Anmeldeseite des Buchhändlers bis zu ~180 s). Fenster offen lassen. |
+| „… weder frischer Token … noch nachgeschoben", **„Fenster ist noch offen"** | Das Fenster zeigt die Anmeldeseite: **dort** im Web Reader neu anmelden (Bücherliste laden) und den Knopf erneut drücken — das Fenster bleibt offen und wird wiederverwendet. |
+| dieselbe Meldung, „Fenster wurde geschlossen" | Verbrauchter Token: Browser-Anmeldung erneut starten und im **neuen** Fenster anmelden, bis die Bücherliste lädt. Das Alter des Kandidaten sagt, ob eine frische Anmeldung (Sekunden) oder eine alte Kopie (Stunden) abgelehnt wurde; „ohne datierbares JWT-alter (Teile, Zeichen)" beschreibt die Struktur des Kandidaten. |
 | `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. |
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz → unten „Bot-Schutz-Komponente installieren". |
 

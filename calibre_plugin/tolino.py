@@ -2086,6 +2086,24 @@ def _candidate_ages_summary(candidates, now=None):
     return ", ".join("%dx %s" % (counts[a], a) for a in order)
 
 
+def _undatable_shape(token):
+    """Structural fingerprint of an undatable candidate -- never its value.
+
+    Separates "the reader's token is not a JWT" (1 Teil: opaque) from
+    "the grab extracted the wrong value" (5 Teile: JWE/gebrochen) in the
+    field report, so "ohne datierbares JWT-alter" says WHAT was rejected
+    without ever naming it (0.9.32).
+    """
+    text = str(token or "")
+    parts = text.split(".")
+    shape = "%d %s, %d Zeichen" % (
+        len(parts), "Teil" if len(parts) == 1 else "Teile", len(text))
+    if len(parts) == 3:
+        shape += (", Payload ohne iat" if _jwt_payload(text)
+                  else ", Payload unlesbar")
+    return shape
+
+
 def _candidate_age_note(candidates):
     """Redaktionsfreier Alters-Hinweis fuer Fehlermeldungen.
 
@@ -2094,6 +2112,8 @@ def _candidate_age_note(candidates):
     abgelehnt (Tausch/Extraktion pruefen), "3700 Sekunden alt" eine
     verbrauchte Kopie aus einem wiederverwendeten Fenster. Damit
     unterscheidet die Feldmeldung die beiden Faelle auf einen Blick.
+    Undatierte Kandidaten werden stattdessen strukturell beschrieben
+    (Teile, Zeichen, Payload-Lesbarkeit) -- nie der Wert selbst.
     """
     best = None
     for token in candidates or ():
@@ -2101,8 +2121,12 @@ def _candidate_age_note(candidates):
         if issued is not None and (best is None or issued > best):
             best = issued
     if best is None:
-        return ("Refresh-Kandidat ohne datierbares JWT-alter"
-                if candidates else "")
+        # candidates kann eine Menge (tried) sein -- nie indexieren.
+        token = next(iter(candidates or ()), None)
+        if token is None:
+            return ""
+        return ("Refresh-Kandidat ohne datierbares JWT-alter (%s)"
+                % _undatable_shape(token))
     return "Refresh-Kandidat %d Sekunden alt" % max(
         0, int(time.time() - best))
 
@@ -2232,6 +2256,18 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
 # docs/browser-login-diagnose.md).
 _NEW_TOKEN_ATTEMPTS = 30
 _NEW_TOKEN_INTERVAL = 3
+# 0.9.32 -- die Wartezeit richtet sich nach dem Fensterzustand:
+# * Endpunkt des Fensters stumm: nach _WINDOW_MISSES_BEFORE_QUIT
+#   Fehlschlaegen in Folge abbrechen (mehr kann das Fenster nie
+#   liefern), statt die volle Wartezeit zu verbrennen;
+# * Fenster OFFEN, aber ohne Reader-Tab (Sitzung tot, Tab liegt auf der
+#   Anmeldeseite des Buchhändlers): _LOGIN_PAGE_EXTRA_ATTEMPTS weitere
+#   Versuche -- dort kann JETZT neu angemeldet werden, und der naechste
+#   Knopfdruck wiederverwendet dieses Fenster (launch_reader_window-
+#   Reuse). Feldbefund 0.9.31: dieser Zustand wurde als "kein
+#   Web-Reader-Tab" gemeldet und das Fenster trotzdem geschlossen.
+_LOGIN_PAGE_EXTRA_ATTEMPTS = 30
+_WINDOW_MISSES_BEFORE_QUIT = 3
 
 
 def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
@@ -2253,11 +2289,13 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     then exchanged. If none appears, TolinoAuthError with instructions.
 
     The grabber window is closed before returning (token adopted) and
-    before the final failure (the page held nothing exchangeable): a
+    before a final failure in which it holds nothing exchangeable: a
     leftover window would keep rotating the very copy the plugin just
     spent, and its stale profile would poison the next attempt. Every
-    later run therefore starts with a fresh window and a real sign-in
-    page.
+    later run then starts with a fresh window and a real sign-in page.
+    The one exception (0.9.32): a window whose tab sits on the partner's
+    sign-in page (the session died) stays OPEN -- the user signs in
+    again right there and the next attempt reuses that window.
 
     Returns (rotated_refresh, hardware_id). Raises TolinoAuthError when
     no Chromium browser is installed -- callers fall back to the
@@ -2269,6 +2307,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     tried = set()
     first_error = ""
     attempt = 0
+    endpoint_misses = 0
+    at_login_page = False
     while True:
         attempt += 1
         fresh = [token for token in _filter_live_candidates(
@@ -2300,35 +2340,83 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                              "wird geschlossen.")
                 cdp_module.close_grabber_window()
                 return result
-        if attempt >= _NEW_TOKEN_ATTEMPTS:
+        limit = _NEW_TOKEN_ATTEMPTS + (
+            _LOGIN_PAGE_EXTRA_ATTEMPTS if at_login_page else 0)
+        if attempt >= limit:
             break
         if progress:
-            progress("Warte auf einen neu geschriebenen Token im Seiten-"
-                     "Speicher (Versuch %d von %d; im Fenster angemeldet "
-                     "bleiben) ..." % (attempt, _NEW_TOKEN_ATTEMPTS))
+            if at_login_page:
+                progress("Das Anmeldefenster ist offen, zeigt aber keine "
+                         "angemeldete Web-Reader-Seite -- bitte dort JETZT "
+                         "im Web Reader neu anmelden (bis die Bücherliste "
+                         "lädt); der frische Token wird dann automatisch "
+                         "übernommen (Versuch %d) ..." % attempt)
+            else:
+                progress("Warte auf einen neu geschriebenen Token im Seiten-"
+                         "Speicher (Versuch %d von %d; im Fenster angemeldet "
+                         "bleiben) ..." % (attempt, _NEW_TOKEN_ATTEMPTS))
         time.sleep(_NEW_TOKEN_INTERVAL)
         more = cdp_module.grab_once_from_grabber()
         if more and more.get("refresh"):
             grabbed = more
+            continue
+        # Nichts lesbar -- WARUM? Das unterscheidet ein verschwundenes
+        # Fenster (Endpunkt stumm: kann nie mehr etwas liefern; nach
+        # drei Fehlschlaegen abbrechen) von einem offenen Fenster ohne
+        # Reader-Tab (Sitzung tot, Tab auf der Anmeldeseite: dort kann
+        # JETZT neu angemeldet werden -- weiter warten und dazu
+        # auffordern). Ohne diese Unterscheidung endete jeder Fall nach
+        # der vollen Wartezeit mit "Fenster wurde geschlossen, bitte neu
+        # starten" (Feldbefund 0.9.31).
+        try:
+            window = cdp_module.grabber_window_state()
+        except Exception:
+            window = None
+        if window is None:
+            continue
+        if window.get("window"):
+            endpoint_misses = 0
+            at_login_page = not window.get("reader_tab")
+            continue
+        endpoint_misses += 1
+        if endpoint_misses >= _WINDOW_MISSES_BEFORE_QUIT:
+            break
     try:
         state = cdp_module.describe_grab_state()
     except Exception:
         state = "Zustand der Seite nicht lesbar"
-    # Nichts Tauschbares im Fenster: offen zu lassen wuerde den
-    # naechsten Versuch wieder zum Loop machen (dieselbe tote Kopie,
-    # dieselbe Ablehnung). Schliessen -> naechster Start mit frischem
-    # Profil und echter Anmeldeseite statt gecachter Buecherliste.
-    cdp_module.close_grabber_window()
+    try:
+        window = cdp_module.grabber_window_state()
+    except Exception:
+        window = {"window": False, "reader_tab": False}
+    if window.get("window") and not window.get("reader_tab"):
+        # Offenes Fenster auf der Anmeldeseite: NICHT schliessen -- dort
+        # kann der Nutzer sofort neu anmelden, und launch_reader_window
+        # wiederverwendet genau dieses Fenster beim naechsten Knopfdruck
+        # (Reuse-Pfad). Schliessen wuerde die Fortsetzung vor Ort
+        # zerstoeren (0.9.32).
+        action = ("Das Anmeldefenster ist noch offen und zeigt gerade "
+                  "keine angemeldete Web-Reader-Seite: bitte dort im Web "
+                  "Reader neu anmelden, bis die Bücherliste lädt, und den "
+                  "Knopf erneut drücken -- das Fenster bleibt offen und "
+                  "wird wiederverwendet.")
+    else:
+        # Nichts Tauschbares im Fenster: offen zu lassen wuerde den
+        # naechsten Versuch wieder zum Loop machen (dieselbe tote Kopie,
+        # dieselbe Ablehnung). Schliessen -> naechster Start mit frischem
+        # Profil und echter Anmeldeseite statt gecachter Buecherliste.
+        cdp_module.close_grabber_window()
+        action = ("Das Anmeldefenster wurde geschlossen, weil dort nur ein "
+                  "verbrauchter Token liegt: die Browser-Anmeldung erneut "
+                  "starten und im neuen Fenster anmelden, bis die "
+                  "Bücherliste lädt.")
     age_note = _candidate_age_note(
         tried or (grabbed or {}).get("refresh") or ())
     raise TolinoAuthError(
         "Im Web Reader wurde weder ein frischer Token im Seiten-"
         "Speicher gefunden noch innerhalb der Wartezeit nachgeschoben "
-        "(%s). Das Anmeldefenster wurde geschlossen, weil dort nur ein "
-        "verbrauchter Token liegt: die Browser-Anmeldung erneut "
-        "starten und im neuen Fenster anmelden, bis die Bücherliste "
-        "lädt."
-        % state
+        "(%s). %s"
+        % (state, action)
         + (" Letzter Fehler: %s" % first_error if first_error else "")
         + (" %s." % age_note if age_note else ""))
 

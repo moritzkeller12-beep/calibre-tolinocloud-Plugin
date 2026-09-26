@@ -3934,5 +3934,140 @@ class BootstrapperTests(unittest.TestCase):
         self.assertEqual(tmp, plugin_dir)
 
 
+class LoginWindowWaitTests(unittest.TestCase):
+    """0.9.32: die Wartezeit nach einer Ablehnung unterscheidet, OB das
+    Anmeldefenster noch lebt und WAS es zeigt.
+
+    Feldbefund 0.9.31: "kein Web-Reader-Tab im Anmeldefenster offen"
+    nach invalid_grant -- vermischte ein verschwundenes Fenster (kann
+    nie mehr liefern) mit einem offenen Fenster auf der Anmeldeseite des
+    Buchhändlers (dort kann JETZT neu angemeldet werden). Beim zweiten
+    Fall schloss das Plugin das Fenster und verlangte einen Neustart."""
+
+    def _refresh_jwt(self, iat):
+        head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+        body = base64.urlsafe_b64encode(
+            json.dumps({"iat": int(iat), "typ": "Refresh",
+                        "sid": "sess-wait"}).encode("utf-8"))
+        return "%s.%s.sig" % (head.decode().rstrip("="),
+                              body.decode().rstrip("="))
+
+    def test_describe_grab_state_separates_login_page_from_vanished(self):
+        """Verschwundenes Fenster und offene Anmeldeseite sind
+        verschiedene Zustände mit unterschiedlicher Handlungsanweisung."""
+        from . import cdp
+        with patch.object(cdp, "_http_get_json", return_value=None):
+            self.assertEqual("kein Web-Reader-Tab im Anmeldefenster offen",
+                             cdp.describe_grab_state())
+        login_targets = [{
+            "type": "page",
+            "url": "https://shop.example.tld/realms/x/protocol/openid-"
+                   "connect/auth?client_id=reader",
+        }]
+        with patch.object(cdp, "_http_get_json", return_value=login_targets):
+            state = cdp.describe_grab_state()
+        self.assertIn("Anmeldefenster offen", state)
+        self.assertIn("Anmeldeseite", state)
+
+    def test_describe_grab_state_reports_counts_with_reader_tab(self):
+        """Mit Reader-Tab bleibt die Zähl-Ausgabe (Kandidaten + IDB)."""
+        from . import cdp
+        reader_targets = [{
+            "type": "page",
+            "url": "https://webreader.mytolino.com/library/index.html",
+        }]
+        with patch.object(cdp, "_http_get_json",
+                          return_value=reader_targets), \
+             patch.object(cdp, "grab_once_from_grabber",
+                          return_value={"refresh": ["tok-current"],
+                                        "hardware": [],
+                                        "idb": ["tolino-user"]}):
+            state = cdp.describe_grab_state()
+        self.assertIn("1 Refresh-Kandidat", state)
+        self.assertIn("tolino-user", state)
+
+    def test_grab_live_refresh_keeps_login_page_window_open(self):
+        """Fenster offen, Tab auf der Anmeldeseite: NICHT schließen,
+        zur Neu-Anmeldung vor Ort auffordern und LÄNGER warten."""
+        from .tolino import grab_live_refresh
+        fresh = self._refresh_jwt(time.time() - 5)
+        grabs = []
+
+        class FailingClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
+
+        login_state = {"window": True, "reader_tab": False,
+                       "login_page": True}
+        with patch("calibre_plugin.tolino.TolinoClient", FailingClient), \
+             patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [fresh], "hardware": []}), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   side_effect=lambda *a, **k: grabs.append(1) or None), \
+             patch("calibre_plugin.cdp.grabber_window_state",
+                   return_value=login_state), \
+             patch("calibre_plugin.cdp.close_grabber_window") as closer, \
+             patch("calibre_plugin.tolino._NEW_TOKEN_ATTEMPTS", 2), \
+             patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        closer.assert_not_called()
+        message = str(ctx.exception)
+        self.assertIn("noch offen", message)
+        self.assertIn("neu anmelden", message)
+        self.assertNotIn("wurde geschlossen", message)
+        # Auf der Anmeldeseite wird länger gewartet (zusätzliche
+        # Versuche), damit die Neu-Anmeldung vor Ort noch ankommen kann.
+        self.assertGreater(len(grabs), 2)
+
+    def test_grab_live_refresh_stops_early_when_window_vanished(self):
+        """Endpunkt stumm: nach drei Fehlschlägen abbrechen statt 30
+        Wartegängen -- und wie bisher schließen + Neustart-Anweisung."""
+        from .tolino import grab_live_refresh
+        stale = self._refresh_jwt(time.time() - 7200)
+        grabs = []
+
+        def no_tab(*args, **kwargs):
+            grabs.append(1)
+            return None
+
+        dead = {"window": False, "reader_tab": False, "login_page": False}
+        with patch("calibre_plugin.cdp.grab_live_tokens",
+                   return_value={"refresh": [stale], "hardware": []}), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   side_effect=no_tab), \
+             patch("calibre_plugin.cdp.grabber_window_state",
+                   return_value=dead), \
+             patch("calibre_plugin.tolino._NEW_TOKEN_ATTEMPTS", 30), \
+             patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertLessEqual(len(grabs), 4)
+        self.assertIn("wurde geschlossen", str(ctx.exception))
+
+    def test_candidate_age_note_describes_undatable_candidate(self):
+        """Undatierte Kandidaten werden strukturell beschrieben (Teile,
+        Zeichen, Payload) -- der Wert selbst nie."""
+        from .tolino import _candidate_age_note
+        opaque = "opaque-refresh-token-value-without-any-dots"
+        note = _candidate_age_note([opaque])
+        self.assertIn("ohne datierbares JWT-alter", note)
+        self.assertIn("1 Teil", note)
+        self.assertIn("Zeichen", note)
+        broken = "aaa.bbb.ccc"
+        note = _candidate_age_note([broken])
+        self.assertIn("3 Teile", note)
+        self.assertIn("unlesbar", note)
+        self.assertNotIn(opaque, note)
+        self.assertNotIn(broken, note)
+        # Datierbare Kandidaten bleiben unverändert.
+        jwt = self._refresh_jwt(time.time() - 7)
+        self.assertIn("Sekunden alt", _candidate_age_note([jwt]))
+
+
 if __name__ == "__main__":
     unittest.main()
