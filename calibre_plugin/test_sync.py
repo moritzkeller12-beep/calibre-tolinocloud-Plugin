@@ -4477,6 +4477,110 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
         self.assertNotIn(blob, message)
 
 
+class InventoryDialogSortTests(unittest.TestCase):
+    """Spaltenkopf-Klick sortiert den Bestandsvergleich und zieht die
+    Häkchen mit (Feldbefund 0.9.38: „das sortieren funktioniert nicht").
+    Qt wird ueber den ToolbarIconTests-Stub geladen; die Zell-Widgets
+    werden durch einfache Fakes ersetzt."""
+
+    def test_column_click_sorts_and_keeps_checks(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            class FakeCheck:
+                def __init__(self):
+                    self._checked = False
+
+                def setChecked(self, value):
+                    self._checked = bool(value)
+
+                def isChecked(self):
+                    return self._checked
+
+                def setEnabled(self, value):
+                    pass
+
+            class FakeHeader:
+                def setSortIndicatorShown(self, shown):
+                    pass
+
+                def setSortIndicator(self, column, order):
+                    pass
+
+            class FakeTable:
+                def __init__(self):
+                    self.row_count = -1
+
+                def setRowCount(self, count):
+                    self.row_count = count
+
+                def setCellWidget(self, row, column, widget):
+                    pass
+
+                def setItem(self, row, column, item):
+                    pass
+
+                def resizeColumnsToContents(self):
+                    pass
+
+                def horizontalHeader(self):
+                    return FakeHeader()
+
+            class FakeItem:
+                def __init__(self, text):
+                    self.text = text
+
+            ui_module.QCheckBox = FakeCheck
+            ui_module.QTableWidgetItem = FakeItem
+            dialog = ui_module.InventoryDialog.__new__(
+                ui_module.InventoryDialog)
+            rows = [
+                {"selected": False, "title": "Alpha", "authors": "A",
+                 "status": "identical", "book_id": 1, "tolino_id": "c1"},
+                {"selected": True, "title": "Zulu", "authors": "Z",
+                 "status": "new_in_calibre", "book_id": 2, "tolino_id": ""},
+                {"selected": False, "title": "beta", "authors": "B",
+                 "status": "changed", "book_id": 3, "tolino_id": "c3"},
+                {"selected": True, "title": "alpha", "authors": "M",
+                 "status": "new_in_calibre", "book_id": 4, "tolino_id": ""},
+            ]
+            dialog.rows = rows
+            dialog.checks = [FakeCheck() for _ in rows]
+            for check, row in zip(dialog.checks, rows):
+                check.setChecked(row["selected"])
+            dialog._sort_column = 0
+            dialog._sort_descending = False
+            dialog.table = FakeTable()
+
+            # Klick auf den Titel: aufsteigend, gehaekelte Buchstaben
+            # bleiben denselben Buechern zugeordnet.
+            dialog._sort_by_column(4)
+            self.assertEqual(
+                ["alpha", "alpha", "beta", "zulu"],
+                [row["title"].casefold() for row in dialog.rows])
+            checked = {row["title"].casefold()
+                       for row, check in zip(dialog.rows, dialog.checks)
+                       if check.isChecked()}
+            self.assertEqual({"alpha", "zulu"}, checked)
+            # Zweiter Klick auf dieselbe Spalte: absteigend.
+            dialog._sort_by_column(4)
+            self.assertEqual(
+                ["zulu", "beta", "alpha", "alpha"],
+                [row["title"].casefold() for row in dialog.rows])
+            checked = {row["title"].casefold()
+                       for row, check in zip(dialog.rows, dialog.checks)
+                       if check.isChecked()}
+            self.assertEqual({"alpha", "zulu"}, checked)
+            # Upload-Spalte (0): gehaeckte zuerst, danach Titel.
+            dialog._sort_by_column(0)
+            first_two = dialog.rows[:2]
+            self.assertTrue(all(row["selected"] for row in first_two))
+            self.assertEqual(["alpha", "zulu"],
+                             [row["title"].casefold() for row in first_two])
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+
 class ComparisonSortTests(unittest.TestCase):
     """Bestandsvergleich (0.9.38): Upload-Auswahl gruppiert oben, dann
     alphabetisch nach Titel und Autoren."""
