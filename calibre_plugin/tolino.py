@@ -1987,7 +1987,7 @@ def normalize_refresh_token(value):
 
 def _query_value(query, name):
     if not isinstance(query, dict):
-        raise TolinoAuthError("Browser login returned invalid callback data.")
+        raise TolinoAuthError("Browser-Anmeldung: ung\u00fcltige Callback-Daten.")
     values = query.get(name)
     if values is None:
         return None
@@ -1995,7 +1995,7 @@ def _query_value(query, name):
         return values
     if isinstance(values, (tuple, list)):
         return next(iter(values), None)
-    raise TolinoAuthError("Browser login returned invalid %s data." % name)
+    raise TolinoAuthError("Browser-Anmeldung: ung\u00fcltige %s-Daten." % name)
 
 
 def hardware_id():
@@ -2030,14 +2030,14 @@ def validate_callback(query, expected_state, created_at, now=None):
     """Validate one OAuth callback without accepting tokens from the URL."""
     now = time.time() if now is None else now
     if now - created_at > OAUTH_STATE_TTL:
-        raise TolinoAuthError("Browser login expired. Please try again.")
+        raise TolinoAuthError("Browser-Anmeldung abgelaufen. Bitte erneut versuchen.")
     if _query_value(query, "state") != expected_state:
-        raise TolinoAuthError("Browser login state did not match.")
+        raise TolinoAuthError("Browser-Anmeldung: Zustand stimmt nicht \u00fcberein. Bitte erneut versuchen.")
     if _query_value(query, "error"):
-        raise TolinoAuthError("Browser login was rejected by the partner.")
+        raise TolinoAuthError("Die Browser-Anmeldung wurde vom Buchh\u00e4ndler abgelehnt.")
     code = _query_value(query, "code")
     if not code:
-        raise TolinoAuthError("Browser login returned no authorization code.")
+        raise TolinoAuthError("Browser-Anmeldung lieferte keinen Autorisierungscode.")
     return code
 
 
@@ -2762,7 +2762,7 @@ def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         if "?" not in auth_url:
             auth_url = auth_url + "?" + urlencode(params)
     if not webbrowser.open(auth_url):
-        raise TolinoAuthError("Could not open the system browser.")
+        raise TolinoAuthError("Der System-Browser konnte nicht ge\u00f6ffnet werden.")
 
     deadline = time.time() + max(30, timeout)
     poll_seconds = 2
@@ -2821,18 +2821,14 @@ def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     if tried:
         raise TolinoAuthError(
             "%d gefundene(n) Refresh-Token wurden gepr\u00fcft, aber keiner "
-            "war g\u00fcltig. Jeder Kandidat wurde genau einmal am Token-"
-            "Endpunkt probiert; \u00e4ltere Tokens derselben Keycloak-Sitzung "
-            "werden bewusst \u00fcbersprungen (nur der neueste Token einer "
-            "Sitzung ist g\u00fcltig). Pr\u00fcfe: 1) Bist du im WEB READER "
-            "(B\u00fccherliste sichtbar) angemeldet, nicht nur im Shop? "
-            "2) Lade den Web Reader einmal neu (F5) und starte die Browser-"
-            "Anmeldung direkt danach -- das Plugin \u00fcbernimmt dann den "
-            "frisch geschriebenen Token automatisch. 3) Hilft das nicht, "
+            "war g\u00fcltig (genau ein Versuch pro Kandidat; nur der "
+            "neueste Token einer Sitzung tauscht). Pr\u00fcfe: "
+            "1) WEB READER ge\u00f6ffnet? (B\u00fccherliste sichtbar, nicht "
+            "nur der Shop). 2) Web Reader neu laden (F5) und die "
+            "Browser-Anmeldung direkt danach starten. 3) Falls n\u00f6tig "
             "den Browser einmal vollst\u00e4ndig SCHLIESSEN und erneut "
-            "versuchen: Chromium h\u00e4lt die neuesten Storage-Schreibvorg\u00e4nge "
-            "teils im RAM und schreibt sie erst beim Schlie\u00dfen auf die "
-            "Festplatte. Kandidaten nach Alter: %s (letzte Meldung: %s)."
+            "versuchen -- Chromium schreibt den Storage oft erst beim "
+            "Schlie\u00dfen. Kandidaten nach Alter: %s (letzte Meldung: %s)."
             % (tried,
                _candidate_ages_summary(sorted(
                    seen_spent, key=_refresh_token_iat_sort_key), None),
@@ -2935,13 +2931,15 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
 
     if not partner or not partner.get("auth_url"):
         raise TolinoAuthError(
-            "This Tolino partner has no OAuth authorization URL configured. "
-            "Use a Web Reader refresh token in the configuration as fallback."
+            "F\u00fcr diesen Buchh\u00e4ndler ist keine OAuth-Anmeldeseite "
+            "hinterlegt. Alternativ ein Refresh-Token aus dem Web Reader "
+            "im Dialog eintragen."
         )
     if not partner.get("token_url"):
         raise TolinoAuthError(
-            "This Tolino partner has no token endpoint configured. "
-            "Use a Web Reader refresh token in the configuration as fallback."
+            "F\u00fcr diesen Buchh\u00e4ndler ist kein Token-Endpunkt "
+            "hinterlegt. Alternativ ein Refresh-Token aus dem Web Reader "
+            "im Dialog eintragen."
         )
 
     if str(partner.get("reseller_id")) in LOCAL_CALLBACK_UNSUPPORTED_RESELLERS:
@@ -2967,7 +2965,7 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
 
     if not webbrowser.open(partner["auth_url"] + "?" + urlencode(params)):
         server.server_close()
-        raise TolinoAuthError("Could not open the system browser.")
+        raise TolinoAuthError("Der System-Browser konnte nicht ge\u00f6ffnet werden.")
     while not hasattr(server, "query") and time.time() - created_at < timeout:
         server.handle_request()
     query = getattr(server, "query", {})
@@ -2987,7 +2985,7 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
     data = client._request(partner["token_url"], "POST", payload,
                            form=True, authenticated=False)
     if not data.get("access_token") or not data.get("refresh_token"):
-        raise TolinoAuthError("Browser login returned an incomplete token response.")
+        raise TolinoAuthError("Browser-Anmeldung lieferte eine unvollst\u00e4ndige Token-Antwort.")
     return data["refresh_token"], client.hardware
 
 
@@ -3224,7 +3222,7 @@ class TolinoClient:
         token_callback persistence, expiry bookkeeping.
         """
         if not data.get("access_token"):
-            raise TolinoAuthError("Tolino token response did not contain access_token.")
+            raise TolinoAuthError("Tolino-Token-Antwort enthielt kein access_token.")
         previous_refresh = self.refresh
         self.access = data["access_token"]
         new_refresh = data.get("refresh_token", self.refresh)
@@ -3252,7 +3250,8 @@ class TolinoClient:
         if self.refresh:
             if not self.partner.get("token_url"):
                 raise TolinoAuthError(
-                    "This partner has no verified refresh-token endpoint in the reference client."
+                    "F\u00fcr diesen Buchh\u00e4ndler ist kein gepr\u00fcfter "
+                    "Refresh-Token-Endpunkt hinterlegt."
                 )
             payload = {
                 "client_id": self.partner["client_id"],
@@ -3262,8 +3261,9 @@ class TolinoClient:
             }
         elif self.username and self.password:
             raise TolinoAuthError(
-                "Username/password login requires the partner's browser OAuth flow. "
-                "Use a Web Reader refresh token for this plugin."
+                "Benutzername/Passwort erfordert die OAuth-Anmeldung des "
+                "Buchh\u00e4ndlers. F\u00fcr dieses Plugin ein Refresh-Token "
+                "aus dem Web Reader verwenden."
             )
             payload = {
                 "client_id": self.partner["client_id"],
@@ -3273,7 +3273,7 @@ class TolinoClient:
                 "scope": self.partner["scope"],
             }
         else:
-            raise TolinoAuthError("Configure a refresh token or username/password.")
+            raise TolinoAuthError("Bitte zuerst ein Refresh-Token konfigurieren.")
         try:
             data = self._request(self.partner["token_url"], "POST", payload,
                                  form=True, authenticated=False)
@@ -3301,9 +3301,9 @@ class TolinoClient:
                 self.access = None
                 self.expires_at = 0
                 raise TolinoAuthError(
-                    "Tolino rejected this refresh token because it was reused or invalid. "
-                    "Sign in to the Web Reader again, copy its new refresh token, and "
-                    "do not test this token repeatedly."
+                    "Tolino hat diesen Refresh-Token abgelehnt (verbraucht oder "
+                    "widerrufen). Melde dich im Web Reader neu an und "
+                    "verwende den neuen Token nicht mehrfach."
                 ) from exc
             raise TolinoAuthError("Tolino authentication failed: %s" % exc)
         return self._apply_token_response(data)
@@ -3417,7 +3417,7 @@ class TolinoClient:
                         and _impersonate_session() is None):
                     message += " " + CURL_CFFI_HINT
                 raise TolinoAuthError(
-                    "Tolino rejected authentication (%s): %s" % (exc.code, message)
+                    "Tolino hat die Anmeldung abgelehnt (%s): %s" % (exc.code, message)
                 )
             raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
 
