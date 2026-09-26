@@ -330,12 +330,10 @@ class DiagnosticDialog(QDialog):
                                 "Kein Refresh-Token konfiguriert.")
             return
         try:
-            client = TolinoClient(values["partner_id"], values["hardware_id"],
-                                  values["refresh_token"], values["username"],
-                                  values["password"],
-                                  token_callback=self.dashboard.persist_refresh_token)
-            client.login()
-            self.dashboard.set_refresh_token(client.refresh)
+            # Derselbe Weg wie „Synchronisieren starten“: Konto speichern,
+            # Token- und Hardware-Callback, Login -- der Test darf sich
+            # nicht vom Lauf unterscheiden, der ihn scheinbar heilt.
+            client = self.dashboard._cloud_client()
             inventory = client.inventory()
             result = {
                 "step": "Tolino-Antwort testen",

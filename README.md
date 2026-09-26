@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.36** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
+Plugin-Version: **0.9.37** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -47,7 +47,7 @@ Kein Inkognito-Fenster.
 | dieselbe Meldung, „Fenster wurde geschlossen" | Verbrauchter Token: Browser-Anmeldung erneut starten und im **neuen** Fenster anmelden, bis die Bücherliste lädt. |
 | `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. Gekoderte und verschlüsselte Kandidaten entpackt das Plugin automatisch vor dem Tausch. |
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz → unten „Bot-Schutz-Komponente installieren". |
-| „Tolino HTTP 400: {}" / „Vorbereitung fehlgeschlagen" | Unbekannte Hardware-ID am BOSH-Dienst: ab 0.9.35 übernimmt bzw. registriert das Plugin das Gerät automatisch, wiederholt den Aufruf einmal und zeigt die echte Servermeldung. |
+| „Tolino HTTP 400: {}" / „Vorbereitung fehlgeschlagen" | Unbekannte Hardware-ID am BOSH-Dienst: ab 0.9.35 übernimmt bzw. registriert das Plugin das Gerät automatisch und wiederholt den Aufruf (seit 0.9.37 mit kurzer Wartezeit nach `registerhw`); die echte Servermeldung steht jetzt im Fehler. |
 
 Feldbefunde und Architektur-Historie: `docs/browser-login-diagnose.md`.
 
