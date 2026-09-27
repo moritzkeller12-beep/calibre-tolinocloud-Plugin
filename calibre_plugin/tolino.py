@@ -2762,6 +2762,91 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
         + (" %s." % age_note if age_note else ""))
 
 
+def in_flatpak_sandbox():
+    """True, wenn dieses Prozess in einer Flatpak-Sandbox läuft.
+
+    Calibre von Flathub (com.calibre_ebook.calibre) teilt seine Sandbox
+    nicht mit dem Host: ohne talk-name=org.freedesktop.Flatpak sind die
+    Browser-Binaries des Rechners und `flatpak run` von hier nicht
+    erreichbar. Feldbefund 0.9.40 (Pop!_OS, Calibre via Flathub):
+    "öffnet sich kein browser".
+    """
+    return os.path.exists("/.flatpak-info")
+
+
+def _run_open_tool(argv, timeout=20):
+    """Öffner-argv synchron starten; True bei Exit-Code 0.
+
+    Der webbrowser-Weg spawnt asynchron und verrät nie, ob der Öffner
+    danach scheitert -- in einer Sandbox endet das im Warten ohne
+    Fenster. Hier zählt deshalb der Exit-Code.
+    """
+    try:
+        proc = subprocess.run(argv, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _run_open_chain(url):
+    """Öffnerkette für sandboxige Umgebungen; True wenn einer startet.
+
+    Reihenfolge: xdg-open (in Flatpak ein dünner Wrapper um das
+    OpenURI-Portal -- der normale Weg zum Browser des Rechners), dann
+    die übrigen Desktop-Öffner, zuletzt `flatpak-spawn --host xdg-open`
+    -- der Start außerhalb der Sandbox, der die talk-name-Freigabe
+    braucht, deren Befehl die Fehlermeldung nennt.
+    """
+    for argv in (["xdg-open"], ["gio", "open"], ["gnome-open"],
+                 ["kde-open"], ["x-www-browser"], ["open"]):
+        if _run_open_tool(list(argv) + [url]):
+            return True
+    if in_flatpak_sandbox() and shutil.which("flatpak-spawn"):
+        return _run_open_tool(["flatpak-spawn", "--host", "xdg-open", url])
+    return False
+
+
+def open_system_browser(url):
+    """URL im System-Browser öffnen; True, wenn ein Öffner gestartet ist.
+
+    Außerhalb einer Sandbox bleibt das webbrowser-Modul der Weg wie
+    bisher (nur dessen Exceptions gelten als Fehlschlag). In einer
+    Flatpak-Sandbox kommt ZUERST die synchrone Öffnerkette: dort
+    meldet das webbrowser-Modul "could not locate runnable browser"
+    (kein Browser im Sandbox-PATH) oder startet xdg-open asynchron,
+    ohne seinen Fehlschlag zu verraten -- genau das war der Feldbefund
+    "öffnet sich kein browser" bei Calibre über Flathub.
+    """
+    sandbox = in_flatpak_sandbox()
+    if sandbox and _run_open_chain(url):
+        return True
+    raised = False
+    try:
+        if webbrowser.open(url):
+            return True
+    except Exception:
+        raised = True
+    if sandbox or raised:
+        return _run_open_chain(url)
+    return False
+
+
+def _system_browser_open_error():
+    """Fehler für "kein Browser geöffnet" -- in der Sandbox mit Fix dazu."""
+    base = "Der System-Browser konnte nicht geöffnet werden."
+    if not in_flatpak_sandbox():
+        return base
+    return base + (
+        " Calibre läuft als Flatpak (Flathub): aus der Sandbox heraus"
+        " sind die Browser des Rechners nicht erreichbar. Einmalig im"
+        " Terminal ausführen und Calibre danach neu starten:"
+        "\nflatpak override --user --talk-name=org.freedesktop.Flatpak"
+        " com.calibre_ebook.calibre"
+        "\nOhne diese Freigabe alternativ den Refresh-Token manuell aus"
+        " einem laufenden Web Reader übernehmen (siehe README).")
+
+
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
                              progress=None):
     """Guided browser sign-in for Keycloak partners without local callback.
@@ -2818,8 +2903,8 @@ def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         auth_url = partner["auth_url"]
         if "?" not in auth_url:
             auth_url = auth_url + "?" + urlencode(params)
-    if not webbrowser.open(auth_url):
-        raise TolinoAuthError("Der System-Browser konnte nicht ge\u00f6ffnet werden.")
+    if not open_system_browser(auth_url):
+        raise TolinoAuthError(_system_browser_open_error())
 
     deadline = time.time() + max(30, timeout)
     poll_seconds = 2
@@ -3027,9 +3112,9 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
         if partner.get(key):
             params[key] = partner[key]
 
-    if not webbrowser.open(partner["auth_url"] + "?" + urlencode(params)):
+    if not open_system_browser(partner["auth_url"] + "?" + urlencode(params)):
         server.server_close()
-        raise TolinoAuthError("Der System-Browser konnte nicht ge\u00f6ffnet werden.")
+        raise TolinoAuthError(_system_browser_open_error())
     while not hasattr(server, "query") and time.time() - created_at < timeout:
         server.handle_request()
     query = getattr(server, "query", {})

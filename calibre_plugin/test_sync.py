@@ -5041,5 +5041,200 @@ class AccountStateBindingTests(unittest.TestCase):
         self.assertFalse(tolino_column_active({}, Db()))
 
 
+class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
+    """Feldbefund 0.9.40: Pop!_OS, Calibre über Flathub -- "öffnet sich
+    kein browser". In der Flatpak-Sandbox sind die Browser des Rechners
+    unsichtbar (kein Browser im PATH, kein flatpak, kein flatpak run);
+    die Öffnerkette und die Fehlermeldungen müssen das offenlegen."""
+
+    URL = "https://webreader.mytolino.com/library/"
+
+    def test_open_system_browser_prefers_portal_tools_in_sandbox(self):
+        """In der Sandbox startet die synchrone Kette zuerst xdg-open
+        (Portal-Wrapper); das webbrowser-Modul läuft hier gar nicht an."""
+        from .tolino import open_system_browser
+
+        calls = []
+
+        def fake_run(argv, timeout=20):
+            calls.append(list(argv))
+            return argv[0] == "xdg-open"
+
+        with patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=True), \
+             patch("calibre_plugin.tolino._run_open_tool",
+                   side_effect=fake_run), \
+             patch("calibre_plugin.tolino.webbrowser.open",
+                   side_effect=AssertionError("webbrowser.open called")):
+            opened = open_system_browser(self.URL)
+        self.assertTrue(opened)
+        self.assertEqual(["xdg-open", self.URL], calls[0])
+
+    def test_open_system_browser_falls_back_to_flatpak_spawn_host(self):
+        """Ohne portal-tauglichen Öffner endet die Kette bei
+        `flatpak-spawn --host xdg-open` (Start außerhalb der Sandbox,
+        braucht die talk-name-Freigabe, deren Befehl der Fehler nennt)."""
+        from .tolino import open_system_browser
+
+        calls = []
+
+        def fake_run(argv, timeout=20):
+            calls.append(list(argv))
+            return argv[:2] == ["flatpak-spawn", "--host"]
+
+        with patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=True), \
+             patch("calibre_plugin.tolino._run_open_tool",
+                   side_effect=fake_run), \
+             patch("calibre_plugin.tolino.shutil.which",
+                   side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                   if name == "flatpak-spawn" else None), \
+             patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=False):
+            opened = open_system_browser(self.URL)
+        self.assertTrue(opened)
+        self.assertEqual(["flatpak-spawn", "--host", "xdg-open", self.URL],
+                         calls[-1])
+
+    def test_open_system_browser_keeps_webbrowser_first_outside_sandbox(self):
+        """Ohne Sandbox ändert sich nichts: das webbrowser-Modul bleibt
+        der Weg, die Öffnerkette wird nicht angerissen."""
+        from .tolino import open_system_browser
+
+        with patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=False), \
+             patch("calibre_plugin.tolino._run_open_tool",
+                   side_effect=AssertionError("open chain called")), \
+             patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=True):
+            self.assertTrue(open_system_browser(self.URL))
+
+    def test_open_system_browser_is_false_when_nothing_opens(self):
+        """Ohne Sandbox und ohne Browser bleibt es False -- die Meldung
+        kommt wie bisher vom Aufrufer."""
+        from .tolino import open_system_browser
+
+        with patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=False), \
+             patch("calibre_plugin.tolino._run_open_tool",
+                   side_effect=AssertionError("open chain called")), \
+             patch("calibre_plugin.tolino.webbrowser.open",
+                   return_value=False):
+            self.assertFalse(open_system_browser(self.URL))
+
+    def test_open_error_names_flatpak_permission_fix(self):
+        """Der Öffner-Fehler nennt in der Sandbox den override-Befehl
+        und den manuellen Token-Weg statt nur "konnte nicht geöffnet
+        werden" -- sonst bleibt der Feldbefund ohne Lösung."""
+        from .tolino import _disk_assisted_login
+
+        with patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=True), \
+             patch("calibre_plugin.tolino.open_system_browser",
+                   return_value=False):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                _disk_assisted_login(4, "test_hardware")
+        message = str(ctx.exception)
+        self.assertIn("Der System-Browser konnte nicht geöffnet werden.",
+                      message)
+        self.assertIn("flatpak override", message)
+        self.assertIn("org.freedesktop.Flatpak", message)
+        self.assertIn("manuell", message)
+
+    def test_launch_reader_window_names_flatpak_permission(self):
+        """Ohne Chromium in der Sandbox nennt der Grabber-Fehler den
+        override-Befehl; der Präfix "Kein Chromium-Browser gefunden"
+        bleibt bestehen, damit der Fallback auf den System-Browser
+        weiter greift."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with _patch.object(cdp_module, "pick_chromium", return_value=None), \
+             _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=True):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                cdp_module.launch_reader_window(4)
+        message = str(ctx.exception)
+        self.assertIn("Kein Chromium-Browser gefunden", message)
+        self.assertIn("flatpak override", message)
+
+    def test_launch_reader_window_without_sandbox_has_no_permission_hint(self):
+        """Außerhalb einer Sandbox nennt dieselbe Meldung KEINEN
+        Flatpak-Befehl (sonst führt sie in die Irre)."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with _patch.object(cdp_module, "pick_chromium", return_value=None), \
+             _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=False):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                cdp_module.launch_reader_window(4)
+        message = str(ctx.exception)
+        self.assertIn("Kein Chromium-Browser gefunden", message)
+        self.assertNotIn("flatpak override", message)
+
+    def test_chromium_candidates_probe_host_browser_via_flatpak_spawn(self):
+        """Die Sandbox-Sonde liest native Host-Pfade und Host-Flatpak-
+        Apps und baut Launcher mit `flatpak-spawn --host` als Präfix."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        class FakeProc(object):
+            returncode = 0
+            stdout = ("NATIVE /usr/bin/chromium\n"
+                      "FLATPAK org.chromium.Chromium\n")
+
+        with _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=True), \
+             _patch("shutil.which",
+                    side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                    if name == "flatpak-spawn" else None), \
+             _patch.object(cdp_module.subprocess, "run",
+                           return_value=FakeProc()):
+            found = cdp_module.chromium_candidates(home="/nonexistent-home")
+        argvs = [argv for argv, _label in found]
+        self.assertIn(["/usr/bin/flatpak-spawn", "--host",
+                       "/usr/bin/chromium"], argvs)
+        self.assertIn(["/usr/bin/flatpak-spawn", "--host", "flatpak", "run",
+                       "--command=chrome", "org.chromium.Chromium"], argvs)
+        labels = [label for _argv, label in found]
+        self.assertIn("chromium (Host)", labels)
+        self.assertIn("Chromium (Flatpak, Host)", labels)
+
+    def test_chromium_candidates_empty_when_host_probe_denied(self):
+        """Ohne talk-name-Freigabe endet die Sonde mit Fehlercode --
+        keine Kandidaten (die Grabber-Meldung nennt den Befehl)."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        class DeniedProc(object):
+            returncode = 1
+            stdout = ""
+
+        with _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=True), \
+             _patch("shutil.which",
+                    side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                    if name == "flatpak-spawn" else None), \
+             _patch.object(cdp_module.subprocess, "run",
+                           return_value=DeniedProc()):
+            found = cdp_module.chromium_candidates(home="/nonexistent-home")
+        self.assertEqual([], found)
+
+    def test_chromium_candidates_never_probe_outside_sandbox(self):
+        """Außerhalb einer Sandbox wird für die Host-Sonde nie ein
+        Prozess gestartet."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=False), \
+             _patch("shutil.which", return_value=None), \
+             _patch.object(cdp_module.subprocess, "run",
+                           side_effect=AssertionError("probe started")):
+            found = cdp_module.chromium_candidates(home="/nonexistent-home")
+        self.assertEqual([], found)
+
+
 if __name__ == "__main__":
     unittest.main()

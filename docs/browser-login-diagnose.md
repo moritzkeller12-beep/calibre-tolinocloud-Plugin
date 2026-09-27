@@ -227,6 +227,29 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     kennt kein `account_name`) und die Tolino-ID-Spalte wird nach
     EINER Regel gelesen **und** geschrieben (nur bei genau einem Konto).
 
+19. **Flatpak-Calibre öffnet keinen Browser (0.9.40):** Feldbefund
+    Pop!_OS, Calibre über Flathub: weder das eigene Anmeldefenster
+    noch der System-Browser öffnen sich. Ursache:
+    `com.calibre_ebook.calibre` läuft in einer Sandbox OHNE
+    `--talk-name=org.freedesktop.Flatpak` — dort findet
+    `pick_chromium()` nichts (Host-Browser liegen nicht im
+    Sandbox-PATH, `flatpak`/`snap` fehlen), und das `webbrowser`-Modul
+    scheitert zweifach: ohne Browser in PATH wirft es „could not
+    locate runnable browser“, sonst startet es `xdg-open` asynchron
+    und verrät dessen Fehlschlag nie — beide Fälle endeten vor
+    0.9.40 im Warten ohne Fenster. Fix in drei Schichten: (a)
+    `open_system_browser()` startet in der Sandbox SYNCHRON die
+    Öffnerkette xdg-open (Portal-Wrapper) → gio/gnome-open/kde-open →
+    `flatpak-spawn --host xdg-open` mit Exit-Code-Prüfung und wertet
+    Modul-Exceptions als Fehlschlag; (b) `chromium_candidates()`
+    plant per `flatpak-spawn --host`-Sonde die Browser des HOSTS
+    (native Pfade plus Host-Flatpak-Apps) und startet das
+    Anmeldefenster damit außerhalb derselben Netzkennzeichnung
+    (Port 9223 bleibt erreichbar); (c) beide Fehlermeldungen nennen
+    bei erkannter Sandbox den Befehl
+    `flatpak override --user --talk-name=org.freedesktop.Flatpak
+    com.calibre_ebook.calibre` und den manuellen Token-Weg.
+
 ## Aktuelle Login-Kette (ab 0.9.35)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
