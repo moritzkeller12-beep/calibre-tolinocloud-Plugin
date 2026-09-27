@@ -2423,7 +2423,8 @@ class LiveGrabTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as home:
             os.makedirs(os.path.join(home, ".var", "app", "com.brave.Browser"))
-            with _patch("shutil.which", return_value=None):
+            with _patch("shutil.which", return_value=None), \
+                 _patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()):
                 candidates = cdp_module.chromium_candidates(home=home)
         self.assertEqual([], candidates)
 
@@ -5215,6 +5216,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
 
         with _patch.object(cdp_module, "in_flatpak_sandbox",
                            return_value=True), \
+             _patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()), \
              _patch("shutil.which",
                     side_effect=lambda name: "/usr/bin/flatpak-spawn"
                     if name == "flatpak-spawn" else None), \
@@ -5231,6 +5233,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
 
         with _patch.object(cdp_module, "in_flatpak_sandbox",
                            return_value=False), \
+             _patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()), \
              _patch("shutil.which", return_value=None), \
              _patch.object(cdp_module.subprocess, "run",
                            side_effect=AssertionError("probe started")):
