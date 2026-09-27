@@ -12,9 +12,12 @@ from unittest.mock import patch
 
 from . import config
 from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
-                   normalize_formats, plan_sync, safe_format_path,
+                   normalize_formats, plan_sync, plan_metadata_updates,
+                   metadata_fingerprint, content_fingerprint,
+                   metadata_update_fields, safe_format_path,
                    selected_book_ids, selected_table_rows, sync_summary,
-                   unpack_plan_result, unpack_upload_record, redact_sensitive,
+                   unpack_plan_result, unpack_upload_record,
+                   unpack_meta_update_record, redact_sensitive,
                    format_diagnostic_report, diagnose_preparation,
                    _diagnostic_formats, metadata_by_id, format_error_details,
                    normalize_title, normalize_inventory_item, custom_column_available,
@@ -2300,6 +2303,117 @@ class SyncPlanTests(unittest.TestCase):
             storage.get("https+++webreader.mytolino.com/refresh_token"),
             "fresh-lsng-token")
 
+class MetadataUpdatePlanTests(unittest.TestCase):
+    """In-place metadata updates instead of full re-uploads (0.9.45)."""
+
+    def _book(self, **extra):
+        book = {"uuid": "u1", "title": "A", "authors": "Fred Vargas",
+                "isbn": "123", "series": "Adamsberg",
+                "formats": ["EPUB"], "last_modified": "1",
+                "format_signatures": {"EPUB": "100:1000"}}
+        book.update(extra)
+        return book
+
+    def _state(self, book, **extra):
+        entry = {"tolino_id": "d1",
+                 "content_fp": content_fingerprint(book, "EPUB"),
+                 "meta_fp": metadata_fingerprint(book)}
+        entry.update(extra)
+        return {"u1": entry}
+
+    def test_planned_upload_with_unchanged_file_becomes_metadata_update(self):
+        book = self._book()
+        state = self._state(book, meta_fp="stale")
+        uploads = [(1, "u1", "EPUB", "d1")]
+        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"])
+        self.assertEqual([], kept)
+        self.assertEqual(1, len(updates))
+        record = unpack_meta_update_record(updates[0])
+        self.assertEqual(1, record["book_id"])
+        self.assertEqual("u1", record["book_uuid"])
+        self.assertEqual("d1", record["tolino_id"])
+        self.assertEqual({"title": "A", "author": "Fred Vargas", "isbn": "123"},
+                         record["fields"])
+
+    def test_replaced_file_stays_a_full_upload(self):
+        book = self._book()
+        state = self._state(book, content_fp="other-file", meta_fp="stale")
+        uploads = [(1, "u1", "EPUB", "d1")]
+        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"])
+        self.assertEqual(uploads, kept)
+        self.assertEqual([], updates)
+
+    def test_legacy_state_without_hashes_keeps_upload(self):
+        book = self._book()
+        state = {"u1": {"tolino_id": "d1", "fingerprint": "x"}}
+        uploads = [(1, "u1", "EPUB", "d1")]
+        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"])
+        self.assertEqual(uploads, kept)
+        self.assertEqual([], updates)
+
+    def test_missing_file_signature_blocks_in_place_update(self):
+        book = self._book(format_signatures={})
+        state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
+        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
+        self.assertEqual([], updates)
+
+    def test_matched_book_without_upload_gets_metadata_update(self):
+        book = self._book()
+        state = self._state(book, meta_fp="stale")
+        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
+        self.assertEqual([], kept)
+        self.assertEqual(1, len(updates))
+        self.assertEqual((1, "u1", "d1"), (updates[0][0], updates[0][1],
+                                           updates[0][2]))
+
+    def test_unchanged_metadata_plans_nothing(self):
+        book = self._book()
+        state = self._state(book)
+        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
+        self.assertEqual([], updates)
+
+    def test_book_without_cloud_copy_is_skipped(self):
+        book = self._book()
+        kept, updates = plan_metadata_updates({1: book}, {}, [], ["EPUB"])
+        self.assertEqual([], updates)
+
+    def test_series_change_converts_upload_but_stays_out_of_meta_payload(self):
+        old_book = self._book()
+        new_book = self._book(series="Neue Reihe")
+        state = {"u1": {"tolino_id": "d1",
+                        "content_fp": content_fingerprint(new_book, "EPUB"),
+                        "meta_fp": metadata_fingerprint(old_book)}}
+        uploads = [(1, "u1", "EPUB", "d1")]
+        kept, updates = plan_metadata_updates({1: new_book}, state, uploads,
+                                              ["EPUB"])
+        self.assertEqual([], kept)
+        self.assertEqual(1, len(updates))
+        self.assertNotIn("series", updates[0][3])
+
+    def test_meta_update_record_validation(self):
+        with self.assertRaisesRegex(ValueError, "invalid metadata update"):
+            unpack_meta_update_record((1, "u1"))
+        with self.assertRaisesRegex(ValueError, "incomplete metadata update"):
+            unpack_meta_update_record((1, "u1", "d1", {}))
+        with self.assertRaisesRegex(ValueError, "incomplete metadata update"):
+            unpack_meta_update_record((1, "u1", "", {"title": "A"}))
+
+    def test_plan_sync_state_carries_content_and_meta_hashes(self):
+        book = self._book()
+        uploads, removals, current = plan_sync({1: book}, {}, ["EPUB"])
+        self.assertEqual([(1, "u1", "EPUB", None)], uploads)
+        self.assertEqual([], removals)
+        self.assertEqual(content_fingerprint(book, "EPUB"),
+                         current["u1"]["content_fp"])
+        self.assertEqual(metadata_fingerprint(book), current["u1"]["meta_fp"])
+
+    def test_metadata_update_fields_skips_empty_values(self):
+        self.assertEqual({}, metadata_update_fields({"title": " ", "isbn": ""}))
+        self.assertEqual({"title": "T", "author": "A, B"},
+                         metadata_update_fields({"title": " T ",
+                                                 "authors": ["A", "B"]}))
+
+
 class LiveGrabTests(unittest.TestCase):
     """v0.9.17: Der Live-Grab (CDP) ist der Primaerpfad der Browser-Anmeldung."""
 
@@ -3437,6 +3551,50 @@ class TolinoClientFeatureTests(unittest.TestCase):
         self.assertEqual("system", patch["value"]["category"])
         self.assertEqual("collection_finished_readings_name",
                          patch["value"]["name"])
+
+    def test_update_metadata_merges_and_puts_upload_metadata(self):
+        existing = {"metadata": {"deliverableId": "b-1", "identifier": "b-1",
+                                 "title": "Alt"}}
+        client, calls = self._patching_client([existing, {"ok": True}])
+        result = client.update_metadata("b-1", {"title": "Neu", "isbn": "123"})
+        self.assertEqual("Neu", result["title"])
+        self.assertEqual("123", result["isbn"])
+        self.assertEqual("b-1", result["deliverableId"])
+        self.assertEqual("GET", calls[0]["method"])
+        self.assertIn("/meta", calls[0]["url"])
+        self.assertIn("deliverableId=b-1", calls[0]["url"])
+        self.assertEqual("PUT", calls[1]["method"])
+        payload = calls[1]["data"]
+        self.assertEqual("Neu", payload["uploadMetaData"]["title"])
+        self.assertEqual("b-1", payload["uploadMetaData"]["deliverableId"])
+
+    def test_update_metadata_requires_fields_and_metadata_response(self):
+        from .tolino import TolinoApiError
+        client, _ = self._patching_client([])
+        with self.assertRaises(TolinoApiError):
+            client.update_metadata("b-1", {})
+        client2, _ = self._patching_client([{"unexpected": {}}])
+        with self.assertRaises(TolinoApiError):
+            client2.update_metadata("b-1", {"title": "x"})
+
+    def test_collection_pairs_reads_sync_data_patches(self):
+        patches = [
+            {"op": "add", "path": "/publications/b-1/tags",
+             "value": {"name": "Adamsberg", "category": "collection"}},
+            {"op": "add", "path": "/publications/b-2/tags",
+             "value": {"name": "SciFi", "category": "collection"}},
+            {"op": "remove", "path": "/publications/b-2/tags",
+             "value": {"name": "SciFi", "category": "collection"}},
+            {"op": "add", "path": "/publications/b-1/tags",
+             "value": {"name": "read", "category": "system"}},
+            {"op": "add", "path": "/somewhere/else",
+             "value": {"name": "X", "category": "collection"}},
+        ]
+        client, calls = self._patching_client(
+            [{"revision": 5, "patches": patches}])
+        self.assertEqual({("b-1", "Adamsberg")}, client.collection_pairs())
+        self.assertEqual("PATCH", calls[0]["method"])
+        self.assertIn("sync-data", calls[0]["url"])
 
     def test_download_resolves_content_url_and_returns_metadata(self):
         client, calls = self._patching_client([

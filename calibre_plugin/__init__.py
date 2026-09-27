@@ -8,7 +8,7 @@ except ImportError:  # Allows deterministic helper tests outside a Calibre insta
     InterfaceActionBase = object
 
 
-PLUGIN_VERSION = (0, 9, 44)
+PLUGIN_VERSION = (0, 9, 45)
 
 
 class TolinoSyncPlugin(InterfaceActionBase):

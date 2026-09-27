@@ -561,6 +561,109 @@ def fingerprint(metadata, format_name):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def metadata_fingerprint(metadata):
+    """Hash of the fields pushed in place to Tolino instead of uploaded."""
+    value = "%s|%s|%s|%s" % (
+        metadata.get("title", ""),
+        metadata.get("authors", ""),
+        metadata.get("isbn", ""),
+        metadata.get("series", ""),
+    )
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def content_fingerprint(metadata, format_name):
+    """Hash of the format FILE itself (uuid|format|size:mtime); '' when the
+    signature was never collected -- an unknown file must never be mistaken
+    for an unchanged one, so '' blocks in-place metadata updates."""
+    signatures = metadata.get("format_signatures")
+    signature = (str(signatures.get(format_name) or "")
+                 if isinstance(signatures, dict) else "")
+    if not signature:
+        return ""
+    value = "%s|%s|%s" % (metadata.get("uuid", ""), format_name, signature)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def metadata_update_fields(metadata):
+    """Tolino /meta payload fields for an in-place metadata update."""
+    fields = {}
+    title = str(metadata.get("title") or "").strip()
+    if title:
+        fields["title"] = title
+    authors = metadata.get("authors")
+    if isinstance(authors, (list, tuple, set)):
+        authors = ", ".join(str(name) for name in authors)
+    authors = str(authors or "").strip()
+    if authors:
+        fields["author"] = authors
+    isbn = str(metadata.get("isbn") or "").strip()
+    if isbn:
+        fields["isbn"] = isbn
+    return fields
+
+
+def unpack_meta_update_record(record):
+    """Read one in-place metadata update record with a contextual error."""
+    if not isinstance(record, (tuple, list)) or len(record) != 4:
+        raise ValueError("Preparation returned an invalid metadata update record: %r" % (record,))
+    book_id, book_uuid, tolino_id, fields = record
+    if (book_id is None or not book_uuid or not tolino_id
+            or not isinstance(fields, dict) or not fields):
+        raise ValueError("Preparation returned an incomplete metadata update record: %r" % (record,))
+    return {
+        "book_id": book_id,
+        "book_uuid": str(book_uuid),
+        "tolino_id": str(tolino_id),
+        "fields": dict(fields),
+    }
+
+
+def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=()):
+    """Split in-place metadata updates off the planned uploads (0.9.45).
+
+    A book qualifies when its cloud copy already exists, the format file is
+    unchanged since the last sync (content_fingerprint), and title/authors/
+    isbn/series changed (metadata_fingerprint). A qualifying planned upload
+    becomes an update record -- the file stays local instead of being sent
+    again. Returns (kept_uploads, meta_updates).
+    """
+    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
+        raise ValueError("Preparation requires metadata and sync state mappings.")
+    preferred_formats = normalize_formats(preferred_formats)
+    upload_uuids = {str(unpack_upload_record(record)["book_uuid"])
+                    for record in uploads}
+    updates = []
+    converted = set()
+    for book_id, metadata in metadata_by_id.items():
+        if not isinstance(metadata, dict):
+            raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
+        book_uuid = str(metadata.get("uuid") or "")
+        if not book_uuid:
+            continue
+        old = state.get(book_uuid) or {}
+        tolino_id = str(old.get("tolino_id") or "")
+        if not tolino_id:
+            continue
+        available = set(normalize_formats(metadata.get("formats")))
+        selected = next((f for f in preferred_formats if f in available), None)
+        if not selected:
+            continue
+        content_fp = content_fingerprint(metadata, selected)
+        if not content_fp or old.get("content_fp") != content_fp:
+            continue
+        if old.get("meta_fp") == metadata_fingerprint(metadata):
+            continue
+        fields = metadata_update_fields(metadata)
+        if not fields:
+            continue
+        updates.append((book_id, book_uuid, tolino_id, fields))
+        if book_uuid in upload_uuids:
+            converted.add(book_uuid)
+    kept = [record for record in uploads if str(record[1]) not in converted]
+    return kept, updates
+
+
 def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
               upload_book_ids=None):
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
@@ -587,7 +690,9 @@ def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
             continue
         fp = fingerprint(metadata, selected)
         current[book_uuid] = {"tolino_id": state.get(book_uuid, {}).get("tolino_id"),
-                              "fingerprint": fp, "calibre_id": book_id}
+                              "fingerprint": fp, "calibre_id": book_id,
+                              "content_fp": content_fingerprint(metadata, selected),
+                              "meta_fp": metadata_fingerprint(metadata)}
         old = state.get(book_uuid, {})
         if upload_book_ids is not None:
             should_upload = book_id in upload_book_ids
