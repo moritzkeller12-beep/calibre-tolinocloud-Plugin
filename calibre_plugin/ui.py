@@ -25,11 +25,12 @@ try:
     from .config import (account_by_name, save_account, save_settings,
                          set_active_account, settings)
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
-                       load_state, metadata_by_id, plan_sync,
+                       load_state, metadata_by_id, plan_sync, plan_metadata_updates,
                        selected_book_ids, selected_table_rows,
                        sort_comparison_rows, sync_summary,
                        normalize_formats, safe_format_path, cover_bytes,
                        unpack_plan_result, unpack_upload_record,
+                       unpack_meta_update_record,
                        diagnose_preparation, format_diagnostic_report,
                        metadata_tolino_id,
                        tolino_column_active, update_tolino_ids)
@@ -43,11 +44,12 @@ except ImportError:
     from config import (account_by_name, save_account, save_settings,
                         set_active_account, settings)
     from sync import (compare_inventory, format_error_details, iter_book_ids,
-                      load_state, metadata_by_id, plan_sync,
+                      load_state, metadata_by_id, plan_sync, plan_metadata_updates,
                       selected_book_ids, selected_table_rows,
                       sort_comparison_rows, sync_summary,
                       normalize_formats, safe_format_path, cover_bytes,
                       unpack_plan_result, unpack_upload_record,
+                      unpack_meta_update_record,
                       diagnose_preparation, format_diagnostic_report,
                       metadata_tolino_id,
                       tolino_column_active, update_tolino_ids)
@@ -84,6 +86,22 @@ def _display_value(value):
     if isinstance(value, dict):
         return ", ".join("%s: %s" % (key, val) for key, val in sorted(value.items()))
     return str(value or "")
+
+
+def _format_signatures(database, book_id, formats):
+    """size:mtime je Format-Datei -- das billige Content-Signal (0.9.45).
+
+    Ersetzt eine Datei, ändern sich Größe und mtime; eine reine
+    Metadatenänderung in Calibre berührt die Datei nicht.
+    """
+    signatures = {}
+    for fmt in formats:
+        try:
+            stat = os.stat(safe_format_path(database, book_id, fmt))
+        except (ValueError, OSError):
+            continue
+        signatures[fmt] = "%d:%d" % (stat.st_size, int(stat.st_mtime * 1000))
+    return signatures
 
 
 class SyncJob:
@@ -484,11 +502,13 @@ class SyncWorker(QObject):
     completed = pyqtSignal(object, object, object)
     failed = pyqtSignal(str, str)
 
-    def __init__(self, settings, jobs, removals):
+    def __init__(self, settings, jobs, removals, meta_updates=None, series_map=None):
         QObject.__init__(self)
         self.settings = settings
         self.jobs = jobs
         self.removals = removals
+        self.meta_updates = list(meta_updates or ())
+        self.series_map = dict(series_map or {})
         self.cancelled = False
 
     def cancel(self):
@@ -509,19 +529,28 @@ class SyncWorker(QObject):
             remote_ids = (client.inventory_ids()
                           if self.settings["enable_deletions"] or needs_replacement_cleanup
                           else set())
-            total = len(self.jobs) + len(self.removals)
+            total = (len(self.jobs) + len(self.removals)
+                     + len(self.meta_updates) + len(self.series_map))
             done = 0
+            # Erst die in-place Metadaten-Updates, dann die Uploads (0.9.45).
+            for update in self.meta_updates:
+                if self.cancelled:
+                    raise RuntimeError("Synchronisierung vom Benutzer abgebrochen.")
+                record = unpack_meta_update_record(update)
+                self.progress.emit(done, total, "Metadaten: %s" % record["book_uuid"])
+                client.update_metadata(record["tolino_id"], record["fields"])
+                done += 1
             for job in self.jobs:
                 if self.cancelled:
                     raise RuntimeError("Synchronisierung vom Benutzer abgebrochen.")
                 self.progress.emit(done, total, "Lade hoch: %s (%s)" %
                                    (job.book_uuid, job.format_name))
                 new_id = client.upload(job.path)
-                state[job.book_uuid] = {
-                    "tolino_id": new_id,
-                    "fingerprint": state.get(job.book_uuid, {}).get("fingerprint", ""),
-                    "calibre_id": job.book_id,
-                }
+                # Plan-Eintrag kopieren: fingerprint/content_fp/meta_fp bleiben
+                # erhalten, nur die Tolino-ID wird neu (0.9.45).
+                entry = dict(state.get(job.book_uuid) or {})
+                entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
+                state[job.book_uuid] = entry
                 updates.append((job.book_id, new_id))
                 if job.cover_path:
                     client.upload_cover(new_id, job.cover_path)
@@ -538,6 +567,26 @@ class SyncWorker(QObject):
                 state.pop(book_uuid, None)
                 done += 1
                 self.progress.emit(done, total, "Erledigt: %s" % book_uuid)
+            # Serien → Sammlungen (0.9.45): Bestand einmal lesen und nur
+            # fehlende Zuordnungen nachziehen (idempotent).
+            series_items = sorted(
+                (str(state[book_uuid]["tolino_id"]), series)
+                for book_uuid, series in self.series_map.items()
+                if series and isinstance(state.get(book_uuid), dict)
+                and state[book_uuid].get("tolino_id"))
+            if series_items:
+                known = client.collection_pairs()
+                for tolino_id, series in series_items:
+                    if self.cancelled:
+                        raise RuntimeError("Synchronisierung vom Benutzer abgebrochen.")
+                    if (tolino_id, series) in known:
+                        done += 1
+                        continue
+                    self.progress.emit(done, total, "Sammlung: %s" % series)
+                    client.add_to_collection(tolino_id, series)
+                    known.add((tolino_id, series))
+                    done += 1
+                self.progress.emit(done, total, "Sammlungen geprüft")
             self.completed.emit(state, client.refresh, updates)
         except Exception as exc:
             self.failed.emit(sanitize_error(
@@ -1123,9 +1172,12 @@ class SyncDashboard(QDialog):
                     "formats": _metadata_value(item, "formats"),
                     "last_modified": str(_metadata_value(item, "last_modified")),
                     "tolino_id": metadata_tolino_id(item) if self.sync_column_enabled else "",
+                    "series": str(_metadata_value(item, "series") or "").strip(),
                 }
-            for item in metadata.values():
+            for book_id, item in metadata.items():
                 item["formats"] = normalize_formats(item["formats"])
+                item["format_signatures"] = _format_signatures(
+                    self.gui.current_db, book_id, item["formats"])
             state = load_state(settings["state"])
             client = TolinoClient(settings["partner_id"], settings["hardware_id"],
                                   settings["refresh_token"], settings["username"],
@@ -1162,6 +1214,14 @@ class SyncDashboard(QDialog):
                 metadata, state, settings["preferred_formats"],
                 settings["enable_deletions"], upload_book_ids=selected,
             ))
+            # Reine Metadatenänderungen laufen in-place gegen /meta (0.9.45).
+            uploads, meta_updates = plan_metadata_updates(
+                metadata, state, uploads, settings["preferred_formats"])
+            series_map = {
+                item["uuid"]: item["series"]
+                for item in metadata.values()
+                if item.get("uuid") and item.get("series")
+            }
             jobs = []
             skipped_uploads = []
             for upload in uploads:
@@ -1206,7 +1266,7 @@ class SyncDashboard(QDialog):
         self.progress.setRange(0, summary["total"] or 1)
         self.progress.setValue(0)
         self.thread = QThread(self)
-        self.worker = SyncWorker(settings, jobs, removals)
+        self.worker = SyncWorker(settings, jobs, removals, meta_updates, series_map)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)

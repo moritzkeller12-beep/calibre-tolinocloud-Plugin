@@ -3275,6 +3275,30 @@ class TolinoClient:
     def delete(self, deliverable_id):
         self._request(BASE_URL + "/deletecontent?deliverableId=" + str(deliverable_id))
 
+    # --- In-place metadata (pytolino/darkphoenix-derived /meta flow) -------
+    META_URL = BASE_URL + "/meta"
+
+    def update_metadata(self, deliverable_id, fields):
+        """Update title/author/isbn on an existing book instead of
+        re-uploading the file (0.9.45).
+
+        GET /meta?deliverableId=... returns the book with its "metadata"
+        dict; the merged dict goes back via PUT as {"uploadMetaData": ...}.
+        """
+        if not isinstance(fields, dict) or not fields:
+            raise TolinoApiError("Metadata update requires at least one field.")
+        url = self.META_URL + "/?deliverableId=" + _url_quote(str(deliverable_id))
+        book = self._request(url)
+        metadata = book.get("metadata") if isinstance(book, dict) else None
+        if not isinstance(metadata, dict):
+            raise TolinoApiError(
+                "Tolino metadata response had no metadata for %s."
+                % deliverable_id)
+        metadata.update(fields)
+        self._request(url, "PUT", {"uploadMetaData": metadata},
+                      content_type="application/json")
+        return metadata
+
     # --- Device list (pytolino-derived): resolve the real hardware ID ------
 
     DEVICES_URL = "https://bosh.pageplace.de/bosh/rest/handshake/devices/list"
@@ -3456,3 +3480,28 @@ class TolinoClient:
             revision=existing["value"].get("revision"))
         data = self._sync_patch({"revision": revision, "patches": [patch]})
         return data.get("revision")
+
+    def collection_pairs(self):
+        """Return the {(deliverable, collection)} pairs set in the cloud.
+
+        Reads sync-data once so the series reconcile (0.9.45) only has to
+        PATCH genuinely missing assignments.
+        """
+        _revision, patches = self.get_sync_data()
+        pairs = set()
+        for item in patches:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("value")
+            if not isinstance(value, dict) or value.get("category") != "collection":
+                continue
+            parts = str(item.get("path") or "").split("/")
+            if (len(parts) != 4 or parts[1] != "publications"
+                    or parts[3] != "tags" or not parts[2]):
+                continue
+            pair = (str(parts[2]), str(value.get("name") or ""))
+            if str(item.get("op") or "add") == "remove":
+                pairs.discard(pair)
+            else:
+                pairs.add(pair)
+        return pairs
