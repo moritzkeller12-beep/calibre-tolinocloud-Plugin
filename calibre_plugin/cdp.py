@@ -32,12 +32,65 @@ import tempfile
 import time
 
 try:
-    from .tolino import PARTNERS, TolinoAuthError
+    from .tolino import PARTNERS, TolinoAuthError, in_flatpak_sandbox
 except ImportError:  # direkter Import (außerhalb des Plugin-Pakets)
-    from tolino import PARTNERS, TolinoAuthError
+    from tolino import PARTNERS, TolinoAuthError, in_flatpak_sandbox
 
 
 # ---------------------------------------------------------------- Vorbedingungen
+
+def _sandbox_host_launchers():
+    """Chromium-Launcher des HOSTS via `flatpak-spawn --host`.
+
+    Für Calibre-Flatpaks (Flathub): weder die Browser-Binaries des
+    Rechners noch `flatpak run` liegen im Sandbox-PATH. Eine einzige
+    Probe läuft AUSSERHALB der Sandbox und liefert native Pfade sowie
+    Host-Flatpak-Apps; ohne talk-name=org.freedesktop.Flatpak endet der
+    Aufruf sofort mit einem Fehler und die Liste bleibt leer -- die
+    Meldung von launch_reader_window nennt dann den override-Befehl.
+    """
+    spawn = shutil.which("flatpak-spawn")
+    if not spawn:
+        return []
+    script = (
+        "for b in google-chrome google-chrome-stable chromium "
+        "chromium-browser brave-browser microsoft-edge vivaldi; do "
+        "p=$(command -v \"$b\") && { echo \"NATIVE $p\"; break; }; done; "
+        "for a in org.chromium.Chromium com.brave.Browser "
+        "com.google.Chrome com.vivaldi.Vivaldi; do "
+        "command -v flatpak >/dev/null 2>&1 && flatpak info \"$a\" "
+        ">/dev/null 2>&1 && echo \"FLATPAK $a\"; done"
+    )
+    try:
+        proc = subprocess.run([spawn, "--host", "sh", "-c", script],
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL,
+                              universal_newlines=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    commands = {
+        "org.chromium.Chromium": ("chrome", "Chromium (Flatpak, Host)"),
+        "com.brave.Browser": ("brave", "Brave (Flatpak, Host)"),
+        "com.google.Chrome": ("chrome", "Chrome (Flatpak, Host)"),
+        "com.vivaldi.Vivaldi": ("vivaldi", "Vivaldi (Flatpak, Host)"),
+    }
+    launchers = []
+    for line in (proc.stdout or "").splitlines():
+        kind, _, value = line.partition(" ")
+        value = value.strip()
+        if not value:
+            continue
+        if kind == "NATIVE":
+            launchers.append(([spawn, "--host", value],
+                              "%s (Host)" % os.path.basename(value)))
+        elif kind == "FLATPAK" and value in commands:
+            command, label = commands[value]
+            launchers.append(([spawn, "--host", "flatpak", "run",
+                               "--command=%s" % command, value], label))
+    return launchers
+
 
 def chromium_candidates(home=None):
     """Installed Chromium-family browsers, most common first.
@@ -90,6 +143,10 @@ def chromium_candidates(home=None):
     if shutil.which("snap") and os.path.isdir(os.path.join(snap, "chromium")):
         found.append(([shutil.which("snap"), "run", "chromium"],
                       "Chromium (Snap)"))
+    # Flatpak-Sandbox (Calibre von Flathub): die Browser des Rechners
+    # sind von hier unsichtbar -- Sonde außerhalb der Sandbox.
+    if in_flatpak_sandbox():
+        found.extend(_sandbox_host_launchers())
     return found
 
 
@@ -634,12 +691,23 @@ def launch_reader_window(partner_id):
     """
     binary, label = pick_chromium() or (None, None)
     if not binary:
-        raise TolinoAuthError(
+        message = (
             "Kein Chromium-Browser gefunden (Chrome/Chromium/Brave/Edge). "
             "Die Browser-Anmeldung benötigt eines davon für die Live-"
             "Token-Übernahme. Alternativ: aktuellen Refresh-Token manuell "
             "aus einem laufenden Web Reader übernehmen (siehe README)."
         )
+        if in_flatpak_sandbox():
+            message += (
+                " Calibre läuft als Flatpak (Flathub): Browser des "
+                "Rechners sind ohne Freigabe unsichtbar. Für das eigene "
+                "Anmeldefenster einmalig erlauben: flatpak override "
+                "--user --talk-name=org.freedesktop.Flatpak "
+                "com.calibre_ebook.calibre (danach Calibre neu starten) "
+                "-- ohne die Freigabe öffnet das Plugin den System-"
+                "Browser als Fallback."
+            )
+        raise TolinoAuthError(message)
     port = _start_port()
     # Reuse path: is a grabber window from an earlier attempt still up?
     if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
