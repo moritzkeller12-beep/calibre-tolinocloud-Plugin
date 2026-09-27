@@ -2847,6 +2847,52 @@ def _system_browser_open_error():
         " einem laufenden Web Reader übernehmen (siehe README).")
 
 
+def chromium_available():
+    """True, wenn das Plugin ein eigenes Chromium-Fenster öffnen kann.
+
+    Der Standardbrowser (z. B. Firefox) spielt keine Rolle -- gesucht
+    werden Chrome/Chromium/Brave/Edge: nativ, als Flatpak/Snap und seit
+    0.9.40 in der Flatpak-Sandbox per Host-Sonde. Feldbefund 0.9.41:
+    der Extract-Button soll trotz Standardbrowser Firefox eine
+    Chromium-Fenster öffnen und live lesen.
+    """
+    from . import cdp as cdp_module
+    try:
+        return cdp_module.pick_chromium() is not None
+    except Exception:
+        return False
+
+
+def spent_token_advice():
+    """Handlungsempfehlung für den "alle Kandidaten verbraucht"-Dialog.
+
+    Ohne Chromium bleibt nur der Festplatten-Weg -- die Empfehlung nennt
+    dann die Installation statt eines Wegs, der nicht funktionieren
+    kann; in einer Flatpak-Sandbox kommt der Freigabe-Befehl dazu.
+    """
+    if chromium_available():
+        return (
+            "Besser: \u201eIm Browser anmelden\u201c benutzen -- das "
+            "öffnet ein eigenes Chromium-Fenster, liest den Token live "
+            "aus der Seite und schließt NUR dieses Fenster; Ihr Browser "
+            "(z. B. Firefox) bleibt geöffnet.")
+    text = (
+        "Ohne Chrome/Chromium/Brave/Edge kann das Plugin kein eigenes "
+        "Fenster öffnen und greift nur auf die Festplatten-Kopien zu. "
+        "Einen dieser Browser installieren und dann \u201eIm Browser "
+        "anmelden\u201c benutzen. Oder ALLE Browserfenster schließen "
+        "(der Reader schreibt dann seinen letzten Token auf die "
+        "Festplatte) und diesen Knopf erneut drücken.")
+    if in_flatpak_sandbox():
+        text += (
+            " Calibre als Flatpak (Flathub): evtl. sind die Browser des "
+            "Rechners ohne Freigabe unsichtbar -- einmalig flatpak "
+            "override --user --talk-name=org.freedesktop.Flatpak "
+            "com.calibre_ebook.calibre ausführen und Calibre neu "
+            "starten.")
+    return text
+
+
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
                              progress=None):
     """Guided browser sign-in for Keycloak partners without local callback.

@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.40** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
+Plugin-Version: **0.9.41** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -33,8 +33,11 @@ den Upload.
 
 Alternativen:
 
-- **„Token aus laufendem Web Reader übernehmen"** liest den Token aus einem schon
-  offenen Reader-Fenster (sonst die Festplatten-Kopien).
+- **„Token aus laufendem Web Reader übernehmen"** liest den Token live: ist ein
+  Anmeldefenster offen, wird es ausgelesen; sonst öffnet das Plugin selbst ein
+  eigenes Chromium-Fenster auf dem Web Reader (Ihr Browser bleibt geöffnet, danach
+  schließt nur dieses Fenster). Nur ohne Chromium werden die Festplatten-Kopien
+  geprüft (alle Browserfenster vorher schließen).
 - **Ohne Chromium:** Knopf drücken → Web Reader im Systems-Browser öffnen →
   **alle Browserfenster schließen** → Knopf erneut drücken.
 - **Manuell:** F12 → Netzwerk → Aufnahme an → im Web Reader anmelden →
@@ -54,6 +57,7 @@ Kein Inkognito-Fenster.
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz. Am Token-Endpunkt wartet das Plugin kurz und wiederholt den Aufruf automatisch (2×); bleibt die 403, → unten „Bot-Schutz-Komponente installieren". |
 | „Tolino HTTP 400: {}" / „Vorbereitung fehlgeschlagen" | Unbekannte Hardware-ID am BOSH-Dienst: ab 0.9.35 übernimmt bzw. registriert das Plugin das Gerät automatisch und wiederholt den Aufruf (seit 0.9.37 mit kurzer Wartezeit nach `registerhw`); die echte Servermeldung steht jetzt im Fehler. |
 | „Der System-Browser konnte nicht geöffnet werden" / es öffnet sich **gar kein Browser** (Calibre via Flathub, z. B. Pop!_OS) | Ab 0.9.40 startet die Sandbox-Kette die Öffner synchron: xdg-open (Portal) → gio → `flatpak-spawn --host`. Ohne Wirkung einmalig `flatpak override --user --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre` ausführen und Calibre neu starten — dann geht wieder das eigene Anmeldefenster. Ohne Freigabe als Notfall den Token manuell übernehmen (oben). |
+| „Es wurden … Refresh-Token gefunden, aber alle waren bereits verbraucht" | Alte Festplatten-Kopien. Ab 0.9.41 öffnet der Knopf „Token aus laufendem Web Reader übernehmen" selbst ein eigenes Chromium-Fenster und liest live (danach schließt nur dieses Fenster, nie der eigene Browser); ohne Chrome/Chromium/Brave einmalig installieren. |
 
 ## Konten und Tolino-IDs
 
