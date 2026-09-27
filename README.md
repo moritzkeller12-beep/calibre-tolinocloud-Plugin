@@ -7,7 +7,7 @@ Plugin-Version: **0.9.44** — synchronisiert Bücher zwischen Calibre und der T
 
 - **Windows 11** — getestet
 - **Linux mit nativ installiertem Calibre** — getestet
-- **Linux mit Calibre als Flatpak (Flathub)**, z. B. **Pop!_OS** — getestet;
+- **Linux mit Calibre als Flatpak (Flathub)** — getestet;
   die Browser des Rechners brauchen dort eine einmalige Freigabe
   (siehe „Häufige Fehlermeldungen“)
 
