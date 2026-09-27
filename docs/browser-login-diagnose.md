@@ -267,6 +267,30 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     (`spent_token_advice()`), in der Flatpak-Sandbox zusätzlich den
     override-Befehl aus 0.9.40.
 
+21. **Standardbrowser statt der installierten Chromium (0.9.42):**
+    Feldbefund: „es öffnet weiterhin den Firefox — bei dem
+    funktioniert das Login nicht; in 0.9.39 funktionierte es mit
+    diesem Chromium browser. Wenn der User eine Chromium-Variante
+    installiert hat, soll sich diese öffnen, egal welchen
+    Standardbrowser der User hat.“ Drei Lücken: (a) die Befehlsliste
+    kannte weder `chrome` noch Beta/Dev-Varianten, und bei
+    reduziertem PATH (Desktop-Start) fiel die Suche leer ab — jetzt
+    erweiterte Liste plus feste Installationsorte
+    (`_EXTRA_BROWSER_PATHS`) und eine Spawn-Schleife, die jeden
+    Kandidaten versucht, bis einer startet; (b) der
+    localhost-Callback-Weg öffnete den System-Browser (Firefox),
+    obwohl eine Chromium installiert war — `open_login_browser()`
+    startet jetzt zuerst die installierte Chromium-Variante
+    (System-Browser nur noch als Notfall ohne Chromium); (c) in der
+    Flatpak-Sandbox landete der „Kein Chromium“-Fehler still im
+    Firefox-Fallback, weil der Meldungstext geschluckt wurde — jetzt
+    bricht der Login dort sichtbar mit dem override-Hinweis ab,
+    außerhalb der Sandbox läuft vor dem Fallback eine Statuszeile
+    („Chrome/Chromium/Brave installieren“). Die Host-Sonde meldet
+    ihren Grund (`_host_probe_status`: denied vs. empty), damit die
+    Fehlermeldung „Freigabe erteilen“ statt „installieren“ sagt, wenn
+    die Freigabe fehlt — und umgekehrt.
+
 ## Aktuelle Login-Kette (ab 0.9.35)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)

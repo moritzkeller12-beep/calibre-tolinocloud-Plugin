@@ -2832,6 +2832,31 @@ def open_system_browser(url):
     return False
 
 
+def open_login_browser(url):
+    """Anmeldelink im Browser öffnen; True wenn ein Öffner gestartet ist.
+
+    Wenn eine Chromium-Variante installiert ist, öffnet DIESE den Link --
+    unabhängig davon, was als Standardbrowser eingestellt ist
+    (Feldbefund 0.9.42: trotz installierter Chromium landete der Link im
+    Firefox, mit dem das Login nicht funktioniert). Ohne Chromium bleibt
+    open_system_browser der Notfall.
+    """
+    from . import cdp as cdp_module
+    try:
+        option = cdp_module.pick_chromium()
+    except Exception:
+        option = None
+    if option:
+        try:
+            subprocess.Popen(list(option[0]) + [url],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return True
+        except OSError:
+            pass  # kaputter erster Kandidat: System-Browser als Notfall
+    return open_system_browser(url)
+
+
 def _system_browser_open_error():
     """Fehler für "kein Browser geöffnet" -- in der Sandbox mit Fix dazu."""
     base = "Der System-Browser konnte nicht geöffnet werden."
@@ -2914,6 +2939,19 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
     except TolinoAuthError as exc:
         if "Kein Chromium-Browser gefunden" not in str(exc):
             raise
+        if in_flatpak_sandbox():
+            # Feldbefund 0.9.42: "es öffnet weiterhin den Firefox" -- in
+            # der Flatpak-Sandbox bringt der System-Browser nichts (mit
+            # dem klappt das Login nicht), und die Browser des Rechners
+            # sind ohne Freigabe unsichtbar. Der Fehler mit dem
+            # override-Befehl wird stattdessen sichtbar gemacht, statt
+            # still in den Firefox-Fallback zu laufen.
+            raise
+        if progress:
+            progress(
+                "Kein Chromium-Browser gefunden -- öffne den "
+                "Standardbrowser als Notfall. Für das eigene "
+                "Anmeldefenster Chrome/Chromium/Brave/Edge installieren.")
         return _disk_assisted_login(partner_id, hardware, timeout)
 
 
@@ -2949,7 +2987,7 @@ def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
         auth_url = partner["auth_url"]
         if "?" not in auth_url:
             auth_url = auth_url + "?" + urlencode(params)
-    if not open_system_browser(auth_url):
+    if not open_login_browser(auth_url):
         raise TolinoAuthError(_system_browser_open_error())
 
     deadline = time.time() + max(30, timeout)
@@ -3158,7 +3196,7 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
         if partner.get(key):
             params[key] = partner[key]
 
-    if not open_system_browser(partner["auth_url"] + "?" + urlencode(params)):
+    if not open_login_browser(partner["auth_url"] + "?" + urlencode(params)):
         server.server_close()
         raise TolinoAuthError(_system_browser_open_error())
     while not hasattr(server, "query") and time.time() - created_at < timeout:
