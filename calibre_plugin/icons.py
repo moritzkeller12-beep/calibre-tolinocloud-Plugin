@@ -1,9 +1,6 @@
 """
-Icons for the Tolino Cloud Sync plugin.
-
-The bundled toolbar image lives at images/tolino_cloud_sync.png (a real
-PNG, 256x256 RGBA, rendered from the SVG below). The SVG is kept as an
-in-process fallback in case the bundled resource cannot be located.
+Icons for the Tolino Cloud Sync plugin: bundled PNG (256x256) with the
+SVG below as in-process fallback.
 """
 
 # Flat-bottom cloud in Tolino blue, contributed artwork (original: 90x90
@@ -70,13 +67,7 @@ def pixmap_from_bytes(data, fmt=None):
 
 
 def toolbar_icon():
-    """Build the toolbar QIcon with a robust fallback chain.
-
-    1. Calibre's resource system (reads images/… from the plugin zip).
-    2. The bundled PNG bytes decoded directly.
-    3. The embedded SVG decoded via QPixmap (QIcon itself has no
-       loadFromData - routing the bytes through a QPixmap is required).
-    """
+    """Build the toolbar QIcon with a robust fallback chain."""
     from qt.core import QIcon
 
     icon = QIcon()

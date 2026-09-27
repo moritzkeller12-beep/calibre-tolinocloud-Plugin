@@ -7,8 +7,7 @@ ROOT = Path(__file__).parent
 SOURCE = ROOT / "calibre_plugin"
 MARKER = "plugin-import-name-tolino_cloud_sync.txt"
 FILES = ("ui.py", "config.py", "sync.py", "tolino.py", "cdp.py",
-         "icons.py",
-         "bootstrapper.py")
+         "icons.py")
 IMAGE_FILES = ("tolino_cloud_sync.png",)
 EXPECTED = {
     "__init__.py",

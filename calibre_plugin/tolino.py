@@ -32,15 +32,10 @@ class TolinoApiError(TolinoError):
     pass
 
 
-# --- Einheitliches Profil der Shops mit dem gemeinsamen Web Reader ------#
-# FELDBEFUND (v2/resellerconfig, client TOLINO_WEBREADER): JEDER
-# tolino-Reseller -- thalia.de/at, hugendubel.de, ebook.de, buecher.de,
-# osiander.de, orell fuessli, sogar das eingestellte buch.de -- traegt
-# als OAuth-Redirect https://webreader.mytolino.com/library/. Der
-# Token-Tausch kommt also bei ALLEN Shops von dieser Seite, und der
-# gefuehrte Web-Reader-Weg (bisher nur Orell Fuessli) ist der eine Weg
-# fuer alle Shops, die dort liegen: ein Profil statt je Partner
-# nachgebauter Einzelheiten (uses_shared_webreader() entscheidet).
+# --- Gemeinsamer Web Reader: EIN Login-Profil fuer alle Shops ---------#
+# Jeder Reseller (thalia, Hugendubel, eBook.de, ...) traegt als OAuth-
+# Redirect https://webreader.mytolino.com/library/; uses_shared_webreader()
+# entscheidet, welcher Shop dort liegt.
 WEBREADER_URL = "https://webreader.mytolino.com/library/"
 WEBREADER_TOKEN_HEADERS = {
     "Origin": "https://webreader.mytolino.com",
@@ -50,12 +45,9 @@ WEBREADER_CLIENT_TYPE = "TOLINO_WEBREADER"
 WEBREADER_CLIENT_VERSION = "5.2.0"
 
 PARTNERS = {
-    # "reseller_id" is the ID the Tolino API expects (headers/protocol);
-    # the dict key is just the plugin-internal, consecutive list position.
-    # "key" preserves the historic plugin ID for migrating saved settings.
-    # Endpunkte (token_url/auth_url/client_id/scope) folgen der
-    # OAuth-Konfiguration des Resellers aus v2/resellerconfig -- dieselbe
-    # Quelle, aus der der Web Reader seinen eigenen Tausch bedient.
+    # "reseller_id" = ID, die die Tolino-API erwartet (Header/Protokoll);
+    # "key" ist nur die interne, historische Positions-ID (Migration).
+    # Endpunkte folgen v2/resellerconfig -- dieselbe Quelle wie beim Reader.
     1: {
         "name": "Thalia.de",
         "key": 3,
@@ -141,11 +133,7 @@ LEGACY_PARTNER_IDS = {
 }
 
 def resolve_partner_id(value):
-    """Map a saved (possibly historic) partner ID to the current plugin ID.
-
-    Safe for runtime use: values that are already valid current IDs pass
-    through unchanged (the ID spaces overlap, e.g. 3 and 4 exist in both).
-    """
+    """Map a saved (possibly historic) partner ID to the current plugin ID."""
     try:
         pid = int(value)
     except (TypeError, ValueError):
@@ -167,14 +155,7 @@ def force_legacy_partner_id(value):
     return LEGACY_PARTNER_IDS.get(pid, pid)
 
 def uses_shared_webreader(partner):
-    """True when the shop runs on the shared Tolino Web Reader.
-
-    Alle Shops, deren Reader auf webreader.mytolino.com liegen,
-    verhalten sich wie Orell Füssli: gefuehrte Browser-Anmeldung am
-    Reader (nie localhost-Callback), Origin/Referer des Readers am
-    Token-Endpunkt und der Web-Reader-Client als Header -- weil deren
-    OAuth-Redirect genau diese Seite ist (v2/resellerconfig).
-    """
+    """True when the shop runs on the shared Tolino Web Reader."""
     if not isinstance(partner, dict):
         return False
     return "webreader.mytolino.com" in str(partner.get("reader_url") or "")
@@ -201,14 +182,10 @@ _BEARER_PATTERN = re.compile(
 )
 
 
-# --- crypto-js-compatible AES (stdlib only) --------------------------------#
-#
-# The Tolino web reader encrypts its refresh token / user infos with
-# CryptoJS.AES.encrypt(value, VERSION.PHRASE) and stores the Base64 result in
-# IndexedDB (keys "userToken" / "userInfos"). CryptoJS uses the OpenSSL
-# "Salted__" KDF: EVP_BytesToKey with MD5 and a random 8-byte salt, AES-256-CBC.
-# The passphrase (PHRASE) is currently an empty string; we accept any phrase
-# so a future change on the reader side keeps working.
+# --- crypto-js-kompatibles AES (nur stdlib) -------------------------------
+# CryptoJS.AES.encrypt(value, VERSION.PHRASE) -> Base64 in IndexedDB
+# (userToken/userInfos): OpenSSL-"Salted__"-KDF, AES-256-CBC; jede
+# Passphrase wird akzeptiert, auch eine kuenftig geaenderte.
 
 _AES_SBOX = []
 _AES_INV_SBOX = []
@@ -405,11 +382,7 @@ def _pkcs7_unpad(data):
 
 
 def cryptojs_decrypt(b64_text, passphrase=""):
-    """Decrypt a CryptoJS.AES.encrypt Base64 blob; return "" on any mismatch.
-
-    CryptoJS output is OpenSSL-formatted: base64("Salted__" + salt(8) +
-    AES-256-CBC(PKCS7, key/iv = EVP_BytesToKey(MD5, passphrase, salt))).
-    """
+    """Decrypt a CryptoJS.AES.encrypt Base64 blob; return "" on any mismatch."""
     try:
         raw = base64.b64decode("".join(str(b64_text or "").split()), validate=False)
     except Exception:
@@ -439,12 +412,7 @@ def cryptojs_decrypt(b64_text, passphrase=""):
 
 
 def _find_browser_storage_paths():
-    """Return candidate browser profile directories for the current platform.
-
-    Entries may be Chromium "User Data" roots (parent of profile dirs with
-    "Local Storage/leveldb") or Firefox profile roots (children are profile
-    dirs). Missing paths are fine; the diagnostic reports what exists.
-    """
+    """Return candidate browser profile directories for the current platform."""
     paths = []
     system = platform.system()
 
@@ -552,13 +520,10 @@ def _origin_matches(host_text):
     return any(origin in text for origin in TOLINO_STORAGE_ORIGINS)
 
 
-# --- Chromium LevelDB: raw, dependency-free readers -----------------------
-#
-# Modern Chromium stores localStorage in LevelDB files (Local Storage/
-# leveldb/*.ldb + *.log). Keys are <origin>\x00\x01<key>, values are
-# \x01<utf8> or \x00<uint8 length><utf16le>. We simply scan the raw bytes of
-# every record and pull out the UTF-8 keys/values belonging to Tolino
-# origins, which is robust across record encodings.
+# --- Chromium LevelDB: Roh-Leser ohne Abhaengigkeiten ---------------------
+# localStorage liegt in LevelDB (Keys <origin>\x00\x01<key>); wir
+# scannen die Rohbytes nach Tolino-Origins -- robust ueber alle
+# Record-Codierungen hinweg.
 
 _LEVELDB_BLOCK_SIZE = 32768
 _LEVELDB_HEADER_SIZE = 7
@@ -582,11 +547,7 @@ def _varint(data, pos):
 
 
 def _leveldb_log_payloads(data):
-    """Yield record payloads from LevelDB log physical blocks.
-
-    Format: 32 KiB blocks of [crc32(4), length(2), type(1), payload];
-    type 1 = FULL, 2/3/4 = FIRST/MIDDLE/LAST fragments.
-    """
+    """Yield record payloads from LevelDB log physical blocks."""
     pos = 0
     n = len(data)
     pending = b""
@@ -618,11 +579,7 @@ def _leveldb_log_payloads(data):
 
 
 def _leveldb_writebatch_pairs(payload):
-    """Yield (key, value) pairs from one WriteBatch payload.
-
-    Layout: sequence(8 LE) + count(4 LE), then entries:
-    type(1: 1=put, 0=delete) klen(varint) key vlen(varint) value.
-    """
+    """Yield (key, value) pairs from one WriteBatch payload."""
     if len(payload) < 12:
         return
     pos = 12
@@ -656,12 +613,7 @@ def _leveldb_records_from_log(data):
 
 
 def _leveldb_records_from_ldb(data):
-    """Yield (key, value) pairs from an .ldb/.sst table file.
-
-    .ldb table files store records in blocks that are usually Snappy-
-    compressed (a raw scan would miss nearly everything). We parse the footer,
-    decompress each data block and walk the key/value prefixes.
-    """
+    """Yield (key, value) pairs from an .ldb/.sst table file."""
     try:
         blocks = _leveldb_ldb_blocks(data)
     except Exception:
@@ -807,12 +759,7 @@ def _leveldb_ldb_blocks(data):
 
 
 def _leveldb_ldb_pairs(block):
-    """Yield (key, value) pairs from one decompressed .ldb data block.
-
-    Entries: shared(varint) non_shared(varint) value_len(varint)
-    then delta-key bytes and the value. We reconstruct keys with a shared-
-    prefix buffer and tolerate restart-array noise at block end.
-    """
+    """Yield (key, value) pairs from one decompressed .ldb data block."""
     pos = 0
     n = len(block)
     last_key = b""
@@ -884,13 +831,7 @@ def _leveldb_value_text(raw):
 
 
 def _scan_chromium_leveldb(db_dir, recency_hint=None):
-    """Scan a Chromium Local/Session Storage LevelDB directory for Tolino keys.
-
-    ``recency_hint`` marks how fresh the harvested values are: values from a
-    write-ahead ``.log`` carry the browser's newest writes, while ``.ldb``
-    files (and directories without a live writer) only hold compacted
-    history. Recency only affects candidate ORDER, never what is read.
-    """
+    """Scan a Chromium Local/Session Storage LevelDB directory for Tolino keys."""
     found = {}
     for file_name in sorted(os.listdir(db_dir)):
         if not file_name.endswith((".log", ".ldb")):
@@ -943,12 +884,7 @@ def _scan_chromium_leveldb(db_dir, recency_hint=None):
 
 
 def _sqlite_snapshot_copy(db_path):
-    """Copy db + WAL/journal next to it so a live Firefox can be read.
-
-    Reading the main file with immutable=1 ignores the write-ahead log, so
-    recently written rows are invisible. A temporary snapshot of db+WAL makes
-    them visible without locking or touching the original.
-    """
+    """Copy db + WAL/journal next to it so a live Firefox can be read."""
     directory = tempfile.mkdtemp(prefix="tolino-scan-")
     try:
         target = os.path.join(directory, os.path.basename(db_path))
@@ -985,16 +921,7 @@ def _read_sqlite_snapshot(db_path, sql, params=()):
 
 
 def _lsng_value_text(value, conversion=0, compression=0):
-    """Decode one LSNG value from its conversion/compression metadata.
-
-    The modern Firefox schema stores the value encoding in two integer
-    columns, not in a prefix byte:
-    - conversion_type: 0 = the BLOB holds raw UTF-16LE code units,
-      1 (UTF16_UTF8) = the BLOB holds UTF-8 text,
-    - compression_type: 0 = uncompressed, 1 = Snappy-compressed.
-    Legacy databases sometimes carry a 0x01/0x02 prefix byte inside the
-    value instead; those prefixes are handled as a fallback.
-    """
+    """Decode one LSNG value from its conversion/compression metadata."""
     if isinstance(value, str):
         return value
     if value is None:
@@ -1050,14 +977,7 @@ def _read_firefox_rows(db_path, sql):
 
 
 def _read_firefox_data_sqlite(db_path):
-    """Read one LSNG per-origin data.sqlite / ls-archive.sqlite database.
-
-    Schema (Firefox dom/localstorage/ActorsParent.cpp, CreateDataTable):
-      data(key TEXT PRIMARY KEY, utf16_length INTEGER, conversion_type INTEGER,
-           compression_type INTEGER, last_access_time INTEGER, value BLOB)
-    conversion_type 0 = raw UTF-16LE units, 1 = UTF-8; compression_type
-    1 = Snappy. Keys are stored without the origin (the file IS per-origin).
-    """
+    """Read one LSNG per-origin data.sqlite / ls-archive.sqlite database."""
     results = {}
     rows = _read_firefox_rows(
         db_path,
@@ -1071,15 +991,7 @@ def _read_firefox_data_sqlite(db_path):
 
 
 def _read_firefox_storage(profile_path):
-    """Read localStorage from a Firefox profile across all known layouts.
-
-    Modern Firefox (LSNG) keeps localStorage in per-origin databases at
-    storage/default/<origin>/ls/data.sqlite plus a cold store ls-archive.sqlite
-    in the storage root; the legacy webappsstore.sqlite only survives as a
-    disabled-by-default shadow database. Its real schema is
-    webappsstore2(originAttributes, originKey, scope, key, value).
-    All reads use snapshot copies, so the browser may keep running.
-    """
+    """Read localStorage from a Firefox profile across all known layouts."""
     results = {}
     legacy = {}
     # 1) LSNG per-origin data.sqlite files anywhere under this profile.
@@ -1195,11 +1107,7 @@ def _read_mozlz4(path):
 
 
 def _harvest_sessionstore_origins(node, results):
-    """Collect "origin/key" pairs from a sessionstore JSON tree.
-
-    SessionStore serializes DOM sessionStorage as nested mappings keyed by
-    origin (any depth), whose values are flat dicts of name -> value.
-    """
+    """Collect "origin/key" pairs from a sessionstore JSON tree."""
     if isinstance(node, dict):
         for key, value in node.items():
             if (isinstance(key, str) and _origin_matches(key)
@@ -1223,13 +1131,7 @@ def _harvest_sessionstore_origins(node, results):
 
 
 def _read_firefox_session_storage(profile_path):
-    """Best-effort read of DOM sessionStorage from Firefox sessionstore files.
-
-    Firefox keeps sessionStorage inside the mozLZ4-compressed sessionstore
-    JSON (sessionstore-backups/recovery.jsonlz4 and friends), not in a
-    SQLite database. Values are keyed "origin/key"; nothing outside Tolino
-    origins is returned.
-    """
+    """Best-effort read of DOM sessionStorage from Firefox sessionstore files."""
     results = {}
     for rel in ("sessionstore-backups/recovery.jsonlz4",
                 "sessionstore-backups/previous.jsonlz4",
@@ -1250,11 +1152,7 @@ def _read_firefox_session_storage(profile_path):
 
 
 def _read_firefox_cookies(profile_path):
-    """Read Tolino-relevant cookie names/values from cookies.sqlite.
-
-    Values of non-Tolino hosts are never returned. Chromium cookie values are
-    encrypted at rest and are therefore not read here.
-    """
+    """Read Tolino-relevant cookie names/values from cookies.sqlite."""
     results = {}
     db_path = os.path.join(profile_path, "cookies.sqlite")
     if not os.path.exists(db_path):
@@ -1271,15 +1169,7 @@ def _read_firefox_cookies(profile_path):
 
 
 def _scan_chromium_indexeddb(idb_dir, notes):
-    """Scan a Chromium IndexedDB level directory for Tolino records.
-
-    The web reader keeps userToken/userInfos in the IndexedDB database
-    "tolino-user" (origin webreader.mytolino.com), stored by Chromium in
-    .ldb/.log LevelDB files with the origin encoded as UTF-16LE inside the
-    keys. We therefore search both UTF-8 and UTF-16LE origin encodings,
-    collect every record whose raw bytes carry a Tolino origin and let the
-    token matcher inspect the (possibly AES-encrypted) values.
-    """
+    """Scan a Chromium IndexedDB level directory for Tolino records."""
     found = {}
     utf16_marker = _TOLINO_ORIGIN_MARKER.encode("utf-16-le")
     for file_name in sorted(os.listdir(idb_dir)):
@@ -1325,12 +1215,7 @@ def _diagnose_storage_keys(storage):
 
 
 def _collect_storage_under(path, notes):
-    """Walk a candidate root and harvest any Tolino storage entries found.
-
-    Finds Chromium "Local Storage/leveldb" and "Session Storage/leveldb"
-    directories plus Firefox "webappsstore.sqlite" files at any depth up to
-    5; ``notes`` receives one entry per distinct storage found.
-    """
+    """Walk a candidate root and harvest any Tolino storage entries found."""
     found = {}
     seen_dirs = set()
     if not os.path.isdir(path):
@@ -1391,14 +1276,7 @@ def _collect_storage_under(path, notes):
 
 
 def _extract_tokens_from_storage(storage_data):
-    """Extract refresh_token and hardware_id from a storage snapshot.
-
-    Handles plain strings, JSON bundles and the Tolino web reader's real
-    format: CryptoJS-AES-encrypted "userToken"/{"refresh":...} and
-    "userInfos"/JSON({userId, devKey, hardwareId}) blobs (passphrase from
-    the reader's src/config.json, currently the empty string).
-    Never logs token values.
-    """
+    """Extract refresh_token and hardware_id from a storage snapshot."""
     refresh_token = None
     hardware_id = None
 
@@ -1495,17 +1373,10 @@ HARDWARE_VALUE_KEYS = ("hardware_id", "hardwareId", "device_id", "deviceId")
 READER_AES_PHRASES = ("",)
 
 
-# --- Candidate ordering -----------------------------------------------------
-# Browser storages keep every historical token copy from past background
-# rotations; LevelDB scan order is file-name order, not recency order. The
-# reader's CURRENT token lives in the newest write, which Chromium keeps in
-# the write-ahead .log (values there overwrite the older .ldb copies for the
-# same key) and Firefox keeps in the WAL of its LSNG data.sqlite (the legacy
-# webappsstore.sqlite shadow copy is only written while Firefox is closed).
-# We therefore tag every harvested value with a recency tier and sort the
-# candidate lists by it before validation: freshest candidates first, so the
-# live token-endpoint validation adopts the reader's current token instead of
-# spending time (and login attempts) on stale history first.
+# --- Kandidaten-Sortierung --------------------------------------------------
+# Storage haelt alle historischen Kopien; Scan-Reihenfolge ist nicht die
+# Aktualitaet. Der aktuelle Token steht im juengsten Write (Chromium:
+# write-ahead .log, Firefox: LSNG-WAL) -- dort wird zuerst gesucht.
 
 _RECENCY_LIVE = 0    # newest write: Chromium .log / Firefox LSNG WAL
 _RECENCY_LDB = 1     # Chromium .ldb / any Firefox row
@@ -1525,13 +1396,7 @@ def _recency_tier(value):
 
 
 def _sort_candidates_by_recency(candidates):
-    """Return candidates sorted freshest-first, deduplicated, order kept.
-
-    Tolino web-reader refresh tokens are JWTs carrying their issue time in
-    the unencrypted payload ("iat"), so when available the true token age
-    outranks the storage-level recency heuristic -- the newest written copy
-    is exactly the one the reader is currently using.
-    """
+    """Return candidates sorted freshest-first, deduplicated, order kept."""
     ordered = []
     for candidate in candidates:
         if candidate and candidate not in ordered:
@@ -1570,13 +1435,7 @@ def _sort_hardware_candidates(candidates):
 
 
 def _jwt_payload(token):
-    """Decode the unverified payload of a JWT-style token (or None).
-
-    Tolino web-reader refresh tokens are signed JWTs whose payload carries
-    "iat"/"exp"/"sid" in plain base64url. The signature is not checked here
-    (we never trust the token, we hand it to the token endpoint); only the
-    metadata is read to order and describe candidates.
-    """
+    """Decode the unverified payload of a JWT-style token (or None)."""
     try:
         parts = str(token or "").split(".")
         if len(parts) != 3 or not parts[1]:
@@ -1605,13 +1464,7 @@ def _refresh_token_iat(token):
 
 
 def _jwt_shaped(text):
-    """True when the text itself looks like a JWT (three base64url parts).
-
-    Used when sweeping storage values whose KEY carries no credential
-    name: only a real JWT (or a JSON object with credential fields) is
-    accepted there, so unrelated storage clutter is never mistaken for a
-    refresh token.
-    """
+    """True when the text itself looks like a JWT (three base64url parts)."""
     text = str(text or "")
     parts = text.split(".")
     if len(parts) != 3 or len(text) < 80:
@@ -1642,13 +1495,7 @@ def _candidate_age_text(token, now=None):
 
 
 def _keycloak_verdict(text):
-    """True when an error message carries a definitive Keycloak rejection.
-
-    Matches the raw OAuth response ("invalid_grant") as well as the
-    client's rewritten messages ("Session not active", "reused or
-    invalid"). Anything else -- WAF pages, network resets, 5xx -- proves
-    nothing about the token itself and must not burn a candidate.
-    """
+    """True when an error message carries a definitive Keycloak rejection."""
     folded = str(text).casefold()
     return ("invalid_grant" in folded or "not active" in folded
             or "reuse exceeded" in folded
@@ -1668,18 +1515,7 @@ def _candidate_sid(token):
 
 
 def _select_candidate_round(refreshes, seen_spent):
-    """Pick the best untried candidates for one validation round.
-
-    Keycloak binds every refresh token of one web-reader login to a session
-    ('sid'); within a session only the NEWEST issued token is ever valid,
-    and replaying a spent sibling can trigger Keycloak's reuse protection
-    and kill the live session outright. So: group the untried candidates by
-    session, keep only the freshest 'iat' per session (candidates without a
-    sid are their own group), and never touch candidates from sessions that
-    already produced a spent token this run -- Keycloak's reuse
-    protection is not picky about WHICH sibling was replayed, so one
-    definitively rejected token marks the whole session dead.
-    """
+    """Pick the best untried candidates for one validation round."""
     by_sid = {}
     order = []
     for token in refreshes or ():
@@ -1726,12 +1562,8 @@ def _validate_one(partner_id, hardware_id, candidate):
     try:
         client._login()
     except TolinoAuthError as exc:
-        # _login wraps EVERY failure in TolinoAuthError -- including pure
-        # transport trouble ("Tolino authentication failed: <urlopen error
-        # ...>"). Only a definitive Keycloak verdict marks the candidate
-        # spent; a bot-protection page or network hiccup must never burn a
-        # possibly-live token (earlier versions dropped it here, which is
-        # why runs kept failing while the fresh token was still valid).
+        # Nur ein eindeutiger Keycloak-Verdacht markiert einen Kandidaten als
+        # verbraucht -- Transportfehler duerfen niemals einen Live-Token brennen.
         if _keycloak_verdict(exc):
             return ("spent", None, None)
         return ("unclear", None, None)
@@ -1747,18 +1579,7 @@ def _validate_one(partner_id, hardware_id, candidate):
 
 
 def validate_refresh_candidates(partner_id, hardware_id, candidates):
-    """Live-validate scraped refresh tokens; return the fresh pair or None.
-
-    Browser storages keep spent tokens from earlier background rotations and
-    LevelDB scan order is not recency order, so candidates are tried in
-    order against the token endpoint. The rotated refresh token of the first
-    accepted grant is returned together with the hardware ID (the login
-    spends one candidate per attempt; a candidate that is already spent
-    cannot be adopted anyway). Older siblings of the same Keycloak session
-    ('sid') are skipped: only the newest token of a session can be valid.
-    Unclear failures skip the candidate just like a spent one;
-    ``_validate_one`` callers can tell the difference.
-    """
+    """Live-validate scraped refresh tokens; return the fresh pair or None."""
     for candidate in _select_candidate_round(candidates, set()):
         verdict, rotated, hw = _validate_one(partner_id, hardware_id,
                                              candidate)
@@ -1768,17 +1589,7 @@ def validate_refresh_candidates(partner_id, hardware_id, candidates):
 
 
 def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
-    """Return (refresh_candidates, hardware_candidates) as ordered lists.
-
-    Browser storages keep historical entries after every background token
-    rotation, and LevelDB scan order is not recency order, so the first
-    match can be a spent token. Callers should validate candidates one by
-    one until one is accepted by the token endpoint.
-
-    ``recency`` marks how fresh the underlying snapshot is: values harvested
-    from a Chromium write-ahead .log (the newest writes) are recorded in the
-    live tier so candidate ordering can put them first.
-    """
+    """Return (refresh_candidates, hardware_candidates) as ordered lists."""
     refresh_candidates = []
     hardware_candidates = []
 
@@ -1809,14 +1620,7 @@ def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
         return found
 
     def shaped(value, mode, trusted):
-        """Best non-ciphertext token text for a storage value (or None).
-
-        ``trusted`` marks values found under a credential-named key: only
-        those may return arbitrary plain text. Swept values without a
-        known key name must themselves look like a credential (JWT shape
-        or a JSON object carrying a credential field) so storage clutter
-        is never mistaken for a refresh token.
-        """
+        """Best non-ciphertext token text for a storage value (or None)."""
         names = TOKEN_VALUE_KEYS if mode == "refresh" else HARDWARE_VALUE_KEYS
         for plain in candidates_for(value, mode):
             if not plain:
@@ -1845,12 +1649,8 @@ def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
                             return plain_inner
         return None
 
-    # Sweep EVERY storage value for credential shapes, regardless of its
-    # key name. The Keycloak web reader stores its current token set inside
-    # an opaque blob under keys like "oidc.user:<issuer>:webreader" -- a
-    # key-name filter ("refresh", "t_auth", ...) misses exactly the entry
-    # that holds the LIVE token, which is why past runs kept adopting only
-    # the historical (spent) copies while the current token stayed hidden.
+    # Jeder Storage-Wert wird auf Credential-Formen geprueft, egal welcher
+    # Schluessel: der Live-Token liegt im opaken "oidc.user:..."-Blob.
     for key, value in storage_data.items():
         key_lower = str(key).casefold()
         refresh_trusted = any(name in key_lower
@@ -1867,19 +1667,7 @@ def _extract_all_tokens_from_storage(storage_data, recency=_RECENCY_LDB):
 
 
 def scrape_browser_tokens(diagnose=False, all_candidates=False):
-    """Read Tolino refresh_token/hardware_id from installed browsers.
-
-    With ``all_candidates`` the return value becomes
-    ``(refresh_candidates, hardware_candidates, notes)`` with ordered lists
-    of every credential found: storages keep spent tokens from previous
-    background rotations, so callers validate them one by one.
-
-    Supports modern Chromium LevelDB stores (Chrome, Edge, Brave, Chromium,
-    Vivaldi, Opera) and modern Firefox LSNG (webappsstore.sqlite) without any
-    third-party module. Files are read raw (no database locks), so the browser
-    may still be running. When ``diagnose`` is true, returns a third element:
-    a redacted list describing what was scanned (no token values).
-    """
+    """Read Tolino refresh_token/hardware_id from installed browsers."""
     notes = []
     checked = []
     all_keys = {}
@@ -2061,12 +1849,7 @@ def hardware_id():
 
 
 def normalize_hardware_id(value):
-    """Bring a hardware ID into the web reader's 8-4-4-4-12 UUID shape.
-
-    The web reader sends `dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1`; a compact
-    32-hex variant (no dashes) is converted rather than rejected, anything
-    else is kept as-is so non-hex legacy device IDs still work.
-    """
+    """Bring a hardware ID into the web reader's 8-4-4-4-12 UUID shape."""
     text = str(value or "").strip()
     if not text:
         return ""
@@ -2109,12 +1892,8 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         return
 
 
-# Partners whose OAuth endpoint does not accept localhost redirect URIs,
-# identified by the stable Tolino reseller_id (the plugin-internal partner
-# ID was renumbered before): Orell Füssli (reseller 8) is Keycloak-based
-# and registers only its Web Reader redirect URIs, so the code flow cannot
-# complete on 127.0.0.1 and Keycloak answers with "Ungültiger Parameter:
-# redirect_uri".
+# Reseller, deren OAuth-Endpunkt keinen localhost-Redirect akzeptiert
+# (reseller 8, Orell Fuessli): registriert sind nur Web-Reader-Redirects.
 LOCAL_CALLBACK_UNSUPPORTED_RESELLERS = ("8",)
 
 
@@ -2144,13 +1923,7 @@ def _candidate_ages_summary(candidates, now=None):
 
 
 def _undatable_shape(token):
-    """Structural fingerprint of an undatable candidate -- never its value.
-
-    Separates "the reader's token is not a JWT" (1 Teil: opaque) from
-    "the grab extracted the wrong value" (5 Teile: JWE/gebrochen) in the
-    field report, so "ohne datierbares JWT-alter" says WHAT was rejected
-    without ever naming it (0.9.32).
-    """
+    """Structural fingerprint of an undatable candidate -- never its value."""
     text = str(token or "")
     parts = text.split(".")
     shape = "%d %s, %d Zeichen" % (
@@ -2162,16 +1935,7 @@ def _undatable_shape(token):
 
 
 def _candidate_age_note(candidates):
-    """Redaktionsfreier Alters-Hinweis fuer Fehlermeldungen.
-
-    Nennt nur das Alter (JWT-iat) des juesten Kandidaten, nie den Wert:
-    "3 Sekunden alt" bedeutet eine frische Anmeldung wurde sofort
-    abgelehnt (Tausch/Extraktion pruefen), "3700 Sekunden alt" eine
-    verbrauchte Kopie aus einem wiederverwendeten Fenster. Damit
-    unterscheidet die Feldmeldung die beiden Faelle auf einen Blick.
-    Undatierte Kandidaten werden stattdessen strukturell beschrieben
-    (Teile, Zeichen, Payload-Lesbarkeit) -- nie der Wert selbst.
-    """
+    """Redaktionsfreier Alters-Hinweis fuer Fehlermeldungen."""
     best = None
     for token in candidates or ():
         issued = _refresh_token_iat(token)
@@ -2189,22 +1953,7 @@ def _candidate_age_note(candidates):
 
 
 def _filter_live_candidates(candidates, max_age_seconds=1800):
-    """Keep only JWT candidates issued within the last minutes.
-
-    The live grab returns the reader's CURRENT token set; anything much
-    older in that set can only be leftover history, so it is dropped
-    instead of being replayed (a replayed token can trip Keycloak's reuse
-    protection and kill the live session). Non-JWT candidates pass
-    through -- they cannot be dated and stay the caller's responsibility
-    (candidates the storage held WRAPPED are unwrapped by
-    ``_normalize_live_grab`` before they ever reach this filter).
-
-    The default cutoff is deliberately generous: Keycloak refresh tokens
-    live about an hour (exp - iat = 3600 s in observed tokens), and the
-    user may take a while between signing in and the grab completing. A
-    2-minute cutoff (the first attempt) rejected the perfectly valid
-    current token of anyone who had signed in more than two minutes ago.
-    """
+    """Keep only JWT candidates issued within the last minutes."""
     now = time.time()
     kept = []
     for token in candidates or ():
@@ -2215,14 +1964,7 @@ def _filter_live_candidates(candidates, max_age_seconds=1800):
 
 
 def _peel_candidate_wrappers(value):
-    """One unwrapping step for a stored candidate; returns peel results.
-
-    The wrappers seen in the field (0.9.33): JSON string quotes,
-    percent-encoding (including encoded dots) and base64/base64url --
-    the three coverings under which the reader hides token parts in its
-    IndexedDB stores. Each layer only yields a candidate when it decodes
-    cleanly; the caller then checks whether the result is a JWT.
-    """
+    """One unwrapping step for a stored candidate; returns peel results."""
     out = []
     stripped = value.strip()
     if (len(stripped) >= 2 and stripped.startswith('"')
@@ -2252,19 +1994,7 @@ def _peel_candidate_wrappers(value):
 
 
 def _decrypt_reader_blob(value):
-    """Plaintexts of a CryptoJS "Salted__" reader blob ([] when none).
-
-    The web reader encrypts its userToken/userInfos entries with
-    CryptoJS.AES.encrypt(value, VERSION.PHRASE) before writing them to
-    storage -- the same OpenSSL format the disk scrape has decrypted
-    all along. The LIVE grab saw only the ciphertext: a 920-character,
-    dot-less "refresh candidate" that no age filter can date and that
-    the endpoint answers with invalid_grant (0.9.34 field report; the
-    curl export shows the exact blob: base64("Salted__" + salt +
-    AES-256-CBC) -- NOT a base64-encoded JWT as 0.9.33 assumed).
-    Decryption runs in Python (stdlib AES, testable without a browser);
-    a wrong phrase or a non-blob simply yields no plaintexts.
-    """
+    """Plaintexts of a CryptoJS "Salted__" reader blob ([] when none)."""
     text = str(value or "")
     if not text or ("Salted__" not in text
                     and not text.lstrip().startswith("U2FsdGVk")):
@@ -2282,12 +2012,7 @@ def _decrypt_reader_blob(value):
 
 
 def _refresh_field_text(json_text):
-    """The refresh-ish string field of a decrypted reader JSON bundle.
-
-    userToken decrypts to {"refresh": "<token-or-nested-blob>",
-    "expireTime": ...}; None for anything else, so an arbitrary
-    decrypted bundle is never mistaken for a credential.
-    """
+    """The refresh-ish string field of a decrypted reader JSON bundle."""
     try:
         parsed = json.loads(json_text)
     except ValueError:
@@ -2302,15 +2027,7 @@ def _refresh_field_text(json_text):
 
 
 def _hardware_from_reader_blob(value):
-    """hardwareId from a decrypted userInfos blob; '' when there is none.
-
-    The live grab reported "0 Hardware-Kandidat(en)" because userInfos
-    only ever appears as ciphertext (0.9.34 field report -- the very
-    curl export the user pointed at carries the hardware id in plain
-    text as a header, and encrypted in this blob). The ciphertext
-    itself is NEVER returned: an undecryptable blob must not travel on
-    as a bogus hardware id.
-    """
+    """hardwareId from a decrypted userInfos blob; '' when there is none."""
     for plain in _decrypt_reader_blob(value):
         try:
             parsed = json.loads(plain)
@@ -2326,24 +2043,7 @@ def _hardware_from_reader_blob(value):
 
 
 def _unwrap_refresh_candidate(token, max_depth=3):
-    """Recover the JWT behind a wrapped, undatable candidate (0.9.33).
-
-    Field report behind this function: exactly ONE live refresh
-    candidate, "1 Teil, 920 Zeichen", rejected by the endpoint (HTTP
-    400, invalid_grant: Invalid refresh token) and undatable ("ohne
-    datierbares JWT-alter"). A JWT always carries two dots -- a dot-less
-    candidate is a WRAPPED form of the token (a ~690-byte JWT
-    base64-encodes to exactly 920 characters), and the wrapped form can
-    never be exchanged: Keycloak cannot parse it at all. So the covering
-    is peeled (up to ``max_depth`` layers: JSON quotes, percent-encoding,
-    base64/base64url) BEFORE the token ever reaches the endpoint.
-
-    A peeled layer only wins when the RESULT itself is a three-part JWT
-    with a readable payload -- a random base64 round-trip of an opaque
-    token passes that test essentially never. If no layer yields a JWT,
-    the original value is returned unchanged (genuinely opaque tokens
-    keep working exactly as before).
-    """
+    """Recover the JWT behind a wrapped, undatable candidate (0.9.33)."""
     text = str(token or "")
     if not text or _jwt_shaped(text):
         return text
@@ -2402,20 +2102,7 @@ def _unwrap_refresh_candidate(token, max_depth=3):
 
 
 def _normalize_live_grab(grabbed):
-    """Unwrap the refresh candidates of ONE grab result (0.9.33).
-
-    Applied exactly where a grab enters the plugin, so every consumer --
-    the 30-minute age filter, the typ-preferring exchange order, the
-    ``tried`` bookkeeping and the age note -- operates on the
-    exchangeable representation instead of the storage wrapper. Without
-    this, a wrapped candidate slipped past the age filter (undatable
-    candidates pass through on purpose) and was then sent to the
-    endpoint in a form that provably fails with invalid_grant.
-
-    Encrypted userInfos hardware blobs are decrypted the same way
-    (ciphertext itself is never returned). Returns the input object
-    unchanged when nothing was unwrapped.
-    """
+    """Unwrap the refresh candidates of ONE grab result (0.9.33)."""
     if not isinstance(grabbed, dict):
         return grabbed
     refresh = []
@@ -2441,14 +2128,7 @@ def _normalize_live_grab(grabbed):
 
 def _exchange_fresh_response(partner_id, hardware, ws_url, token_url,
                              candidate, form, data):
-    """Exchange via in-page fetch and apply the response with full logic.
-
-    The browser-exchange path bypasses ``_login`` entirely, so the
-    ``_apply_token_response`` post-processing (rotation, immediate
-    token_callback persistence, expiry bookkeeping) must be applied
-    explicitly -- same behaviour as the plugin-POST path, but through the
-    reader's own TLS fingerprint. Returns (refresh, hardware).
-    """
+    """Exchange via in-page fetch and apply the response with full logic."""
     client = TolinoClient(partner_id, hardware or "")
     client.refresh = candidate
     client._apply_token_response(data)
@@ -2456,12 +2136,7 @@ def _exchange_fresh_response(partner_id, hardware, ws_url, token_url,
 
 
 def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
-    """Exchange the freshest grabbed candidate; returns (refresh, hardware).
-
-    Split out of ``grab_live_refresh`` so the UI's one-shot live grab can
-    reuse exactly the same endpoint logic (typ-preferring candidate
-    order, single exchange, no replay of the remaining candidates).
-    """
+    """Exchange the freshest grabbed candidate; returns (refresh, hardware)."""
     # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sind
     # kurzlebig und haben denselben JWT-Aufbau -- ein Access-Token am
     # Token-Endpunkt "zu verbrauchen" hilft niemandem und der eigentliche
@@ -2479,13 +2154,9 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     hardware_id = hardware_candidates[0] if hardware_candidates else hardware
     partner = PARTNERS[int(partner_id)]
 
-    # Erster Weg: den Grant IN der Reader-Seite ausfuehren (in-page
-    # fetch). Der Bot-Schutz vor dem Token-Endpunkt akzeptiert die
-    # Anfrage, weil sie denselben TLS-Fingerprint und dieselbe Header-
-    # Familie wie der Web Reader selbst hat -- der Reader stellt sie
-    # ja staendig selbst. Der Plugin-eigene POST (curl_cffi/curl/
-    # urllib) wird dagegen gelegentlich mit dem WAF-403 "Zugriff
-    # geblockt" abgewiesen, obwohl der Token voellig gueltig war.
+    # Grant zuerst IN der Reader-Seite (in-page fetch): dieselben TLS-/Header-
+    # Fingerprints wie der Reader selbst -- der eigene POST wird vom
+    # Bot-Schutz gelegentlich mit WAF-403 abgewiesen.
     try:
         from . import cdp as cdp_module
         ws_url = cdp_module.reader_ws_url()
@@ -2531,55 +2202,22 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     return client.refresh or candidate, client.hardware or hardware_id
 
 
-# Nach einem abgelehnten oder grauen Storage-Kandidaten wird kurz auf
-# eine NEU geschriebene Kopie gewartet, statt eine Rotation zu erzwingen:
-# der Web Reader rotiert im Hintergrund etwa alle 40-60 s und schreibt
-# die frische Kopie dann selbst in den Seiten-Speicher. Lesen, was der
-# Reader schreibt -- kein erzwungener Page.reload, keine Netzwerk-
-# Interception (beides in 0.9.28 entfernt, siehe
-# docs/browser-login-diagnose.md).
+# Nach Ablehnung wird auf eine NEU geschriebene Kopie gewartet: der Reader
+# rotiert selbst alle 40-60 s. Lesen, was der Reader schreibt -- kein
+# erzwungener Reload, keine Netzwerk-Interception.
 _NEW_TOKEN_ATTEMPTS = 30
 _NEW_TOKEN_INTERVAL = 3
-# 0.9.32 -- die Wartezeit richtet sich nach dem Fensterzustand:
-# * Endpunkt des Fensters stumm: nach _WINDOW_MISSES_BEFORE_QUIT
-#   Fehlschlaegen in Folge abbrechen (mehr kann das Fenster nie
-#   liefern), statt die volle Wartezeit zu verbrennen;
-# * Fenster OFFEN, aber ohne Reader-Tab (Sitzung tot, Tab liegt auf der
-#   Anmeldeseite des Buchhändlers): _LOGIN_PAGE_EXTRA_ATTEMPTS weitere
-#   Versuche -- dort kann JETZT neu angemeldet werden, und der naechste
-#   Knopfdruck wiederverwendet dieses Fenster (launch_reader_window-
-#   Reuse). Feldbefund 0.9.31: dieser Zustand wurde als "kein
-#   Web-Reader-Tab" gemeldet und das Fenster trotzdem geschlossen.
+# Wartezeit richtet sich nach dem Fensterzustand:
+# * Endpunkt stumm: nach _WINDOW_MISSES_BEFORE_QUIT abbrechen;
+# * Fenster offen ohne Reader-Tab (Sitzung tot):
+#   _LOGIN_PAGE_EXTRA_ATTEMPTS weitere Versuche -- dort kann neu
+#   angemeldet und das Fenster wiederverwendet werden.
 _LOGIN_PAGE_EXTRA_ATTEMPTS = 30
 _WINDOW_MISSES_BEFORE_QUIT = 3
 
 
 def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     """Read the Web Reader's CURRENT token via a private CDP window.
-
-    Opens a dedicated Chromium window (private profile, DevTools port) on
-    the partner's Web Reader, lets the user sign in there, and reads the
-    token set the live page holds in its JavaScript storage (Chrome
-    DevTools Protocol, see cdp.py). The freshest JWT candidate is then
-    exchanged at the token endpoint -- exactly ONCE, because a token this
-    fresh is the only live one of its session and any replay would only
-    risk Keycloak's reuse protection (the session killer of v0.9.16 and
-    before).
-
-    A candidate the endpoint definitively rejects is spent (the reader
-    already rotated past it): it and its session siblings are never
-    retried. Instead the page storage is re-read (every few seconds, up
-    to ~90 s) until the reader itself writes a NEW candidate, which is
-    then exchanged. If none appears, TolinoAuthError with instructions.
-
-    The grabber window is closed before returning (token adopted) and
-    before a final failure in which it holds nothing exchangeable: a
-    leftover window would keep rotating the very copy the plugin just
-    spent, and its stale profile would poison the next attempt. Every
-    later run then starts with a fresh window and a real sign-in page.
-    The one exception (0.9.32): a window whose tab sits on the partner's
-    sign-in page (the session died) stays OPEN -- the user signs in
-    again right there and the next attempt reuses that window.
 
     Returns (rotated_refresh, hardware_id). Raises TolinoAuthError when
     no Chromium browser is installed -- callers fall back to the
@@ -2614,11 +2252,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                     progress("Token am Token-Endpunkt abgelehnt -- warte "
                              "auf eine frische Rotation des Web Readers ...")
             else:
-                # Der Token gehoert ab jetzt Calibre. Fenster zu: ein
-                # offener Reader rotiert im Hintergrund weiter und wuerde
-                # die uebernommene Kopie verbrauchen -- der Reuse-Schutz
-                # widerruft dann die ganze Sitzung (der Kreislauf hinter
-                # "invalid_grant: Invalid refresh token").
+                # Der Token gehoert ab jetzt Calibre: ein offener Reader rotiert weiter
+                # und wuerde die uebernommene Kopie verbrennen (Reuse-Schutz).
                 if progress:
                     progress("Token übernommen -- das Anmeldefenster "
                              "wird geschlossen.")
@@ -2645,14 +2280,9 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         if more and more.get("refresh"):
             grabbed = more
             continue
-        # Nichts lesbar -- WARUM? Das unterscheidet ein verschwundenes
-        # Fenster (Endpunkt stumm: kann nie mehr etwas liefern; nach
-        # drei Fehlschlaegen abbrechen) von einem offenen Fenster ohne
-        # Reader-Tab (Sitzung tot, Tab auf der Anmeldeseite: dort kann
-        # JETZT neu angemeldet werden -- weiter warten und dazu
-        # auffordern). Ohne diese Unterscheidung endete jeder Fall nach
-        # der vollen Wartezeit mit "Fenster wurde geschlossen, bitte neu
-        # starten" (Feldbefund 0.9.31).
+        # Nichts lesbar -- WARUM? Fenster weg (Endpunkt stumm, nach drei
+        # Fehlschlaegen abbrechen) vs. Fenster offen ohne Reader-Tab (Sitzung
+        # tot: weiter warten und Neu-Anmeldung vor Ort anfordern).
         try:
             window = cdp_module.grabber_window_state()
         except Exception:
@@ -2675,11 +2305,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     except Exception:
         window = {"window": False, "reader_tab": False}
     if window.get("window") and not window.get("reader_tab"):
-        # Offenes Fenster auf der Anmeldeseite: NICHT schliessen -- dort
-        # kann der Nutzer sofort neu anmelden, und launch_reader_window
-        # wiederverwendet genau dieses Fenster beim naechsten Knopfdruck
-        # (Reuse-Pfad). Schliessen wuerde die Fortsetzung vor Ort
-        # zerstoeren (0.9.32).
+        # Fenster auf der Anmeldeseite: NICHT schliessen -- dort kann neu
+        # angemeldet werden; launch_reader_window wiederverwendet es.
         action = ("Das Anmeldefenster ist noch offen und zeigt gerade "
                   "keine angemeldete Web-Reader-Seite: bitte dort im Web "
                   "Reader neu anmelden, bis die Bücherliste lädt, und den "
@@ -2709,24 +2336,12 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
 def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
     """Read the current token from a running grabber window, if any.
 
-    ONE in-page read + at most one endpoint exchange -- no polling loop.
-    The extract button runs on the Calibre GUI thread; blocking it for
-    minutes (the earlier polling version) froze Calibre until the OS
-    killed the session (the "Failed to contact running instance" startup
-    error afterwards).
-
     Returns (refresh, hardware) when a grabber window is alive AND its
     page yielded an exchangeable token; the window is closed first --
     the plugin owns the session now, and a reader left running would
     rotate the adopted copy away (reuse protection kills the session).
     Returns None when no grabber window is running -- the caller should
     then use the historical disk-scrape flow.
-
-    A window that IS running but yields no exchangeable token raises
-    TolinoAuthError (with a redacted page-state summary): silently
-    scraping the disks instead would replay stale storage copies against
-    a session that is open right there in the window -- the exact
-    reuse-protection trap this whole flow exists to avoid.
     """
     from . import cdp as cdp_module
     if not cdp_module.devtools_port_alive():
@@ -2763,24 +2378,12 @@ def try_live_grab_first(partner_id, hardware, timeout=12, single_attempt=True):
 
 
 def in_flatpak_sandbox():
-    """True, wenn dieses Prozess in einer Flatpak-Sandbox läuft.
-
-    Calibre von Flathub (com.calibre_ebook.calibre) teilt seine Sandbox
-    nicht mit dem Host: ohne talk-name=org.freedesktop.Flatpak sind die
-    Browser-Binaries des Rechners und `flatpak run` von hier nicht
-    erreichbar. Feldbefund 0.9.40 (Pop!_OS, Calibre via Flathub):
-    "öffnet sich kein browser".
-    """
+    """True, wenn dieses Prozess in einer Flatpak-Sandbox läuft."""
     return os.path.exists("/.flatpak-info")
 
 
 def _run_open_tool(argv, timeout=20):
-    """Öffner-argv synchron starten; True bei Exit-Code 0.
-
-    Der webbrowser-Weg spawnt asynchron und verrät nie, ob der Öffner
-    danach scheitert -- in einer Sandbox endet das im Warten ohne
-    Fenster. Hier zählt deshalb der Exit-Code.
-    """
+    """Öffner-argv synchron starten; True bei Exit-Code 0."""
     try:
         proc = subprocess.run(argv, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=timeout)
@@ -2790,14 +2393,7 @@ def _run_open_tool(argv, timeout=20):
 
 
 def _run_open_chain(url):
-    """Öffnerkette für sandboxige Umgebungen; True wenn einer startet.
-
-    Reihenfolge: xdg-open (in Flatpak ein dünner Wrapper um das
-    OpenURI-Portal -- der normale Weg zum Browser des Rechners), dann
-    die übrigen Desktop-Öffner, zuletzt `flatpak-spawn --host xdg-open`
-    -- der Start außerhalb der Sandbox, der die talk-name-Freigabe
-    braucht, deren Befehl die Fehlermeldung nennt.
-    """
+    """Öffnerkette für sandboxige Umgebungen; True wenn einer startet."""
     for argv in (["xdg-open"], ["gio", "open"], ["gnome-open"],
                  ["kde-open"], ["x-www-browser"], ["open"]):
         if _run_open_tool(list(argv) + [url]):
@@ -2808,16 +2404,7 @@ def _run_open_chain(url):
 
 
 def open_system_browser(url):
-    """URL im System-Browser öffnen; True, wenn ein Öffner gestartet ist.
-
-    Außerhalb einer Sandbox bleibt das webbrowser-Modul der Weg wie
-    bisher (nur dessen Exceptions gelten als Fehlschlag). In einer
-    Flatpak-Sandbox kommt ZUERST die synchrone Öffnerkette: dort
-    meldet das webbrowser-Modul "could not locate runnable browser"
-    (kein Browser im Sandbox-PATH) oder startet xdg-open asynchron,
-    ohne seinen Fehlschlag zu verraten -- genau das war der Feldbefund
-    "öffnet sich kein browser" bei Calibre über Flathub.
-    """
+    """URL im System-Browser öffnen; True, wenn ein Öffner gestartet ist."""
     sandbox = in_flatpak_sandbox()
     if sandbox and _run_open_chain(url):
         return True
@@ -2833,14 +2420,7 @@ def open_system_browser(url):
 
 
 def open_login_browser(url):
-    """Anmeldelink im Browser öffnen; True wenn ein Öffner gestartet ist.
-
-    Wenn eine Chromium-Variante installiert ist, öffnet DIESE den Link --
-    unabhängig davon, was als Standardbrowser eingestellt ist
-    (Feldbefund 0.9.42: trotz installierter Chromium landete der Link im
-    Firefox, mit dem das Login nicht funktioniert). Ohne Chromium bleibt
-    open_system_browser der Notfall.
-    """
+    """Anmeldelink im Browser öffnen; True wenn ein Öffner gestartet ist."""
     from . import cdp as cdp_module
     try:
         option = cdp_module.pick_chromium()
@@ -2881,14 +2461,7 @@ def _system_browser_open_error():
 
 
 def chromium_available():
-    """True, wenn das Plugin ein eigenes Chromium-Fenster öffnen kann.
-
-    Der Standardbrowser (z. B. Firefox) spielt keine Rolle -- gesucht
-    werden Chrome/Chromium/Brave/Edge: nativ, als Flatpak/Snap und seit
-    0.9.40 in der Flatpak-Sandbox per Host-Sonde. Feldbefund 0.9.41:
-    der Extract-Button soll trotz Standardbrowser Firefox eine
-    Chromium-Fenster öffnen und live lesen.
-    """
+    """True, wenn das Plugin ein eigenes Chromium-Fenster öffnen kann."""
     from . import cdp as cdp_module
     try:
         return cdp_module.pick_chromium() is not None
@@ -2897,12 +2470,7 @@ def chromium_available():
 
 
 def spent_token_advice():
-    """Handlungsempfehlung für den "alle Kandidaten verbraucht"-Dialog.
-
-    Ohne Chromium bleibt nur der Festplatten-Weg -- die Empfehlung nennt
-    dann die Installation statt eines Wegs, der nicht funktionieren
-    kann; in einer Flatpak-Sandbox kommt der Freigabe-Befehl dazu.
-    """
+    """Handlungsempfehlung für den "alle Kandidaten verbraucht"-Dialog."""
     if chromium_available():
         return (
             "Besser: \u201eIm Browser anmelden\u201c benutzen -- das "
@@ -2930,19 +2498,7 @@ def spent_token_advice():
 
 def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
                              progress=None):
-    """Guided browser sign-in for Keycloak partners without local callback.
-
-    Primary path: a private Chromium window (Chrome DevTools Protocol) in
-    which the user signs into the Web Reader; the CURRENT token is read
-    from the live page and exchanged exactly once -- no replay of
-    historical storage copies, which is what kept tripping Keycloak's
-    reuse protection and killing the session in earlier versions.
-
-    Fallback (no Chromium browser installed): the historical disk-scrape
-    flow (``_disk_assisted_login``), which validates harvested storage
-    tokens against the endpoint; there the reader must be CLOSED so the
-    newest token is actually flushed to disk.
-    """
+    """Guided browser sign-in for Keycloak partners without local callback."""
     try:
         return grab_live_refresh(partner_id, hardware, timeout=timeout,
                                  progress=progress)
@@ -2950,12 +2506,8 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
         if "Kein Chromium-Browser gefunden" not in str(exc):
             raise
         if in_flatpak_sandbox():
-            # Feldbefund 0.9.42: "es öffnet weiterhin den Firefox" -- in
-            # der Flatpak-Sandbox bringt der System-Browser nichts (mit
-            # dem klappt das Login nicht), und die Browser des Rechners
-            # sind ohne Freigabe unsichtbar. Der Fehler mit dem
-            # override-Befehl wird stattdessen sichtbar gemacht, statt
-            # still in den Firefox-Fallback zu laufen.
+            # In der Flatpak-Sandbox kein stiller Firefox-Fallback: der Fehler
+            # mit dem override-Befehl wird stattdessen sichtbar gemacht.
             raise
         if progress:
             progress(
@@ -2966,21 +2518,7 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
 
 
 def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
-    """Disk-scrape fallback for Keycloak partners (no Chromium browser).
-
-    Opens the partner's real Web Reader page (never a hand-built authorize
-    URL: Keycloak rejects unregistered redirect URIs with "Ungueltiger
-    Parameter: redirect_uri"), then polls the browser storages and adopts
-    the first candidate the token endpoint accepts.
-
-    Validating a refresh token consumes it (refresh grants rotate), so a
-    candidate the endpoint rejects as "invalid_grant" is remembered and
-    never retried: re-testing spent tokens wastes the whole run. Instead
-    the loop keeps polling and picks up every newly written candidate --
-    the reader writes a fresh one after each background rotation and
-    Chromium flushes its Local Storage to disk when the tab closes, which
-    is exactly when the freshest, never-touched token becomes readable.
-    """
+    """Disk-scrape fallback for Keycloak partners (no Chromium browser)."""
     partner = PARTNERS[partner_id]
     # The Web Reader's own login flow uses the partner's registered redirect
     # URIs, so it can never hit the Keycloak redirect_uri error.
@@ -3002,18 +2540,11 @@ def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
 
     deadline = time.time() + max(30, timeout)
     poll_seconds = 2
-    # The Web Reader refreshes its token roughly every 40-60 s in the
-    # background (refresh_expires_in ~3598 with a proactive rotation well
-    # before expiry). Waiting 20 s of "stability" therefore never wins the
-    # race against an OPEN reader -- and a closed reader writes nothing at
-    # all. So instead of blocking until the storage looks quiet: harvest
-    # candidates each round, remember the ones the token endpoint rejected
-    # (a spent "invalid_grant" token can never come back to life), and
-    # keep polling until a NEWLY written candidate shows up -- typically
-    # right after the reader finished its login or after the user closed
-    # the tab (Chromium flushes its Local Storage to disk on close). That
-    # closes the "all candidates spent" gap in which earlier versions gave
-    # up even though the freshest token had not been written yet.
+    # Der Reader rotiert alle 40-60 s; auf "Stabilitaet" zu warten
+    # gewinnt gegen ein offenes Fenster nie. Statt Blockade: pro Runde
+    # ernten, abgelehnte Kopien (invalid_grant) merken und weiterscannen,
+    # bis ein NEU geschriebener Kandidat erscheint (meist nach Login oder
+    # Tab-Schluss, wenn Chromium den Speicher flush-t).
     seen_spent = set()   # definitively rejected: never retried
     unclear_at = {}      # candidate -> last unclear attempt (time.time)
     tried = 0
@@ -3026,12 +2557,8 @@ def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
             last_note = notes[-1]
         if not refreshes:
             continue
-        # At most ONE endpoint POST per candidate: the token exchange does
-        # not involve the hardware ID (verified against the Web Reader's
-        # own request), so the earlier per-candidate loop over up to three
-        # hardware IDs only burned two extra replay attempts -- and a
-        # replayed token can trip Keycloak's reuse protection, killing the
-        # whole session.
+        # Maximal EIN Endpunkt-POST pro Kandidat: der Tausch braucht keine
+        # Hardware-ID -- Replays wuerden nur den Reuse-Schutz triggern.
         now = time.time()
         pending = []
         for candidate in _select_candidate_round(refreshes, seen_spent):
@@ -3080,23 +2607,15 @@ def _disk_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL):
     )
 
 
-# --- Token keep-alive --------------------------------------------------------
-# Keycloak refresh tokens of the Tolino web reader expire after roughly an
-# hour of idleness (token responses report refresh_expires_in ~3598), so a
-# token adopted from the Web Reader dies between two syncs unless it is
-# rotated regularly. The keep-alive thread performs a silent login every
-# interval and persists the rotated token via the provided callback.
+# --- Token Keep-alive --------------------------------------------------------
+# Keycloak-Refresh-Tokens sterben nach ~1 h Leerlauf; der Keep-alive
+# rotiert sie im Intervall still und speichert sie ueber den Callback.
 _KEEPALIVE_LOCK = threading.Lock()
 _KEEPALIVE_STOP = threading.Event()
 
 
 def keepalive_refresh(get_credentials, persist):
-    """One silent keep-alive login; returns the rotated token or None.
-
-    Never raises: keep-alive is best-effort and failures (expired token,
-    network down) simply leave the stored token untouched. A module-level
-    lock keeps concurrent keep-alive logins from racing each other.
-    """
+    """One silent keep-alive login; returns the rotated token or None."""
     if not _KEEPALIVE_LOCK.acquire(blocking=False):
         return None
     try:
@@ -3127,12 +2646,7 @@ def keepalive_refresh(get_credentials, persist):
 
 
 def start_token_keepalive(get_credentials, persist, interval=45 * 60):
-    """Rotate the stored refresh token every `interval` seconds.
-
-    Runs as a daemon thread for the lifetime of the process; the callback
-    pair keeps it decoupled from the config/UI modules. Calling it twice
-    starts only one keep-alive loop.
-    """
+    """Rotate the stored refresh token every `interval` seconds."""
     if getattr(start_token_keepalive, "_started", False):
         return None
     start_token_keepalive._started = True
@@ -3149,21 +2663,7 @@ def start_token_keepalive(get_credentials, persist, interval=45 * 60):
 
 def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
                   progress=None):
-    """Sign in via the partner's OAuth authorization endpoint.
-
-    Shops on the shared Web Reader (webreader.mytolino.com) register ONLY
-    the reader's redirect URI -- every reseller's OAuth config
-    (v2/resellerconfig) carries that page as URL_OAUTH_REDIRECT, never
-    localhost -- so the authorization code can never flow back to a local
-    callback server. Those shops therefore take the guided path exactly
-    like Orell Füssli: a private Chromium window opens the Web Reader, the
-    user signs in there, the CURRENT token is read from the live page and
-    exchanged exactly once at the token endpoint.
-
-    A shop WITHOUT the shared reader keeps the local callback server: its
-    authorization endpoint accepts a localhost redirect URI, so the code
-    flows back to 127.0.0.1 and is exchanged for a guaranteed-fresh token.
-    """
+    """Sign in via the partner's OAuth authorization endpoint."""
     partner = PARTNERS.get(int(partner_id))
 
     if not partner or not partner.get("auth_url"):
@@ -3232,12 +2732,9 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
     return data["refresh_token"], client.hardware
 
 
-# --- Optional curl transport -------------------------------------------------
-# Tolino's token endpoint sits behind a bot-protection that fingerprints TLS.
-# Python's urllib has a distinctive handshake and is sometimes rejected with a
-# bot-check page, while curl succeeds (it impersonates a common client).
-# When a `curl` binary is available we route HTTP through it; urllib remains the
-# fallback so the plugin still works without curl installed.
+# --- Optionaler curl-Transport -----------------------------------------------
+# Der Token-Endpunkt fingerprintet TLS; curl/curl_cffi impersonieren
+# einen Browser, urllib bleibt Fallback ohne Abhaengigkeiten.
 
 CURL_BINARIES = ("curl",)
 
@@ -3250,14 +2747,7 @@ BROWSER_USER_AGENT = (
 
 
 def _browser_sec_headers():
-    """Browser-consistent Sec-Fetch/Client-Hints headers for token requests.
-
-    The web reader's own token POST (captured via browser DevTools) carries
-    exactly this header family; the bot protection in front of the shop
-    token endpoints answers requests without them with an HTML
-    "Zugriff geblockt" page (HTTP 403). The Chrome major version is derived
-    from BROWSER_USER_AGENT so the UA and the Client Hints stay consistent.
-    """
+    """Browser-consistent Sec-Fetch/Client-Hints headers for token requests."""
     match = re.search(r"Chrome/(\d+)", BROWSER_USER_AGENT)
     major = match.group(1) if match else "153"
     return {
@@ -3287,15 +2777,6 @@ _BOT_CHECK_MARKERS = (
     "request blocked", "<!doctype html",
 )
 
-CURL_CFFI_HINT = (
-    "The bot protection rejected this client's TLS fingerprint. Open the "
-    "plugin dashboard and click \u201ecurl_cffi installieren\u201c (one-click "
-    "installer for Calibre's own Python environment), or run `python3 -m "
-    "pip install --user curl_cffi` and restart Calibre; see README section "
-    "\u201e403-Fehler verstehen\u201c."
-)
-
-
 def _bot_check_detected(detail):
     """True when the response looks like a bot-protection page, not OAuth."""
     return any(marker in str(detail or "").casefold()
@@ -3303,12 +2784,7 @@ def _bot_check_detected(detail):
 
 
 def _waf_block_response(status, raw):
-    """True for a 403 bot-protection page at the token endpoint.
-
-    Only such blocks fall through to the next transport: every other
-    non-2xx (400 invalid_grant ...) must fail immediately, because a
-    replayed refresh grant can trip Keycloak's reuse protection.
-    """
+    """True for a 403 bot-protection page at the token endpoint."""
     if status != 403:
         return False
     text = (raw.decode("utf-8", "replace") if isinstance(raw, bytes)
@@ -3332,45 +2808,12 @@ def _curl_binary():
 # without an OAuth error body).
 def _impersonate_session():
     """Return a curl_cffi session that impersonates Chrome, or None."""
-    Session = None
     try:
         from curl_cffi.requests import Session
     except Exception:
-        # Bootstrap fallback: the one-click install extracts the library
-        # into the plugin directory; import it from there on the fly.
-        bootstrapper = None
-        try:
-            # Works inside any package: calibre_plugins.tolino_cloud_sync
-            # inside Calibre, calibre_plugin in the unit tests.
-            from . import bootstrapper  # type: ignore[no-redef]
-        except Exception:
-            for module_name in ("calibre_plugins.tolino_cloud_sync",
-                                "calibre_plugin"):
-                try:
-                    import importlib
-                    bootstrapper = importlib.import_module(
-                        "%s.bootstrapper" % module_name)
-                    break
-                except Exception:
-                    continue
-        factory = None
-        if bootstrapper is not None:
-            try:
-                factory = bootstrapper.import_from_plugin_dir()
-            except Exception:
-                factory = None
-        if factory is None:
-            return None
-        # Feldbefund 0.9.38: diese Fabrik wurde frueher verworfen und
-        # danach der nicht gebundene Name ``Session`` aufgerufen
-        # (NameError -> None). Der ERSTE Token-Aufruf im Prozess landete
-        # damit immer beim WAF-geblockten System-curl (403, "Zugriff
-        # geblockt"), spaetere Laeufe liefen -- deshalb Diagnose rot,
-        # danach alles gruen.
-        Session = factory
+        return None
     try:
         session = Session(impersonate="chrome")
-        # ``post`` must exist; guard against stubbed/partial installs.
         if not callable(getattr(session, "post", None)):
             return None
         return session
@@ -3482,13 +2925,7 @@ class TolinoClient:
             return self._login()
 
     def _apply_token_response(self, data):
-        """Store the token endpoint response; returns the rotated refresh.
-
-        Split out of ``_login`` so the browser-executed exchange (cdp
-        exchange_refresh_in_browser, same TLS fingerprint as the reader)
-        can reuse exactly the same post-processing: rotation, immediate
-        token_callback persistence, expiry bookkeeping.
-        """
+        """Store the token endpoint response; returns the rotated refresh."""
         if not data.get("access_token"):
             raise TolinoAuthError("Tolino-Token-Antwort enthielt kein access_token.")
         previous_refresh = self.refresh
@@ -3671,14 +3108,9 @@ class TolinoClient:
                                      _extra_headers=_extra_headers)
             if (exc.code == 400 and authenticated
                     and url != self.partner.get("token_url")):
-                # 400 on an authenticated BOSH call: the service answers an
-                # unknown hardware id with an empty "{}" (Feldbefund 0.9.35:
-                # login worked, inventory/delta died in "Vorbereitung
-                # fehlgeschlagen"). Adopt the account's registered device or
-                # register ours, then retry -- after registerhw with a short
-                # wait, because the freshly registered id is accepted only
-                # moments later (Feldbefund 0.9.36: the immediate retry of
-                # the first Diagnose test still 400'd, every later click ran).
+                # 400 am authentifizierten BOSH-Call = unbekannte Hardware-ID (Antwort:
+                # leeres "{}"): Geraet uebernehmen/registrieren und nach kurzem Warten
+                # (registerhw braucht einen Moment) wiederholen.
                 if _retry:
                     self._hw_registered_now = False
                     try:
@@ -3705,7 +3137,7 @@ class TolinoClient:
                         and _bot_check_detected(self.last_error_text)):
                     # Kurz warten und den Transport-Wechsel erneut
                     # probieren (zwei Warteversuche, danach sichtbarer
-                    # Fehler mit curl_cffi-Hinweis).
+                    # Fehler).
                     time.sleep(_WAF_RETRY_SECONDS[0] if _retry is True
                                else _WAF_RETRY_SECONDS[1])
                     return self._request(
@@ -3715,21 +3147,14 @@ class TolinoClient:
                 self.access = None
                 message = (_compact_error_text(self.last_error_text)
                            or "no response detail")
-                if (_bot_check_detected(self.last_error_text)
-                        and self.last_transport != "curl_cffi"
-                        and _impersonate_session() is None):
-                    message += " " + CURL_CFFI_HINT
                 raise TolinoAuthError(
                     "Tolino hat die Anmeldung abgelehnt (%s): %s" % (exc.code, message)
                 )
             raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
 
-        # Route token-endpoint POSTs through an impersonating transport when
-        # available: the bot protection behind it fingerprints TLS and is
-        # friendlier to Chrome's handshake (curl_cffi impersonate="chrome",
-        # exactly what the pytolino reference client does) than to urllib's.
-        # Plain curl and urllib remain as fallbacks so the plugin still works
-        # without optional dependencies.
+        # Token-Endpunkt bevorzugt ueber curl_cffi (impersonate="chrome") --
+        # der Bot-Schutz mag Chrome-TLS lieber; curl und urllib bleiben
+        # Fallbacks ohne optionale Abhaengigkeiten.
         if data is not None and url == self.partner.get("token_url"):
             session = _impersonate_session()
             if session is not None:
@@ -3855,13 +3280,7 @@ class TolinoClient:
     DEVICES_URL = "https://bosh.pageplace.de/bosh/rest/handshake/devices/list"
 
     def fetch_hardware_id(self):
-        """Return the most recently used hardware ID registered for the account.
-
-        Mirrors pytolino's device-list flow: POST accounts with the access
-        token, read deviceListResponse.devices sorted by deviceLastUsage and
-        take the latest entry's deviceId. Useful after a fresh web reader
-        login, when the account's registered device is unknown.
-        """
+        """Return the most recently used hardware ID registered for the account."""
         payload = {
             "deviceListRequest": {
                 "accounts": [{
@@ -3892,14 +3311,7 @@ class TolinoClient:
                 pass
 
     def _register_hardware(self):
-        """Register this hardware id at the BOSH service (reference flow).
-
-        tolino-python and pytolino register the device (registerhw)
-        before calling any BOSH endpoint; without a registration the
-        service answers inventory/delta with HTTP 400 and an empty "{}"
-        for hardware ids it does not know (field report 0.9.35). Best
-        effort: False when neither endpoint variant accepts us.
-        """
+        """Register this hardware id at the BOSH service (reference flow)."""
         payload = {"hardware_name": "other"}
         extra = {
             "hardware_type": "HTML5",
@@ -3918,15 +3330,7 @@ class TolinoClient:
         return False
 
     def _recover_device_registration(self):
-        """Adopt or register a hardware id the BOSH service accepts (0.9.35).
-
-        Triggered by a 400 on an authenticated non-token request: first
-        adopt the account's most recently used device from
-        handshake/devices/list (the web reader's own session lives
-        there); when that yields nothing, register the hardware id we
-        carry. Returns True when something changed and a single retry
-        may succeed; never raises -- the original error must surface.
-        """
+        """Adopt or register a hardware id the BOSH service accepts (0.9.35)."""
         if self._in_device_recovery:
             return False
         self._in_device_recovery = True

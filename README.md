@@ -1,7 +1,15 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.43** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
+Plugin-Version: **0.9.44** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
+
+## Läuft auf
+
+- **Windows 11** — getestet
+- **Linux mit nativ installiertem Calibre** — getestet
+- **Linux mit Calibre als Flatpak (Flathub)**, z. B. **Pop!_OS** — getestet;
+  die Browser des Rechners brauchen dort eine einmalige Freigabe
+  (siehe „Häufige Fehlermeldungen“)
 
 ## Installation
 
@@ -14,96 +22,55 @@ laden**, dann Calibre neu starten.
 
 ## Einrichtung
 
-Dialog **Tolino Cloud Sync**: Buchhändler und Hardware-ID prüfen, Refresh-Token
-eintragen, Formate festlegen → **3. Vergleichen und hochladen**. Der
-Bestandsvergleich gruppiert die Auswahl zum Hochladen nach oben (danach Titel,
-Autoren), ein Klick auf den Spaltenkopf sortiert um, **In Calibre**/**In Cloud**
-zeigt, wo jedes Buch liegt, und die Cloud-Aktionen (Herunterladen, Sammlungen,
-Gelesen) erklären sich über Tooltipps. Unten bestätigt **Auswahl hochladen**
-den Upload.
+Dialog **Tolino Cloud Sync**: Buchhändler, Hardware-ID und Refresh-Token prüfen,
+Formate festlegen → **Vergleichen und hochladen** (Auswahl nach oben sortiert,
+Spaltenköpfe klicken sortiert um, **In Calibre**/**In Cloud** zeigt die Lage jedes
+Buchs, Tooltips erklären die Cloud-Aktionen).
 
 ## Refresh-Token beschaffen
 
-**Empfohlen: „Im Browser anmelden (frischen Token holen)".**
+**Empfohlen: „Im Browser anmelden (frischen Token holen)“** — das eigene
+Chromium-Fenster öffnet den Web Reader, dort bis zur **Bücherliste** anmelden;
+das Plugin liest den Token live und schließt das Fenster danach selbst.
 
-1. Das eigene Chromium-Fenster öffnet den Web Reader — dort **anmelden**, bis die
-   **Bücherliste** lädt,
-2. Fenster offen lassen — das Plugin liest den Token live und speichert ihn,
-3. bei „Token gespeichert" schließt sich das Fenster automatisch.
-
-Alternativen:
-
-- **„Token aus laufendem Web Reader übernehmen"** liest den Token live: ist ein
-  Anmeldefenster offen, wird es ausgelesen; sonst öffnet das Plugin selbst ein
-  eigenes Chromium-Fenster auf dem Web Reader (Ihr Browser bleibt geöffnet, danach
-  schließt nur dieses Fenster). Nur ohne Chromium werden die Festplatten-Kopien
-  geprüft (alle Browserfenster vorher schließen).
-- **Ohne Chromium:** Knopf drücken → Web Reader im Systems-Browser öffnen →
-  **alle Browserfenster schließen** → Knopf erneut drücken. (Mit Calibre als
-  Flatpak zuerst die Freigabe erteilen — sonst bricht die Anmeldung mit Hinweis
-  ab, statt im Standardbrowser zu landen.)
+- **Ohne Chromium:** Knopf drücken → Web Reader im System-Browser öffnen → **alle
+  Browserfenster schließen** → Knopf erneut drücken. (Flatpak: zuerst die Freigabe
+  aus der Tabelle unten erteilen.)
 - **Manuell:** F12 → Netzwerk → Aufnahme an → im Web Reader anmelden →
   `hardware_id` (Filter `registerhw`) und `refresh_token` (Filter `token`) kopieren.
 
-**Wichtig:** Tolino-Tokens sind nach einmaliger Nutzung ungültig (`invalid_grant`).
-Kein Inkognito-Fenster.
+**Wichtig:** Tolino-Tokens sind nach einmaliger Nutzung ungültig (`invalid_grant`);
+kein Inkognito-Fenster.
 
 ### Häufige Fehlermeldungen
 
 | Meldung | Tun |
 |---|---|
-| „… warte auf eine frische Rotation des Web Readers" | Token verbraucht; das Plugin wartet bis zu ~90 s auf eine neu geschriebene Kopie. Fenster offen lassen. |
-| „… weder frischer Token … noch nachgeschoben", **„Fenster ist noch offen"** | Das Fenster zeigt die Anmeldeseite: **dort** neu anmelden (Bücherliste laden) und den Knopf erneut drücken — das Fenster bleibt offen und wird wiederverwendet. |
-| dieselbe Meldung, „Fenster wurde geschlossen" | Verbrauchter Token: Browser-Anmeldung erneut starten und im **neuen** Fenster anmelden, bis die Bücherliste lädt. |
-| `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. Gekoderte und verschlüsselte Kandidaten entpackt das Plugin automatisch vor dem Tausch. |
-| HTTP 403 „Zugriff geblockt" | Bot-Schutz. Am Token-Endpunkt wartet das Plugin kurz und wiederholt den Aufruf automatisch (2×); bleibt die 403, → unten „Bot-Schutz-Komponente installieren". |
-| „Tolino HTTP 400: {}" / „Vorbereitung fehlgeschlagen" | Unbekannte Hardware-ID am BOSH-Dienst: ab 0.9.35 übernimmt bzw. registriert das Plugin das Gerät automatisch und wiederholt den Aufruf (seit 0.9.37 mit kurzer Wartezeit nach `registerhw`); die echte Servermeldung steht jetzt im Fehler. |
-| „Der System-Browser konnte nicht geöffnet werden" / es öffnet sich **gar kein Browser** (Calibre via Flathub, z. B. Pop!_OS) | Ab 0.9.40 startet die Sandbox-Kette die Öffner synchron: xdg-open (Portal) → gio → `flatpak-spawn --host`. Ohne Wirkung einmalig die Freigabe erteilen — User-Installation: `flatpak override --user --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre`, System-Installation: `sudo flatpak override --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre` (ohne `--user`; `flatpak info` zeigt, welche Installation gilt) — danach Calibre **vollständig** neu starten. Ohne Freigabe als Notfall den Token manuell übernehmen (oben). |
-| „Es wurden … Refresh-Token gefunden, aber alle waren bereits verbraucht" | Alte Festplatten-Kopien. Ab 0.9.41 öffnet der Knopf „Token aus laufendem Web Reader übernehmen" selbst ein eigenes Chromium-Fenster und liest live (danach schließt nur dieses Fenster, nie der eigene Browser); ohne Chrome/Chromium/Brave einmalig installieren. |
-| Es öffnet sich nur Firefox / das eigene Fenster bleibt zu | Ab 0.9.42 wird eine **installierte Chromium-Variante überall zuerst genutzt** – egal welcher Standardbrowser eingestellt ist: erweiterte Suche (auch `chrome`, Beta/Dev-Varianten, feste Installationsorte bei reduziertem PATH), der Anmeldelink geht direkt an die Chromium, und in der Flatpak-Sandbox bricht die Anmeldung sichtbar mit dem `flatpak override`-Hinweis ab statt still im Firefox zu landen. Ohne installierte Chromium-Variante: bitte eine installieren. |
-| Flatpak-Meldung „Freigabe erteilen“ bleibt, obwohl der Befehl lief (0.9.43) | Die Host-Sonde deutete zuvor jeden Fehlercode ihres eigenen Prüfskripts als fehlende Freigabe und verwarf dabei die gefundenen Browser. Ab 0.9.43 meldet sie verlässlich, und die Meldung nennt beide Varianten (User: `flatpak override --user …`, System: `sudo flatpak override …` ohne `--user`) plus Nachweis: `flatpak info --show-permissions com.calibre_ebook.calibre` muss `org.freedesktop.Flatpak` zeigen. Calibre danach **vollständig** neu starten — laufende Fenster behalten die alten Rechte. |
+| „warte auf eine frische Rotation …“ / „Fenster ist noch offen“ | Fenster zeigt die Anmeldeseite: **dort** neu anmelden (Bücherliste laden), Knopf erneut — das Fenster bleibt offen und wird wiederverwendet. „Fenster wurde geschlossen“: Browser-Anmeldung neu starten und im **neuen** Fenster anmelden. |
+| `invalid_grant` / „alle verbraucht“ | Live-Weg benutzen; Festplatten-Kopien nur mit geschlossenen Browserfenstern lesen (gekoderte/verschlüsselte Werte entpackt das Plugin automatisch). |
+| HTTP 403 „Zugriff geblockt“ | Bot-Schutz: das Plugin wartet und wiederholt den Aufruf automatisch (zwei Warteversuche mit Transportwechsel); bleibt die 403, später erneut versuchen. |
+| „Tolino HTTP 400: {}“ / „Vorbereitung fehlgeschlagen“ | Unbekannte Hardware-ID: das Gerät wird automatisch übernommen bzw. registriert und der Aufruf wiederholt. |
+| Flatpak: kein Browser / „Freigabe erteilen“ | Einmalig erlauben, danach Calibre **vollständig** neu starten: User-Installation `flatpak override --user --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre`, System-Installation dasselbe mit `sudo` ohne `--user`. Wirksam? `flatpak info --show-permissions com.calibre_ebook.calibre` muss `org.freedesktop.Flatpak` zeigen. |
+| Es öffnet sich nur Firefox / das eigene Fenster bleibt zu | Eine installierte Chromium-Variante (Chrome/Chromium/Brave/Edge) wird immer zuerst genutzt, egal welcher Standardbrowser eingestellt ist — ohne eine davon bitte eine installieren. |
 
-## Konten und Tolino-IDs
+## Konten
 
-Jedes Konto speichert seine Tolino-Cloud-Zuordnung (Buch-ID je Buch) selbst —
-der Wechsel im Dialog aktiviert das Konto sofort, State und Keep-alive lesen
-und schreiben dadurch immer genau das angezeigte Konto. Die optionale
-**Tolino-ID-Spalte** ist nur ein Spiegel der Bibliothek: gelesen **und**
-geschrieben wird sie ausschließlich bei **genau einem Konto** (mehrere Konten
-tragen ihre Zuordnung sonst nicht eindeutig in eine globale Spalte).
-
-Alle Buchhandlungen (Thalia, Hugendubel, eBook.de, buecher.de, Osiander,
-Orell Füssli) laufen über denselben Web Reader auf `webreader.mytolino.com`:
-die Browser-Anmeldung öffnet deshalb bei jedem dieser Partner das eigene
-Chromium-Fenster auf dem Web Reader (wie bisher bei Orell Füssli), und der
-Token-Tausch trägt Origin/Referer des Readers.
-
-Feldbefunde und Architektur-Historie: `docs/browser-login-diagnose.md`.
+Jedes Konto speichert seine Tolino-IDs selbst (Kontowechsel wirkt sofort); die
+optionale **Tolino-ID-Spalte** wird nur bei **genau einem Konto** gelesen und
+geschrieben. Alle Buchhandlungen (Thalia, Hugendubel, eBook.de, buecher.de,
+Osiander, Orell Füssli) laufen über den gemeinsamen Web Reader auf
+`webreader.mytolino.com`. Feldbefunde: `docs/browser-login-diagnose.md`.
 
 ## Technik (Kurzfassung)
 
-- **Live-Grab statt Replay:** Keycloak akzeptiert pro Sitzung nur den **neuesten**
-  Refresh-Token. Das Plugin liest ihn direkt aus dem Speicher der laufenden
-  Reader-Seite (CDP) und tauscht genau einmal — als in-page `fetch` mit demselben
-  TLS-Fingerprint wie der Web Reader, dadurch geht es am Bot-Schutz vorbei.
-- **Kandidaten automatisch aufbereiten:** gekoderte Werte (base64/JSON/Prozent) und
-  CryptoJS-verschlüsselte Blöcke (userToken/userInfos) werden vor dem Tausch
-  entpackt bzw. entschlüsselt.
-- **Token-Keep-alive:** Refresh-Tokens verfallen nach ~1 Stunde Untätigkeit; solange
-  Calibre läuft, rotiert das Plugin alle 45 Minuten still weiter.
-
-## 403 und Bot-Schutz
-
-Der Token-Endpunkt prüft TLS-Fingerprints. Transportreihenfolge: **curl_cffi**
-(Chrome-TLS, bei aktivem Bot-Schutz erforderlich) → **curl** → **urllib**. Blockiert ein
-Transport mit 403 (Bot-Schutz-Seite), geht der Aufruf automatisch auf den nächsten
-Transport über — erst wenn alle geblockt sind, wird kurz gewartet und zweimal
-wiederholt. OAuth-Antworten (z. B. `invalid_grant`) brechen dagegen sofort ab, damit kein
-Grant doppelt gesendet wird.
-
-**Ein-Klick:** Button **„Bot-Schutz-Komponente installieren (einmalig)"** lädt die
-curl_cffi-Wheels von PyPI, prüft SHA-256 und entpackt sie in den
-Calibre-Plugin-Ordner — ohne pip, ohne Neustart.
+- **Live-Grab statt Replay:** Keycloak akzeptiert pro Sitzung nur den neuesten
+  Refresh-Token; das Plugin liest ihn per CDP aus der laufenden Reader-Seite und
+  tauscht genau einmal (in-page `fetch`, derselbe TLS-Fingerprint wie der Reader).
+- **Kandidaten automatisch aufbereiten:** gekoderte und CryptoJS-verschlüsselte
+  Werte werden vor dem Tausch entpackt bzw. entschlüsselt.
+- **Token-Keep-alive:** rotiert alle 45 Minuten, solange Calibre läuft.
+- **403-Bot-Schutz:** Transportkette curl → urllib, bei 403 automatischer
+  Wechsel; OAuth-Antworten brechen sofort ab (kein Grant-Replay).
 
 ## Validierung
 
@@ -111,9 +78,3 @@ Calibre-Plugin-Ordner — ohne pip, ohne Neustart.
 python3 -m unittest calibre_plugin.test_sync
 python3 build_plugin.py
 ```
-
-## Weitere Funktionen
-
-- **Hardware-ID automatisch auflösen** aus der Tolino-Geräteliste
-- **Buch herunterladen**, **Sammlungen** und **Gelesen-Markierung** in der
-  Bestandsvergleich-Liste

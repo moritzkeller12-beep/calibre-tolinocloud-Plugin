@@ -1,23 +1,4 @@
-"""Live-Token-Grab über das Chrome DevTools Protocol (CDP).
-
-Warum dieses Modul existiert: Der Web Reader rotiert seinen Refresh-Token
-bei jedem Hintergrund-Refresh, und Keycloak akzeptiert innerhalb einer
-Sitzung nur den NEUESTEN Token. Historische Kopien im Browser-Storage auf
-der Festplatte sind damit zwangsläufig verbraucht -- ihr Replay gegen den
-Token-Endpunkt beantwortet Keycloak mit "invalid_grant" und kann dessen
-Wiederverwendungsschutz auslösen, der die GESAMTE Sitzung widerruft (das
-war der Grund für die "ich werde sofort wieder abgemeldet"-Loop).
-
-Der Ausweg: ein eigenes Chromium-Fenster (privates Profil), in dem der
-Benutzer den Web Reader normal bedient. Sobald die Bücherliste geladen
-ist, lesen wir den AKTUELLEN Token direkt aus dem Seiten-Speicher der
-laufenden Seite (Runtime.evaluate über CDP) -- einmalig, unmittelbar vor
-dem Tausch am Token-Endpunkt. Kein Replay, keine Konkurrenz um den Token.
-
-Verwendet wird eine minimale WebSocket-Implementierung auf sockety
-(RFC 6455 Basiscclient ohne Abhängigkeiten); curl_cffi wird nur als
-optimaler HTTP-Fallback für den WS-Handshake genutzt.
-"""
+"""Live-Token-Grab ueber das Chrome DevTools Protocol."""
 
 import base64
 import json
@@ -75,17 +56,7 @@ def _browser_label_for(path):
 
 
 def _sandbox_host_launchers():
-    """Chromium-Launcher des HOSTS via `flatpak-spawn --host`.
-
-    Für Calibre-Flatpaks (Flathub): weder die Browser-Binaries des
-    Rechners noch `flatpak run` liegen im Sandbox-PATH. Eine einzige
-    Probe läuft AUSSERHALB der Sandbox und liefert native Pfade sowie
-    Host-Flatpak-Apps; ohne talk-name=org.freedesktop.Flatpak endet der
-    Aufruf sofort mit einem Fehler und die Liste bleibt leer -- die
-    Meldung von launch_reader_window nennt dann den override-Befehl.
-    Das Ergebnis steht in ``_host_probe_status`` ("denied" vs. "empty":
-    Freigabe fehlt vs. auf dem Host ist kein Chromium installiert).
-    """
+    """Chromium-Launcher des HOSTS via `flatpak-spawn --host`."""
     global _host_probe_status
     spawn = shutil.which("flatpak-spawn")
     if not spawn:
@@ -101,14 +72,9 @@ def _sandbox_host_launchers():
         "com.google.Chrome com.vivaldi.Vivaldi; do "
         "command -v flatpak >/dev/null 2>&1 && flatpak info \"$a\" "
         ">/dev/null 2>&1 && echo \"FLATPAK $a\"; done"
-        # Der Exit-Code wird bewusst erzwungen: die letzte flatpak-
-        # info-Prüfung der Host-Schleife scheitert auf fast jedem
-        # Rechner (keine der vier Flatpak-Browser installiert). Ohne
-        # `exit 0` lieferte das Skript damit IMMER einen Fehlercode --
-        # die Sonde deutete das als "Freigabe fehlt" (Status
-        # "denied") und warf die gefundenen NATIVE-Zeilen weg.
-        # Feldbefund 0.9.43: der override-Befehl warerteilt, die
-        # Meldung blieb trotzdem und es öffnete kein Anmeldefenster.
+        # `exit 0` erzwingen: die letzte flatpak-info-Pruefung scheitert auf
+        # fast jedem Rechner -- ohne den Fehlercode meldete die Sonde IMMER
+        # "Freigabe fehlt" und verwarf die NATIVE-Treffer (0.9.43).
         "; exit 0"
     )
     try:
@@ -306,12 +272,7 @@ def _reader_url(partner_id):
 
 
 def devtools_port_alive(port=None):
-    """True when a grabber window's DevTools endpoint answers right now.
-
-    Used by callers that want to reuse the running "Im Browser anmelden"
-    window before falling back to disk scraping: a live window always
-    holds the reader's CURRENT token, while disk copies are historical.
-    """
+    """True when a grabber window's DevTools endpoint answers right now."""
     return bool(_http_get_json(
         "http://127.0.0.1:%d/json/version" % (port or _start_port()), 2))
 
@@ -394,11 +355,8 @@ class _Ws:
     def recv_json(self, timeout=10):
         deadline = time.time() + max(1, timeout)
         while True:
-            # RFC 6455 frame header: byte 0 = FIN/opcode, byte 1 = MASK bit
-            # + 7-bit length. The first version dropped byte 1 and read a
-            # third byte as the length -- every CDP response was then cut
-            # at the wrong offsets and Runtime.evaluate never returned a
-            # usable value (the "plugin finds nothing" bug report).
+            # RFC-6455-Framekopf: byte 0 = FIN/opcode, byte 1 = MASK bit + Laenge.
+            # Byte 1 auszulassen kappte jede CDP-Antwort an falscher Stelle.
             header = self._read_exact(2, deadline)
             opcode = header[0] & 0x0F
             length = header[1]
@@ -712,12 +670,7 @@ def _evaluate_raw_in_target(ws_url, expression, timeout=10,
 
 
 def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
-    """Run a JS expression in a DevTools page target, return its JSON value.
-
-    ``await_promise=True`` makes CDP resolve a Promise returned by the
-    expression -- the grab snippet returns one while it enumerates
-    IndexedDB databases (keycloak-js stores the token set there).
-    """
+    """Run a JS expression in a DevTools page target, return its JSON value."""
     try:
         path = ws_url[len("ws://"):]
         host, port, ws_path = _ws_path_to_host_port(path)
@@ -828,11 +781,8 @@ def launch_reader_window(partner_id):
     creationflags = 0
     if os.name == "nt":
         creationflags = 0x00000008  # DETACHED_PROCESS: Calibre bleibt bedienbar
-    # Alle Kandidaten der Reihe nach versuchen: ein defekter erster
-    # Eintrag darf die Anmeldung nicht in den System-Browser-Fallback
-    # schicken, wenn daneben eine lauffähige Chromium-Variante
-    # installiert ist (Feldbefund 0.9.42: installierte Chromium wurde
-    # übersehen, es öffnete der Standardbrowser).
+    # Kandidaten nacheinander versuchen: ein defekter erster Eintrag
+    # darf die Anmeldung nicht in den System-Browser-Fallback schicken.
     attempts = [(list(binary), label)]
     last_error = None
     index = 0
@@ -896,15 +846,7 @@ def read_idb_tokens(ws_url, db_names, timeout=10):
 
 
 def _grab_page_tokens(ws_url, timeout=10):
-    """ONE full storage grab: localStorage, sessionStorage, IndexedDB.
-
-    The main snippet only LISTS the page's IndexedDB database names (it
-    must resolve quickly), while many reader versions keep their CURRENT
-    token set exclusively in those databases --0.9.21 added the separate
-    per-database read, but only the extract button used it. Every live
-    read (extract button, login wait) now goes through this helper so
-    the IndexedDB sets are merged in everywhere.
-    """
+    """ONE full storage grab: localStorage, sessionStorage, IndexedDB."""
     grabbed = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
                                   await_promise=True) or {}
     for bucket in ("refresh", "hardware", "idb"):
@@ -971,12 +913,7 @@ _EXCHANGE_SNIPPET = r"""
 
 
 def _oauth_rejection_reason(body):
-    """Short 'error: description' for a Keycloak/OAuth error frame; '' otherwise.
-
-    WAF HTML pages ("Zugriff geblockt"), fetch failures and unexpected
-    payloads return '' -- they prove nothing about the token itself and
-    must never abort the exchange.
-    """
+    """Short 'error: description' for a Keycloak/OAuth error frame; '' otherwise."""
     text = str(body or "")
     lowered = text.casefold()
     for marker in ("invalid_grant", "invalid_client",
@@ -1026,15 +963,9 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
         return 0, "unparseable page reply"
     status = int(payload.get("status") or 0)
     body = str(payload.get("body") or "")
-    # A 400/401/403 carrying a recognisable OAuth error frame is a
-    # GENUINE answer from the token endpoint (the reader's own TLS
-    # fingerprint got past the bot protection), not a transport failure.
-    # Raising TolinoAuthError here skips the plugin-own fallback POST --
-    # replaying an already-spent grant could only produce a second
-    # rejection plus WAF noise -- and it is exactly the signal the
-    # callers expect: grab_live_refresh / try_live_grab_first catch it
-    # and wait briefly for a NEW candidate before failing with a clear
-    # instruction.
+    # 400/401/403 mit OAuth-Fehlerframe = ECHTE Antwort des Token-Endpunkts:
+    # sofort TolinoAuthError (kein eigener Fallback-POST -- ein Replay
+    # wurde nur erneut abgewiesen); die Rufer warten auf NEUE Kandidaten.
     reason = _oauth_rejection_reason(body) if status in (400, 401, 403) else ""
     if reason:
         raise TolinoAuthError(
@@ -1062,17 +993,7 @@ def reader_ws_url(port=None):
 
 
 def close_grabber_window(timeout=2):
-    """Das private Anmeldefenster schließen; niemals werfend.
-
-    Das Plugin besitzt die Sitzung, sobald ein Tausch erfolgreich war
-    (oder sie als tot feststeht, nachdem der Seiten-Token am Endpunkt
-    abgelehnt wurde). Ein offen gebliebenes Fenster rotiert im
-    Hintergrund weiter und verbraucht damit die soeben übernommene
-    Kopie -- Keycloaks Wiederverwendungsschutz widerruft davon die
-    ganze Sitzung, und der nächste Versuch sieht nur noch eine
-    verbrauchte Kopie (Feldbefund zu 0.9.30). Best effort: ohne
-    laufenden Grabber einfach False, ohne Exception nach oben.
-    """
+    """Das private Anmeldefenster schließen; niemals werfend."""
     try:
         version = _http_get_json(
             "http://127.0.0.1:%d/json/version" % _start_port(), timeout)
@@ -1100,18 +1021,6 @@ def grabber_window_state(port=None, timeout=5):
     """Structured grabber-window state for the login wait loop (0.9.32).
 
     Returns ``{"window", "reader_tab", "login_page"}``:
-
-    * ``window`` False  -- the DevTools endpoint is silent: the window is
-      gone and no further token can ever arrive from it.
-    * ``window`` True, ``reader_tab`` False -- the window lives but no
-      tab is on mytolino.com: the session died and the tab sits on the
-      partner's sign-in page (or is still loading). The user can sign in
-      again RIGHT THERE, and ``launch_reader_window`` reuses this window
-      on the next attempt.
-    * ``reader_tab`` True -- the signed-in reader is there.
-
-    Redacted by construction: foreign URLs are only classified, never
-    returned.
     """
     port = port or _start_port()
     targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
@@ -1134,15 +1043,7 @@ def grabber_window_state(port=None, timeout=5):
 
 
 def describe_grab_state(port=None, timeout=12):
-    """Short diagnostic: reader tab present? any token values visible?
-
-    Redacted by construction -- only counts and store names, never
-    token values. Since 0.9.32 the text separates a vanished window from
-    an open window without a reader tab (partner sign-in page): the two
-    demand different actions from the user, and conflating them produced
-    the field report "kein Web-Reader-Tab im Anmeldefenster offen" for a
-    window that was still open and signable.
-    """
+    """Short diagnostic: reader tab present? any token values visible?"""
     state = grabber_window_state(port, timeout)
     if not state["window"]:
         return "kein Web-Reader-Tab im Anmeldefenster offen"
@@ -1161,22 +1062,7 @@ def describe_grab_state(port=None, timeout=12):
 
 
 def collect_grab(partner_id, port, timeout=180, progress=None):
-    """Poll the grabber window until the reader exposes the current token.
-
-    The in-page grab only returns the reader's CURRENT refresh token, so
-    there is no replay risk; we simply wait (up to `timeout` seconds) for
-    the user to complete the Web Reader sign-in. The moment a token
-    appears it is returned together with any hardware candidate.
-
-    "Window closed" is decided by the DevTools ENDPOINT, never by the
-    URL of the tab: during sign-in the tab leaves mytolino.com for the
-    partner's Keycloak page (e.g. www.orellfuessli.ch/...), and a
-    transient /json/list failure looked identical --0.9.26 reported
-    "Das Anmeldefenster wurde geschlossen" while the user had not even
-    signed in yet (field report). While the endpoint answers, the
-    window counts as open and we keep waiting with a hint; only several
-    consecutive endpoint misses in a row mean the window is gone.
-    """
+    """Poll the grabber window until the reader exposes the current token."""
     deadline = time.time() + timeout
     endpoint_misses = 0
     saw_reader = False

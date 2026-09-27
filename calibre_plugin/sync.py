@@ -40,15 +40,7 @@ def custom_column_available(database):
 
 
 def tolino_column_active(values, database):
-    """ONE rule for the Tolino-ID column: read AND write with exactly one account.
-
-    Die Spalte lebt in der Bibliothek (global), die Sync-Zuordnung lebt
-    je Konto im Konten-State -- bei mehreren Konten koennte die Spalte
-    nur die IDs des zuletzt synchronisierten Kontos spiegeln. Deshalb
-    gilt fuer Lesen UND Schreiben dieselbe Bedingung: genau ein Konto,
-    Spalte vorhanden, Option aktiv. Alles andere speichert die
-    Tolino-IDs eindeutig im jeweiligen Konto.
-    """
+    """ONE rule for the Tolino-ID column: read AND write with exactly one account."""
     if not isinstance(values, dict) or not values.get("use_tolino_column"):
         return False
     if not custom_column_available(database):
@@ -159,12 +151,7 @@ except Exception:
 
 
 def _qt_object_alive(obj):
-    """False for Qt wrappers whose C++ object was already deleted.
-
-    Clicking a button after its inventory table was destroyed crashed the
-    plugin with "wrapped C/C++ object of type QTableWidget has been
-    deleted"; this check turns that into a harmless empty selection.
-    """
+    """False for Qt wrappers whose C++ object was already deleted."""
     if obj is None:
         return False
     if _shiboken is not None:
@@ -553,12 +540,7 @@ def selected_book_ids(comparison_rows):
 
 
 def sort_comparison_rows(comparison_rows):
-    """Bestandsvergleich sortieren: erst Upload-Auswahl, dann Titel, dann Autoren.
-
-    Reine Ordnungshilfe für die Dialogliste: die Zeilen selbst (und ihre
-    Häkchen) bleiben unverändert, nur die Anzeige-Reihenfolge wird stabil
-    und alphabetisch -- mit Upload-Häkchen gruppiert oben.
-    """
+    """Bestandsvergleich sortieren: erst Upload-Auswahl, dann Titel, dann Autoren."""
     def sort_key(row):
         return (
             0 if row.get("selected") else 1,
