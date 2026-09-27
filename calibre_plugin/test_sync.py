@@ -1196,12 +1196,27 @@ class SyncPlanTests(unittest.TestCase):
         self.assertNotIn("127.0.0.1", opened[0])
         self.assertNotIn("redirect_uri", opened[0])
 
-    def test_browser_login_keeps_localhost_callback_for_other_partners(self):
+    def test_browser_login_keeps_localhost_callback_without_shared_reader(self):
+        """Nur Shops OHNE den gemeinsamen Web Reader behalten den
+        lokalen Callback-Server (127.0.0.1). Fuer Thalia, Hugendubel,
+        eBook.de, buecher.de, Osiander und Orell Fuestli (alle mit
+        webreader.mytolino.com) laeuft jetzt der gefuehrte Weg -- deren
+        OAuth-Redirect zeigt auf den Reader, nie auf localhost."""
         opened = []
-        with patch("calibre_plugin.tolino.webbrowser.open",
-                   side_effect=lambda url: opened.append(url) or True):
-            with self.assertRaises(TolinoAuthError):
-                browser_login(1, "test_hardware", timeout=0.2)
+        synthetic = {
+            9: {"name": "Testladen ohne Reader",
+                "key": 99,
+                "reseller_id": "99",
+                "client_id": "webshop01",
+                "scope": "SCOPE_BOSH",
+                "token_url": "https://example.invalid/oauth2/token",
+                "auth_url": "https://example.invalid/oauth2/authorize"},
+        }
+        with patch.dict("calibre_plugin.tolino.PARTNERS", synthetic):
+            with patch("calibre_plugin.tolino.webbrowser.open",
+                       side_effect=lambda url: opened.append(url) or True):
+                with self.assertRaises(TolinoAuthError):
+                    browser_login(9, "test_hardware", timeout=0.2)
         self.assertEqual(1, len(opened))
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1", opened[0])
 
@@ -4814,6 +4829,216 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         self.assertEqual(2, len(seen))
         self.assertEqual([], sleeps)
         self.assertFalse(client._hw_registered_now)
+
+
+class SharedWebreaderPartnerTests(unittest.TestCase):
+    """Alle Shops mit dem gemeinsamen Web Reader verhalten sich wie
+    Orell Fuessli -- ein Profil statt pro Partner nachgebauter
+    Einzelheiten.
+
+    Quelle der Endpunkte/Client-IDs/Scopes: v2/resellerconfig (client
+    TOLINO_WEBREADER), in der JEDER Reseller als OAuth-Redirect
+    https://webreader.mytolino.com/library/ traegt -- der Token-Tausch
+    kommt bei allen Shops von dieser Seite."""
+
+    SHARED = (1, 2, 4, 5, 6, 7, 8)
+
+    def test_shared_reader_covers_every_shop(self):
+        from .tolino import uses_shared_webreader
+        for pid in self.SHARED:
+            partner = PARTNERS[pid]
+            self.assertIn("webreader.mytolino.com", partner["reader_url"], pid)
+            self.assertTrue(uses_shared_webreader(partner), pid)
+        # Buch.de (reseller 6) ist eingestellt, hat keine Endpunkte und
+        # faellt nicht in das Profil -- der klare Fehler bleibt.
+        self.assertFalse(uses_shared_webreader(PARTNERS[3]))
+
+    def test_hugendubel_reader_is_the_shared_reader(self):
+        # webreader.hugendubel.de leitet 301 auf webreader.mytolino.com
+        # (reseller=13&autologin=true) -- ab jetzt direkt dorthin.
+        self.assertEqual(PARTNERS[4]["reader_url"],
+                         PARTNERS[5]["reader_url"])
+
+    def test_ebook_de_partner_matches_reference_config(self):
+        partner = PARTNERS[8]
+        self.assertEqual("eBook.de", partner["name"])
+        self.assertEqual("81", partner["reseller_id"])
+        self.assertEqual("ebookde0501html5readerV0001", partner["client_id"])
+        self.assertEqual("e-publishing", partner["scope"])
+        self.assertEqual("https://www.ebook.de/oauth/token",
+                         partner["token_url"])
+        self.assertEqual("https://www.ebook.de/oauth/authorize",
+                         partner["auth_url"])
+        self.assertEqual(8, force_legacy_partner_id(81))
+        self.assertEqual(8, resolve_partner_id(81))
+
+    def test_corrected_endpoints_match_reader_config(self):
+        self.assertEqual("https://www.hugendubel.de/oauth/token",
+                         PARTNERS[5]["token_url"])
+        self.assertEqual("webreader", PARTNERS[7]["client_id"])
+        self.assertEqual("SCOPE_BOSH", PARTNERS[7]["scope"])
+        self.assertEqual("https://www.buecher.de/auth/oauth2/token",
+                         PARTNERS[7]["token_url"])
+        self.assertEqual("webreader", PARTNERS[2]["client_id"])
+        self.assertEqual("https://www.thalia.at/auth/oauth2/token",
+                         PARTNERS[2]["token_url"])
+
+    def test_token_post_carries_reader_origin(self):
+        """Der Token-POST sieht bei allen Shops aus wie der des Readers."""
+        for pid in (1, 5, 8):
+            captured = {}
+
+            class Response:
+                status = 200
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def read(self):
+                    return b'{"access_token":"a","expires_in":3600}'
+
+            def request(request, timeout):
+                captured.update(
+                    {key.casefold(): value
+                     for key, value in request.headers.items()})
+                return Response()
+
+            with patch("calibre_plugin.tolino._curl_binary",
+                       return_value=None), \
+                    patch("calibre_plugin.tolino._impersonate_session",
+                          return_value=None), \
+                    patch("calibre_plugin.tolino.urlopen", request):
+                TolinoClient(pid, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+                             "refresh-token").login()
+            self.assertEqual("https://webreader.mytolino.com",
+                             captured.get("origin"), pid)
+            self.assertEqual("https://webreader.mytolino.com/",
+                             captured.get("referer"), pid)
+
+    def test_authenticated_requests_send_webreader_client(self):
+        for pid in (1, 5):
+            captured = {}
+
+            class Response:
+                status = 200
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def read(self):
+                    return b"{}"
+
+            def request(request, timeout):
+                captured.update(
+                    {key.casefold(): value
+                     for key, value in request.headers.items()})
+                return Response()
+
+            with patch("calibre_plugin.tolino._curl_binary",
+                       return_value=None), \
+                    patch("calibre_plugin.tolino._impersonate_session",
+                          return_value=None), \
+                    patch("calibre_plugin.tolino.urlopen", request):
+                client = TolinoClient(pid, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
+                                      "refresh-token")
+                client.access = "access-token"
+                client.expires_at = time.time() + 60
+                client._request(
+                    "https://bosh.pageplace.de/bosh/rest/inventory/delta")
+            self.assertEqual("TOLINO_WEBREADER",
+                             captured.get("client_type"), pid)
+            self.assertEqual("5.2.0", captured.get("client_version"), pid)
+
+    def test_browser_login_opens_reader_for_every_shared_shop(self):
+        """Alle Shops mit dem gemeinsamen Reader: der gefuehrte Weg
+        oeffnet den Web Reader selbst, nie einen localhost-Callback."""
+        for pid in (1, 5, 8):
+            opened = []
+            clock = {"t": 1000.0}
+
+            def fake_time():
+                clock["t"] += 1000.0
+                return clock["t"]
+
+            with patch("calibre_plugin.tolino.webbrowser.open",
+                       side_effect=lambda url: opened.append(url) or True), \
+                 patch("calibre_plugin.tolino.scrape_browser_tokens",
+                       return_value=(None, [], [])), \
+                 patch("calibre_plugin.tolino.time.time",
+                       side_effect=fake_time), \
+                 patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
+                with self.assertRaises(TolinoAuthError):
+                    browser_login(pid, "test_hardware")
+            self.assertEqual(1, len(opened), pid)
+            self.assertEqual(PARTNERS[pid]["reader_url"], opened[0])
+            self.assertNotIn("127.0.0.1", opened[0])
+            self.assertNotIn("redirect_uri", opened[0])
+
+
+class AccountStateBindingTests(unittest.TestCase):
+    """Das im Dialog angezeigte Konto IST das Konto, dessen State
+    gelesen und geschrieben wird -- nur eine Quelle je Konto, und die
+    Tolino-ID-Spalte folgt EINER Regel (nur bei genau einem Konto)."""
+
+    def test_account_by_name_ignores_the_active_account(self):
+        accounts = [
+            {"name": "alpha", "state": {"u1": {"tolino_id": "id-a"}}},
+            {"name": "beta", "state": {"u2": {"tolino_id": "id-b"}}},
+        ]
+        self.assertEqual({"u1": {"tolino_id": "id-a"}},
+                         config.account_by_name("alpha", accounts)["state"])
+        self.assertEqual({"u2": {"tolino_id": "id-b"}},
+                         config.account_by_name("beta", accounts)["state"])
+        self.assertEqual({}, config.account_by_name("gone", accounts))
+
+    def test_set_active_account_switches_without_touching_state(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.settings()
+            config.save_account(
+                "alpha", {"state": {"u1": {"tolino_id": "id-a"}}},
+                active="alpha")
+            config.save_account(
+                "beta", {"state": {"u2": {"tolino_id": "id-b"}}},
+                active="beta")
+            config.set_active_account("alpha")
+            values = config.settings()
+            self.assertEqual("alpha", values["active_account"])
+            self.assertEqual({"u1": {"tolino_id": "id-a"}}, values["state"])
+            # Das andere Konto bleibt unberuehrt.
+            self.assertEqual({"u2": {"tolino_id": "id-b"}},
+                             config.account_by_name("beta")["state"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_tolino_column_active_requires_single_account(self):
+        from .sync import tolino_column_active
+
+        class Db:
+            field_metadata = {TOLINO_COLUMN: {}}
+
+        class NoColumn:
+            field_metadata = {}
+
+        values = {"use_tolino_column": True,
+                  "accounts": [{"name": "a"}, {"name": "b"}]}
+        # Zwei Konten: die globale Spalte kann nur das zuletzt
+        # synchronisierte Konto spiegeln -- weder lesen noch schreiben.
+        self.assertFalse(tolino_column_active(values, Db()))
+        values["accounts"] = [{"name": "a"}]
+        self.assertTrue(tolino_column_active(values, Db()))
+        values["use_tolino_column"] = False
+        self.assertFalse(tolino_column_active(values, Db()))
+        values["use_tolino_column"] = True
+        self.assertFalse(tolino_column_active(values, NoColumn()))
+        self.assertFalse(tolino_column_active({}, Db()))
 
 
 if __name__ == "__main__":

@@ -195,6 +195,38 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     Auswahl, Titel, Autoren), neue Spalten „In Calibre"/"In Cloud",
     Tooltips zu den Cloud-Aktionen.
 
+18. **Alle Shops laufen über den gemeinsamen Web Reader (0.9.39):**
+    Feldbefund nach der Orell-Füssli-Fix-Serie (0.9.34–0.9.38): die
+    anderen Buchhandlungen „müssten sich gleich verhalten — die nutzen
+    ja alle webreader.mytolino.com“. Belegt über die OAuth-Konfiguration
+    jedes Resellers (`v2/resellerconfig`, client `TOLINO_WEBREADER`):
+    **jeder** Reseller — thalia.de/at, hugendubel.de, ebook.de,
+    buecher.de, osiander.de, orell fuessli, sogar das eingestellte
+    buch.de — trägt als `URL_OAUTH_REDIRECT`
+    `https://webreader.mytolino.com/library/`, nie localhost. Der
+    localhost-Code-Flow konnte bei ihnen also nie ankommen; nur Orell
+    Füssli lief bislang über den geführten Weg (`LOCAL_CALLBACK_
+    UNSUPPORTED_RESELLERS`). Fix: ein gemeinsames Profil
+    (`uses_shared_webreader()`), das für alle Shops mit diesem Reader
+    denselben Weg öffnet — Chromium-Fenster auf dem Reader, Live-Grab,
+    genau ein Tausch — und am Token-POST dieselben Origin/Referer-
+    Kopfzeilen sowie `client_type`/`client_version`
+    (`TOLINO_WEBREADER`/`5.2.0`) setzt wie Orell Füssli. Endpunkte,
+    Client-IDs und Scopes wurden an derselben Quelle ausgerichtet
+    (u. a. Hugendubel `www.hugendubel.de/oauth/token`, buecher.de
+    `www.buecher.de/auth/oauth2/*` mit `webreader`/`SCOPE_BOSH`, Thalia.at
+    `www.thalia.at/auth/oauth2/*`); Hugendubels alter
+    `webreader.hugendubel.de` leitet 301 auf den gemeinsamen Reader.
+    **eBook.de** fehlte als Partner komplett und ist jetzt Reseller 81
+    neu (Client `ebookde0501html5readerV0001`, Scope `e-publishing`,
+    `www.ebook.de/oauth/{authorize,token}`); das tote Buch.de-Eintrag
+    behält ohne Endpunkte den klaren „keine OAuth-Anmeldeseite“-Fehler.
+    Daneben zwei Konten-Fixes in derselben Runde: der Dialog wechselt
+    das aktive Konto sofort (State/Keep-alive lesen immer das
+    angezeigte Konto, Keep-alive-Persistenz war tot — `settings()`
+    kennt kein `account_name`) und die Tolino-ID-Spalte wird nach
+    EINER Regel gelesen **und** geschrieben (nur bei genau einem Konto).
+
 ## Aktuelle Login-Kette (ab 0.9.35)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)

@@ -32,10 +32,30 @@ class TolinoApiError(TolinoError):
     pass
 
 
+# --- Einheitliches Profil der Shops mit dem gemeinsamen Web Reader ------#
+# FELDBEFUND (v2/resellerconfig, client TOLINO_WEBREADER): JEDER
+# tolino-Reseller -- thalia.de/at, hugendubel.de, ebook.de, buecher.de,
+# osiander.de, orell fuessli, sogar das eingestellte buch.de -- traegt
+# als OAuth-Redirect https://webreader.mytolino.com/library/. Der
+# Token-Tausch kommt also bei ALLEN Shops von dieser Seite, und der
+# gefuehrte Web-Reader-Weg (bisher nur Orell Fuessli) ist der eine Weg
+# fuer alle Shops, die dort liegen: ein Profil statt je Partner
+# nachgebauter Einzelheiten (uses_shared_webreader() entscheidet).
+WEBREADER_URL = "https://webreader.mytolino.com/library/"
+WEBREADER_TOKEN_HEADERS = {
+    "Origin": "https://webreader.mytolino.com",
+    "Referer": "https://webreader.mytolino.com/",
+}
+WEBREADER_CLIENT_TYPE = "TOLINO_WEBREADER"
+WEBREADER_CLIENT_VERSION = "5.2.0"
+
 PARTNERS = {
     # "reseller_id" is the ID the Tolino API expects (headers/protocol);
     # the dict key is just the plugin-internal, consecutive list position.
     # "key" preserves the historic plugin ID for migrating saved settings.
+    # Endpunkte (token_url/auth_url/client_id/scope) folgen der
+    # OAuth-Konfiguration des Resellers aus v2/resellerconfig -- dieselbe
+    # Quelle, aus der der Web Reader seinen eigenen Tausch bedient.
     1: {
         "name": "Thalia.de",
         "key": 3,
@@ -43,17 +63,21 @@ PARTNERS = {
         "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.thalia.de/auth/oauth2/token",
-        "auth_url": "https://www.thalia.de/de.thalia.ecp.authservice.application/oauth2/authorize",
-        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles",
+        "auth_url": "https://www.thalia.de/auth/oauth2/authorize",
+        "reader_url": WEBREADER_URL,
     },
     2: {"name": "Thalia.at",
         "key": 4,
         "reseller_id": "4",
-        "client_id": "webshop01",
+        "client_id": "webreader",
         "scope": "SCOPE_BOSH",
-        "token_url": "https://www.thalia.at/de.buch.appservices/api/4004/oauth2/token",
-        "auth_url": "https://www.thalia.at/de.thalia.ecp.authservice.application/oauth2/authorize",
-        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
+        "token_url": "https://www.thalia.at/auth/oauth2/token",
+        "auth_url": "https://www.thalia.at/auth/oauth2/authorize",
+        "reader_url": WEBREADER_URL},
+    # Buch.de ist eingestellt (www.buch.de leitet auf thalia.de um);
+    # ohne eigene Endpunkte bleibt hier der klare Fehler "keine
+    # OAuth-Anmeldeseite hinterlegt". Der moderne Nachfolger des
+    # Shops steht als Partner 8 (eBook.de) daneben.
     3: {"name": "Buch.de",
         "key": 6,
         "reseller_id": "6",
@@ -80,25 +104,35 @@ PARTNERS = {
         "reseller_id": "13",
         "client_id": "4c20de744aa8b83b79b692524c7ec6ae",
         "scope": "ebook_library",
-        "token_url": "https://api.hugendubel.de/rest/oauth2/token",
+        "token_url": "https://www.hugendubel.de/oauth/token",
         "auth_url": "https://www.hugendubel.de/oauth/authorize",
-        "reader_url": "https://webreader.hugendubel.de/library/index.html"},
+        # webreader.hugendubel.de leitet 301 auf den gemeinsamen Reader
+        # (mit reseller=13&autologin=true) -- ab jetzt direkt dorthin.
+        "reader_url": WEBREADER_URL},
     6: {"name": "Osiander.de",
         "key": 23,
         "reseller_id": "23",
         "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.osiander.de/auth/oauth2/token",
-        "auth_url": "https://www.osiander.de/de.thalia.ecp.authservice.application/oauth2/authorize",
-        "reader_url": "https://webreader.mytolino.com/library/index.html#/mybooks/titles"},
+        "auth_url": "https://www.osiander.de/auth/oauth2/authorize",
+        "reader_url": WEBREADER_URL},
     7: {"name": "Buecher.de",
         "key": 30,
         "reseller_id": "30",
-        "client_id": "webshop01",
-        "scope": "SCOPE_BOSH SCOPE_BUCHDE",
-        "token_url": "https://www.buecher.de/oauth2/token",
-        "auth_url": "https://www.buecher.de/oauth2/authorize",
-        "reader_url": "https://webreader.mytolino.com/library/"},
+        "client_id": "webreader",
+        "scope": "SCOPE_BOSH",
+        "token_url": "https://www.buecher.de/auth/oauth2/token",
+        "auth_url": "https://www.buecher.de/auth/oauth2/authorize",
+        "reader_url": WEBREADER_URL},
+    8: {"name": "eBook.de",
+        "key": 81,
+        "reseller_id": "81",
+        "client_id": "ebookde0501html5readerV0001",
+        "scope": "e-publishing",
+        "token_url": "https://www.ebook.de/oauth/token",
+        "auth_url": "https://www.ebook.de/oauth/authorize",
+        "reader_url": WEBREADER_URL},
 }
 
 # Historic plugin-internal IDs -> new consecutive IDs.
@@ -131,6 +165,20 @@ def force_legacy_partner_id(value):
     except (TypeError, ValueError):
         return value
     return LEGACY_PARTNER_IDS.get(pid, pid)
+
+def uses_shared_webreader(partner):
+    """True when the shop runs on the shared Tolino Web Reader.
+
+    Alle Shops, deren Reader auf webreader.mytolino.com liegen,
+    verhalten sich wie Orell Füssli: gefuehrte Browser-Anmeldung am
+    Reader (nie localhost-Callback), Origin/Referer des Readers am
+    Token-Endpunkt und der Web-Reader-Client als Header -- weil deren
+    OAuth-Redirect genau diese Seite ist (v2/resellerconfig).
+    """
+    if not isinstance(partner, dict):
+        return False
+    return "webreader.mytolino.com" in str(partner.get("reader_url") or "")
+
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 OAUTH_STATE_TTL = 300
@@ -492,7 +540,7 @@ TOLINO_STORAGE_ORIGINS = (
     "orellfuessli.ch",
     "thalia.de", "thalia.at",
     "buch.de", "books.ch",
-    "hugendubel.de", "osiander.de", "buecher.de",
+    "hugendubel.de", "osiander.de", "buecher.de", "ebook.de",
     "buchhaus.ch", "wolters-mauritz.de", "book-club-family.de",
     "delibur.com", "thienemueller.de", "ohlala.ch",
     "keycloak", "auth",  # generic IdP path hints
@@ -2924,17 +2972,18 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
                   progress=None):
     """Sign in via the partner's OAuth authorization endpoint.
 
-    For most partners (Thalia ecosystem) the authorization endpoint accepts
-    a localhost redirect URI, so the authorization code flows back to the
-    local callback server and is exchanged for a guaranteed-fresh token.
+    Shops on the shared Web Reader (webreader.mytolino.com) register ONLY
+    the reader's redirect URI -- every reseller's OAuth config
+    (v2/resellerconfig) carries that page as URL_OAUTH_REDIRECT, never
+    localhost -- so the authorization code can never flow back to a local
+    callback server. Those shops therefore take the guided path exactly
+    like Orell Füssli: a private Chromium window opens the Web Reader, the
+    user signs in there, the CURRENT token is read from the live page and
+    exchanged exactly once at the token endpoint.
 
-    For Keycloak-based partners such as Orell Füssli the shop registers only
-    its own Web Reader redirect URIs, so the code flow cannot complete
-    locally. Instead the browser opens, the user signs in, and the plugin
-    then harvests refresh-token candidates from the browser storages and
-    validates each live against the token endpoint, adopting only the
-    guaranteed-fresh rotated token. If every candidate is spent, the user
-    is told to reload the Web Reader once and retry.
+    A shop WITHOUT the shared reader keeps the local callback server: its
+    authorization endpoint accepts a localhost redirect URI, so the code
+    flows back to 127.0.0.1 and is exchanged for a guaranteed-fresh token.
     """
     partner = PARTNERS.get(int(partner_id))
 
@@ -2951,7 +3000,13 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
             "im Dialog eintragen."
         )
 
-    if str(partner.get("reseller_id")) in LOCAL_CALLBACK_UNSUPPORTED_RESELLERS:
+    # Gemeinsamer Web Reader: ein Weg fuer alle Shops, die dort liegen
+    # (Thalia, Hugendubel, eBook.de, buecher.de, Osiander, Orell
+    # Fuessli) -- der localhost-Callback kann bei ihnen nie ankommen,
+    # weil deren OAuth-Redirect auf webreader.mytolino.com zeigt.
+    if (uses_shared_webreader(partner)
+            or str(partner.get("reseller_id"))
+            in LOCAL_CALLBACK_UNSUPPORTED_RESELLERS):
         return _keycloak_assisted_login(int(partner_id), hardware, timeout,
                                         progress=progress)
 
@@ -3362,14 +3417,22 @@ class TolinoClient:
                 "hardware_id": self.hardware,
                 "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
             })
-            for key in ("client_type", "client_version"):
-                if self.partner.get(key):
-                    headers[key] = self.partner[key]
+            for key, shared in (("client_type", WEBREADER_CLIENT_TYPE),
+                                ("client_version", WEBREADER_CLIENT_VERSION)):
+                value = self.partner.get(key) or (
+                    shared if uses_shared_webreader(self.partner) else None)
+                if value:
+                    headers[key] = value
         elif url == self.partner.get("token_url"):
             # Look like the web reader's own token POST: full Sec-Fetch /
-            # Client-Hints set first, partner-specific Origin/Referer last.
+            # Client-Hints set first, Origin/Referer of the shared Web
+            # Reader last -- jeder Partner mit dem gemeinsamen Reader
+            # bekommt damit exakt die Kopfzeilen von Orell Fuessli.
             headers.update(_browser_sec_headers())
-            headers.update(self.partner.get("token_headers", {}))
+            headers.update(self.partner.get("token_headers")
+                           or (WEBREADER_TOKEN_HEADERS
+                               if uses_shared_webreader(self.partner)
+                               else {}))
         if _extra_headers:
             headers.update(_extra_headers)
         if data is not None:

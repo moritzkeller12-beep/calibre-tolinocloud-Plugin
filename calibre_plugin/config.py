@@ -179,6 +179,28 @@ def save_account(name, values, active=None):
     PREFERENCES.commit()
 
 
+def account_by_name(name, accounts=None):
+    """Return the stored account dict for `name` -- never a different one.
+
+    Der Dialog darf State/Token IMMER unter seinem angezeigten Kontonamen
+    lesen und schreiben; ein anderes "aktives" Konto darf dabei nie
+    hineinspielen (sonst landet die Tolino-ID-Zuordnung im falschen
+    Konto).
+    """
+    items = settings()["accounts"] if accounts is None else accounts
+    for item in items:
+        if isinstance(item, dict) and item.get("name") == name:
+            return item
+    return {}
+
+
+def set_active_account(name):
+    """Switch the active account without touching any stored values."""
+    if name not in {item.get("name") for item in settings()["accounts"]}:
+        return
+    save_account(name, {}, active=name)
+
+
 def save_settings(values):
     """Persist global options and the selected account (legacy-compatible)."""
     current = settings()

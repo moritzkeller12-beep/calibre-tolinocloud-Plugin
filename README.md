@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.38** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
+Plugin-Version: **0.9.39** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -53,6 +53,21 @@ Kein Inkognito-Fenster.
 | `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. Gekoderte und verschlüsselte Kandidaten entpackt das Plugin automatisch vor dem Tausch. |
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz. Am Token-Endpunkt wartet das Plugin kurz und wiederholt den Aufruf automatisch (2×); bleibt die 403, → unten „Bot-Schutz-Komponente installieren". |
 | „Tolino HTTP 400: {}" / „Vorbereitung fehlgeschlagen" | Unbekannte Hardware-ID am BOSH-Dienst: ab 0.9.35 übernimmt bzw. registriert das Plugin das Gerät automatisch und wiederholt den Aufruf (seit 0.9.37 mit kurzer Wartezeit nach `registerhw`); die echte Servermeldung steht jetzt im Fehler. |
+
+## Konten und Tolino-IDs
+
+Jedes Konto speichert seine Tolino-Cloud-Zuordnung (Buch-ID je Buch) selbst —
+der Wechsel im Dialog aktiviert das Konto sofort, State und Keep-alive lesen
+und schreiben dadurch immer genau das angezeigte Konto. Die optionale
+**Tolino-ID-Spalte** ist nur ein Spiegel der Bibliothek: gelesen **und**
+geschrieben wird sie ausschließlich bei **genau einem Konto** (mehrere Konten
+tragen ihre Zuordnung sonst nicht eindeutig in eine globale Spalte).
+
+Alle Buchhandlungen (Thalia, Hugendubel, eBook.de, buecher.de, Osiander,
+Orell Füssli) laufen über denselben Web Reader auf `webreader.mytolino.com`:
+die Browser-Anmeldung öffnet deshalb bei jedem dieser Partner das eigene
+Chromium-Fenster auf dem Web Reader (wie bisher bei Orell Füssli), und der
+Token-Tausch trägt Origin/Referer des Readers.
 
 Feldbefunde und Architektur-Historie: `docs/browser-login-diagnose.md`.
 
