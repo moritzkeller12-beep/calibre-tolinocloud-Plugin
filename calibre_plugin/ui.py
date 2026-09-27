@@ -36,9 +36,11 @@ try:
                        tolino_column_active, update_tolino_ids, TOLINO_COLUMN,
                        TOLINO_COLUMN_LABEL)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                         hardware_id, normalize_refresh_token, sanitize_error,
-                         scrape_browser_tokens, start_token_keepalive,
-                         try_live_grab_first, validate_refresh_candidates)
+                         chromium_available, hardware_id,
+                         normalize_refresh_token, sanitize_error,
+                         scrape_browser_tokens, spent_token_advice,
+                         start_token_keepalive, try_live_grab_first,
+                         validate_refresh_candidates)
 except ImportError:
     bootstrapper = None
     from config import (account_by_name, save_account, save_settings,
@@ -54,9 +56,11 @@ except ImportError:
                       tolino_column_active, update_tolino_ids, TOLINO_COLUMN,
                       TOLINO_COLUMN_LABEL)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                        hardware_id, normalize_refresh_token, sanitize_error,
-                        scrape_browser_tokens, start_token_keepalive,
-                        try_live_grab_first, validate_refresh_candidates)
+                        chromium_available, hardware_id,
+                        normalize_refresh_token, sanitize_error,
+                        scrape_browser_tokens, spent_token_advice,
+                        start_token_keepalive, try_live_grab_first,
+                        validate_refresh_candidates)
 
 
 def _plugin_version():
@@ -638,9 +642,12 @@ class SyncDashboard(QDialog):
         self.scrape_browser = QPushButton(
             "Token aus laufendem Web Reader übernehmen")
         self.scrape_browser.setToolTip(
-            "Liest den aktuellen Token aus einem schon offenen Reader-"
-            "Fenster; ohne solches werden die Festplatten-Kopien der "
-            "Browser geprüft (alle Fenster vorher schließen).")
+            "Liest den Token live: ist ein Anmeldefenster offen, wird "
+            "es ausgelesen. Sonst öffnet das Plugin ein eigenes "
+            "Chromium-Fenster auf dem Web Reader – Ihr Browser bleibt "
+            "geöffnet, und nach dem Übernehmen schließt nur dieses "
+            "Fenster. Nur ohne Chromium werden die Festplatten-Kopien "
+            "geprüft (alle Browserfenster vorher schließen).")
         self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
         self.install_curl_cffi = QPushButton(
             "Bot-Schutz-Komponente installieren (einmalig)")
@@ -881,6 +888,22 @@ class SyncDashboard(QDialog):
                     "Das Anmeldefenster wurde geschlossen."
                     % (hardware_id_value or "unver\u00e4ndert"))
                 return
+            # Kein Fenster offen: das EIGENE Chromium-Fenster öffnen
+            # und live übernehmen (Feldbefund 0.9.41 – trotz
+            # Standardbrowser Firefox soll eine Chromium aufgehen; NUR
+            # dieses Fenster schließt sich danach, nie der gesamte
+            # Browser des Nutzers). Ohne Chromium bleibt der
+            # Festplatten-Weg unten.
+            if chromium_available():
+                if (self.login_thread is not None
+                        and self.login_thread.isRunning()):
+                    return  # eine Anmeldung läuft bereits
+                self.status.setText(
+                    "Öffne ein eigenes Chromium-Fenster auf dem Web "
+                    "Reader – dort anmelden, Bücherliste laden. Nur "
+                    "dieses Fenster schließt sich danach.")
+                self.browser_login()
+                return
             refreshes, hardwares, notes = scrape_browser_tokens(
                 diagnose=True, all_candidates=True)
             if refreshes:
@@ -945,16 +968,13 @@ class SyncDashboard(QDialog):
             "- Kein Browserprofil gefunden"
         answer = QMessageBox.question(
             self, "Token verbraucht",
-            "Es wurden %d Refresh-Token gefunden, aber alle waren bereits "
-            "verbraucht (invalid grant).\n\n"
-            "Nur der neueste Token einer Sitzung ist gültig – "
-            "Festplatten-Kopien sind deshalb fast immer alt.\n\n"
-            "Besser: \u201eIm Browser anmelden\u201c benutzen. Oder ALLE "
-            "Browserfenster schließen (der Reader schreibt dann seinen "
-            "letzten Token auf die Festplatte) und diesen Knopf erneut "
-            "drücken.\n\n"
-            "Jetzt 5 Minuten alle 30 Sekunden weiterprüfen?\n\n"
-            "Befund:\n%s" % (count, detail),
+            ("Es wurden %d Refresh-Token gefunden, aber alle waren bereits "
+             "verbraucht (invalid grant).\n\n"
+             "Nur der neueste Token einer Sitzung ist gültig – "
+             "Festplatten-Kopien sind deshalb fast immer alt.\n\n"
+             "%s\n\n"
+             "Jetzt 5 Minuten alle 30 Sekunden weiterprüfen?\n\n"
+             "Befund:\n%s") % (count, spent_token_advice(), detail),
             QMessageBox.Yes | QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
@@ -1105,6 +1125,7 @@ class SyncDashboard(QDialog):
             return  # a sign-in attempt is already running
         partner_id = self.partner.currentData()
         self.browser.setEnabled(False)
+        self.scrape_browser.setEnabled(False)
         self.status.setText(
             "Browser-Anmeldung läuft: im Anmeldefenster im Web Reader "
             "(Bibliothek) anmelden und die Bücherliste laden. Fenster "
@@ -1159,6 +1180,7 @@ class SyncDashboard(QDialog):
         self.login_worker = None
         try:
             self.browser.setEnabled(True)
+            self.scrape_browser.setEnabled(True)
             self.status.setText("Bereit")
         except RuntimeError:
             pass  # dialog already destroyed

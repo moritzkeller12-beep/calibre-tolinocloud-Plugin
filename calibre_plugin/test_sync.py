@@ -5236,5 +5236,58 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         self.assertEqual([], found)
 
 
+class ExtractOpensOwnChromiumWindowTests(unittest.TestCase):
+    """Feldbefund 0.9.41: trotz Standardbrowser Firefox soll der
+    Extract-Button („Token aus laufendem Web Reader übernehmen") ein
+    eigenes Chromium-Fenster öffnen, live lesen wie der Grabber und
+    NUR dieses Fenster schließen -- nie den gesamten Browser."""
+
+    def test_chromium_available_tracks_pick_chromium(self):
+        from .tolino import chromium_available
+
+        with patch("calibre_plugin.cdp.pick_chromium",
+                   return_value=("/usr/bin/chromium", "Chromium")):
+            self.assertTrue(chromium_available())
+        with patch("calibre_plugin.cdp.pick_chromium", return_value=None):
+            self.assertFalse(chromium_available())
+        with patch("calibre_plugin.cdp.pick_chromium",
+                   side_effect=OSError("boom")):
+            self.assertFalse(chromium_available())
+
+    def test_advice_recommends_own_window_when_chromium_exists(self):
+        from .tolino import spent_token_advice
+
+        with patch("calibre_plugin.tolino.chromium_available",
+                   return_value=True):
+            advice = spent_token_advice()
+        self.assertIn("eigenes Chromium-Fenster", advice)
+        self.assertIn("NUR dieses Fenster", advice)
+        self.assertIn("Firefox", advice)
+        self.assertNotIn("Festplatten-Kopien", advice)
+
+    def test_advice_names_installation_without_chromium(self):
+        from .tolino import spent_token_advice
+
+        with patch("calibre_plugin.tolino.chromium_available",
+                   return_value=False), \
+             patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=False):
+            advice = spent_token_advice()
+        self.assertIn("Festplatten-Kopien", advice)
+        self.assertIn("installieren", advice)
+        self.assertNotIn("flatpak override", advice)
+
+    def test_advice_adds_flatpak_permission_without_chromium(self):
+        from .tolino import spent_token_advice
+
+        with patch("calibre_plugin.tolino.chromium_available",
+                   return_value=False), \
+             patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=True):
+            advice = spent_token_advice()
+        self.assertIn("flatpak override", advice)
+        self.assertIn("com.calibre_ebook.calibre", advice)
+
+
 if __name__ == "__main__":
     unittest.main()

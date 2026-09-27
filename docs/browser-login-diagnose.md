@@ -250,6 +250,23 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     `flatpak override --user --talk-name=org.freedesktop.Flatpak
     com.calibre_ebook.calibre` und den manuellen Token-Weg.
 
+20. **Extract-Button öffnet selbst das Chromium-Fenster (0.9.41):**
+    Feldbefund: Standardbrowser Firefox, der Knopf „Token aus
+    laufendem Web Reader übernehmen“ endete mit „alle 6 Refresh-Token
+    waren bereits verbraucht (invalid grant)“ — der Live-Vorsprung von
+    `try_live_grab_first` greift nur, wenn ein Anmeldefenster LÄUFT;
+    sonst fiel der Flow sofort auf die Festplatten-Kopien des
+    Standardbrowsers zurück. Ab 0.9.41 öffnet der Knopf, wenn kein
+    Fenster offen ist und ein Chromium verfügbar ist
+    (`chromium_available()`), SELBST das eigene Anmeldefenster und
+    läuft denselben Live-Weg wie „Im Browser anmelden“ (CDP-Read,
+    genau ein Tausch, das Fenster schließt sich danach selbst — nur
+    dieses Fenster, nie der Browser des Nutzers). Ohne Chromium
+    bleibt der Festplatten-Weg; die Verbraucht-Empfehlung nennt dann
+    statt eines Wegs, der nicht funktioniert, die Installation
+    (`spent_token_advice()`), in der Flatpak-Sandbox zusätzlich den
+    override-Befehl aus 0.9.40.
+
 ## Aktuelle Login-Kette (ab 0.9.35)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
