@@ -1,7 +1,6 @@
-"""Package marker for the test suite.
-
-The shipped copy is the repository root __init__.py (see
-build_plugin.py, which refuses to build when PLUGIN_VERSION drifts).
+"""
+Package marker for the test suite (the shipped copy is the root
+__init__.py; build_plugin.py refuses to build on PLUGIN_VERSION drift).
 """
 try:
     from calibre.customize import InterfaceActionBase
@@ -9,7 +8,7 @@ except ImportError:  # Allows deterministic helper tests outside a Calibre insta
     InterfaceActionBase = object
 
 
-PLUGIN_VERSION = (0, 9, 43)
+PLUGIN_VERSION = (0, 9, 44)
 
 
 class TolinoSyncPlugin(InterfaceActionBase):

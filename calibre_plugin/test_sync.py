@@ -1124,7 +1124,6 @@ class SyncPlanTests(unittest.TestCase):
                 "tolino.py",
                 "cdp.py",
                 "icons.py",
-                "bootstrapper.py",
                 "images/tolino_cloud_sync.png",
             }, set(plugin.namelist()))
             marker = next(name for name in plugin.namelist()
@@ -1144,12 +1143,7 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual(["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"], values)
 
     def test_bundled_toolbar_icon_is_a_real_png(self):
-        """The bundled image must be a real PNG.
-
-        It shipped as a WebP file with a .png extension once; Qt picks the
-        decoder by extension, fails to decode, and the toolbar icon stayed
-        empty.
-        """
+        """The bundled image must be a real PNG."""
         with zipfile.ZipFile(Path(__file__).resolve().parents[1] / "tolino_cloud_sync.zip") as plugin:
             data = plugin.read("images/tolino_cloud_sync.png")
         self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"),
@@ -1168,14 +1162,7 @@ class SyncPlanTests(unittest.TestCase):
                         self.assertNotIn("only registers its Web Reader redirect URI", error_msg)
 
     def test_browser_login_routes_keycloak_partner_to_assisted_login(self):
-        """Orell Füssli (reseller 8) must use the guided Web Reader login.
-
-        Its Keycloak rejects localhost callback redirect URIs with
-        "Ungültiger Parameter: redirect_uri". The routing keys on the
-        stable reseller_id, not the internal partner id (4 after
-        renumbering) - the v0.9.9 guided login was never reached because
-        the old check compared against the historic id 8.
-        """
+        """Orell Füssli (reseller 8) must use the guided Web Reader login."""
         opened = []
         clock = {"t": 1000.0}
 
@@ -1201,7 +1188,8 @@ class SyncPlanTests(unittest.TestCase):
         lokalen Callback-Server (127.0.0.1). Fuer Thalia, Hugendubel,
         eBook.de, buecher.de, Osiander und Orell Fuestli (alle mit
         webreader.mytolino.com) laeuft jetzt der gefuehrte Weg -- deren
-        OAuth-Redirect zeigt auf den Reader, nie auf localhost."""
+        OAuth-Redirect zeigt auf den Reader, nie auf localhost.
+        """
         opened = []
         synthetic = {
             9: {"name": "Testladen ohne Reader",
@@ -1281,7 +1269,8 @@ class SyncPlanTests(unittest.TestCase):
         Kandidaten: „5 Sekunden alt" (frische Anmeldung sofort
         abgelehnt) unterscheidet sich klar von „3700 Sekunden alt"
         (verbrauchte Kopie aus wiederverwendetem Fenster) -- und der
-        Token-Wert selbst darf nie in der Meldung stehen."""
+        Token-Wert selbst darf nie in der Meldung stehen.
+        """
         from .tolino import grab_live_refresh
         fresh = self._refresh_jwt(time.time() - 5)
 
@@ -1335,14 +1324,7 @@ class SyncPlanTests(unittest.TestCase):
         closer.assert_called_once_with()
 
     def test_keycloak_assisted_login_validates_each_new_candidate_once(self):
-        """Every newly harvested candidate is validated exactly once.
-
-        Validating a refresh token rotates it; an "invalid_grant" answer
-        means the candidate is dead forever and must be remembered, so it
-        is never retried on a later poll. A fresh candidate that shows up
-        later (e.g. the reader's next background rotation) is still picked
-        up and validated.
-        """
+        """Every newly harvested candidate is validated exactly once."""
         from .tolino import _keycloak_assisted_login
 
         validations = []
@@ -1411,13 +1393,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("1 gefundene(n)", message)
 
     def test_keycloak_assisted_login_keeps_polling_after_exhausted(self):
-        """A run that exhausts all candidates must not end immediately.
-
-        The freshest token often reaches disk only when the user closes
-        the Web Reader tab (Chromium flushes Local Storage on close), so
-        the loop must keep polling and adopt the late candidate instead
-        of failing with "all candidates spent".
-        """
+        """A run that exhausts all candidates must not end immediately."""
         from .tolino import _keycloak_assisted_login
 
         polls = {"n": 0}
@@ -1456,13 +1432,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(["dead-1", "dead-2", "late-fresh"], validations)
 
     def test_keycloak_assisted_login_retries_unclear_candidates(self):
-        """Unclear verdicts are retried after a cooldown, not declared dead.
-
-        A network error or bot-protection page proves nothing about the
-        token itself: the candidate must stay alive and be retried once
-        the transport recovers. It must not crowd out newer candidates
-        every round either (30 s cooldown per candidate).
-        """
+        """Unclear verdicts are retried after a cooldown, not declared dead."""
         from .tolino import _keycloak_assisted_login
 
         attempts = {"tok": 0}
@@ -1505,14 +1475,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(["dead"], attempts_dead)
 
     def test_validate_one_network_failure_is_unclear_not_spent(self):
-        """A transport failure wrapped by _login must NOT burn a candidate.
-
-        TolinoClient._login wraps every underlying error (network reset,
-        WAF page, 5xx) in TolinoAuthError. Only a definitive Keycloak
-        verdict inside the message means the token is dead; anything else
-        must stay retryable ("unclear"), otherwise a single hiccup makes
-        the flow abandon a still-live token forever.
-        """
+        """A transport failure wrapped by _login must NOT burn a candidate."""
         from .tolino import _validate_one
 
         def wrapped_network_error(self):
@@ -1541,13 +1504,7 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual(expected, verdict)
 
     def test_keycloak_assisted_login_one_post_per_candidate(self):
-        """Each candidate gets exactly ONE token-endpoint attempt.
-
-        The token exchange does not involve the hardware ID, so the old
-        loop over up to three hardware candidates sent redundant replays;
-        a replayed token can trip Keycloak's reuse protection and kill
-        the session. Every verdict must now come from a single call.
-        """
+        """Each candidate gets exactly ONE token-endpoint attempt."""
         from .tolino import _keycloak_assisted_login
 
         validations = []
@@ -1590,15 +1547,7 @@ class SyncPlanTests(unittest.TestCase):
             validations)
 
     def test_keycloak_assisted_login_prefers_newest_token_per_session(self):
-        """Only the freshest sibling of one Keycloak session is validated.
-
-        All refresh tokens of one web-reader login share the 'sid' claim;
-        within a session only the newest 'iat' can be valid, and replaying
-        an older sibling may trigger Keycloak's reuse protection and kill
-        the live session. The selector must therefore validate at most one
-        token per session -- the newest -- and skip sessions that already
-        produced a spent token during this run.
-        """
+        """Only the freshest sibling of one Keycloak session is validated."""
         from .tolino import _keycloak_assisted_login, _select_candidate_round
 
         import base64 as b64
@@ -1751,13 +1700,7 @@ class SyncPlanTests(unittest.TestCase):
             _RECENCY_BUCKETS.clear()
 
     def test_extract_all_tokens_sweeps_opaque_oidc_keys(self):
-        """The Keycloak reader's oidc.user blob must yield its token.
-
-        The web reader stores its CURRENT token set under a key like
-        'oidc.user:<issuer>:webreader' whose name carries no credential
-        hint, while only historical copies sit under refresh_token keys.
-        The sweep must find the live token through shape detection.
-        """
+        """The Keycloak reader's oidc.user blob must yield its token."""
         import base64 as b64
         from .tolino import _extract_all_tokens_from_storage
 
@@ -1828,13 +1771,7 @@ class SyncPlanTests(unittest.TestCase):
         client_mock.assert_not_called()
 
     def test_keycloak_assisted_login_opens_web_reader_not_authorize_url(self):
-        """Keycloak partners must open the Web Reader page itself.
-
-        A hand-built authorize URL is rejected by Keycloak with
-        "Ung\u00fctiger Parameter: redirect_uri" (only registered redirect
-        URIs are accepted), which is exactly the reported browser-login
-        failure for Orell F\u00fcssli.
-        """
+        """Keycloak partners must open the Web Reader page itself."""
         from .tolino import _keycloak_assisted_login
 
         clock = {"t": 1000.0}
@@ -2364,14 +2301,7 @@ class SyncPlanTests(unittest.TestCase):
             "fresh-lsng-token")
 
 class LiveGrabTests(unittest.TestCase):
-    """v0.9.17: Der Live-Grab (CDP) ist der Primaerpfad der Browser-Anmeldung.
-
-    Die Disk-Scrape-Validierung replays historische Tokens; Keycloaks
-    Wiederverwendungsschutz reagiert darauf mit Session-Widerruf -- genau
-    deshalb meldete der Web Reader die Benutzer sofort wieder ab. Der
-    Live-Grab liest den AKTUELLEN Token aus dem Seiten-Speicher und
-    tauscht ihn genau EINMAL am Token-Endpunkt.
-    """
+    """v0.9.17: Der Live-Grab (CDP) ist der Primaerpfad der Browser-Anmeldung."""
 
     def _jwt(self, iat, sid=None):
         head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
@@ -2384,12 +2314,7 @@ class LiveGrabTests(unittest.TestCase):
                               body.decode().rstrip("="))
 
     def test_chromium_candidates_detects_flatpak_installs(self):
-        """Flatpak-Browser werden als `flatpak run`-Launcher erkannt.
-
-        Direkte Binary-Pfade aus dem Flatpak-Store (~/.var/app/...) laufen
-        ohne die Sandbox-Runtime nicht -- der Launcher muss `flatpak run`
-        sein (Nutzerreport: Chromium/Brave unter ~/.var/app).
-        """
+        """Flatpak-Browser werden als `flatpak run`-Launcher erkannt."""
         import tempfile
         from unittest.mock import patch as _patch
         from . import cdp as cdp_module
@@ -2580,7 +2505,8 @@ class LiveGrabTests(unittest.TestCase):
         (Keycloak-Reuse-Schutz) -- auch nicht, wenn der Seiten-Speicher
         dieselbe Kopie erneut liefert. Statt einer erzwungenen Rotation
         wartet das Plugin auf eine NEU geschriebene Kopie; kommt keine,
-        endet es mit einer klaren Fehlermeldung."""
+        endet es mit einer klaren Fehlermeldung.
+        """
         from .tolino import grab_live_refresh
         spent = self._jwt(time.time() - 10, "sess-live")
         logins = []
@@ -2608,13 +2534,7 @@ class LiveGrabTests(unittest.TestCase):
         self.assertIn("Letzter Fehler", str(ctx.exception))
 
     def test_ws_recv_json_parses_rfc6455_header_correctly(self):
-        """Der minimale WS-Client liest den Länge+MASK-Header korrekt.
-
-        Regression zu 0.9.18: das zweite Header-Byte (Länge) wurde
-        verworfen und ein drittes Byte als Länge gelesen -- jede CDP-
-        Antwort zerfiel an falschen Offsets und der Live-Grab fand
-        "nichts", obwohl das Anmeldefenster angemeldet war.
-        """
+        """Der minimale WS-Client liest den Länge+MASK-Header korrekt."""
         import socket as socket_module
         import threading
         from .cdp import _Ws
@@ -2687,12 +2607,7 @@ class LiveGrabTests(unittest.TestCase):
             '{"id": 1, "method": "Runtime.evaluate"'))
 
     def test_filter_live_cutoff_accepts_tokens_from_older_signin(self):
-        """Tokens bis 30 Minuten Alter ueberleben den Live-Cutoff.
-
-        Der Nutzer braucht fuer die Anmeldung oft laenger als 2 Minuten;
-        Keycloak-Refresh-Tokens leben ~1 Stunde, der 2-Minuten-Cutoff von
-        0.9.18 warf daher den gueltigen Live-Token weg.
-        """
+        """Tokens bis 30 Minuten Alter ueberleben den Live-Cutoff."""
         from .tolino import _filter_live_candidates
         now = time.time()
         ten_minutes_old = self._jwt(now - 600, "sess-1")
@@ -2736,12 +2651,7 @@ class LiveGrabTests(unittest.TestCase):
         self.assertEqual(("rotated-token", "hw-from-grab"), result)
 
     def test_try_live_grab_first_raises_when_window_dead_yields_nothing(self):
-        """Fenster lebt, liefert aber nichts -> Fehler statt Disk-Scrape.
-
-        Wuerde der Aufrufer hier still scrapen, replayte er alte Storage-
-        Kopien gegen die im Fenster offene Sitzung -- der Reuse-Schutz-
-        fall, den der Live-Weg gerade vermeiden soll.
-        """
+        """Fenster lebt, liefert aber nichts -> Fehler statt Disk-Scrape."""
         from .tolino import try_live_grab_first
         with patch("calibre_plugin.cdp.devtools_port_alive",
                    return_value=True), \
@@ -3108,7 +3018,8 @@ class LiveGrabTests(unittest.TestCase):
         bindet, meldet den Port via thread_state["ready"] und beantwortet
         bis zu `connections` aufeinanderfolgende Verbindungen per
         `handler(message, send_raw)` -- jeder CDP-Aufruf oeffnet eine
-        eigene Verbindung."""
+        eigene Verbindung.
+        """
         import socket as socket_module
         import struct as struct_module
         srv = socket_module.socket()
@@ -3193,7 +3104,8 @@ class LiveGrabTests(unittest.TestCase):
         JSON.stringify(out) -- einem STRING. _evaluate_in_target muss
         diese Antwort parsten, sonst bleibt jeder Grab leer ("kein
         frischer Token"); frueher antworteten nur die Test-Server mit
-        dict, wodurch die Regression unsichtbar blieb."""
+        dict, wodurch die Regression unsichtbar blieb.
+        """
         from . import cdp as cdp_module
 
         def handler(message, send_raw):
@@ -3663,38 +3575,6 @@ class CurlTransportTests(unittest.TestCase):
         self.assertEqual("https://webreader.mytolino.com/",
                          headers.get("Referer"))
 
-    def test_403_bot_check_without_curl_cffi_appends_install_hint(self):
-        from urllib.error import HTTPError
-        import calibre_plugin.tolino as tolino_module
-
-        body = b"<!DOCTYPE html><title>Zugriff geblockt</title>"
-        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
-        error.read = lambda: body
-        client = TolinoClient(4, "", "old-refresh")
-        with patch.object(tolino_module, "_impersonate_session", return_value=None), \
-                patch.object(tolino_module, "_curl_binary", return_value=None), \
-                patch.object(tolino_module, "urlopen", side_effect=error), \
-                patch.object(tolino_module.time, "sleep"):
-            with self.assertRaisesRegex(TolinoAuthError, "curl_cffi"):
-                client.login()
-
-    def test_403_bot_check_with_curl_cffi_has_no_install_hint(self):
-        from urllib.error import HTTPError
-        import calibre_plugin.tolino as tolino_module
-
-        body = b"<!DOCTYPE html><title>Zugriff geblockt</title>"
-        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
-        error.read = lambda: body
-        client = TolinoClient(4, "", "old-refresh")
-        with patch.object(tolino_module, "_impersonate_session",
-                          return_value=object()), \
-                patch.object(tolino_module, "_curl_binary", return_value=None), \
-                patch.object(tolino_module, "urlopen", side_effect=error), \
-                patch.object(tolino_module.time, "sleep"):
-            with self.assertRaisesRegex(TolinoAuthError, "Zugriff geblockt"):
-                client.login()
-        self.assertNotIn("curl_cffi", str(getattr(client, "last_error_text", "")))
-
     def test_auth_diagnostics_reports_curl_cffi_availability(self):
         import calibre_plugin.tolino as tolino_module
 
@@ -3789,31 +3669,6 @@ class CurlTransportTests(unittest.TestCase):
         self.assertEqual(1, len(curl_calls))
         self.assertEqual("a6", client.access)
 
-    def test_impersonate_session_uses_bootstrap_factory_on_first_call(self):
-        """Feldbefund 0.9.38: import_from_plugin_dir() liefert die
-        Session-Fabrik; frueher wurde sie verworfen und der ungebundene
-        Name ``Session`` aufgerufen (NameError -> None). Der erste
-        Token-Aufruf im Prozess landete so beim WAF-geblockten
-        System-curl -- Diagnose rot, nach dem Side-Effekt alles gruen."""
-        import calibre_plugin.tolino as tolino_module
-        from . import bootstrapper
-
-        class Factory:
-            def __init__(self, impersonate=None):
-                self.impersonate = impersonate
-
-            def post(self, *_args, **_kwargs):
-                raise AssertionError("not used in this test")
-
-        with patch.dict("sys.modules", {"curl_cffi": None,
-                                        "curl_cffi.requests": None}), \
-                patch.object(bootstrapper, "import_from_plugin_dir",
-                             return_value=Factory):
-            session = tolino_module._impersonate_session()
-        self.assertIsNotNone(session)
-        self.assertEqual("chrome", session.impersonate)
-        self.assertTrue(callable(session.post))
-
     def test_token_403_bot_page_falls_through_to_urllib(self):
         """Feldbefund 0.9.38: curl_cffi UND System-curl werden von der
         Bot-Schutz-Laufzeitbahn mit 403 geblockt -- dann entscheidet
@@ -3901,216 +3756,10 @@ class CurlTransportTests(unittest.TestCase):
                     "https://example.test/token", "grant_type=x", {}, 5)
 
 
-class BootstrapperTests(unittest.TestCase):
-    """The curl_cffi one-click installer verifies checksums and projects a
-    working import root into the plugin directory."""
-
-    def _fake_plugin_dir(self):
-        return tempfile.mkdtemp(prefix="tolino-bootstrap-test-")
-
-    def test_wheel_tables_are_consistent(self):
-        from . import bootstrapper
-
-        # The curl_cffi wheel is abi3 (works on every CPython >= its tag).
-        self.assertEqual(5, len(bootstrapper.CURL_CFFI_WHEELS))
-        for platform, row in bootstrapper.CURL_CFFI_WHEELS.items():
-            filename, sha256, url_path = row
-            self.assertIn("cp310-abi3", filename, platform)
-            self.assertEqual(64, len(sha256), platform)
-            self.assertTrue(url_path.endswith(filename), platform)
-        # cffi is version-specific: every supported CPython tag has a wheel
-        # for every platform, each with a valid checksum.
-        expected_keys = {("cp%d%d" % (3, minor), platform)
-                         for minor in range(10, 15)
-                         for platform in bootstrapper.CURL_CFFI_WHEELS}
-        self.assertEqual(expected_keys, set(bootstrapper.CFFI_WHEELS))
-        for (tag, platform), row in bootstrapper.CFFI_WHEELS.items():
-            filename, sha256, url_path = row
-            self.assertTrue(filename.startswith("cffi-2.1.1-%s-" % tag),
-                            (tag, platform))
-            self.assertEqual(64, len(sha256), (tag, platform))
-            self.assertTrue(url_path.endswith(filename), (tag, platform))
-        for filename, sha256, url_path in bootstrapper.WHEELS_ANY:
-            self.assertTrue(filename.endswith(".whl"))
-            self.assertEqual(64, len(sha256))
-            self.assertNotIn("PLACEHOLDER", sha256)
-            self.assertTrue(url_path.endswith(filename))
-        # Pure-python deps appear exactly once (they are platform-neutral).
-        seen = [row[0] for row in bootstrapper.WHEELS_ANY]
-        self.assertEqual(1, sum(1 for name in seen if name.startswith("pycparser")))
-        self.assertEqual(1, sum(1 for name in seen if name.startswith("certifi")))
-
-    def test_cffi_tag_follows_running_interpreter(self):
-        import sys
-        from . import bootstrapper
-
-        with patch.object(sys, "version_info", (3, 12, 3, "final", 0)):
-            self.assertEqual("cp312", bootstrapper._cffi_tag())
-        with patch.object(sys, "version_info", (3, 10, 0, "final", 0)):
-            self.assertEqual("cp310", bootstrapper._cffi_tag())
-        with patch.object(sys, "version_info", (3, 9, 18, "final", 0)):
-            self.assertIsNone(bootstrapper._cffi_tag())
-
-    def test_install_rejects_unsupported_python_with_manual_hint(self):
-        import sys
-        from . import bootstrapper
-
-        with patch.object(sys, "version_info", (3, 9, 18, "final", 0)):
-            with self.assertRaisesRegex(bootstrapper.BootstrapError,
-                                        "Python 3.10-3.14"):
-                bootstrapper.install(
-                    plugin_dir=self._fake_plugin_dir(), progress=lambda t: None)
-
-    def test_install_picks_cffi_wheel_matching_interpreter(self):
-        import sys
-        from . import bootstrapper
-
-        tmp = self._fake_plugin_dir()
-        self.addCleanup(lambda: __import__("shutil").rmtree(
-            tmp, ignore_errors=True))
-        picked = []
-
-        def fake_download(url, expected_sha256):
-            filename = url.rsplit("/", 1)[-1]
-            picked.append(filename)
-            buf = __import__("io").BytesIO()
-            with zipfile.ZipFile(buf, "w") as zf:
-                top = filename.split("-")[0]
-                zf.writestr("%s/__init__.py" % top, "# fake package\n")
-            return buf.getvalue()
-
-        with patch.object(sys, "version_info", (3, 12, 3, "final", 0)), \
-                patch.object(bootstrapper, "_download", fake_download):
-            bootstrapper.install(plugin_dir=tmp, progress=lambda t: None)
-
-        self.assertEqual(4, len(picked))
-        self.assertTrue(
-            any(name.startswith("cffi-2.1.1-cp312-") for name in picked),
-            picked)
-        self.assertTrue(
-            any(name.startswith("curl_cffi-0.16.3-cp310-abi3-")
-                for name in picked), picked)
-
-    def test_download_rejects_checksum_mismatch(self):
-        from . import bootstrapper
-
-        blob = b"definitely-not-a-wheel"
-        wrong = "0" * 64
-        with patch.object(bootstrapper, "urlopen") as fake:
-            fake.return_value.__enter__ = lambda s: type(
-                "R", (), {"read": lambda self: blob})()
-            fake.return_value.__exit__ = lambda s, *a: False
-            with self.assertRaisesRegex(bootstrapper.BootstrapError,
-                                        "SHA-256 mismatch"):
-                bootstrapper._download("https://example.invalid/x.whl", wrong)
-
-    def test_install_extracts_and_verifies_fake_wheels(self):
-        from . import bootstrapper
-
-        tmp = self._fake_plugin_dir()
-        self.addCleanup(lambda: __import__("shutil").rmtree(
-            tmp, ignore_errors=True))
-
-        def fake_wheel_blob(name):
-            buf = __import__("io").BytesIO()
-            with zipfile.ZipFile(buf, "w") as zf:
-                top = name.split("-")[0]
-                zf.writestr("%s/__init__.py" % top, "# fake package\n")
-            return buf.getvalue()
-
-        platform = bootstrapper._platform_key()
-        entries = (list(bootstrapper.WHEELS_ANY)
-                   + [bootstrapper.CURL_CFFI_WHEELS[platform],
-                      bootstrapper.CFFI_WHEELS[(bootstrapper._cffi_tag(),
-                                                platform)]])
-
-        def fake_download(url, expected_sha256):
-            filename = url.rsplit("/", 1)[-1]
-            return fake_wheel_blob(filename)
-
-        with patch.object(bootstrapper, "_download", fake_download):
-            installed = bootstrapper.install(plugin_dir=tmp, progress=lambda t: None)
-        self.assertEqual(len(entries), len(installed))
-        root = os.path.join(tmp, "curl_cffi-libs")
-        for name in ("curl_cffi", "cffi", "pycparser", "certifi"):
-            self.assertTrue(os.path.isdir(os.path.join(root, name)), name)
-
-    def test_import_from_plugin_dir_loads_fresh_projected_copy(self):
-        """A healthy projected copy is imported (shadowing any other
-        curl_cffi); a broken one yields None instead of raising."""
-        import sys
-        import importlib
-        from . import bootstrapper
-
-        tmp = self._fake_plugin_dir()
-        self.addCleanup(lambda: __import__("shutil").rmtree(
-            tmp, ignore_errors=True))
-        root = os.path.join(tmp, "curl_cffi-libs")
-
-        def cleanup():
-            if root in sys.path:
-                sys.path.remove(root)
-            for name in [m for m in list(sys.modules)
-                         if m.split(".")[0] in ("curl_cffi", "cffi",
-                                                "_cffi_backend", "pycparser",
-                                                "certifi")]:
-                sys.modules.pop(name, None)
-        self.addCleanup(cleanup)
-
-        # Broken projected install, shadowing everything else on sys.path.
-        os.makedirs(os.path.join(root, "curl_cffi"))
-        with open(os.path.join(root, "curl_cffi", "__init__.py"), "w") as fh:
-            fh.write("raise ImportError('broken install')\n")
-        sys.path.insert(0, root)
-        with patch.object(bootstrapper, "calibre_plugin_dir",
-                          return_value=tmp):
-            self.assertIsNone(bootstrapper.import_from_plugin_dir())
-
-        # Repair the projected copy in place (like a fresh one-click install).
-        os.makedirs(os.path.join(root, "curl_cffi", "requests"))
-        with open(os.path.join(root, "curl_cffi", "__init__.py"), "w") as fh:
-            fh.write("")
-        with open(os.path.join(root, "curl_cffi", "requests", "__init__.py"),
-                  "w") as fh:
-            fh.write("class Session:\n"
-                     "    def __init__(self, impersonate=None):\n"
-                     "        self.impersonate = impersonate\n")
-        future = __import__("time").time() + 5
-        for base, dirs, files in os.walk(root):
-            for name in dirs + files:
-                os.utime(os.path.join(base, name), (future, future))
-        importlib.invalidate_caches()
-        with patch.object(bootstrapper, "calibre_plugin_dir",
-                          return_value=tmp):
-            session_factory = bootstrapper.import_from_plugin_dir()
-        self.assertIsNotNone(session_factory)
-        self.assertEqual("chrome",
-                         session_factory(impersonate="chrome").impersonate)
-        self.assertIn(root, sys.path)
-
-    def test_setup_status_reports_missing_install(self):
-        from . import bootstrapper
-
-        tmp = self._fake_plugin_dir()
-        self.addCleanup(lambda: __import__("shutil").rmtree(
-            tmp, ignore_errors=True))
-        with patch.object(bootstrapper, "calibre_plugin_dir", return_value=tmp), \
-                patch.object(bootstrapper, "is_available", return_value=False):
-            installed, importable, plugin_dir = bootstrapper.setup_status()
-        self.assertFalse(installed)
-        self.assertFalse(importable)
-        self.assertEqual(tmp, plugin_dir)
-
-
 class LoginWindowWaitTests(unittest.TestCase):
     """0.9.32: die Wartezeit nach einer Ablehnung unterscheidet, OB das
     Anmeldefenster noch lebt und WAS es zeigt.
-
-    Feldbefund 0.9.31: "kein Web-Reader-Tab im Anmeldefenster offen"
-    nach invalid_grant -- vermischte ein verschwundenes Fenster (kann
-    nie mehr liefern) mit einem offenen Fenster auf der Anmeldeseite des
-    Buchhändlers (dort kann JETZT neu angemeldet werden). Beim zweiten
-    Fall schloss das Plugin das Fenster und verlangte einen Neustart."""
+    """
 
     def _refresh_jwt(self, iat):
         head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
@@ -4242,7 +3891,8 @@ class WrappedCandidateTests(unittest.TestCase):
     ablegen -- Feldbefund der Extrahier-Schaltfläche: genau EIN
     Refresh-Kandidat, "1 Teil, 920 Zeichen", am Endpunkt abgelehnt
     (invalid_grant) und ohne datierbares JWT-alter. Ein JWT traegt immer
-    zwei Punkte; die Hülle muss vor dem Tausch abgezogen werden."""
+    zwei Punkte; die Hülle muss vor dem Tausch abgezogen werden.
+    """
 
     def _refresh_jwt(self, iat):
         head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
@@ -4362,13 +4012,7 @@ class WrappedCandidateTests(unittest.TestCase):
 class ReaderBlobLiveGrabTests(unittest.TestCase):
     """0.9.34: Der Live-Grab entpackt die CryptoJS-verschluesselten
     userToken/userInfos-Bloebe des Readers.
-
-    Feldbefund (curl-Export, erneut "1 Teil, 920 Zeichen"): der einzige
-    Refresh-Kandidat war base64("Salted__" + Salt + AES-256-CBC) --
-    verschluesselt, undatiert, am Endpunkt abgelehnt; die Hardware-Id
-    steckte im ebenso verschluesselten userInfos ("0 Hardware-
-    Kandidat(en)"). Die Platten-Version des Plugins konnte dies schon,
-    der Live-Grab nicht."""
+    """
 
     def _refresh_jwt(self, iat):
         head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
@@ -4629,12 +4273,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
     Geraete-Recovery aus: das registrierte Geraet des Kontos wird
     uebernommen, sonst wird unsere Hardware-ID per registerhw
     registriert -- dann genau EIN Retry.
-
-    Feldbefund: Login lief, inventory/delta starb mit "Tolino HTTP 400:
-    {}" (Vorbereitung fehlgeschlagen). Die Referenz-Clients
-    (tolino-python, pytolino) registrieren vor jedem BOSH-Aufruf oder
-    adoptieren das Geraet der Liste -- dieses Plugin tat keins von
-    beiden, und fetch_hardware_id war tot angeloetet."""
+    """
 
     INVENTORY_BODY = b'{"PublicationInventory": {"edata": []}}'
 
@@ -4836,11 +4475,7 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
     """Alle Shops mit dem gemeinsamen Web Reader verhalten sich wie
     Orell Fuessli -- ein Profil statt pro Partner nachgebauter
     Einzelheiten.
-
-    Quelle der Endpunkte/Client-IDs/Scopes: v2/resellerconfig (client
-    TOLINO_WEBREADER), in der JEDER Reseller als OAuth-Redirect
-    https://webreader.mytolino.com/library/ traegt -- der Token-Tausch
-    kommt bei allen Shops von dieser Seite."""
+    """
 
     SHARED = (1, 2, 4, 5, 6, 7, 8)
 
@@ -5521,7 +5156,8 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
     Host-Sonde wertete den Exit-Code des sh-Skripts aus, dessen letzte
     flatpak-info-Prüfung auf fast jedem Rechner scheitert -- sie
     meldete also IMMER „Freigabe fehlt“ und warf die gefundenen
-    Host-Browser weg."""
+    Host-Browser weg.
+    """
 
     def test_host_probe_keeps_results_when_script_exits_nonzero(self):
         """Ein Fehlercode MIT Ausgabe ist kein Freigabe-Verlust: die

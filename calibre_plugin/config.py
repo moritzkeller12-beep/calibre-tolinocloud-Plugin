@@ -29,12 +29,7 @@ def _force_legacy_partner_id(value):
 
 
 def _migrate_partner_ids(accounts):
-    """One-time rewrite of historic plugin partner IDs to consecutive ones.
-
-    Guarded by a schema marker so it only ever runs once: the legacy ID
-    space (3, 4, 6, 8, 13, 23, 30) overlaps the new consecutive one, so a
-    stored ID can only be interpreted as legacy before the marker exists.
-    """
+    """One-time rewrite of historic plugin partner IDs to consecutive ones."""
     try:
         version = int(PREFERENCES.get("partner_schema_version", 1) or 1)
     except (TypeError, ValueError):
@@ -180,13 +175,7 @@ def save_account(name, values, active=None):
 
 
 def account_by_name(name, accounts=None):
-    """Return the stored account dict for `name` -- never a different one.
-
-    Der Dialog darf State/Token IMMER unter seinem angezeigten Kontonamen
-    lesen und schreiben; ein anderes "aktives" Konto darf dabei nie
-    hineinspielen (sonst landet die Tolino-ID-Zuordnung im falschen
-    Konto).
-    """
+    """Return the stored account dict for `name` -- never a different one."""
     items = settings()["accounts"] if accounts is None else accounts
     for item in items:
         if isinstance(item, dict) and item.get("name") == name:

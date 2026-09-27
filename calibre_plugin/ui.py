@@ -6,23 +6,22 @@ import traceback
 from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
 try:
-    from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    from qt.core import (QCheckBox, QComboBox, QDialog,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
-                         QProgressBar, QPushButton, QProgressDialog, QThread,
+                         QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QTextEdit, QObject, QInputDialog,
                          QFileDialog, Qt, QTimer, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
-    from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    from qt.core import (QCheckBox, QComboBox, QDialog,
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
-                         QProgressBar, QPushButton, QProgressDialog, QThread,
+                         QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QTextEdit, QObject, QInputDialog,
                          QFileDialog, Qt, QTimer, Signal as pyqtSignal)
 
 try:
-    from . import bootstrapper
     from .config import (account_by_name, save_account, save_settings,
                          set_active_account, settings)
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
@@ -33,8 +32,7 @@ try:
                        unpack_plan_result, unpack_upload_record,
                        diagnose_preparation, format_diagnostic_report,
                        metadata_tolino_id,
-                       tolino_column_active, update_tolino_ids, TOLINO_COLUMN,
-                       TOLINO_COLUMN_LABEL)
+                       tolino_column_active, update_tolino_ids)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          chromium_available, hardware_id,
                          normalize_refresh_token, sanitize_error,
@@ -42,7 +40,6 @@ try:
                          start_token_keepalive, try_live_grab_first,
                          validate_refresh_candidates)
 except ImportError:
-    bootstrapper = None
     from config import (account_by_name, save_account, save_settings,
                         set_active_account, settings)
     from sync import (compare_inventory, format_error_details, iter_book_ids,
@@ -53,8 +50,7 @@ except ImportError:
                       unpack_plan_result, unpack_upload_record,
                       diagnose_preparation, format_diagnostic_report,
                       metadata_tolino_id,
-                      tolino_column_active, update_tolino_ids, TOLINO_COLUMN,
-                      TOLINO_COLUMN_LABEL)
+                      tolino_column_active, update_tolino_ids)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         chromium_available, hardware_id,
                         normalize_refresh_token, sanitize_error,
@@ -254,12 +250,7 @@ class InventoryDialog(QDialog):
         self._rebuild_table(ordered)
 
     def _rebuild_table(self, rows):
-        """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen.
-
-        Checks und Zeilen werden immer zusammen erzeugt: Qt verschiebt
-        Zell-Widgets beim Sortieren nicht -- ein Spaltenkopf-Klick darf
-        die Häkchen also nie auf die falsche Zeile ziehen.
-        """
+        """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen."""
         self.rows = list(rows)
         self.checks = []
         self.table.setRowCount(0)
@@ -649,17 +640,9 @@ class SyncDashboard(QDialog):
             "Fenster. Nur ohne Chromium werden die Festplatten-Kopien "
             "geprüft (alle Browserfenster vorher schließen).")
         self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
-        self.install_curl_cffi = QPushButton(
-            "Bot-Schutz-Komponente installieren (einmalig)")
-        self.install_curl_cffi.setToolTip(
-            "Lädt die curl_cffi-Bibliothek (gegen den Bot-Schutz am "
-            "Token-Endpunkt) einmalig in den Calibre-Plugin-Ordner -- "
-            "ohne pip und ohne Neustart.")
-        self.install_curl_cffi.clicked.connect(self.install_curl_cffi_clicked)
         setup_form.addRow("Buchhändler", self.partner)
         setup_form.addRow("", self.browser)
         setup_form.addRow("", self.scrape_browser)
-        setup_form.addRow("", self.install_curl_cffi)
         setup_form.addRow("", self.status)
         setup_form.addRow("Hardware ID (automatisch erkannt)", self.hardware)
         setup_form.addRow("Refresh token", self.refresh)
@@ -846,34 +829,15 @@ class SyncDashboard(QDialog):
         }, active=self.account_name)
 
     def _validate_scraped_candidates(self, refreshes, hardwares):
-        """Validate scraped candidates live; return the fresh pair or None.
-
-        The token exchange itself does not involve the hardware ID (the
-        Web Reader's own token POST carries none either), so ONE pass over
-        the candidates is enough: the earlier loop over up to three
-        hardware IDs sent two redundant replays per token, and a replayed
-        token can trip Keycloak's reuse protection and kill the session.
-        The adopted hardware ID comes back from the token/device flow via
-        ``validate_refresh_candidates``.
-        """
+        """Validate scraped candidates live; return the fresh pair or None."""
         return validate_refresh_candidates(
             self.partner.currentData(), "", refreshes)
 
     def scrape_browser_tokens(self):
-        """Extract a working refresh_token and hardware_id from browsers.
-
-        Browser storage keeps spent tokens from earlier background rotations
-        and scan order is not recency order, so every candidate is validated
-        against the token endpoint until one is accepted. Only the fresh,
-        rotated token of the accepted grant is persisted.
-        """
+        """Extract a working refresh_token and hardware_id from browsers."""
         try:
-            # A grabber window from "Im Browser anmelden" (or an earlier
-            # extract attempt) holds the CURRENT token of the signed-in
-            # reader -- always better than any disk copy, whose tokens
-            # are history after the reader's background rotation. Try the
-            # live read first; scrape the disks only when no grabber
-            # window is running.
+            # Ein laufendes Anmeldefenster haelt den AKTUELLEN Token -- immer
+            # besser als jede Festplatten-Kopie: erst live lesen, sonst Scheibe.
             grabbed = try_live_grab_first(
                 self.partner.currentData(), self.hardware.text().strip())
             if grabbed:
@@ -888,12 +852,8 @@ class SyncDashboard(QDialog):
                     "Das Anmeldefenster wurde geschlossen."
                     % (hardware_id_value or "unver\u00e4ndert"))
                 return
-            # Kein Fenster offen: das EIGENE Chromium-Fenster öffnen
-            # und live übernehmen (Feldbefund 0.9.41 – trotz
-            # Standardbrowser Firefox soll eine Chromium aufgehen; NUR
-            # dieses Fenster schließt sich danach, nie der gesamte
-            # Browser des Nutzers). Ohne Chromium bleibt der
-            # Festplatten-Weg unten.
+            # Kein Fenster: selbst das eigene Chromium-Fenster oeffnen und live
+            # uebernehmen (nur dieses Fenster schliesst sich, 0.9.41).
             if chromium_available():
                 if (self.login_thread is not None
                         and self.login_thread.isRunning()):
@@ -957,13 +917,7 @@ class SyncDashboard(QDialog):
             )
 
     def _offer_spent_token_retry(self, count, notes):
-        """Explain spent candidates and offer a 30 s background retry poll.
-
-        The Web Reader rotates its refresh token on every background
-        refresh, so a fresh token usually lands in the browser storage
-        within a minute or two of the reader being used. Instead of making
-        the user re-click the button, offer an automatic poll.
-        """
+        """Explain spent candidates and offer a 30 s background retry poll."""
         detail = "\n".join("- %s" % note for note in notes) or \
             "- Kein Browserprofil gefunden"
         answer = QMessageBox.question(
@@ -1034,58 +988,6 @@ class SyncDashboard(QDialog):
         except RuntimeError:
             pass  # dialog already destroyed (Calibre shutdown)
 
-    def install_curl_cffi_clicked(self):
-        """One-click install of curl_cffi wheels (pinned, checksum-verified)."""
-        if bootstrapper is None:
-            QMessageBox.critical(
-                self, "curl_cffi",
-                "Interner Fehler: Bootstrapper-Modul fehlt im Plugin-Paket.")
-            return
-        installed, importable, plugin_dir = bootstrapper.setup_status()
-        if importable:
-            QMessageBox.information(
-                self, "curl_cffi",
-                "curl_cffi ist bereits installiert und importierbar "
-                "(Diagnose zeigt curl_cffi: true).")
-            return
-        confirm = QMessageBox.question(
-            self, "curl_cffi installieren",
-            "Es werden die offiziellen, versionierten curl_cffi-Räder "
-            "(Version %s) von PyPI geladen, ihre SHA-256-Prüfsummen "
-            "geprüft und in den Calibre-Plugin-Ordner entpackt:\n%s\n\n"
-            "Fortfahren?" % (bootstrapper.CURL_CFFI_VERSION, plugin_dir))
-        if confirm != QMessageBox.Yes:
-            return
-        progress = QProgressDialog(
-            "curl_cffi wird installiert ...", None, 0, 0, self)
-        progress.setWindowTitle("curl_cffi Installation")
-        progress.setWindowModality(Qt.WindowModal)
-        try:
-            def step(text):
-                progress.setLabelText(text)
-                from qt.core import QCoreApplication
-                QCoreApplication.processEvents()
-
-            bootstrapper.install(progress=step)
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "curl_cffi Installation fehlgeschlagen",
-                "Fehler bei der Installation: %s" % sanitize_error(exc))
-            return
-        finally:
-            progress.cancel()
-        session_factory = bootstrapper.import_from_plugin_dir()
-        if session_factory is not None:
-            QMessageBox.information(
-                self, "curl_cffi installiert",
-                "curl_cffi wurde installiert und ist sofort nutzbar. "
-                "Testen Sie jetzt \u201eTolino-Antwort testen\u201c.")
-        else:
-            QMessageBox.information(
-                self, "curl_cffi installiert",
-                "curl_cffi wurde nach %s entpackt. Bitte Calibre neu "
-                "starten, damit die Module geladen werden." % plugin_dir)
-
     def _selected_account(self):
         """The account this dialog shows -- never a different 'active' one."""
         return account_by_name(getattr(self, "account_name", None))
@@ -1110,17 +1012,7 @@ class SyncDashboard(QDialog):
         }
 
     def browser_login(self):
-        """Open the private Chromium sign-in window, adopt the fresh token.
-
-        Primary path: a dedicated Chromium window (DevTools protocol) on
-        the partner's Web Reader, where the CURRENT token is read from the
-        live page; without a Chromium binary the same flow falls back to
-        the disk-scrape login in the system browser (closed windows only).
-
-        Both paths can poll for minutes (the reader writes its fresh token
-        on its own schedule), so the work runs in a worker thread: blocking
-        the GUI thread froze Calibre and could crash it.
-        """
+        """Open the private Chromium sign-in window, adopt the fresh token."""
         if self.login_thread is not None and self.login_thread.isRunning():
             return  # a sign-in attempt is already running
         partner_id = self.partner.currentData()
