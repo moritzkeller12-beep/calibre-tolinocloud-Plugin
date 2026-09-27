@@ -2864,10 +2864,18 @@ def _system_browser_open_error():
         return base
     return base + (
         " Calibre läuft als Flatpak (Flathub): aus der Sandbox heraus"
-        " sind die Browser des Rechners nicht erreichbar. Einmalig im"
-        " Terminal ausführen und Calibre danach neu starten:"
-        "\nflatpak override --user --talk-name=org.freedesktop.Flatpak"
-        " com.calibre_ebook.calibre"
+        " sind die Browser des Rechners nicht erreichbar. Einmalig die"
+        " Freigabe erteilen -- bitte zur Installation passend -- und"
+        " Calibre danach VOLLSTÄNDIG neu starten (laufende Fenster"
+        " behalten die alten Rechte):"
+        "\nUser-Installation: flatpak override --user"
+        " --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre"
+        "\nSystem-Installation (flatpak info zeigt \"Installation:"
+        " system\"): sudo flatpak override --talk-name=org.freedesktop."
+        "Flatpak com.calibre_ebook.calibre"
+        "\nWirksam ist die Freigabe, wenn flatpak info"
+        " --show-permissions com.calibre_ebook.calibre"
+        " org.freedesktop.Flatpak enthält."
         "\nOhne diese Freigabe alternativ den Refresh-Token manuell aus"
         " einem laufenden Web Reader übernehmen (siehe README).")
 
@@ -2911,10 +2919,12 @@ def spent_token_advice():
     if in_flatpak_sandbox():
         text += (
             " Calibre als Flatpak (Flathub): evtl. sind die Browser des "
-            "Rechners ohne Freigabe unsichtbar -- einmalig flatpak "
-            "override --user --talk-name=org.freedesktop.Flatpak "
-            "com.calibre_ebook.calibre ausführen und Calibre neu "
-            "starten.")
+            "Rechners ohne Freigabe unsichtbar -- einmalig die Freigabe "
+            "erteilen (User-Installation: flatpak override --user "
+            "--talk-name=org.freedesktop.Flatpak com.calibre_ebook."
+            "calibre; System-Installation: sudo flatpak override "
+            "--talk-name=org.freedesktop.Flatpak com.calibre_ebook."
+            "calibre) und Calibre danach vollständig neu starten.")
     return text
 
 

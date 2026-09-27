@@ -101,6 +101,15 @@ def _sandbox_host_launchers():
         "com.google.Chrome com.vivaldi.Vivaldi; do "
         "command -v flatpak >/dev/null 2>&1 && flatpak info \"$a\" "
         ">/dev/null 2>&1 && echo \"FLATPAK $a\"; done"
+        # Der Exit-Code wird bewusst erzwungen: die letzte flatpak-
+        # info-Prüfung der Host-Schleife scheitert auf fast jedem
+        # Rechner (keine der vier Flatpak-Browser installiert). Ohne
+        # `exit 0` lieferte das Skript damit IMMER einen Fehlercode --
+        # die Sonde deutete das als "Freigabe fehlt" (Status
+        # "denied") und warf die gefundenen NATIVE-Zeilen weg.
+        # Feldbefund 0.9.43: der override-Befehl warerteilt, die
+        # Meldung blieb trotzdem und es öffnete kein Anmeldefenster.
+        "; exit 0"
     )
     try:
         proc = subprocess.run([spawn, "--host", "sh", "-c", script],
@@ -109,7 +118,12 @@ def _sandbox_host_launchers():
                               universal_newlines=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return []
-    if proc.returncode != 0:
+    output = proc.stdout or ""
+    if proc.returncode != 0 and not output.strip():
+        # flatpak-spawn selbst ist gescheitert: ohne talk-name-
+        # Freigabe verweigert der Session-Helper den Host-Start. Ohne
+        # Ausgabe gibt es nichts auszuwerten; ein Fehlercode MIT
+        # Ausgabe wird unten trotzdem gelesen.
         _host_probe_status = "denied"
         return []
     commands = {
@@ -119,7 +133,7 @@ def _sandbox_host_launchers():
         "com.vivaldi.Vivaldi": ("vivaldi", "Vivaldi (Flatpak, Host)"),
     }
     launchers = []
-    for line in (proc.stdout or "").splitlines():
+    for line in output.splitlines():
         kind, _, value = line.partition(" ")
         value = value.strip()
         if not value:
@@ -770,14 +784,29 @@ def launch_reader_window(partner_id):
                 "installieren; danach öffnet sich das eigene Fenster "
                 "unabhängig vom Standardbrowser."
             )
+        elif in_flatpak_sandbox() and _host_probe_status == "unavailable":
+            message += (
+                " Calibre läuft als Flatpak (Flathub), aber das Werkzeug "
+                "flatpak-spawn fehlt in der Sandbox. Einmalig `flatpak "
+                "update` ausführen und Calibre danach vollständig neu "
+                "starten -- danach findet die Sonde die Browser des "
+                "Rechners."
+            )
         elif in_flatpak_sandbox():
             message += (
                 " Calibre läuft als Flatpak (Flathub): Browser des "
-                "Rechners sind ohne Freigabe unsichtbar. Für das eigene "
-                "Anmeldefenster einmalig erlauben: flatpak override "
-                "--user --talk-name=org.freedesktop.Flatpak "
-                "com.calibre_ebook.calibre (danach Calibre neu starten) "
-                "-- ohne die Freigabe bricht die Anmeldung hier mit "
+                "Rechners sind ohne Freigabe unsichtbar. Einmalig die "
+                "Freigabe erteilen -- bitte zur Installation passend, "
+                "danach Calibre VOLLSTÄNDIG neu starten (laufende "
+                "Fenster behalten die alten Rechte): User-Installation: "
+                "flatpak override --user --talk-name=org.freedesktop."
+                "Flatpak com.calibre_ebook.calibre; System-Installation "
+                "(flatpak info zeigt \"Installation: system\"): sudo "
+                "flatpak override --talk-name=org.freedesktop.Flatpak "
+                "com.calibre_ebook.calibre. Wirksam ist die Freigabe, "
+                "wenn flatpak info --show-permissions "
+                "com.calibre_ebook.calibre org.freedesktop.Flatpak "
+                "enthält. Ohne sie bricht die Anmeldung hier mit "
                 "diesem Hinweis ab, statt im Standardbrowser zu landen."
             )
         raise TolinoAuthError(message)

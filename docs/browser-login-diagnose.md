@@ -291,6 +291,36 @@ Seiten-Speicher-Snapshots) sind damit zwangsläufig wertlos oder gefährlich.
     Fehlermeldung „Freigabe erteilen“ statt „installieren“ sagt, wenn
     die Freigabe fehlt — und umgekehrt.
 
+22. **Flatpak-Freigabe erteilt, Meldung blieb (0.9.43):** Feldbefund:
+    der Befehl `flatpak override --user --talk-name=org.freedesktop.
+    Flatpak com.calibre_ebook.calibre` war ausgeführt und Calibre neu
+    gestartet, trotzdem endete die Anmeldung mit „Kein
+    Chromium-Browser gefunden … Calibre läuft als Flatpak … ohne die
+    Freigabe bricht die Anmeldung hier mit diesem Hinweis ab“. Ursache
+    war die Host-Sonde selbst: ihr `sh`-Skript endete mit der letzten
+    `flatpak info`-Prüfung der Vierer-Liste, die auf fast jedem
+    Rechner scheitert (keine der vier Flatpak-Browser installiert) —
+    der damit fast immer gelieferte Fehlercode wurde als „Freigabe
+    fehlt“ (Status `denied`) gelesen und die gefundenen NATIVE-Zeilen
+    verworfen. Der Freigabe-Befehl konnte die Meldung dadurch gar
+    nicht mehr ändern, und ob die Freigabe wirklich fehlte, war nicht
+    mehr unterscheidbar. Fix: das Skript endet mit `exit 0`; ein
+    Fehlercode MIT Ausgabe wird weiterhin gelesen, `denied` bleibt nur
+    noch der Fall „Fehlercode ohne jede Ausgabe“, und die Meldung
+    unterscheidet drei Fälle (`empty` → Browser installieren,
+    `unavailable` → `flatpak update`, sonst → Freigabe erteilen). Der
+    Freigabe-Hinweis nennt jetzt beide Installationsvarianten (User:
+    `flatpak override --user …`; System: `sudo flatpak override …`
+    ohne `--user`, falls `flatpak info` „Installation: system“ zeigt),
+    den Nachweis `flatpak info --show-permissions
+    com.calibre_ebook.calibre` (muss `org.freedesktop.Flatpak`
+    enthalten) und den vollständigen Neustart — ein laufendes Calibre
+    behält die alten Rechte. Ein User-Override wirkt für die
+    Installationen dieses Nutzers, der ausgeführte Befehl war also an
+    sich korrekt. Dieselbe Doppelvariante steht jetzt auch im
+    Öffner-Fehler (`_system_browser_open_error`) und in der
+    Verbraucht-Empfehlung (`spent_token_advice`).
+
 ## Aktuelle Login-Kette (ab 0.9.35)
 
 1. Eigenes Chromium-Fenster (privates Profil, DevTools-Port, Flatpak-fähig)
