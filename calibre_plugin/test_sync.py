@@ -5514,5 +5514,143 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                       spawned["args"][-1])
 
 
+
+class FlatpakHostProbeReportTests(unittest.TestCase):
+    """Feldbefund 0.9.43: der override-Befehl warerteilt, die Meldung
+    „kein Chromium-Browser ... Freigabe erteilen“ blieb trotzdem. Die
+    Host-Sonde wertete den Exit-Code des sh-Skripts aus, dessen letzte
+    flatpak-info-Prüfung auf fast jedem Rechner scheitert -- sie
+    meldete also IMMER „Freigabe fehlt“ und warf die gefundenen
+    Host-Browser weg."""
+
+    def test_host_probe_keeps_results_when_script_exits_nonzero(self):
+        """Ein Fehlercode MIT Ausgabe ist kein Freigabe-Verlust: die
+        NATIVE-Zeilen werden gelesen, der Status wird „ok“."""
+        from . import cdp as cdp_module
+
+        class Proc(object):
+            returncode = 1
+            stdout = "NATIVE /usr/bin/chromium\n"
+
+        with patch.object(cdp_module, "in_flatpak_sandbox",
+                          return_value=True), \
+             patch.object(cdp_module, "_host_probe_status", ""), \
+             patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()), \
+             patch("shutil.which",
+                   side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                   if name == "flatpak-spawn" else None), \
+             patch.object(cdp_module.subprocess, "run",
+                          return_value=Proc()):
+            found = cdp_module.chromium_candidates(home="/nonexistent-home")
+            # Status hier pruefen: der Patch stellt den alten Wert wieder
+            # her, sobald der Block endet (Verhalten wie die
+            # Bestandstests in ChromiumOpensRegardlessOfDefaultTests).
+            self.assertEqual("ok", cdp_module._host_probe_status)
+        argvs = [argv for argv, _label in found]
+        self.assertIn(["/usr/bin/flatpak-spawn", "--host",
+                       "/usr/bin/chromium"], argvs)
+
+    def test_host_probe_script_forces_exit_zero(self):
+        """Das Sonden-Skript endet mit `exit 0` -- sonst meldet die
+        Host-Schleife selbst dann einen Fehler, wenn die Freigabe
+        erteilt ist (Regressionsschutz für den Feldbefund)."""
+        from . import cdp as cdp_module
+
+        captured = {}
+
+        class Proc(object):
+            returncode = 0
+            stdout = ""
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = list(argv)
+            return Proc()
+
+        with patch.object(cdp_module, "in_flatpak_sandbox",
+                          return_value=True), \
+             patch.object(cdp_module, "_host_probe_status", ""), \
+             patch("shutil.which",
+                   side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                   if name == "flatpak-spawn" else None), \
+             patch.object(cdp_module.subprocess, "run",
+                          side_effect=fake_run):
+            cdp_module.chromium_candidates(home="/nonexistent-home")
+        script = captured["argv"][-1]
+        self.assertTrue(script.rstrip().endswith("exit 0"), script)
+
+    def test_denied_still_reported_without_any_output(self):
+        """Ohne Ausgabe und mit Fehlercode bleibt „denied“ die einzige
+        plausible Deutung: flatpak-spawn wurde abgewiesen."""
+        from . import cdp as cdp_module
+
+        class Proc(object):
+            returncode = 1
+            stdout = "   "
+
+        with patch.object(cdp_module, "in_flatpak_sandbox",
+                          return_value=True), \
+             patch.object(cdp_module, "_host_probe_status", ""), \
+             patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()), \
+             patch("shutil.which",
+                   side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                   if name == "flatpak-spawn" else None), \
+             patch.object(cdp_module.subprocess, "run",
+                          return_value=Proc()):
+            found = cdp_module.chromium_candidates(home="/nonexistent-home")
+            self.assertEqual("denied", cdp_module._host_probe_status)
+        self.assertEqual([], found)
+
+    def test_launch_permission_names_both_installations(self):
+        """Die Meldung nennt beide Installationen (User-Befehl wie
+        ausgeführt, System-Befehl mit sudo), den Nachweis über
+        `flatpak info --show-permissions` und den vollständigen
+        Neustart."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with _patch.object(cdp_module, "pick_chromium", return_value=None), \
+             _patch.object(cdp_module, "_host_probe_status", "denied"), \
+             _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=True):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                cdp_module.launch_reader_window(4)
+        message = str(ctx.exception)
+        self.assertIn("Kein Chromium-Browser gefunden", message)
+        self.assertIn("flatpak override --user", message)
+        self.assertIn("sudo flatpak override", message)
+        self.assertIn("--show-permissions", message)
+        self.assertIn("neu starten", message)
+
+    def test_launch_names_runtime_update_when_spawn_missing(self):
+        """Ohne flatpak-spawn hilft keine Freigabe -- die Meldung
+        nennt dann `flatpak update` statt des override-Befehls."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with _patch.object(cdp_module, "pick_chromium", return_value=None), \
+             _patch.object(cdp_module, "_host_probe_status",
+                           "unavailable"), \
+             _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=True):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                cdp_module.launch_reader_window(4)
+        message = str(ctx.exception)
+        self.assertIn("flatpak update", message)
+        self.assertNotIn("flatpak override", message)
+
+    def test_open_error_names_both_installations(self):
+        """Auch der Öffner-Fehler nennt beide Varianten inklusive
+        Nachweis-Befehl (0.9.43)."""
+        from .tolino import _system_browser_open_error
+
+        with patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=True):
+            message = _system_browser_open_error()
+        self.assertIn("flatpak override --user", message)
+        self.assertIn("sudo flatpak override", message)
+        self.assertIn("--show-permissions", message)
+        self.assertIn("VOLLSTÄNDIG neu starten", message)
+
+
 if __name__ == "__main__":
     unittest.main()

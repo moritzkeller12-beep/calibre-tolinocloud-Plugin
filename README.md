@@ -1,6 +1,6 @@
 # Tolino Cloud Sync für Calibre
 
-Plugin-Version: **0.9.42** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
+Plugin-Version: **0.9.43** — synchronisiert Bücher zwischen Calibre und der Tolino Cloud
 (Upload, Download, Sammlungen, Gelesen-Markierung).
 
 ## Installation
@@ -58,9 +58,10 @@ Kein Inkognito-Fenster.
 | `invalid_grant` / „verbraucht oder widerrufen" | Alter Kandidat — empfohlenen Live-Weg benutzen; Disk-Kopien nur mit geschlossenen Browserfenstern lesen. Gekoderte und verschlüsselte Kandidaten entpackt das Plugin automatisch vor dem Tausch. |
 | HTTP 403 „Zugriff geblockt" | Bot-Schutz. Am Token-Endpunkt wartet das Plugin kurz und wiederholt den Aufruf automatisch (2×); bleibt die 403, → unten „Bot-Schutz-Komponente installieren". |
 | „Tolino HTTP 400: {}" / „Vorbereitung fehlgeschlagen" | Unbekannte Hardware-ID am BOSH-Dienst: ab 0.9.35 übernimmt bzw. registriert das Plugin das Gerät automatisch und wiederholt den Aufruf (seit 0.9.37 mit kurzer Wartezeit nach `registerhw`); die echte Servermeldung steht jetzt im Fehler. |
-| „Der System-Browser konnte nicht geöffnet werden" / es öffnet sich **gar kein Browser** (Calibre via Flathub, z. B. Pop!_OS) | Ab 0.9.40 startet die Sandbox-Kette die Öffner synchron: xdg-open (Portal) → gio → `flatpak-spawn --host`. Ohne Wirkung einmalig `flatpak override --user --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre` ausführen und Calibre neu starten — dann geht wieder das eigene Anmeldefenster. Ohne Freigabe als Notfall den Token manuell übernehmen (oben). |
+| „Der System-Browser konnte nicht geöffnet werden" / es öffnet sich **gar kein Browser** (Calibre via Flathub, z. B. Pop!_OS) | Ab 0.9.40 startet die Sandbox-Kette die Öffner synchron: xdg-open (Portal) → gio → `flatpak-spawn --host`. Ohne Wirkung einmalig die Freigabe erteilen — User-Installation: `flatpak override --user --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre`, System-Installation: `sudo flatpak override --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre` (ohne `--user`; `flatpak info` zeigt, welche Installation gilt) — danach Calibre **vollständig** neu starten. Ohne Freigabe als Notfall den Token manuell übernehmen (oben). |
 | „Es wurden … Refresh-Token gefunden, aber alle waren bereits verbraucht" | Alte Festplatten-Kopien. Ab 0.9.41 öffnet der Knopf „Token aus laufendem Web Reader übernehmen" selbst ein eigenes Chromium-Fenster und liest live (danach schließt nur dieses Fenster, nie der eigene Browser); ohne Chrome/Chromium/Brave einmalig installieren. |
 | Es öffnet sich nur Firefox / das eigene Fenster bleibt zu | Ab 0.9.42 wird eine **installierte Chromium-Variante überall zuerst genutzt** – egal welcher Standardbrowser eingestellt ist: erweiterte Suche (auch `chrome`, Beta/Dev-Varianten, feste Installationsorte bei reduziertem PATH), der Anmeldelink geht direkt an die Chromium, und in der Flatpak-Sandbox bricht die Anmeldung sichtbar mit dem `flatpak override`-Hinweis ab statt still im Firefox zu landen. Ohne installierte Chromium-Variante: bitte eine installieren. |
+| Flatpak-Meldung „Freigabe erteilen“ bleibt, obwohl der Befehl lief (0.9.43) | Die Host-Sonde deutete zuvor jeden Fehlercode ihres eigenen Prüfskripts als fehlende Freigabe und verwarf dabei die gefundenen Browser. Ab 0.9.43 meldet sie verlässlich, und die Meldung nennt beide Varianten (User: `flatpak override --user …`, System: `sudo flatpak override …` ohne `--user`) plus Nachweis: `flatpak info --show-permissions com.calibre_ebook.calibre` muss `org.freedesktop.Flatpak` zeigen. Calibre danach **vollständig** neu starten — laufende Fenster behalten die alten Rechte. |
 
 ## Konten und Tolino-IDs
 
