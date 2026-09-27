@@ -39,6 +39,41 @@ except ImportError:  # direkter Import (außerhalb des Plugin-Pakets)
 
 # ---------------------------------------------------------------- Vorbedingungen
 
+# Fest verdrahtete Installationsorte: Calibre startet teils mit einem
+# reduzierten PATH (Desktop-Start), dann findet shutil.which selbst eine
+# installierte Chromium-Variante nicht (Feldbefund 0.9.42: es öffnete
+# stattdessen der Standardbrowser).
+_EXTRA_BROWSER_PATHS = (
+    "/usr/bin/chromium", "/usr/bin/chromium-browser",
+    "/usr/lib/chromium/chromium", "/usr/lib/chromium-browser/chromium-browser",
+    "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+    "/opt/google/chrome/chrome",
+    "/usr/bin/brave-browser", "/usr/bin/brave-browser-stable",
+    "/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
+    "/usr/bin/vivaldi", "/usr/bin/vivaldi-stable",
+    "/usr/bin/opera", "/usr/bin/opera-stable", "/snap/bin/chromium",
+)
+
+# Ergebnis der Host-Sonde in der Flatpak-Sandbox:
+# "" (nicht gelaufen/gefunden), "unavailable", "denied", "empty", "ok".
+_host_probe_status = ""
+
+
+def _browser_label_for(path):
+    """Anzeigename für einen Browser-Pfad (chromium* → Chromium …)."""
+    name = os.path.basename(str(path))
+    for prefix, label in (("google-chrome", "Google Chrome"),
+                          ("chrome", "Google Chrome"),
+                          ("chromium", "Chromium"),
+                          ("brave", "Brave"),
+                          ("microsoft-edge", "Edge"),
+                          ("vivaldi", "Vivaldi"),
+                          ("opera", "Opera")):
+        if name.startswith(prefix):
+            return label
+    return name
+
+
 def _sandbox_host_launchers():
     """Chromium-Launcher des HOSTS via `flatpak-spawn --host`.
 
@@ -48,13 +83,19 @@ def _sandbox_host_launchers():
     Host-Flatpak-Apps; ohne talk-name=org.freedesktop.Flatpak endet der
     Aufruf sofort mit einem Fehler und die Liste bleibt leer -- die
     Meldung von launch_reader_window nennt dann den override-Befehl.
+    Das Ergebnis steht in ``_host_probe_status`` ("denied" vs. "empty":
+    Freigabe fehlt vs. auf dem Host ist kein Chromium installiert).
     """
+    global _host_probe_status
     spawn = shutil.which("flatpak-spawn")
     if not spawn:
+        _host_probe_status = "unavailable"
         return []
     script = (
-        "for b in google-chrome google-chrome-stable chromium "
-        "chromium-browser brave-browser microsoft-edge vivaldi; do "
+        "for b in google-chrome google-chrome-stable google-chrome-beta "
+        "chrome chromium chromium-browser brave-browser "
+        "brave-browser-stable microsoft-edge microsoft-edge-stable "
+        "microsoft-edge-dev vivaldi vivaldi-stable opera; do "
         "p=$(command -v \"$b\") && { echo \"NATIVE $p\"; break; }; done; "
         "for a in org.chromium.Chromium com.brave.Browser "
         "com.google.Chrome com.vivaldi.Vivaldi; do "
@@ -69,6 +110,7 @@ def _sandbox_host_launchers():
     except (OSError, subprocess.SubprocessError):
         return []
     if proc.returncode != 0:
+        _host_probe_status = "denied"
         return []
     commands = {
         "org.chromium.Chromium": ("chrome", "Chromium (Flatpak, Host)"),
@@ -89,6 +131,7 @@ def _sandbox_host_launchers():
             command, label = commands[value]
             launchers.append(([spawn, "--host", "flatpak", "run",
                                "--command=%s" % command, value], label))
+    _host_probe_status = "ok" if launchers else "empty"
     return launchers
 
 
@@ -109,20 +152,37 @@ def chromium_candidates(home=None):
     execs = [
         ("google-chrome", "Google Chrome"),
         ("google-chrome-stable", "Google Chrome"),
+        ("google-chrome-beta", "Google Chrome"),
+        ("chrome", "Google Chrome"),
         ("chromium", "Chromium"),
         ("chromium-browser", "Chromium"),
         ("brave-browser", "Brave"),
+        ("brave-browser-stable", "Brave"),
         ("microsoft-edge", "Edge"),
         ("microsoft-edge-stable", "Edge"),
+        ("microsoft-edge-beta", "Edge"),
+        ("microsoft-edge-dev", "Edge"),
         ("vivaldi", "Vivaldi"),
         ("vivaldi-stable", "Vivaldi"),
+        ("vivaldi-snapshot", "Vivaldi"),
         ("opera", "Opera"),
+        ("opera-stable", "Opera"),
     ]
     found = []
     for exe, label in execs:
         path = shutil.which(exe)
         if path:
             found.append(([path], label))
+    # PATH-unabhängige Zusatzsuche an fest verdrahteten Installations-
+    # orten (Desktop-Start von Calibre liefert teils einen reduzierten
+    # PATH -- trotz installierter Chromium-Variante fand die Normal-
+    # suche dann nichts und es öffnete der Standardbrowser).
+    for path in _EXTRA_BROWSER_PATHS:
+        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            continue
+        if any(path == argv[0] for argv, _label in found):
+            continue
+        found.append(([path], _browser_label_for(path)))
     # Flatpak: only offer an app whose installation directory actually
     # exists AND whose launcher binary is available (sandboxed binaries
     # cannot be executed directly -- they need the flatpak runtime).
@@ -190,6 +250,16 @@ def _macos_chrome_paths():
     return found
 
 
+def chromium_options():
+    """Alle lauffähigen Kandidaten inklusive Windows/macOS-Pfaden."""
+    found = chromium_candidates()
+    if sys.platform == "win32":
+        found = found + _windows_chrome_paths()
+    elif sys.platform == "darwin":
+        found = found + _macos_chrome_paths()
+    return found
+
+
 def pick_chromium():
     """Best available Chromium-family browser, or None.
 
@@ -197,11 +267,7 @@ def pick_chromium():
     path or a flatpak/snap launcher followed by nothing yet -- the
     Chromium flags are appended by the caller.
     """
-    found = chromium_candidates()
-    if sys.platform == "win32":
-        found = found + _windows_chrome_paths()
-    elif sys.platform == "darwin":
-        found = found + _macos_chrome_paths()
+    found = chromium_options()
     return found[0] if found else None
 
 
@@ -697,15 +763,22 @@ def launch_reader_window(partner_id):
             "Token-Übernahme. Alternativ: aktuellen Refresh-Token manuell "
             "aus einem laufenden Web Reader übernehmen (siehe README)."
         )
-        if in_flatpak_sandbox():
+        if _host_probe_status == "empty":
+            message += (
+                " Die Sonde außerhalb der Sandbox fand ebenfalls keinen "
+                "Chromium-Browser -- bitte Chrome/Chromium/Brave/Edge "
+                "installieren; danach öffnet sich das eigene Fenster "
+                "unabhängig vom Standardbrowser."
+            )
+        elif in_flatpak_sandbox():
             message += (
                 " Calibre läuft als Flatpak (Flathub): Browser des "
                 "Rechners sind ohne Freigabe unsichtbar. Für das eigene "
                 "Anmeldefenster einmalig erlauben: flatpak override "
                 "--user --talk-name=org.freedesktop.Flatpak "
                 "com.calibre_ebook.calibre (danach Calibre neu starten) "
-                "-- ohne die Freigabe öffnet das Plugin den System-"
-                "Browser als Fallback."
+                "-- ohne die Freigabe bricht die Anmeldung hier mit "
+                "diesem Hinweis ab, statt im Standardbrowser zu landen."
             )
         raise TolinoAuthError(message)
     port = _start_port()
@@ -713,7 +786,7 @@ def launch_reader_window(partner_id):
     if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
         return binary, port
     _clean_profile_dir()
-    args = list(binary) + [
+    flags = [
         "--user-data-dir=%s" % _profile_dir(),
         "--remote-debugging-port=%d" % port,
         "--no-first-run", "--no-default-browser-check",
@@ -726,12 +799,34 @@ def launch_reader_window(partner_id):
     creationflags = 0
     if os.name == "nt":
         creationflags = 0x00000008  # DETACHED_PROCESS: Calibre bleibt bedienbar
-    try:
-        subprocess.Popen(args, creationflags=creationflags,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError as exc:
+    # Alle Kandidaten der Reihe nach versuchen: ein defekter erster
+    # Eintrag darf die Anmeldung nicht in den System-Browser-Fallback
+    # schicken, wenn daneben eine lauffähige Chromium-Variante
+    # installiert ist (Feldbefund 0.9.42: installierte Chromium wurde
+    # übersehen, es öffnete der Standardbrowser).
+    attempts = [(list(binary), label)]
+    last_error = None
+    index = 0
+    while index < len(attempts):
+        argv, candidate_label = attempts[index]
+        index += 1
+        try:
+            subprocess.Popen(list(argv) + flags, creationflags=creationflags,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            break
+        except OSError as exc:
+            last_error = (candidate_label, exc)
+            if index == 1:
+                # Erst beim ersten Fehlschlag die übrigen Kandidaten
+                # ermitteln (die Host-Sonde kostet einen Prozessstart).
+                attempts.extend(
+                    cand for cand in chromium_options()
+                    if cand[0] != binary[0])
+    else:
         raise TolinoAuthError(
-            "Chromium konnte nicht gestartet werden (%s): %s" % (label, exc))
+            "Chromium konnte nicht gestartet werden (%s): %s"
+            % (last_error[0], last_error[1]))
     # Wait until the DevTools endpoint answers.
     deadline = time.time() + 20
     while time.time() < deadline:

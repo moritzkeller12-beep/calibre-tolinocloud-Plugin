@@ -2423,7 +2423,8 @@ class LiveGrabTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as home:
             os.makedirs(os.path.join(home, ".var", "app", "com.brave.Browser"))
-            with _patch("shutil.which", return_value=None):
+            with _patch("shutil.which", return_value=None), \
+                 _patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()):
                 candidates = cdp_module.chromium_candidates(home=home)
         self.assertEqual([], candidates)
 
@@ -5150,6 +5151,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         from . import cdp as cdp_module
 
         with _patch.object(cdp_module, "pick_chromium", return_value=None), \
+             _patch.object(cdp_module, "_host_probe_status", ""), \
              _patch.object(cdp_module, "in_flatpak_sandbox",
                            return_value=True):
             with self.assertRaises(TolinoAuthError) as ctx:
@@ -5165,6 +5167,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         from . import cdp as cdp_module
 
         with _patch.object(cdp_module, "pick_chromium", return_value=None), \
+             _patch.object(cdp_module, "_host_probe_status", ""), \
              _patch.object(cdp_module, "in_flatpak_sandbox",
                            return_value=False):
             with self.assertRaises(TolinoAuthError) as ctx:
@@ -5213,6 +5216,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
 
         with _patch.object(cdp_module, "in_flatpak_sandbox",
                            return_value=True), \
+             _patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()), \
              _patch("shutil.which",
                     side_effect=lambda name: "/usr/bin/flatpak-spawn"
                     if name == "flatpak-spawn" else None), \
@@ -5229,6 +5233,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
 
         with _patch.object(cdp_module, "in_flatpak_sandbox",
                            return_value=False), \
+             _patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", ()), \
              _patch("shutil.which", return_value=None), \
              _patch.object(cdp_module.subprocess, "run",
                            side_effect=AssertionError("probe started")):
@@ -5287,6 +5292,226 @@ class ExtractOpensOwnChromiumWindowTests(unittest.TestCase):
             advice = spent_token_advice()
         self.assertIn("flatpak override", advice)
         self.assertIn("com.calibre_ebook.calibre", advice)
+
+
+class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
+    """Feldbefund 0.9.42: "es öffnet weiterhin den Firefox ... in 0.9.39
+    funktionierte es mit diesem Chromium browser. Wenn der User eine
+    Chromium-Variante installiert hat, soll sich diese öffnen, egal
+    welchen Standardbrowser der User hat."""
+
+    def test_chromium_candidates_finds_extra_binary_names(self):
+        """Auch `chrome`, Beta/Dev-Varianten etc. werden als Befehlsname
+        erkannt -- nicht nur die klassischen zehn."""
+        from . import cdp as cdp_module
+
+        with tempfile.TemporaryDirectory() as home:
+            with patch("shutil.which",
+                       side_effect=lambda name: "/usr/bin/%s" % name
+                       if name == "chrome" else None):
+                found = cdp_module.chromium_candidates(home=home)
+        argvs = [argv for argv, _label in found]
+        self.assertIn(["/usr/bin/chrome"], argvs)
+
+    def test_chromium_candidates_falls_back_to_known_paths(self):
+        """Fest verdrahtete Installationsorte finden auch dann eine
+        installierte Chromium-Variante, wenn Calibre mit reduziertem
+        PATH startet (Desktop-Start)."""
+        from . import cdp as cdp_module
+
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "chromium-bin")
+            with open(path, "w") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+            with patch.object(cdp_module, "_EXTRA_BROWSER_PATHS", (path,)), \
+                 patch.object(cdp_module, "_host_probe_status", ""), \
+                 patch("shutil.which", return_value=None):
+                found = cdp_module.chromium_candidates(home=home)
+        self.assertIn([path], [argv for argv, _label in found])
+        self.assertIn("Chromium", [label for _argv, label in found])
+
+    def test_host_probe_status_denied_when_flatpak_spawn_fails(self):
+        """Ohne talk-name-Freigabe endet die Host-Sonde mit Fehlercode --
+        der Status "denied" unterscheidet das von "kein Chromium
+        installiert"."""
+        from . import cdp as cdp_module
+
+        class DeniedProc(object):
+            returncode = 1
+            stdout = ""
+
+        with patch.object(cdp_module, "in_flatpak_sandbox",
+                          return_value=True), \
+             patch.object(cdp_module, "_host_probe_status", ""), \
+             patch("shutil.which",
+                   side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                   if name == "flatpak-spawn" else None), \
+             patch.object(cdp_module.subprocess, "run",
+                          return_value=DeniedProc()):
+            cdp_module.chromium_candidates(home="/nonexistent-home")
+            self.assertEqual("denied", cdp_module._host_probe_status)
+
+    def test_host_probe_status_empty_when_host_has_no_browser(self):
+        """Sonde erlaubt (rc 0), aber der Host hat keinen Chromium --
+        Status "empty" fordert dann die Installation."""
+        from . import cdp as cdp_module
+
+        class EmptyProc(object):
+            returncode = 0
+            stdout = ""
+
+        with patch.object(cdp_module, "in_flatpak_sandbox",
+                          return_value=True), \
+             patch.object(cdp_module, "_host_probe_status", ""), \
+             patch("shutil.which",
+                   side_effect=lambda name: "/usr/bin/flatpak-spawn"
+                   if name == "flatpak-spawn" else None), \
+             patch.object(cdp_module.subprocess, "run",
+                          return_value=EmptyProc()):
+            cdp_module.chromium_candidates(home="/nonexistent-home")
+            self.assertEqual("empty", cdp_module._host_probe_status)
+
+    def test_launch_names_installation_when_host_probe_empty(self):
+        """Ist die Sonde durchgelaufen und hat nichts gefunden, nennt die
+        Meldung die Installation statt des override-Befehls (der wäre
+        überflüssig)."""
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        with _patch.object(cdp_module, "pick_chromium", return_value=None), \
+             _patch.object(cdp_module, "_host_probe_status", "empty"), \
+             _patch.object(cdp_module, "in_flatpak_sandbox",
+                           return_value=True):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                cdp_module.launch_reader_window(4)
+        message = str(ctx.exception)
+        self.assertIn("installieren", message)
+        self.assertNotIn("flatpak override", message)
+
+    def test_launch_falls_through_to_next_candidate(self):
+        """Ein defekter erster Kandidat (OSError beim Start) darf die
+        Anmeldung nicht abwürgen: die nächste installierte
+        Chromium-Variante wird gestartet."""
+        import tempfile
+        from unittest.mock import patch as _patch
+        from . import cdp as cdp_module
+
+        broken = (["/usr/bin/broken"], "Broken")
+        working = (["/usr/bin/working"], "Working")
+        spawned = {}
+
+        class FakePopen(object):
+            def __init__(self, args, **kwargs):
+                if args[0] == "/usr/bin/broken":
+                    raise OSError("exec format error")
+                spawned["args"] = list(args)
+
+        with tempfile.TemporaryDirectory() as home:
+            with _patch.object(cdp_module, "pick_chromium",
+                               return_value=broken), \
+                 _patch.object(cdp_module, "chromium_options",
+                               return_value=[broken, working]), \
+                 _patch.object(cdp_module, "_host_probe_status", ""), \
+                 _patch.object(cdp_module, "_clean_profile_dir"), \
+                 _patch.object(cdp_module, "_profile_dir",
+                               return_value=os.path.join(home, "prof")), \
+                 _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
+                 _patch.object(cdp_module, "_http_get_json",
+                               side_effect=[None, {"webSocketDebuggerUrl":
+                                                   "ok"}]), \
+                 _patch.object(cdp_module.time, "sleep"):
+                _binary, port = cdp_module.launch_reader_window(4)
+        self.assertEqual("/usr/bin/working", spawned["args"][0])
+        self.assertIn("--remote-debugging-port=%d" % port, spawned["args"])
+        self.assertIn("mytolino.com", spawned["args"][-1])
+
+    def test_open_login_browser_prefers_installed_chromium(self):
+        """Der Anmeldelink geht an die installierte Chromium-Variante --
+        der Standardbrowser (Firefox) spielt keine Rolle."""
+        from .tolino import open_login_browser
+
+        spawned = {}
+
+        class FakePopen(object):
+            def __init__(self, args, **kwargs):
+                spawned["args"] = list(args)
+
+        with patch("calibre_plugin.cdp.pick_chromium",
+                   return_value=(["/usr/bin/chromium"], "Chromium")), \
+             patch.object(tolino_module.subprocess, "Popen", FakePopen), \
+             patch("calibre_plugin.tolino.open_system_browser",
+                   side_effect=AssertionError("system browser called")):
+            opened = open_login_browser("https://example.invalid/auth")
+        self.assertTrue(opened)
+        self.assertEqual(["/usr/bin/chromium",
+                          "https://example.invalid/auth"], spawned["args"])
+
+    def test_open_login_browser_falls_back_without_chromium(self):
+        """Ohne Chromium bleibt der System-Browser der Notfall."""
+        from .tolino import open_login_browser
+
+        with patch("calibre_plugin.cdp.pick_chromium", return_value=None), \
+             patch("calibre_plugin.tolino.open_system_browser",
+                   return_value=True) as system, \
+             patch.object(tolino_module.subprocess, "Popen",
+                          side_effect=AssertionError("Popen called")):
+            opened = open_login_browser("https://example.invalid/auth")
+        self.assertTrue(opened)
+        system.assert_called_once_with("https://example.invalid/auth")
+
+    def test_keycloak_surfaces_flatpak_hint_instead_of_system_browser(self):
+        """In der Flatpak-Sandbox fällt der Login NICHT mehr still auf
+        den System-Browser (Firefox) zurück -- der Freigabe-Hint wird
+        als Fehler sichtbar (Feldbefund 0.9.42)."""
+        from .tolino import _keycloak_assisted_login
+
+        with patch("calibre_plugin.tolino.grab_live_refresh",
+                   side_effect=TolinoAuthError(
+                       "Kein Chromium-Browser gefunden (Chrome/Chromium/"
+                       "Brave/Edge). Die Browser-Anmeldung benötigt "
+                       "eines davon.")), \
+             patch("calibre_plugin.tolino.in_flatpak_sandbox",
+                   return_value=True), \
+             patch("calibre_plugin.tolino._disk_assisted_login",
+                   side_effect=AssertionError("fallback called")):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                _keycloak_assisted_login(4, "test_hardware")
+        self.assertIn("Kein Chromium-Browser gefunden", str(ctx.exception))
+
+    def test_local_callback_opens_chromium_variant(self):
+        """Der localhost-Callback-Weg öffnet den Auth-Link in der
+        installierten Chromium-Variante, nie im Standardbrowser."""
+        from .tolino import browser_login
+
+        synthetic = {
+            9: {"name": "Testladen ohne Reader",
+                "key": 99,
+                "reseller_id": "99",
+                "client_id": "webshop01",
+                "scope": "SCOPE_BOSH",
+                "token_url": "https://example.invalid/oauth2/token",
+                "auth_url": "https://example.invalid/oauth2/authorize"},
+        }
+        spawned = {}
+
+        class FakePopen(object):
+            def __init__(self, args, **kwargs):
+                spawned["args"] = list(args)
+
+        with patch.dict("calibre_plugin.tolino.PARTNERS", synthetic), \
+             patch("calibre_plugin.cdp.pick_chromium",
+                   return_value=(["/usr/bin/chromium"], "Chromium")), \
+             patch.object(tolino_module.subprocess, "Popen", FakePopen), \
+             patch("calibre_plugin.tolino.webbrowser.open",
+                   side_effect=AssertionError("webbrowser.open called")):
+            with self.assertRaises(TolinoAuthError):
+                browser_login(9, "test_hardware", timeout=0.2)
+        self.assertEqual("/usr/bin/chromium", spawned["args"][0])
+        self.assertIn("https://example.invalid/oauth2/authorize",
+                      spawned["args"][-1])
+        self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1",
+                      spawned["args"][-1])
 
 
 if __name__ == "__main__":
