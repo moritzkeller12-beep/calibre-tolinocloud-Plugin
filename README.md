@@ -4,7 +4,7 @@
 **Neu:** Calibre-Serien werden automatisch als Sammlungen in der Cloud angelegt; reine
 Metadatenänderungen (Titel/Autoren/ISBN) werden in-place aktualisiert statt das Buch neu
 hochzuladen (nur wenn die Datei unverändert ist).
-**Läuft auf:** Windows 11 · natives Linux · Calibre als Flatpak (Pop!_OS) — alle getestet.
+**Läuft auf:** Windows 11 · natives Linux · Calibre als Flatpak — alle getestet.
 
 ## Installation
 
