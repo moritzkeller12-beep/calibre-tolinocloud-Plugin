@@ -23,7 +23,8 @@ except ImportError:
 
 try:
     from . import bootstrapper
-    from .config import save_account, save_settings, settings
+    from .config import (account_by_name, save_account, save_settings,
+                         set_active_account, settings)
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
                        load_state, metadata_by_id, plan_sync,
                        selected_book_ids, selected_table_rows,
@@ -31,15 +32,17 @@ try:
                        normalize_formats, safe_format_path, cover_bytes,
                        unpack_plan_result, unpack_upload_record,
                        diagnose_preparation, format_diagnostic_report,
-                       custom_column_available, metadata_tolino_id,
-                       update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
+                       metadata_tolino_id,
+                       tolino_column_active, update_tolino_ids, TOLINO_COLUMN,
+                       TOLINO_COLUMN_LABEL)
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          hardware_id, normalize_refresh_token, sanitize_error,
                          scrape_browser_tokens, start_token_keepalive,
                          try_live_grab_first, validate_refresh_candidates)
 except ImportError:
     bootstrapper = None
-    from config import save_account, save_settings, settings
+    from config import (account_by_name, save_account, save_settings,
+                        set_active_account, settings)
     from sync import (compare_inventory, format_error_details, iter_book_ids,
                       load_state, metadata_by_id, plan_sync,
                       selected_book_ids, selected_table_rows,
@@ -47,8 +50,9 @@ except ImportError:
                       normalize_formats, safe_format_path, cover_bytes,
                       unpack_plan_result, unpack_upload_record,
                       diagnose_preparation, format_diagnostic_report,
-                      custom_column_available, metadata_tolino_id,
-                      update_tolino_ids, TOLINO_COLUMN, TOLINO_COLUMN_LABEL)
+                      metadata_tolino_id,
+                      tolino_column_active, update_tolino_ids, TOLINO_COLUMN,
+                      TOLINO_COLUMN_LABEL)
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         hardware_id, normalize_refresh_token, sanitize_error,
                         scrape_browser_tokens, start_token_keepalive,
@@ -661,6 +665,12 @@ class SyncDashboard(QDialog):
         self.deletions = QCheckBox("Löschungen erlauben")
         self.tolino_column = QCheckBox(
             "Tolino-ID-Spalte verwenden, wenn vorhanden")
+        self.tolino_column.setToolTip(
+            "Die Spalte spiegelt die Tolino-IDs der Bibliothek. Gelesen "
+            "UND geschrieben wird sie nur bei GENAU EINEM Konto -- die "
+            "Bibliothek ist global, die Zuordnung jedes Kontos lebt aber "
+            "im Konto selbst. Bei mehreren Konten merkt sich jedes Konto "
+            "seine Tolino-IDs allein im Konten-State.")
         self.compare_authors = QCheckBox("Autor (nur Vergleich/Filter)")
         self.compare_title = QCheckBox("Buchtitel (nur Vergleich/Filter)")
         self.compare_isbn = QCheckBox("ISBN (nur Vergleich/Filter)")
@@ -737,6 +747,11 @@ class SyncDashboard(QDialog):
             return
         self._save_visible_account()
         self.account_name = self.account_select.itemData(index)
+        # Angezeigtes und aktives Konto sind ab jetzt IMMER dasselbe:
+        # settings(), Konten-State und Keep-alive lesen sonst weiter das
+        # vorherige Konto, und die Tolino-ID-Zuordnung landete beim
+        # falschen Konto.
+        set_active_account(self.account_name)
         account = next(item for item in settings()["accounts"]
                        if item["name"] == self.account_name)
         self.partner.setCurrentIndex(max(0, self.partner.findData(account["partner_id"])))
@@ -1051,20 +1066,27 @@ class SyncDashboard(QDialog):
                 "curl_cffi wurde nach %s entpackt. Bitte Calibre neu "
                 "starten, damit die Module geladen werden." % plugin_dir)
 
+    def _selected_account(self):
+        """The account this dialog shows -- never a different 'active' one."""
+        return account_by_name(getattr(self, "account_name", None))
+
     def values(self):
         refresh_token, _ = normalize_refresh_token(self.refresh.text())
+        account = self._selected_account() or settings()
         return {
             "account_name": self.account_name,
             "partner_id": self.partner.currentData(),
             "hardware_id": self.hardware.text().strip() or hardware_id(),
             "refresh_token": refresh_token,
-            "username": settings()["username"],
-            "password": settings()["password"],
-            "preferred_formats": [x.strip().upper() for x in self.formats.text().split(",") if x.strip()],
+            "username": account.get("username", ""),
+            "password": account.get("password", ""),
+            "preferred_formats": [x.strip().upper()
+                                  for x in self.formats.text().split(",") if x.strip()],
             "upload_covers": self.covers.isChecked(),
             "enable_deletions": self.deletions.isChecked(),
             "use_tolino_column": self.tolino_column.isChecked(),
-            "state": settings()["state"],
+            "state": (account.get("state")
+                      if isinstance(account.get("state"), dict) else {}),
         }
 
     def browser_login(self):
@@ -1169,10 +1191,10 @@ class SyncDashboard(QDialog):
             QMessageBox.warning(self, "Konfiguration",
                                 "Bitte zuerst einen Refresh-Token konfigurieren.")
             return
-        self.sync_column_enabled = (
-            settings["use_tolino_column"] and
-            custom_column_available(self.gui.current_db)
-        )
+        # EINE Regel fuer Lesen UND Schreiben der Tolino-ID-Spalte
+        # (tolino_column_active): nur bei genau einem Konto.
+        self.sync_column_enabled = tolino_column_active(
+            settings, self.gui.current_db)
         try:
             metadata = {}
             for book_id in iter_book_ids(self.gui.current_db):
@@ -1212,8 +1234,7 @@ class SyncDashboard(QDialog):
             comparison = compare_inventory(
                 metadata, state, client.inventory(), settings["preferred_formats"],
                 comparison_fields,
-                use_metadata_ids=(self.sync_column_enabled and
-                                  len(settings["accounts"]) == 1),
+                use_metadata_ids=self.sync_column_enabled,
             )
             dialog = InventoryDialog(
                 comparison, self,
@@ -1387,7 +1408,10 @@ class TolinoSyncAction(InterfaceAction):
     def _keepalive_persist(self, refresh):
         try:
             cfg = settings()
-            name = cfg.get("account_name")
+            # Keep-alive-Konto = aktives Konto (settings()); das
+            # Dialog-Feld "account_name" existiert in settings() nicht --
+            # der rotierte Token landete dadurch nie auf der Platte.
+            name = cfg.get("active_account") or cfg.get("name")
             if name and refresh:
                 save_account(name, {"refresh_token": refresh}, active=name)
         except Exception:

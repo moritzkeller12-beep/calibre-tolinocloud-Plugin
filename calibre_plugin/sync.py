@@ -39,6 +39,23 @@ def custom_column_available(database):
     return TOLINO_COLUMN in fields
 
 
+def tolino_column_active(values, database):
+    """ONE rule for the Tolino-ID column: read AND write with exactly one account.
+
+    Die Spalte lebt in der Bibliothek (global), die Sync-Zuordnung lebt
+    je Konto im Konten-State -- bei mehreren Konten koennte die Spalte
+    nur die IDs des zuletzt synchronisierten Kontos spiegeln. Deshalb
+    gilt fuer Lesen UND Schreiben dieselbe Bedingung: genau ein Konto,
+    Spalte vorhanden, Option aktiv. Alles andere speichert die
+    Tolino-IDs eindeutig im jeweiligen Konto.
+    """
+    if not isinstance(values, dict) or not values.get("use_tolino_column"):
+        return False
+    if not custom_column_available(database):
+        return False
+    return len(values.get("accounts") or []) == 1
+
+
 def update_tolino_ids(database, updates, enabled=True):
     """Persist IDs through Calibre's supported set_field API when enabled."""
     if not enabled or not updates or not custom_column_available(database):
