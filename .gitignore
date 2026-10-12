@@ -1,7 +1,6 @@
 # Python and plugin build artifacts
 __pycache__/
 *.py[cod]
-tolino_cloud_sync.zip
 
 # Editors and OS metadata
 .idea

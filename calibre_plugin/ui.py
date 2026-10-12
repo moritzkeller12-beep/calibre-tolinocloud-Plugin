@@ -129,12 +129,9 @@ class InventoryDialog(QDialog):
         self.setWindowTitle("Bestandsvergleich")
         self.setMinimumSize(1080, 460)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "So funktioniert’s: Häkchen in „Hochladen“ = dieses Buch wird "
-            "in die Cloud geladen (diese Zeilen stehen oben). „In "
-            "Calibre“/„In Cloud“ zeigt, wo das Buch schon liegt. Ein Klick "
-            "auf einen Spaltenkopf sortiert. Die Cloud-Aktionen unten "
-            "wirken nur auf die markierte Zeile."))
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -169,8 +166,8 @@ class InventoryDialog(QDialog):
         # Cloud actions live inside this window and use its own table, so
         # they can never outlive it (the deleted-QTableWidget crash).
         actions = QGroupBox(
-            "Cloud-Aktionen für die markierte Zeile (wirken nur im "
-            "Tolino-Konto, nicht in Calibre)")
+            "Cloud-Buch der markierten Zeile: herunterladen, Sammlung, "
+            "gelesen markieren (wirkt nur in der Tolino Cloud)")
         action_row = QHBoxLayout()
         self.download_btn = QPushButton("Herunterladen")
         self.download_btn.setToolTip(
@@ -200,9 +197,12 @@ class InventoryDialog(QDialog):
 
         buttons = QHBoxLayout()
         confirm = QPushButton("Auswahl hochladen")
+        confirm.setToolTip(
+            "Lädt genau die angehakten Bücher in die Tolino Cloud hoch.")
         cancel = QPushButton("Abbrechen")
         confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
+        self.confirm = confirm
         buttons.addWidget(confirm)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
@@ -285,6 +285,12 @@ class InventoryDialog(QDialog):
             check = QCheckBox()
             check.setChecked(bool(row.get("selected")))
             check.setEnabled(row.get("book_id") is not None)
+            state_signal = getattr(check, "stateChanged", None)
+            if state_signal is not None:
+                try:
+                    state_signal.connect(self._update_summary)
+                except Exception:
+                    pass  # Qt-Stub ohne echtes Signal
             self.checks.append(check)
             self.table.setCellWidget(row_index, 0, check)
             values = (
@@ -301,6 +307,25 @@ class InventoryDialog(QDialog):
                 self.table.setItem(
                     row_index, column, QTableWidgetItem(str(value or "")))
         self.table.resizeColumnsToContents()
+        self._update_summary()
+
+    def _update_summary(self, *_args):
+        """Kurzzeile: wie viele Bücher gerade ausgewählt sind."""
+        try:
+            total = len(self.rows)
+            selected = len(self.selected_ids())
+            summary = getattr(self, "summary", None)
+            if summary is not None:
+                summary.setText(
+                    "%d von %d Büchern ausgewählt. Bücher mit Häkchen in "
+                    "„Hochladen“ werden in die Tolino Cloud geladen; "
+                    "Spaltenkopf klicken sortiert." % (selected, total))
+            confirm = getattr(self, "confirm", None)
+            if confirm is not None:
+                confirm.setText("Auswahl hochladen (%d)" % selected
+                                if selected else "Auswahl hochladen")
+        except Exception:
+            return  # Qt-Stub oder noch nicht aufgebaute Oberfläche
 
     # --- Cloud actions on the currently selected table row ---------------
 
@@ -662,70 +687,103 @@ class SyncDashboard(QDialog):
         self.setMinimumWidth(560)
         root = QVBoxLayout(self)
 
-        setup = QGroupBox("1. Anmeldung")
+        intro = QLabel(
+            "So geht’s: <b>1)</b> anmelden &nbsp;→&nbsp; <b>2)</b> "
+            "vergleichen und Bücher hochladen. Alles Weitere ist optional "
+            "und standardmäßig richtig eingestellt.")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        # --- Schritt 1: Anmelden -------------------------------------------
+        setup = QGroupBox("1 · Anmelden")
         setup_form = QFormLayout(setup)
         self.partner = QComboBox()
         for pid, partner in sorted(PARTNERS.items()):
-            self.partner.addItem("%s - %s" % (pid, partner["name"]), pid)
+            self.partner.addItem("%s – %s" % (pid, partner["name"]), pid)
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
         self.refresh.setEchoMode(QLineEdit.Password)
         self.status = QLabel()
-        self.browser = QPushButton(
-            "Im Browser anmelden (frischen Token holen)")
+        self.browser = QPushButton("Jetzt bei Tolino anmelden")
         self.browser.setToolTip(
-            "Öffnet ein eigenes Chromium-Fenster auf dem Web Reader: dort "
-            "anmelden, Bücherliste laden -- das Plugin liest den Token "
-            "live und speichert ihn. Danach schließt sich das Fenster "
-            "selbst.")
+            "Öffnet ein Anmeldefenster. Dort im Web Reader einloggen und "
+            "die Bücherliste öffnen – den Zugang holt das Plugin "
+            "automatisch und schließt das Fenster wieder.")
         self.browser.clicked.connect(self.browser_login)
-        self.scrape_browser = QPushButton(
-            "Token aus laufendem Web Reader übernehmen")
+        self.scrape_browser = QPushButton("Zugang aus offenem Browser holen")
         self.scrape_browser.setToolTip(
-            "Liest den Token live: ist ein Anmeldefenster offen, wird "
-            "es ausgelesen. Sonst öffnet das Plugin ein eigenes "
-            "Chromium-Fenster auf dem Web Reader – Ihr Browser bleibt "
-            "geöffnet, und nach dem Übernehmen schließt nur dieses "
-            "Fenster. Nur ohne Chromium werden die Festplatten-Kopien "
-            "geprüft (alle Browserfenster vorher schließen).")
+            "Holt den Zugang aus einem bereits geöffneten Anmeldefenster. "
+            "Ohne Chromium prüft das Plugin die gespeicherten "
+            "Browser-Daten – dann vorher alle Browserfenster schließen.")
         self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
         setup_form.addRow("Buchhändler", self.partner)
         setup_form.addRow("", self.browser)
-        setup_form.addRow("", self.scrape_browser)
         setup_form.addRow("", self.status)
-        setup_form.addRow("Hardware ID (automatisch erkannt)", self.hardware)
-        setup_form.addRow("Refresh token", self.refresh)
         root.addWidget(setup)
 
-        options = QGroupBox("2. Optionen (Standard reicht)")
-        option_form = QFormLayout(options)
+        # --- Schritt 2: Synchronisieren ------------------------------------
+        action = QGroupBox("2 · Synchronisieren")
+        action_form = QFormLayout(action)
+        self.progress_label = QLabel("Bereit")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.start = QPushButton("Vergleichen und hochladen …")
+        self.start.setToolTip(
+            "Öffnet den Bestandsvergleich: Bücher anhaken, dann die "
+            "Auswahl in die Tolino Cloud hochladen.")
+        self.start.clicked.connect(self.start_sync)
+        self.cancel = QPushButton("Abbrechen")
+        self.cancel.setEnabled(False)
+        self.cancel.clicked.connect(self.cancel_sync)
+        self.debug = QPushButton("Diagnose")
+        self.debug.setToolTip(
+            "Prüfbericht zum Nachschauen bei Problemen. Führt ohne "
+            "Anmeldung keine Tolino-Anfrage aus.")
+        self.debug.clicked.connect(self.debug_diagnose)
+        action_form.addRow("", self.start)
+        action_form.addRow("", self.progress_label)
+        action_form.addRow("", self.progress)
+        action_form.addRow("", self.cancel)
+        root.addWidget(action)
+
+        # --- Erweiterte Einstellungen (standardmäßig ausgeblendet) ---------
+        self.advanced_toggle = QCheckBox("Erweiterte Einstellungen anzeigen")
+        self.advanced_toggle.setToolTip(
+            "Zugangsdaten, Formate, Vergleichsfelder und mehrere Konten – "
+            "für den normalen Gebrauch nicht nötig.")
+        self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        root.addWidget(self.advanced_toggle)
+
+        self.advanced = QGroupBox("Erweiterte Einstellungen")
+        advanced_form = QFormLayout(self.advanced)
         self.formats = QLineEdit()
-        self.covers = QCheckBox("Covers hochladen")
-        self.deletions = QCheckBox("Löschungen erlauben")
+        self.covers = QCheckBox("Cover mit hochladen")
+        self.deletions = QCheckBox("Löschungen aus der Cloud übernehmen")
         self.tolino_column = QCheckBox(
-            "Tolino-ID-Spalte verwenden, wenn vorhanden")
+            "Tolino-ID in eigene Calibre-Spalte schreiben (nur ein Konto)")
         self.tolino_column.setToolTip(
-            "Die Spalte spiegelt die Tolino-IDs der Bibliothek. Gelesen "
-            "UND geschrieben wird sie nur bei GENAU EINEM Konto -- die "
-            "Bibliothek ist global, die Zuordnung jedes Kontos lebt aber "
-            "im Konto selbst. Bei mehreren Konten merkt sich jedes Konto "
-            "seine Tolino-IDs allein im Konten-State.")
-        self.compare_authors = QCheckBox("Autor (nur Vergleich/Filter)")
-        self.compare_title = QCheckBox("Buchtitel (nur Vergleich/Filter)")
-        self.compare_isbn = QCheckBox("ISBN (nur Vergleich/Filter)")
+            "Schreibt die Tolino-IDs in die Calibre-Spalte #tolino_id. "
+            "Nur sinnvoll bei genau einem Konto – bei mehreren Konten "
+            "merkt sich jedes Konto seine IDs selbst.")
+        self.compare_authors = QCheckBox("Autor beim Vergleich berücksichtigen")
+        self.compare_title = QCheckBox("Titel beim Vergleich berücksichtigen")
+        self.compare_isbn = QCheckBox("ISBN beim Vergleich berücksichtigen")
         for field in (self.compare_authors, self.compare_title, self.compare_isbn):
             field.setChecked(True)
-        option_form.addRow("Formate", self.formats)
-        option_form.addRow("", self.covers)
-        option_form.addRow("", self.compare_authors)
-        option_form.addRow("", self.compare_title)
-        option_form.addRow("", self.compare_isbn)
-        option_form.addRow("", self.deletions)
-        option_form.addRow("", self.tolino_column)
-        root.addWidget(options)
+        advanced_form.addRow("", self.scrape_browser)
+        advanced_form.addRow("Hardware-ID (automatisch erkannt)", self.hardware)
+        advanced_form.addRow("Zugangsschlüssel (Refresh-Token)", self.refresh)
+        advanced_form.addRow("Bevorzugte Formate", self.formats)
+        advanced_form.addRow("", self.covers)
+        advanced_form.addRow("", self.compare_authors)
+        advanced_form.addRow("", self.compare_title)
+        advanced_form.addRow("", self.compare_isbn)
+        advanced_form.addRow("", self.deletions)
+        advanced_form.addRow("", self.tolino_column)
+        root.addWidget(self.advanced)
 
-        accounts = QGroupBox("Konten (optional)")
-        account_form = QFormLayout(accounts)
+        self.accounts_group = QGroupBox("Konten")
+        account_form = QFormLayout(self.accounts_group)
         self.account_select = QComboBox()
         self.account_new = QPushButton("Neues Konto")
         self.account_remove = QPushButton("Konto löschen")
@@ -735,39 +793,25 @@ class SyncDashboard(QDialog):
         self.account_select.currentIndexChanged.connect(self.account_changed)
         self.account_new.clicked.connect(self.new_account)
         self.account_remove.clicked.connect(self.remove_account)
-        account_form.addRow("Konto", self.account_select)
+        account_form.addRow("Aktives Konto", self.account_select)
         account_form.addRow("", account_buttons)
-        root.addWidget(accounts)
+        root.addWidget(self.accounts_group)
 
-        self.progress_label = QLabel("Bereit")
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.start = QPushButton("3. Vergleichen und hochladen")
-        self.start.setToolTip(
-            "Öffnet den Bestandsvergleich: Häkchen prüfen, dann die "
-            "Auswahl in die Tolino Cloud hochladen.")
-        self.debug = QPushButton("Diagnose")
-        self.debug.setToolTip(
-            "Prüfbericht: erst die lokale Vorbereitung, danach optional "
-            "„Tolino-Antwort testen“.")
-        self.cancel = QPushButton("Abbrechen")
-        self.cancel.setEnabled(False)
-        self.start.clicked.connect(self.start_sync)
-        self.debug.clicked.connect(self.debug_diagnose)
-        self.cancel.clicked.connect(self.cancel_sync)
-        root.addWidget(self.progress_label)
-        root.addWidget(self.progress)
-        action_buttons = QHBoxLayout()
-        action_buttons.addWidget(self.debug)
-        action_buttons.addWidget(self.start)
-        root.addLayout(action_buttons)
-        root.addWidget(self.cancel)
+        self.advanced.setVisible(False)
+        self.accounts_group.setVisible(False)
+
         # Plain close button instead of QDialogButtonBox: immune to the Qt6
         # "Invalid ButtonRole, button not added" warning seen in the field.
         close = QPushButton("Schließen")
         close.clicked.connect(self.close)
         root.addWidget(close)
         self.load_values()
+
+    def _toggle_advanced(self, visible):
+        """Erweiterte Einstellungen ein-/ausblenden (Standard: aus)."""
+        visible = bool(visible)
+        self.advanced.setVisible(visible)
+        self.accounts_group.setVisible(visible)
 
     def _save_visible_account(self):
         if not getattr(self, "account_name", None):
@@ -854,8 +898,14 @@ class SyncDashboard(QDialog):
         self.update_status()
 
     def update_status(self):
-        self.status.setText("Angemeldet" if self.refresh.text().strip()
-                            else "Nicht angemeldet")
+        logged_in = bool(self.refresh.text().strip())
+        self.status.setText(
+            "✓ Angemeldet – Sie können synchronisieren." if logged_in
+            else "● Nicht angemeldet – bitte zuerst oben anmelden.")
+        # Schritt 2 ist ohne Anmeldung nicht möglich; während eines Laufs
+        # bleibt der Knopf gesperrt (start_sync/finish_thread steuern ihn).
+        if self.thread is None:
+            self.start.setEnabled(logged_in)
 
     def set_refresh_token(self, refresh):
         normalized, _ = normalize_refresh_token(refresh)
@@ -925,11 +975,9 @@ class SyncDashboard(QDialog):
                     self.refresh.setText(refresh_token)
                     self.persist_refresh_token(refresh_token)
                     QMessageBox.information(
-                        self, "Token extrahiert",
-                        "Frischer Refresh-Token gefunden und gespeichert "
-                        "(aus %d Kandidaten validiert). Hardware-ID: %s"
-                        % (len(refreshes), hardware_id or "unverändert")
-                    )
+                        self, "Anmeldung erfolgreich",
+                        "Der Zugang wurde gefunden und gespeichert "
+                        "(Hardware-ID: %s)." % (hardware_id or "unverändert"))
                     return
                 self._offer_spent_token_retry(len(refreshes), notes)
                 return
@@ -939,16 +987,10 @@ class SyncDashboard(QDialog):
             detail = "\n".join("- %s" % note for note in notes) or \
                 "- Kein Browserprofil gefunden"
             QMessageBox.warning(
-                self, "Keine Token gefunden",
-                "Keine Tolino-Web-Reader-Tokens gefunden.\n\n"
-                "1. Im Web Reader (Bibliothek) anmelden – nicht nur "
-                "im Shop.\n"
-                "2. Die Bücherliste komplett laden.\n"
-                "3. ALLE Browserfenster schließen und sofort danach "
-                "hier nachdrücken – nur der neueste Token einer Sitzung "
-                "ist gültig.\n\n"
-                "Besser: \u201eIm Browser anmelden\u201c – der liest den "
-                "Token direkt aus dem Browser-Fenster.\n\n"
+                self, "Keine Anmeldung gefunden",
+                "Es wurde kein gültiger Tolino-Zugang gefunden.\n\n"
+                "Am einfachsten: alle Browserfenster schließen und oben "
+                "„Jetzt bei Tolino anmelden“ drücken.\n\n"
                 "Befund:\n%s" % detail
             )
         except TolinoAuthError as exc:
@@ -970,13 +1012,11 @@ class SyncDashboard(QDialog):
         detail = "\n".join("- %s" % note for note in notes) or \
             "- Kein Browserprofil gefunden"
         answer = QMessageBox.question(
-            self, "Token verbraucht",
-            ("Es wurden %d Refresh-Token gefunden, aber alle waren bereits "
-             "verbraucht (invalid grant).\n\n"
-             "Nur der neueste Token einer Sitzung ist gültig – "
-             "Festplatten-Kopien sind deshalb fast immer alt.\n\n"
+            self, "Zugang abgelaufen",
+            ("Es wurden %d Zugangsdaten gefunden, aber alle sind bereits "
+             "verbraucht.\n\n"
              "%s\n\n"
-             "Jetzt 5 Minuten alle 30 Sekunden weiterprüfen?\n\n"
+             "Jetzt 5 Minuten lang alle 30 Sekunden erneut prüfen?\n\n"
              "Befund:\n%s") % (count, spent_token_advice(), detail),
             QMessageBox.Yes | QMessageBox.No)
         if answer != QMessageBox.Yes:
@@ -1000,10 +1040,10 @@ class SyncDashboard(QDialog):
         if time.time() > getattr(self, "_scrape_retry_deadline", 0):
             self._stop_scrape_retry()
             QMessageBox.information(
-                self, "Token verbraucht",
-                "Auch nach 5 Minuten kam kein frischer Token an. Melde "
-                "dich im Web Reader (Bibliothek) neu an, lade ihn einmal "
-                "neu (F5) und starte die Browser-Anmeldung erneut.")
+                self, "Zugang abgelaufen",
+                "Auch nach 5 Minuten kam kein gültiger Zugang an. Bitte "
+                "im Web Reader neu anmelden und „Jetzt bei Tolino "
+                "anmelden“ erneut drücken.")
             return
         try:
             refreshes, hardwares, _notes = scrape_browser_tokens(
@@ -1023,8 +1063,8 @@ class SyncDashboard(QDialog):
         self.persist_refresh_token(refresh_token)
         self.update_status()
         QMessageBox.information(
-            self, "Token extrahiert",
-            "Frischer Refresh-Token gefunden und gespeichert.")
+            self, "Anmeldung erfolgreich",
+            "Der Zugang wurde gespeichert.")
 
     def _stop_scrape_retry(self):
         """Stop the 30 s retry poll (new poll, success or shutdown)."""
@@ -1135,7 +1175,7 @@ class SyncDashboard(QDialog):
         settings = self.values()
         if not settings["refresh_token"]:
             raise TolinoAuthError(
-                "Bitte zuerst einen Refresh-Token konfigurieren.")
+                "Bitte zuerst anmelden: „Jetzt bei Tolino anmelden“.")
         self._save_visible_account()
         client = TolinoClient(
             settings["partner_id"], settings["hardware_id"],
@@ -1151,8 +1191,9 @@ class SyncDashboard(QDialog):
             return
         settings = self.values()
         if not settings["refresh_token"]:
-            QMessageBox.warning(self, "Konfiguration",
-                                "Bitte zuerst einen Refresh-Token konfigurieren.")
+            QMessageBox.warning(self, "Noch nicht angemeldet",
+                                "Bitte zuerst oben auf „Jetzt bei Tolino "
+                                "anmelden“ drücken.")
             return
         # EINE Regel fuer Lesen UND Schreiben der Tolino-ID-Spalte
         # (tolino_column_active): nur bei genau einem Konto.
