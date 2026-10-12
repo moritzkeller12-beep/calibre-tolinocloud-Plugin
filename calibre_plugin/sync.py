@@ -404,6 +404,35 @@ def normalize_inventory_item(item):
     }
 
 
+def _file_changed(metadata, state_entry, format_name):
+    """True, wenn sich die Buchdatei seit dem letzten Sync geändert hat.
+
+    Nur aussagekräftig, wenn beide Seiten einen Content-Fingerabdruck
+    haben; sonst False -- die Oberfläche schlägt dann den Metadaten-Abgleich
+    vor, der ohne erneuten Upload auskommt.
+    """
+    if not format_name:
+        return False
+    current = content_fingerprint(metadata, format_name)
+    previous = str(state_entry.get("content_fp") or "")
+    return bool(current and previous and current != previous)
+
+
+def _row_explanation(status, match_reason, file_changed):
+    """Klartext-Hinweis für eine Bestandszeile."""
+    if match_reason == "duplicate_title":
+        return "Titel mehrfach in der Cloud – bitte prüfen."
+    if status == "identical":
+        if match_reason == "title":
+            return "Titel stimmt mit der Cloud überein."
+        return "In beiden vorhanden, keine Unterschiede gefunden."
+    if status == "new_in_calibre":
+        return "Noch nicht in der Cloud – kann hochgeladen werden."
+    if file_changed:
+        return "Buchdatei unterscheidet sich – Hochladen lädt die neue Datei."
+    return "Nur Metadaten unterscheiden sich – kein erneuter Upload nötig."
+
+
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                       comparison_fields=("authors", "title", "isbn"),
                       use_metadata_ids=True):
@@ -422,6 +451,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             **normalized,
             "status": "only_tolino",
             "selected": False,
+            "file_changed": False,
             "explanation": "Nur in der Cloud – kann heruntergeladen werden.",
             "normalized_title": normalize_title(normalized["title"]),
         })
@@ -466,6 +496,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
              if str(fmt).upper() in {x.upper() for x in normalize_formats(metadata.get("formats"))}),
             None,
         )
+        file_changed = False
         if remote_index is None:
             status = "new_in_calibre"
             tolino_id = stored_id
@@ -488,6 +519,9 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             status = "identical" if title_match or (
                 old.get("fingerprint") and old.get("fingerprint") == current_fp
             ) or same_fields else "changed"
+            # Nur die Buchdatei kann nicht per /meta nachgezogen werden --
+            # die Zeile soll das sagen können (0.13.0).
+            file_changed = _file_changed(metadata, old, selected_format)
             match_reason = (
                 "title" if title_match else
                 "stored_id_or_uuid" if stored_id or book_uuid == remote["uuid"] else
@@ -508,15 +542,9 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             "selected": status == "new_in_calibre",
             "match_reason": match_reason,
             "duplicate_count": title_counts.get(title_key, 0),
-            "explanation": (
-                "Titel stimmt mit der Cloud überein."
-                if status == "identical" and match_reason == "title" else
-                "Titel mehrfach in der Cloud – bitte prüfen."
-                if match_reason == "duplicate_title" else
-                "Noch nicht in der Cloud – zum Hochladen angehakt."
-                if status == "new_in_calibre" else
-                "In der Cloud vorhanden, aber abweichend – anhaken zum Abgleichen."
-            ),
+            "file_changed": file_changed,
+            "explanation": _row_explanation(status, match_reason,
+                                             file_changed),
         })
     for i, row in enumerate(remote_rows):
         if i not in matched:
@@ -540,10 +568,18 @@ def selected_book_ids(comparison_rows):
 
 
 def sort_comparison_rows(comparison_rows):
-    """Bestandsvergleich sortieren: erst Upload-Auswahl, dann Titel, dann Autoren."""
+    """Bestandsvergleich sortieren: erst ausgewählte Aktionen, dann Titel, Autoren.
+
+    Zeilen mit einer Aktion ("upload"/"metadata") stehen oben. Ältere Zeilen
+    ohne diese Felder fallen auf das frühere "selected" zurück.
+    """
     def sort_key(row):
+        upload = row.get("upload")
+        if upload is None:
+            upload = bool(row.get("selected"))
         return (
-            0 if row.get("selected") else 1,
+            0 if upload else 1,
+            0 if row.get("metadata") else 1,
             str(row.get("title") or "").casefold(),
             str(row.get("authors") or "").casefold(),
             str(row.get("isbn") or ""),
@@ -664,53 +700,74 @@ def unpack_meta_update_record(record):
 
 
 def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
-                          enabled=True):
-    """Split in-place metadata updates off the planned uploads (0.9.45).
+                          only_book_ids=None):
+    """In-place Metadaten-Updates (/meta) für die ausgewählten Bücher.
 
-    A book qualifies when its cloud copy already exists, the format file is
-    unchanged since the last sync (content_fingerprint), and title/authors/
-    isbn/series changed (metadata_fingerprint). A qualifying planned upload
-    becomes an update record -- the file stays local instead of being sent
-    again. Returns (kept_uploads, meta_updates). Mit `enabled=False` bleibt
-    die stille Cloud-Aktualisierung aus: alle Uploads bleiben unveraendert
-    und es gibt keine Metadaten-Updates.
+    Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat, ein
+    bevorzugtes Format vorliegt und sich Titel/Autor(en)/ISBN/Serie seit
+    dem letzten Sync geändert haben (oder der Zustand noch keinen
+    Metadaten-Fingerabdruck kennt). `only_book_ids` grenzt auf die vom
+    Nutzer ausgewählten Bücher ein; ohne Angabe werden alle passenden Bücher
+    berücksichtigt. Bücher, die ohnehin hochgeladen werden, werden NIE
+    zusätzlich gepatcht -- der Upload trägt die Metadaten mit.
+
+    Returns (kept_uploads, meta_updates).
     """
-    if not enabled:
-        return list(uploads), []
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
     preferred_formats = normalize_formats(preferred_formats)
     upload_uuids = {str(unpack_upload_record(record)["book_uuid"])
                     for record in uploads}
+    requested = None if only_book_ids is None else {str(item) for item in only_book_ids}
     updates = []
-    converted = set()
     for book_id, metadata in metadata_by_id.items():
         if not isinstance(metadata, dict):
             raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
+        if requested is not None and str(book_id) not in requested:
+            continue
         book_uuid = str(metadata.get("uuid") or "")
-        if not book_uuid:
+        if not book_uuid or book_uuid in upload_uuids:
             continue
         old = state.get(book_uuid) or {}
         tolino_id = str(old.get("tolino_id") or "")
         if not tolino_id:
             continue
         available = set(normalize_formats(metadata.get("formats")))
-        selected = next((f for f in preferred_formats if f in available), None)
-        if not selected:
+        selected_format = next((f for f in preferred_formats if f in available), None)
+        if not selected_format:
             continue
-        content_fp = content_fingerprint(metadata, selected)
-        if not content_fp or old.get("content_fp") != content_fp:
-            continue
-        if old.get("meta_fp") == metadata_fingerprint(metadata):
+        fingerprint = old.get("meta_fp")
+        if fingerprint and fingerprint == metadata_fingerprint(metadata):
             continue
         fields = metadata_update_fields(metadata)
         if not fields:
             continue
         updates.append((book_id, book_uuid, tolino_id, fields))
-        if book_uuid in upload_uuids:
-            converted.add(book_uuid)
-    kept = [record for record in uploads if str(record[1]) not in converted]
-    return kept, updates
+    return list(uploads), updates
+
+
+def revert_unsynced_fingerprints(current, previous, synced_uuids):
+    """Fingerabdrücke von Büchern ohne Aktion auf den alten Stand zurück.
+
+    `plan_sync` schreibt für JEDES Buch den neuen Stand in den Zustand --
+    auch für Bücher, die der Nutzer gar nicht ausgewählt hat. Ohne diese
+    Korrektur hielte der nächste Vergleich die Cloud für aktuell, obwohl
+    dort weiterhin die alten Daten liegen (und ein späteres "Metadaten"
+    wäre ein stiller Leerlauf).
+    """
+    synced = {str(book_uuid) for book_uuid in synced_uuids}
+    for book_uuid, entry in current.items():
+        if str(book_uuid) in synced or not isinstance(entry, dict):
+            continue
+        old = previous.get(book_uuid)
+        if not isinstance(old, dict):
+            continue
+        for key in ("fingerprint", "content_fp", "meta_fp"):
+            if key in old:
+                entry[key] = old[key]
+            else:
+                entry.pop(key, None)
+    return current
 
 
 def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,

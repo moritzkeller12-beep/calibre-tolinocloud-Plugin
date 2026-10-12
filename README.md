@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.12.0-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.13.0-blue)](__init__.py)
 [![Calibre](https://img.shields.io/badge/Calibre-%E2%89%A5%205.0-informational)](https://calibre-ebook.com/)
 [![Plattformen](https://img.shields.io/badge/Plattformen-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#voraussetzungen)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
@@ -27,11 +27,11 @@ mit Calibre als Flatpak.
 
 | Funktion | Beschreibung |
 |---|---|
-| **Bestandsvergleich** | Ein Fenster zeigt, welche Bücher nur in Calibre, nur in der Cloud oder in beiden liegen (gleich bzw. geändert). Anhaken, „Auswahl hochladen“ – sortierbar per Spaltenkopf. |
+| **Bestandsvergleich** | Ein Fenster zeigt, welche Bücher nur in Calibre, nur in der Cloud oder in beiden liegen (gleich bzw. geändert). Pro Buch wird ausgewählt, was passieren soll: **Hochladen** (Buchdatei) und/oder **Metadaten** (nur Titel/Autor(en)/ISBN in der Cloud). Sortierbar per Spaltenkopf. |
 | **Serien in der Cloud** | Jede Calibre-Serie wird der Tolino Cloud zugeordnet; der Tolino Web Reader zeigt diese Zuordnung als „Sammlung“ an. |
 | **Titelbilder** | Das Titelbild eines Buches kann mit hochgeladen werden. |
 | **Herunterladen** | Cloud-Bücher als EPUB direkt auf den Rechner holen. |
-| **Metadaten** | Geänderte Titel/Autor(en)/ISBN werden ohne erneuten Upload in der Cloud aktualisiert. |
+| **Metadaten** | Geänderte Titel/Autor(en)/ISBN lassen sich ohne erneuten Upload in der Cloud aktualisieren – pro Buch im Bestandsvergleich auswählen. |
 | **Mehrere Konten** | Getrennte Zugangsdaten und Zuordnungen pro Buchhändler-Konto. |
 
 ## Installation
@@ -72,12 +72,30 @@ die Cloud und öffnet den Bestandsvergleich.
 
 ### 3. Bestandsvergleich
 
-- **Anhaken**, was hochgeladen werden soll – Knopf und Kopfzeile zeigen die
-  Anzahl, „Alle Unterschiede anhaken“ und „Auswahl aufheben“ helfen dabei.
-- **Spaltenkopf anklicken** sortiert (angehakte Bücher stehen oben).
+Die Tabelle zeigt je Buch zwei Aktionen zum Auswählen und zwei Spalten mit
+einem ✓, wo das Buch liegt (Stand vor dem Lauf):
+
+| Spalte | Bedeutung |
+|---|---|
+| **Hochladen** | Buchdatei in die Tolino Cloud hochladen (ersetzt dort die vorhandene Kopie). |
+| **Metadaten** | Nur Titel/Autor(en)/ISBN in der Cloud abgleichen – die Buchdatei bleibt, wie sie ist. Nur möglich, wenn das Buch schon in der Cloud liegt. |
+| **In Calibre** ✓ | Das Buch liegt in Ihrer Calibre-Bibliothek. |
+| **In der Cloud** ✓ | Das Buch liegt in der Tolino Cloud. |
+
+Darunter stehen Titel, Autor(en), der **Status** (z. B. „Nur in Calibre“,
+„In beiden, geändert“) und ein Hinweis in Alltagssprache. Keine Auswahl → das
+Buch bleibt unangetastet. `✓` in beiden Spalten und ein Status „In beiden,
+gleich“ heißt: nichts zu tun.
+
+- **„Empfehlung auswählen“** wählt für alle Bücher die passende Aktion aus
+  (neu → Hochladen, nur geänderte Metadaten → Metadaten), **„Auswahl
+  aufheben“** hebt die gesamte Auswahl auf. Knopf und Zeile darüber zeigen laufend, wie
+  viele Aktionen ausgewählt sind.
+- **Spaltenkopf anklicken** sortiert; ausgewählte Bücher stehen oben.
 - **„Technische Spalten anzeigen“** blendet ISBN und Tolino-ID ein.
 - **„Weitere Aktionen anzeigen“** klappt die Cloud-Einzelaktionen aus:
   herunterladen, einer Sammlung zuordnen, gelesen markieren.
+- **„Auswahl übernehmen“** führt genau die ausgewählten Aktionen aus.
 
 Alle weiteren Einstellungen (Formate, Titelbilder, mehrere Konten,
 Zugangsdaten) liegen hinter **„Erweiterte Einstellungen anzeigen“** und sind
@@ -85,15 +103,16 @@ standardmäßig richtig eingestellt.
 
 ## Was automatisch passiert
 
-Beim Klick auf **„Auswahl hochladen“** läuft zusätzlich zum Upload noch
-folgendes mit. Jeder Punkt steht auch im Bestandsvergleich über der Liste und
-lässt sich unter **Erweiterte Einstellungen → „Bei jedem Synchronisieren
-zusätzlich“** abschalten:
+**Hochladen und Metadaten sind keine Automatik mehr:** Beide werden pro Buch
+im Bestandsvergleich ausgewählt. Nur wer dort nichts auswählt, ändert auch nichts.
+
+Zusätzlich zu den ausgewählten Aktionen läuft beim Klick auf **„Auswahl
+übernehmen“** noch folgendes mit. Jeder Punkt steht auch im Bestandsvergleich
+über der Liste und lässt sich unter **Erweiterte Einstellungen** abschalten:
 
 | Automatisch | Standard | Bedeutung |
 |---|---|---|
 | **Serien in der Cloud anlegen** | an | Jedes Buch einer Calibre-Serie wird der Cloud zugeordnet (im Web Reader als „Sammlung“ sichtbar). Vorhandene Zuordnungen werden nicht doppelt geschrieben. |
-| **Metadaten aktualisieren** | an | Ändert sich in Calibre nur Titel, Autor(en) oder ISBN (Buchdatei unverändert), wird der Cloud-Eintrag ohne neuen Upload aktualisiert. |
 | **Löschungen übernehmen** | aus | Bücher, die aus Calibre entfernt wurden, verschwinden auch aus der Cloud. |
 
 ## Anmeldung von Hand (ohne Chromium)

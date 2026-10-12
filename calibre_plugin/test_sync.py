@@ -14,7 +14,8 @@ from unittest.mock import patch
 from . import config
 from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    normalize_formats, plan_collection_updates, plan_sync,
-                   plan_metadata_updates, series_map_from_metadata,
+                   plan_metadata_updates, revert_unsynced_fingerprints,
+                   series_map_from_metadata,
                    metadata_fingerprint, content_fingerprint,
                    metadata_update_fields, safe_format_path,
                    selected_book_ids, selected_table_rows, sync_summary,
@@ -1049,21 +1050,19 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
-    def test_automatic_cloud_actions_default_to_on_and_are_persisted(self):
-        """Serien-Sammlungen und Metadaten-Updates laufen wie bisher,
-        sind aber ausdrücklich schaltbar (0.12.0)."""
+    def test_series_collections_default_to_on_and_are_persisted(self):
+        """Serien-Sammlungen laufen wie bisher, sind aber schaltbar
+        (0.12.0). Metadaten-Updates sind seit 0.13.0 eine Auswahl pro Buch
+        und haben deshalb keine globale Option mehr."""
         original = config.PREFERENCES
         try:
             config.PREFERENCES = config.JSONConfig("test")
             values = config.settings()
             self.assertTrue(values["sync_collections"])
-            self.assertTrue(values["sync_metadata_updates"])
+            self.assertNotIn("sync_metadata_updates", values)
             self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
-            config.save_settings({"sync_collections": False,
-                                  "sync_metadata_updates": False})
-            values = config.settings()
-            self.assertFalse(values["sync_collections"])
-            self.assertFalse(values["sync_metadata_updates"])
+            config.save_settings({"sync_collections": False})
+            self.assertFalse(config.settings()["sync_collections"])
             self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
         finally:
             config.PREFERENCES = original
@@ -1396,7 +1395,12 @@ class SyncPlanTests(unittest.TestCase):
         client_mock.assert_not_called()
 
 class MetadataUpdatePlanTests(unittest.TestCase):
-    """In-place metadata updates instead of full re-uploads (0.9.45)."""
+    """In-place Metadaten-Updates (/meta) nur für ausgewählte Bücher (0.13.0).
+
+    Jede Zeile im Bestandsvergleich hat zwei Auswahlfelder: "Hochladen" lädt die
+    Buchdatei, "Metadaten" gleicht nur Titel/Autor(en)/ISBN in der Cloud ab.
+    Es gibt keine stille Umwandlung des einen in das andere.
+    """
 
     def _book(self, **extra):
         book = {"uuid": "u1", "title": "A", "authors": "Fred Vargas",
@@ -1413,11 +1417,11 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         entry.update(extra)
         return {"u1": entry}
 
-    def test_planned_upload_with_unchanged_file_becomes_metadata_update(self):
+    def test_selected_book_is_updated_in_place(self):
         book = self._book()
         state = self._state(book, meta_fp="stale")
-        uploads = [(1, "u1", "EPUB", "d1")]
-        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"])
+        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
+                                              only_book_ids={1})
         self.assertEqual([], kept)
         self.assertEqual(1, len(updates))
         record = unpack_meta_update_record(updates[0])
@@ -1427,29 +1431,57 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual({"title": "A", "author": "Fred Vargas", "isbn": "123"},
                          record["fields"])
 
+    def test_unchecked_books_are_never_touched(self):
+        """Ohne Auswahl kein /meta-Schreibvorgang -- auch wenn sich die
+        Metadaten unterscheiden (genau das war vorher unsichtbar)."""
+        book = self._book()
+        state = self._state(book, meta_fp="stale")
+        for only in (set(), {"2"}):
+            kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
+                                                  only_book_ids=only)
+            self.assertEqual([], kept)
+            self.assertEqual([], updates)
+
+    def test_selected_upload_is_never_silently_converted(self):
+        """"Hochladen" heißt hochladen -- kein heimliches /meta."""
+        book = self._book()
+        state = self._state(book, meta_fp="stale")
+        uploads = [(1, "u1", "EPUB", "d1")]
+        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"],
+                                              only_book_ids={1})
+        self.assertEqual(uploads, kept)
+        self.assertEqual([], updates)
+
     def test_replaced_file_stays_a_full_upload(self):
         book = self._book()
         state = self._state(book, content_fp="other-file", meta_fp="stale")
         uploads = [(1, "u1", "EPUB", "d1")]
-        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"])
+        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"],
+                                              only_book_ids={1})
         self.assertEqual(uploads, kept)
         self.assertEqual([], updates)
 
-    def test_legacy_state_without_hashes_keeps_upload(self):
-        book = self._book()
-        state = {"u1": {"tolino_id": "d1", "fingerprint": "x"}}
-        uploads = [(1, "u1", "EPUB", "d1")]
-        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"])
-        self.assertEqual(uploads, kept)
-        self.assertEqual([], updates)
-
-    def test_missing_file_signature_blocks_in_place_update(self):
+    def test_selected_metadata_update_does_not_need_the_book_file(self):
+        """Ein reiner Metadaten-Abgleich braucht die Datei nicht -- der
+        Nutzer hat ausdrücklich nur die Metadaten ausgewählt."""
         book = self._book(format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
-        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
-        self.assertEqual([], updates)
+        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
+                                              only_book_ids={1})
+        self.assertEqual([], kept)
+        self.assertEqual(1, len(updates))
 
-    def test_matched_book_without_upload_gets_metadata_update(self):
+    def test_legacy_state_without_fingerprints_is_updated_when_selected(self):
+        """Ohne gespeicherte Fingerabdrücke ist der Cloud-Stand unbekannt --
+        wer auswählt, bekommt den Abgleich."""
+        book = self._book()
+        state = {"u1": {"tolino_id": "d1", "fingerprint": "x"}}
+        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
+                                              only_book_ids={1})
+        self.assertEqual([], kept)
+        self.assertEqual(1, len(updates))
+
+    def test_without_selection_every_qualifying_book_is_planned(self):
         book = self._book()
         state = self._state(book, meta_fp="stale")
         kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
@@ -1469,33 +1501,19 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         kept, updates = plan_metadata_updates({1: book}, {}, [], ["EPUB"])
         self.assertEqual([], updates)
 
-    def test_series_change_converts_upload_but_stays_out_of_meta_payload(self):
+    def test_series_change_is_updated_without_sending_the_series(self):
+        """Serien stehen nicht im /meta-Payload (dafür gibt es die
+        Sammlungs-Zuordnung), zählen aber als Änderung."""
         old_book = self._book()
         new_book = self._book(series="Neue Reihe")
         state = {"u1": {"tolino_id": "d1",
                         "content_fp": content_fingerprint(new_book, "EPUB"),
                         "meta_fp": metadata_fingerprint(old_book)}}
-        uploads = [(1, "u1", "EPUB", "d1")]
-        kept, updates = plan_metadata_updates({1: new_book}, state, uploads,
-                                              ["EPUB"])
+        kept, updates = plan_metadata_updates({1: new_book}, state, [], ["EPUB"],
+                                              only_book_ids={1})
         self.assertEqual([], kept)
         self.assertEqual(1, len(updates))
         self.assertNotIn("series", updates[0][3])
-
-    def test_automatic_metadata_updates_can_be_switched_off(self):
-        """Ausgeschaltet bleibt jeder geplante Upload ein Upload und es
-        gibt keine stillen /meta-Schreibvorgänge."""
-        book = self._book()
-        state = self._state(book, meta_fp="stale")
-        uploads = [(1, "u1", "EPUB", "d1")]
-        kept, updates = plan_metadata_updates({1: book}, state, uploads,
-                                              ["EPUB"], enabled=False)
-        self.assertEqual(uploads, kept)
-        self.assertEqual([], updates)
-        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
-                                              enabled=False)
-        self.assertEqual([], kept)
-        self.assertEqual([], updates)
 
     def test_meta_update_record_validation(self):
         with self.assertRaisesRegex(ValueError, "invalid metadata update"):
@@ -1513,6 +1531,64 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual(content_fingerprint(book, "EPUB"),
                          current["u1"]["content_fp"])
         self.assertEqual(metadata_fingerprint(book), current["u1"]["meta_fp"])
+
+    def test_unselected_book_keeps_the_old_fingerprints(self):
+        """Ohne Auswahl darf der Zustand nicht „abgeglichen“ behaupten.
+
+        `plan_sync` schreibt den neuen Stand für jedes Buch -- auch für die,
+        die der Nutzer nicht ausgewählt hat. Ohne Rücknahme hielte der nächste
+        Vergleich die Cloud für aktuell, und ein späteres „Metadaten“ wäre
+        ein stiller Leerlauf.
+        """
+        old_book = self._book()
+        new_book = self._book(title="Neu",
+                              format_signatures={"EPUB": "200:2000"})
+        previous = self._state(old_book)
+        _uploads, _removals, current = plan_sync({1: new_book}, previous,
+                                                 ["EPUB"])
+        self.assertNotEqual(previous["u1"]["meta_fp"],
+                            current["u1"]["meta_fp"])
+        self.assertNotEqual(previous["u1"]["content_fp"],
+                            current["u1"]["content_fp"])
+        revert_unsynced_fingerprints(current, previous, [])
+        self.assertEqual(previous["u1"]["meta_fp"],
+                         current["u1"]["meta_fp"])
+        self.assertEqual(previous["u1"]["content_fp"],
+                         current["u1"]["content_fp"])
+        self.assertNotIn("fingerprint", current["u1"])
+
+    def test_synced_book_keeps_the_new_fingerprints(self):
+        old_book = self._book()
+        new_book = self._book(title="Neu",
+                              format_signatures={"EPUB": "200:2000"})
+        previous = self._state(old_book)
+        _uploads, _removals, current = plan_sync({1: new_book}, previous,
+                                                 ["EPUB"])
+        revert_unsynced_fingerprints(current, previous, {"u1"})
+        self.assertEqual(metadata_fingerprint(new_book),
+                         current["u1"]["meta_fp"])
+        self.assertEqual(content_fingerprint(new_book, "EPUB"),
+                         current["u1"]["content_fp"])
+        self.assertEqual(fingerprint(new_book, "EPUB"),
+                         current["u1"]["fingerprint"])
+        self.assertEqual("d1", current["u1"]["tolino_id"])
+
+    def test_legacy_state_without_hashes_stays_clean_when_not_selected(self):
+        """Alter Zustand ohne Fingerabdrücke: die Rücknahme darf weder
+        Hashes noch Fremdfelder erfinden."""
+        previous = {"u1": {"tolino_id": "d1"}}
+        book = self._book()
+        _uploads, _removals, current = plan_sync({1: book}, previous, ["EPUB"])
+        revert_unsynced_fingerprints(current, previous, [])
+        self.assertNotIn("fingerprint", current["u1"])
+        self.assertNotIn("meta_fp", current["u1"])
+        self.assertNotIn("content_fp", current["u1"])
+        self.assertEqual("d1", current["u1"]["tolino_id"])
+        # Ein Buch ganz ohne Vorgeschichte bleibt unangetastet: es gibt
+        # nichts, worauf zurückgesetzt werden könnte.
+        _uploads, _removals, fresh = plan_sync({1: book}, previous, ["EPUB"])
+        revert_unsynced_fingerprints(fresh, {}, [])
+        self.assertIn("meta_fp", fresh["u1"])
 
     def test_metadata_update_fields_skips_empty_values(self):
         self.assertEqual({}, metadata_update_fields({"title": " ", "isbn": ""}))
@@ -3440,7 +3516,7 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
 
 class InventoryDialogSortTests(unittest.TestCase):
     """Spaltenkopf-Klick sortiert den Bestandsvergleich und zieht die
-    Häkchen mit (Feldbefund 0.9.38: „das sortieren funktioniert nicht").
+    Auswahl mit (Feldbefund 0.9.38: „das sortieren funktioniert nicht").
     Qt wird ueber den ToolbarIconTests-Stub geladen; die Zell-Widgets
     werden durch einfache Fakes ersetzt."""
 
@@ -3499,52 +3575,67 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog = ui_module.InventoryDialog.__new__(
                 ui_module.InventoryDialog)
             rows = [
-                {"selected": False, "title": "Alpha", "authors": "A",
-                 "status": "identical", "book_id": 1, "tolino_id": "c1",
+                {"upload": False, "metadata": False, "title": "Alpha",
+                 "authors": "A", "status": "identical", "book_id": 1,
+                 "tolino_id": "c1",
                  "explanation": "Titel stimmt mit der Cloud überein."},
-                {"selected": True, "title": "Zulu", "authors": "Z",
-                 "status": "new_in_calibre", "book_id": 2, "tolino_id": "",
-                 "explanation": "Noch nicht in der Cloud – zum Hochladen angehakt."},
-                {"selected": False, "title": "beta", "authors": "B",
-                 "status": "changed", "book_id": 3, "tolino_id": "c3",
-                 "explanation": "In der Cloud vorhanden, aber abweichend."},
-                {"selected": True, "title": "alpha", "authors": "M",
-                 "status": "new_in_calibre", "book_id": 4, "tolino_id": "",
-                 "explanation": "Noch nicht in der Cloud – zum Hochladen angehakt."},
+                {"upload": True, "metadata": False, "title": "Zulu",
+                 "authors": "Z", "status": "new_in_calibre", "book_id": 2,
+                 "tolino_id": "",
+                 "explanation": "Noch nicht in der Cloud – kann hochgeladen werden."},
+                {"upload": False, "metadata": True, "title": "beta",
+                 "authors": "B", "status": "changed", "book_id": 3,
+                 "tolino_id": "c3",
+                 "explanation": "Nur Metadaten unterscheiden sich."},
+                {"upload": True, "metadata": False, "title": "alpha",
+                 "authors": "M", "status": "new_in_calibre", "book_id": 4,
+                 "tolino_id": "",
+                 "explanation": "Noch nicht in der Cloud – kann hochgeladen werden."},
             ]
             dialog.rows = rows
             dialog.checks = [FakeCheck() for _ in rows]
-            for check, row in zip(dialog.checks, rows):
-                check.setChecked(row["selected"])
+            dialog.meta_checks = [FakeCheck() for _ in rows]
+            for uploads, metadata, row in zip(dialog.checks, dialog.meta_checks,
+                                              rows):
+                uploads.setChecked(row["upload"])
+                metadata.setChecked(row["metadata"])
             dialog._sort_column = 0
             dialog._sort_descending = False
             dialog.table = FakeTable()
 
-            # Klick auf den Titel: aufsteigend, gehaekelte Buchstaben
-            # bleiben denselben Buechern zugeordnet.
-            dialog._sort_by_column(1)
+            # Klick auf den Titel (Spalte 4): aufsteigend, die Auswahl
+            # bleibt denselben Büchern zugeordnet.
+            dialog._sort_by_column(4)
             self.assertEqual(
                 ["alpha", "alpha", "beta", "zulu"],
                 [row["title"].casefold() for row in dialog.rows])
-            checked = {row["title"].casefold()
-                       for row, check in zip(dialog.rows, dialog.checks)
-                       if check.isChecked()}
-            self.assertEqual({"alpha", "zulu"}, checked)
+            upload_titles = {row["title"].casefold()
+                             for row, check in zip(dialog.rows, dialog.checks)
+                             if check.isChecked()}
+            meta_titles = {row["title"].casefold()
+                           for row, check in zip(dialog.rows, dialog.meta_checks)
+                           if check.isChecked()}
+            self.assertEqual({"alpha", "zulu"}, upload_titles)
+            self.assertEqual({"beta"}, meta_titles)
             # Zweiter Klick auf dieselbe Spalte: absteigend.
-            dialog._sort_by_column(1)
+            dialog._sort_by_column(4)
             self.assertEqual(
                 ["zulu", "beta", "alpha", "alpha"],
                 [row["title"].casefold() for row in dialog.rows])
-            checked = {row["title"].casefold()
-                       for row, check in zip(dialog.rows, dialog.checks)
-                       if check.isChecked()}
-            self.assertEqual({"alpha", "zulu"}, checked)
-            # Upload-Spalte (0): gehaeckte zuerst, danach Titel.
+            self.assertEqual(
+                {"alpha", "zulu"},
+                {row["title"].casefold()
+                 for row, check in zip(dialog.rows, dialog.checks)
+                 if check.isChecked()})
+            # Hochladen-Spalte (0): ausgewählte zuerst, danach Titel.
             dialog._sort_by_column(0)
             first_two = dialog.rows[:2]
-            self.assertTrue(all(row["selected"] for row in first_two))
+            self.assertTrue(all(row["upload"] for row in first_two))
             self.assertEqual(["alpha", "zulu"],
                              [row["title"].casefold() for row in first_two])
+            # Metadaten-Spalte (1): nur das Metadaten-Auswahlfeld steht oben.
+            dialog._sort_by_column(1)
+            self.assertEqual("beta", dialog.rows[0]["title"].casefold())
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -3568,23 +3659,26 @@ class InventoryDialogSortTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
 
-    def test_automatic_note_names_the_enabled_actions(self):
+    def test_note_names_only_the_automatic_actions(self):
+        """Metadaten-Updates sind keine Automatik mehr -- der Hinweis nennt
+        nur, was zusätzlich zur Auswahl passiert."""
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
             dialog = ui_module.InventoryDialog.__new__(
                 ui_module.InventoryDialog)
-            dialog.options = {"collections": True, "metadata_updates": True,
-                              "deletions": False}
+            dialog.options = {"collections": True, "deletions": True}
             note = dialog._automatic_note()
             self.assertIn("Serien werden in der Tolino Cloud", note)
-            self.assertIn("aktualisiert", note)
+            self.assertIn("gelöscht", note)
+            dialog.options = {"collections": True}
+            note = dialog._automatic_note()
+            self.assertIn("Serien werden in der Tolino Cloud", note)
             self.assertNotIn("gelöscht", note)
-            dialog.options = {"deletions": True}
-            self.assertIn("gelöscht", dialog._automatic_note())
             # Ohne automatische Aktionen sagt der Hinweis das ausdrücklich.
             dialog.options = {}
-            self.assertIn("sonst passiert nichts", dialog._automatic_note())
+            self.assertIn("nur, was Sie auswählen",
+                          dialog._automatic_note())
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -3612,19 +3706,47 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog = ui_module.InventoryDialog.__new__(
                 ui_module.InventoryDialog)
             rows = [
-                {"selected": False, "status": "identical", "book_id": 1},
-                {"selected": False, "status": "changed", "book_id": 2},
-                {"selected": False, "status": "new_in_calibre", "book_id": 3},
-                {"selected": False, "status": "only_tolino", "book_id": None},
+                {"status": "identical", "book_id": 1, "tolino_id": "c1"},
+                {"status": "new_in_calibre", "book_id": 2, "tolino_id": ""},
+                {"status": "changed", "book_id": 3, "tolino_id": "c3",
+                 "file_changed": True},
+                {"status": "changed", "book_id": 4, "tolino_id": "c4"},
+                {"status": "only_tolino", "book_id": None, "tolino_id": "c9"},
             ]
             dialog.rows = rows
             dialog.checks = [FakeCheck() for _ in rows]
-            dialog.select_all_differences()
-            self.assertEqual({2, 3}, dialog.selected_ids())
-            self.assertEqual([False, True, True, False],
+            dialog.meta_checks = [FakeCheck() for _ in rows]
+            dialog.apply_recommended()
+            # Neu -> hochladen, geänderte Datei -> hochladen, sonst
+            # Metadaten; nichts für unveränderte oder reine Cloud-Bücher.
+            self.assertEqual({2, 3}, dialog.selected_upload_ids())
+            self.assertEqual({4}, dialog.selected_metadata_ids())
+            self.assertEqual([False, True, True, False, False],
                              [check.isChecked() for check in dialog.checks])
+            self.assertEqual([False, False, False, True, False],
+                             [check.isChecked() for check in dialog.meta_checks])
             dialog.clear_all_selection()
-            self.assertEqual(set(), dialog.selected_ids())
+            self.assertEqual(set(), dialog.selected_upload_ids())
+            self.assertEqual(set(), dialog.selected_metadata_ids())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_default_actions_follow_the_kind_of_change(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            choose = ui_module.InventoryDialog.default_actions
+            self.assertEqual((True, False), choose(
+                {"book_id": 1, "status": "new_in_calibre"}))
+            self.assertEqual((True, False), choose(
+                {"book_id": 1, "tolino_id": "t1", "status": "changed",
+                 "file_changed": True}))
+            self.assertEqual((False, True), choose(
+                {"book_id": 1, "tolino_id": "t1", "status": "changed"}))
+            self.assertEqual((False, False), choose(
+                {"book_id": 1, "tolino_id": "t1", "status": "identical"}))
+            self.assertEqual((False, False), choose(
+                {"book_id": None, "tolino_id": "t1", "status": "only_tolino"}))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -3813,14 +3935,13 @@ class InventoryDialogBuildTests(unittest.TestCase):
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None, qt_stub=self._qt_stub())
         rows = [
-            {"selected": False, "title": "Zulu", "authors": "Z",
-             "status": "identical", "book_id": 1, "tolino_id": "c1",
-             "isbn": "111", "explanation": "Titel stimmt mit der Cloud "
-             "überein."},
-            {"selected": True, "title": "Alpha", "authors": "A",
-             "status": "new_in_calibre", "book_id": 2, "tolino_id": "",
-             "isbn": "222", "explanation": "Noch nicht in der Cloud – zum "
-             "Hochladen angehakt."},
+            {"title": "Zulu", "authors": "Z", "status": "identical",
+             "book_id": 1, "tolino_id": "c1", "isbn": "111",
+             "explanation": "Titel stimmt mit der Cloud überein."},
+            {"title": "Alpha", "authors": "A", "status": "new_in_calibre",
+             "book_id": 2, "tolino_id": "", "isbn": "222",
+             "explanation": "Noch nicht in der Cloud – kann hochgeladen "
+             "werden."},
         ]
         return ui_module, ui_module.InventoryDialog(rows, options=options)
 
@@ -3829,37 +3950,58 @@ class InventoryDialogBuildTests(unittest.TestCase):
         try:
             self.assertEqual(list(ui_module.InventoryDialog.HEADERS),
                              dialog.table.headers)
+            cells = {(row, column): widget
+                     for row, column, widget in dialog.table.cell_widgets}
             for index, row in enumerate(dialog.rows):
-                self.assertEqual(row["title"], dialog.table.items[(index, 1)])
-                self.assertEqual(row["authors"], dialog.table.items[(index, 2)])
+                in_cloud = bool(row["tolino_id"])
+                # Zwei Auswahlfelder je Buch ...
+                self.assertIs(cells[(index, 0)], dialog.checks[index])
+                self.assertIs(cells[(index, 1)], dialog.meta_checks[index])
+                # ... zwei ✓-Spalten (in Calibre / in der Cloud) ...
+                self.assertEqual("✓", dialog.table.items[(index, 2)])
+                self.assertEqual("✓" if in_cloud else "",
+                                 dialog.table.items[(index, 3)])
+                # ... und danach die Textspalten.
+                self.assertEqual(row["title"], dialog.table.items[(index, 4)])
+                self.assertEqual(row["authors"], dialog.table.items[(index, 5)])
                 self.assertEqual(
                     ui_module.InventoryDialog.STATUS_TEXT[row["status"]],
-                    dialog.table.items[(index, 3)])
+                    dialog.table.items[(index, 6)])
                 self.assertEqual(row["explanation"],
-                                 dialog.table.items[(index, 4)])
-                self.assertEqual(row["isbn"], dialog.table.items[(index, 5)])
+                                 dialog.table.items[(index, 7)])
+                self.assertEqual(row["isbn"], dialog.table.items[(index, 8)])
                 self.assertEqual(row["tolino_id"],
-                                 dialog.table.items[(index, 6)])
+                                 dialog.table.items[(index, 9)])
+                # Metadaten gibt es nur für Bücher, die auch in der Cloud
+                # liegen; Hochladen nur mit Calibre-Buch.
+                upload, metadata = dialog.checks[index], dialog.meta_checks[index]
+                self.assertTrue(upload.enabled)
+                self.assertEqual(in_cloud, metadata.enabled)
+                # Vorbelegt ist, was der Vergleich vorschlägt.
+                self.assertEqual(bool(row["upload"]), upload.isChecked())
+                self.assertEqual(bool(row["metadata"]), metadata.isChecked())
             # Nur die technischen Spalten sind zunächst verborgen.
-            self.assertEqual({5: True, 6: True}, dialog.table.hidden)
+            self.assertEqual({8: True, 9: True}, dialog.table.hidden)
             self.assertIn("Serien werden in der Tolino Cloud",
                           dialog.note.text())
-            self.assertIn("1 von 2 Büchern angehakt", dialog.summary.text())
-            self.assertEqual("Auswahl hochladen (1)", dialog.confirm.text())
+            self.assertIn("1 zum Hochladen", dialog.summary.text())
+            self.assertIn("0 für Metadaten", dialog.summary.text())
+            self.assertEqual("Auswahl übernehmen (1)", dialog.confirm.text())
         finally:
             ui_module._restore_stubs_for_tests()
 
     def test_toggles_switch_technical_columns_and_extra_actions(self):
-        ui_module, dialog = self._build({"metadata_updates": True})
+        ui_module, dialog = self._build({"collections": True})
         try:
             self.assertFalse(dialog.actions.isVisible())
             dialog._toggle_more_actions(True)
             self.assertTrue(dialog.actions.isVisible())
             dialog._toggle_technical_columns(True)
-            self.assertEqual({5: False, 6: False}, dialog.table.hidden)
+            self.assertEqual({8: False, 9: False}, dialog.table.hidden)
             dialog._toggle_technical_columns(False)
-            self.assertEqual({5: True, 6: True}, dialog.table.hidden)
-            self.assertIn("aktualisiert", dialog.note.text())
+            self.assertEqual({8: True, 9: True}, dialog.table.hidden)
+            self.assertIn("Serien werden in der Tolino Cloud",
+                          dialog.note.text())
         finally:
             ui_module._restore_stubs_for_tests()
 

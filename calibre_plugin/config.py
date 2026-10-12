@@ -72,7 +72,6 @@ DEFAULTS = {
     "upload_covers": True,
     "enable_deletions": False,
     "sync_collections": True,
-    "sync_metadata_updates": True,
     "use_tolino_column": True,
     "tolino_column_notice_shown": False,
     "accounts": [],
@@ -144,7 +143,7 @@ def settings():
         for key, value in current.items():
             PREFERENCES[key] = value
         for key in ("preferred_formats", "upload_covers", "enable_deletions",
-                    "sync_collections", "sync_metadata_updates",
+                    "sync_collections",
                     "use_tolino_column",
                     "tolino_column_notice_shown"):
             PREFERENCES[key] = values[key]
@@ -197,7 +196,7 @@ def save_settings(values):
     """Persist global options and the selected account (legacy-compatible)."""
     current = settings()
     for key in ("preferred_formats", "upload_covers", "enable_deletions",
-                "sync_collections", "sync_metadata_updates",
+                "sync_collections",
                 "use_tolino_column",
                 "tolino_column_notice_shown"):
         if key in values:
