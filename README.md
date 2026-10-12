@@ -1,34 +1,44 @@
 # Tolino Cloud Sync für Calibre
 
-**0.10.0** — Bücher zwischen Calibre und der Tolino Cloud abgleichen:
-hochladen, herunterladen, Sammlungen und Gelesen-Markierung.
-**Läuft auf:** Windows 11 · natives Linux · Calibre als Flatpak — alle getestet.
+Bücher zwischen Calibre und der Tolino Cloud abgleichen: hochladen,
+herunterladen, Sammlungen anlegen und gelesen markieren.
+Läuft unter Windows, Linux und mit Calibre als Flatpak.
 
-## In drei Schritten loslegen
+## Installation (in 2 Minuten)
 
-1. **Installieren:** `python3 build_plugin.py` ausführen, dann
-   `tolino_cloud_sync.zip` in Calibre laden
-   (**Einstellungen → Plugins → Plugin aus Datei laden**) und Calibre neu starten.
-2. **Anmelden:** In der Symbolleiste **Tolino Cloud Sync** öffnen und
-   **„Jetzt bei Tolino anmelden“** drücken. Im Anmeldefenster im Web Reader
-   einloggen und die Bücherliste öffnen — das Fenster schließt sich selbst.
-3. **Synchronisieren:** **„Vergleichen und hochladen …“** drücken, im
-   Bestandsvergleich die gewünschten Bücher anhaken und **„Auswahl hochladen“**.
+1. **Plugin herunterladen:**
+   [**tolino_cloud_sync.zip** herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/main/tolino_cloud_sync.zip)
+   *(oder im Repo oben: die Datei `tolino_cloud_sync.zip` anklicken → „Download“)*
+2. In Calibre öffnen: **Einstellungen → Plugins → Plugin aus Datei laden**
+   und die heruntergeladene `tolino_cloud_sync.zip` auswählen.
+3. **Calibre neu starten.** In der Symbolleiste erscheint dann
+   **Tolino Cloud Sync**.
 
-Weitere Einstellungen (Formate, mehrere Konten, Zugangsdaten) sind hinter
-**„Erweiterte Einstellungen anzeigen“** versteckt und müssen nicht angepasst
-werden.
+Es ist kein Bauen nötig – die Zip ist direkt installierbar.
 
-## Anmeldung ohne den Automatik-Knopf
+## Benutzung
 
-- **Empfohlen:** den Knopf **„Jetzt bei Tolino anmelden“** nutzen.
-- **Ohne Chromium:** Knopf drücken, im System-Browser im Web Reader anmelden,
-  **alle Browserfenster schließen** und den Knopf erneut drücken.
-- **Manuell (nur wenn nötig):** in den erweiterten Einstellungen Hardware-ID
-  und Refresh-Token eintragen. F12 → Netzwerk → Aufnahme an → im Web Reader
-  anmelden → `hardware_id` (Filter `registerhw`) und `refresh_token`
+1. **Anmelden:** Symbolleiste **Tolino Cloud Sync** öffnen → Buchhändler
+   wählen → **„Jetzt bei Tolino anmelden“**. Im Anmeldefenster im Web Reader
+   einloggen und die Bücherliste öffnen; das Fenster schließt sich selbst.
+2. **Synchronisieren:** **„Vergleichen und hochladen …“** drücken.
+3. Im Bestandsvergleich die gewünschten Bücher anhaken → **„Auswahl
+   hochladen“**.
+
+Alle weiteren Einstellungen (Formate, mehrere Konten, Zugangsdaten) liegen
+hinter **„Erweiterte Einstellungen anzeigen“** und sind standardmäßig richtig
+eingestellt.
+
+## Wenn die Anmeldung nicht automatisch klappt
+
+- **Ohne Chromium installiert:** „Jetzt bei Tolino anmelden“ drücken, im
+  System-Browser im Web Reader anmelden, **alle Browserfenster schließen**
+  und den Knopf erneut drücken.
+- **Nur im Notfall manuell:** In den erweiterten Einstellungen Hardware-ID und
+  Refresh-Token von Hand eintragen. F12 → Netzwerk → Aufnahme an → im Web
+  Reader anmelden → `hardware_id` (Filter `registerhw`) und `refresh_token`
   (Filter `token`) kopieren. Ein Tolino-Token ist nach einmaliger Nutzung
-  ungültig — kein Inkognito-Fenster verwenden.
+  ungültig – kein Inkognito-Fenster verwenden.
 
 ## Häufige Probleme
 
@@ -38,9 +48,19 @@ werden.
 | „Fenster ist noch offen“ / verbrauchter Token | Im offenen Anmeldefenster **dort** neu anmelden (Bücherliste laden) und den Knopf erneut drücken. Ist das Fenster zu, die Anmeldung neu starten und im **neuen** Fenster anmelden. |
 | HTTP 403 „Zugriff geblockt“ | Bot-Schutz: das Plugin wartet und wiederholt automatisch; bleibt die 403, später erneut versuchen. |
 
-## Entwicklung
+## Für Entwickler
+
+Nach Änderungen am Quellcode die Zip neu bauen – die im Repo abgelegte Zip
+muss dazu mit der Version in `__init__.py` übereinstimmen:
 
 ```text
 python3 -m unittest calibre_plugin.test_sync
 python3 build_plugin.py
 ```
+
+Der Testlauf läuft auch automatisch in GitHub Actions bei jedem Push/Pull
+Request.
+
+## Version
+
+Aktuell: **0.10.0** — siehe `__init__.py`.
