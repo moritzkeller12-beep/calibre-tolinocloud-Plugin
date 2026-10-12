@@ -736,6 +736,38 @@ class DiagnosticDialog(QDialog):
         self.output.selectAll()
         self.output.copy()
 
+    @staticmethod
+    def _sync_data_summary(client, secrets=()):
+        """Kurzer Ueberblick ueber die sync-data-Antwort (0.15.1).
+
+        Die Spalte „Gelesen“ und die gemerkten Serien stammen aus dieser
+        Antwort. Der Bericht zeigt deshalb, OB der Server Marken liefert und
+        wie viele davon Sammlungen bzw. Gelesen-Marken sind -- sonst ist
+        spaeter nicht zu erkennen, ob eine leere Spalte an der Cloud oder am
+        Plugin lag. Ein Fehler hier bricht den Test nicht ab.
+        """
+        try:
+            revision, patches = client.sync_snapshot()
+            categories = sorted({
+                str((item.get("value") or {}).get("category") or "")
+                for item in patches if isinstance(item, dict)
+            })
+            return {
+                "revision_present": revision not in (None, "", 0),
+                "patch_count": len(patches),
+                "collections": len(client.collection_pairs()),
+                "read_marks": len(client.read_ids()),
+                "tag_categories": categories,
+                "sample_paths": [
+                    str(item.get("path") or "") for item in patches[:3]
+                    if isinstance(item, dict)
+                ],
+            }
+        except Exception as exc:
+            return {"error_type": type(exc).__name__,
+                    "error_message": sanitize_error(
+                        exc, secrets + (getattr(client, "access", None),))}
+
     def test_tolino(self):
         values = self.dashboard.values()
         if not values["refresh_token"]:
@@ -755,6 +787,8 @@ class DiagnosticDialog(QDialog):
                     "response_type": type(inventory).__name__,
                     "item_count": len(inventory),
                     "sample": inventory[:3],
+                    "sync_data": DiagnosticDialog._sync_data_summary(
+                        client, (values["refresh_token"],)),
                     "auth": client.auth_diagnostics(),
                 },
             }

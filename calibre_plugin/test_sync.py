@@ -4611,6 +4611,189 @@ class ReadStateComparisonTests(unittest.TestCase):
             self.assertFalse(row["read"])
 
 
+class SyncDataResponseShapeTests(unittest.TestCase):
+    """Die sync-data-Antwort des Servers trägt die Marken-ID im Pfad.
+
+    Gelesen-Marken und Sammlungen kommen als
+    ``/publications/<Buch-ID>/tags/<Marken-ID>`` zurück -- die Marken-ID
+    vergibt der Server. Der Plugin schrieb nur die Form ohne Marken-ID und
+    verlangte beim Lesen genau vier Pfadteile: damit war jede Server-Marke
+    unsichtbar. Folge: die Spalte „Gelesen“ blieb leer, obwohl die Cloud die
+    Bücher als gelesen führte, und jede Serie schien bei jedem Lauf zu
+    fehlen (0.15.1).
+    """
+
+    PUB = "bosh_8_543897185873248682836029182"
+    READ = {"op": "replace",
+            "path": "/publications/%s/tags/6438286" % PUB,
+            "value": {"revision": "1-abc", "modified": 17,
+                      "name": "collection_finished_readings_name",
+                      "category": "system"}}
+    SERIES = {"op": "replace",
+              "path": "/publications/%s/tags/6438287" % PUB,
+              "value": {"revision": "1-def", "modified": 18,
+                        "name": "Brunetti", "category": "collection"}}
+    OWN_ADD = {"op": "add", "path": "/publications/%s/tags" % PUB,
+               "value": {"modified": 19, "name": "SciFi",
+                         "category": "collection"}}
+
+    def _client(self, patches, revision="42"):
+        """Client mit echter Antwortform als Lesegrundlage."""
+        client = TolinoClient(4, "hardware", "refresh-token")
+        calls = []
+
+        def fake_request(url, method="GET", data=None, form=False,
+                         authenticated=True, content_type=None, _retry=True):
+            calls.append({"url": url, "method": method, "data": data})
+            return {"revision": revision, "patches": list(patches)}
+
+        client._request = fake_request
+        return client, calls
+
+    def test_read_ids_understands_the_server_path_with_tag_id(self):
+        client, calls = self._client([self.READ, self.OWN_ADD])
+        self.assertEqual({self.PUB}, client.read_ids())
+        self.assertEqual(1, len(calls))
+
+    def test_collection_pairs_understands_the_server_path_with_tag_id(self):
+        client, _ = self._client([self.SERIES, self.OWN_ADD])
+        self.assertEqual({(self.PUB, "Brunetti"), (self.PUB, "SciFi")},
+                         client.collection_pairs())
+
+    def test_read_state_and_collections_come_from_one_read(self):
+        client, calls = self._client([self.READ, self.SERIES])
+        self.assertEqual({self.PUB}, client.read_ids())
+        self.assertEqual({(self.PUB, "Brunetti")}, client.collection_pairs())
+        self.assertEqual(1, len(calls))
+
+    def test_remove_with_tag_id_takes_the_book_out_again(self):
+        removed = {"op": "remove",
+                   "path": "/publications/%s/tags/6438286" % self.PUB,
+                   "value": {"revision": "1-abc",
+                             "name": "collection_finished_readings_name",
+                             "category": "system"}}
+        client, _ = self._client([self.READ, removed])
+        self.assertEqual(set(), client.read_ids())
+
+    def test_foreign_paths_and_malformed_patches_are_ignored(self):
+        patches = [
+            {"op": "replace", "path": "/publications/%s/bookmark/12" % self.PUB,
+             "value": {"progress": 0.4}},
+            {"op": "replace", "path": "/publications//tags/1",
+             "value": {"name": "collection_finished_readings_name",
+                       "category": "system"}},
+            {"op": "replace", "path": "/publications/%s/tags/1" % self.PUB},
+            "kein dict",
+        ]
+        client, _ = self._client(patches)
+        self.assertEqual(set(), client.read_ids())
+        self.assertEqual(set(), client.collection_pairs())
+
+    def test_mark_read_many_skips_books_the_server_already_calls_read(self):
+        """Die Server-Form wird erkannt: eine vorhandene Marke wird nicht
+        noch einmal geschrieben."""
+        client, calls = self._client([self.READ], revision="43")
+        self.assertEqual("43", client.mark_read_many([self.PUB]))
+        self.assertEqual(1, len(calls))
+
+    def test_mark_read_uses_the_revision_of_a_real_response(self):
+        client, calls = self._client([self.SERIES], revision="77")
+        client.mark_read_many(["neues-buch"])
+        self.assertEqual(2, len(calls))
+        self.assertEqual("77", calls[1]["data"]["revision"])
+        self.assertEqual("/publications/neues-buch/tags",
+                         calls[1]["data"]["patches"][0]["path"])
+
+    def test_cloud_read_state_reaches_the_comparison_rows(self):
+        """Von der Server-Antwort bis zur angehakten Spalte -- der Fall aus
+        dem Feldbericht (0.15.1)."""
+        client, _ = self._client([self.READ])
+        book = {"uuid": "u1", "title": "Feuerprobe", "authors": "Donna Leon",
+                "isbn": "", "formats": ["EPUB"], "last_modified": "1",
+                "format_signatures": {"EPUB": "1:1"}}
+        inventory = [{"deliverableId": self.PUB,
+                      "epubMetaData": {"title": "Feuerprobe",
+                                       "author": [{"name": "Donna Leon"}]}}]
+        rows = compare_inventory({1: book}, {"u1": {"tolino_id": self.PUB}},
+                                 inventory, ["EPUB"],
+                                 read_ids=client.read_ids())
+        row = rows[0]
+        self.assertTrue(row["read_in_cloud"])
+        self.assertTrue(row["read"])
+        self.assertEqual(self.PUB, row["tolino_id"])
+
+
+class SyncDataDiagnosticTests(unittest.TestCase):
+    """Der Diagnose-Bericht zeigt, was die sync-data wirklich liefert.
+
+    Ohne diesen Block war dem Feldbericht nicht anzusehen, dass der Server
+    Marken mit Marken-ID im Pfad schickt -- und damit auch nicht, warum die
+    Spalte „Gelesen“ leer blieb (0.15.1).
+    """
+
+    PUB = "bosh_8_543897185873248682836029182"
+
+    @staticmethod
+    def _ui():
+        class Icon:
+            def isNull(self):
+                return False
+
+        return ToolbarIconTests._load_ui_module(Icon())
+
+    @staticmethod
+    def _client(patches):
+        client = TolinoClient(4, "hardware", "refresh-token")
+
+        def fake_request(url, method="GET", data=None, form=False,
+                         authenticated=True, content_type=None, _retry=True):
+            return {"revision": "42", "patches": list(patches)}
+
+        client._request = fake_request
+        return client
+
+    def test_summary_counts_collections_and_read_marks(self):
+        patches = [
+            {"op": "replace",
+             "path": "/publications/%s/tags/6438286" % self.PUB,
+             "value": {"revision": "1-abc", "modified": 17,
+                       "name": "collection_finished_readings_name",
+                       "category": "system"}},
+            {"op": "replace",
+             "path": "/publications/%s/tags/6438287" % self.PUB,
+             "value": {"revision": "1-def", "modified": 18,
+                       "name": "Brunetti", "category": "collection"}},
+        ]
+        ui_module = self._ui()
+        try:
+            summary = ui_module.DiagnosticDialog._sync_data_summary(
+                self._client(patches), ("refresh-token",))
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertTrue(summary["revision_present"])
+        self.assertEqual(2, summary["patch_count"])
+        self.assertEqual(1, summary["read_marks"])
+        self.assertEqual(1, summary["collections"])
+        self.assertIn("system", summary["tag_categories"])
+        self.assertTrue(summary["sample_paths"][0].startswith("/publications/"))
+
+    def test_summary_reports_a_failed_read_without_raising(self):
+        class Broken:
+            access = "access-secret"
+
+            def sync_snapshot(self):
+                raise RuntimeError("Netz weg")
+
+        ui_module = self._ui()
+        try:
+            summary = ui_module.DiagnosticDialog._sync_data_summary(
+                Broken(), ("refresh-token",))
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual("RuntimeError", summary["error_type"])
+        self.assertNotIn("access-secret", summary["error_message"])
+
+
 class ComparisonSortTests(unittest.TestCase):
     """Bestandsvergleich (0.9.38): Upload-Auswahl gruppiert oben, dann
     alphabetisch nach Titel und Autoren."""

@@ -1993,7 +1993,24 @@ class TolinoClient:
         return self._sync_cache
 
     @staticmethod
-    def _tag_pairs(patches, category, name=None):
+    def _tag_path_parts(path):
+        """(Buch-ID, Marken-ID) aus einem Tag-Pfad -- sonst None.
+
+        Der Server schickt Marken als
+        ``/publications/<Buch-ID>/tags/<Marken-ID>`` (die Marken-ID
+        vergibt der Server), der Plugin schreibt beim Setzen
+        ``/publications/<Buch-ID>/tags``. Beide Formen müssen gelesen
+        werden können -- sonst findet der Bestandsvergleich keine
+        Gelesen-Marke in der Cloud (0.15.1).
+        """
+        parts = str(path or "").split("/")
+        if (len(parts) < 4 or parts[1] != "publications"
+                or parts[3] != "tags" or not parts[2]):
+            return None
+        return str(parts[2]), str(parts[4] if len(parts) > 4 else "")
+
+    @classmethod
+    def _tag_pairs(cls, patches, category, name=None):
         """{(Buch-ID, Markenname)} aus einer sync-data-Patchliste.
 
         `remove`-Patches nehmen das Paar wieder heraus -- der letzte
@@ -2008,11 +2025,10 @@ class TolinoClient:
                 continue
             if name is not None and value.get("name") != name:
                 continue
-            parts = str(item.get("path") or "").split("/")
-            if (len(parts) != 4 or parts[1] != "publications"
-                    or parts[3] != "tags" or not parts[2]):
+            parts = cls._tag_path_parts(item.get("path"))
+            if parts is None:
                 continue
-            pair = (str(parts[2]), str(value.get("name") or ""))
+            pair = (parts[0], str(value.get("name") or ""))
             if str(item.get("op") or "add") == "remove":
                 pairs.discard(pair)
             else:

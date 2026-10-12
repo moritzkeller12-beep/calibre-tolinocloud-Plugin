@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.15.0-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.15.1-blue)](__init__.py)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Calibre-Plugin, das die eigene Bibliothek mit der **Tolino Cloud** abgleicht:
@@ -71,7 +71,9 @@ kopieren und unter **Erweiterte Einstellungen** eintragen.
 - **Verbrauchter Token / „Fenster ist noch offen“:** im offenen Anmeldefenster die Bücherliste neu laden und den Knopf erneut drücken.
 - **HTTP 403:** Bot-Schutz – das Plugin wartet und wiederholt automatisch, sonst später erneut versuchen.
 
-Der Knopf **„Diagnose“** sammelt Details ohne Tolino-Anfrage; Hintergrund:
+Der Knopf **„Diagnose“** sammelt Details ohne Tolino-Anfrage; im Bericht prüft
+**„Tolino-Antwort testen“** die Anmeldung und zeigt, wie viele Sammlungen und
+Gelesen-Marken die Cloud meldet. Hintergrund:
 [`docs/browser-login-diagnose.md`](docs/browser-login-diagnose.md).
 
 ## Entwicklung
