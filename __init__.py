@@ -4,7 +4,10 @@ except ImportError:
     InterfaceActionBase = object
 
 
-PLUGIN_VERSION = (0, 11, 0)
+PLUGIN_VERSION = (0, 12, 0)
+
+# GPL-3.0-or-later: siehe LICENSE (kompatibel zu Calibre, das unter GPL-3 steht).
+__license__ = "GPL-3.0-or-later"
 
 
 class TolinoSyncPlugin(InterfaceActionBase):

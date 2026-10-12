@@ -422,6 +422,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             **normalized,
             "status": "only_tolino",
             "selected": False,
+            "explanation": "Nur in der Cloud – kann heruntergeladen werden.",
             "normalized_title": normalize_title(normalized["title"]),
         })
     title_counts = {}
@@ -508,13 +509,13 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             "match_reason": match_reason,
             "duplicate_count": title_counts.get(title_key, 0),
             "explanation": (
-                "Eindeutiger normalisierter Titel-Treffer; standardmäßig nicht hochgeladen."
+                "Titel stimmt mit der Cloud überein."
                 if status == "identical" and match_reason == "title" else
-                "Gleicher Titel mehrfach in Tolino; Zuordnung konservativ, Auswahl prüfen."
+                "Titel mehrfach in der Cloud – bitte prüfen."
                 if match_reason == "duplicate_title" else
-                "Kein vorhandener Titel-Treffer; Upload standardmäßig ausgewählt."
+                "Noch nicht in der Cloud – zum Hochladen angehakt."
                 if status == "new_in_calibre" else
-                "Vorhandener Datensatz unterscheidet sich; Upload nur bei expliziter Auswahl."
+                "In der Cloud vorhanden, aber abweichend – anhaken zum Abgleichen."
             ),
         })
     for i, row in enumerate(remote_rows):
@@ -522,12 +523,11 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             if not row["title"]:
                 row = dict(row, status="not_matchable",
                            explanation=(
-                               "Tolino-Datensatz ohne Titel; technische Tolino-ID "
-                               "wird nicht als Titel verwendet und ist nicht matchbar."
+                               "Tolino-Datensatz ohne Titel – nicht zuordenbar."
                            ))
             elif title_counts.get(row["normalized_title"], 0) > 1:
                 row = dict(row, status="duplicate_tolino",
-                           explanation="Doppelter Tolino-Titel; nicht automatisch hochladen.")
+                           explanation="Titel mehrfach in der Cloud – nicht automatisch hochladen.")
             rows.append(row)
     return rows
 
@@ -549,6 +549,50 @@ def sort_comparison_rows(comparison_rows):
             str(row.get("isbn") or ""),
         )
     return sorted(comparison_rows, key=sort_key)
+
+
+def series_map_from_metadata(metadata_by_id):
+    """uuid -> Serienname fuer alle Buecher mit Serie (0.12.0).
+
+    Reine Zuordnung ohne Cloud-Zugriff: die Sammlungen der Tolino Cloud
+    entstehen erst, wenn der Nutzer "Serien in der Cloud anlegen"
+    eingeschaltet hat.
+    """
+    series_map = {}
+    if not isinstance(metadata_by_id, dict):
+        return series_map
+    for metadata in metadata_by_id.values():
+        if not isinstance(metadata, dict):
+            continue
+        book_uuid = str(metadata.get("uuid") or "")
+        series = str(metadata.get("series") or "").strip()
+        if book_uuid and series:
+            series_map[book_uuid] = series
+    return series_map
+
+
+def plan_collection_updates(series_map, state):
+    """Sammlungspaare (Tolino-ID, Serienname) fuer den Cloud-Abgleich.
+
+    Der Abgleich selbst ist idempotent: der Aufrufer liest die vorhandenen
+    Sammlungen und schreibt nur fehlende Paare. Ohne Serien (oder ohne
+    bekannte Tolino-ID) ist das Ergebnis leer -- Ordner entstehen dann
+    nie automatisch.
+    """
+    if not isinstance(series_map, dict) or not isinstance(state, dict):
+        return []
+    pairs = set()
+    for book_uuid, series in series_map.items():
+        series = str(series or "").strip()
+        if not book_uuid or not series:
+            continue
+        entry = state.get(book_uuid)
+        if not isinstance(entry, dict):
+            continue
+        tolino_id = str(entry.get("tolino_id") or "").strip()
+        if tolino_id:
+            pairs.add((tolino_id, series))
+    return sorted(pairs)
 
 
 def fingerprint(metadata, format_name):
@@ -619,15 +663,20 @@ def unpack_meta_update_record(record):
     }
 
 
-def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=()):
+def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
+                          enabled=True):
     """Split in-place metadata updates off the planned uploads (0.9.45).
 
     A book qualifies when its cloud copy already exists, the format file is
     unchanged since the last sync (content_fingerprint), and title/authors/
     isbn/series changed (metadata_fingerprint). A qualifying planned upload
     becomes an update record -- the file stays local instead of being sent
-    again. Returns (kept_uploads, meta_updates).
+    again. Returns (kept_uploads, meta_updates). Mit `enabled=False` bleibt
+    die stille Cloud-Aktualisierung aus: alle Uploads bleiben unveraendert
+    und es gibt keine Metadaten-Updates.
     """
+    if not enabled:
+        return list(uploads), []
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
     preferred_formats = normalize_formats(preferred_formats)
@@ -808,7 +857,8 @@ def diagnose_preparation(database, preferred_formats=(), upload_covers=False, st
     step("Metadaten-Schlüssel/-Typen", lambda: _metadata_shapes(metadata))
     step("Format-Rückgaben", lambda: _diagnostic_formats(database, metadata))
     if upload_covers:
-        step("Cover-Typ/Größe", lambda: _diagnostic_covers(database, book_ids))
+        step("Titelbild-Typ/-Größe",
+             lambda: _diagnostic_covers(database, book_ids))
     state_result = step("Lokaler Sync-Status", lambda: state if isinstance(state, dict) else {})
     state = state_result.get("value", {}) if state_result.get("status") == "ok" else {}
     step("plan_sync-Ergebnisform", lambda: _diagnostic_plan(metadata, state, preferred_formats))

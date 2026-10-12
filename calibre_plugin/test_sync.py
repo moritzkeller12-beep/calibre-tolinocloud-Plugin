@@ -1,4 +1,5 @@
 import base64
+import importlib
 import unittest
 import ast
 import json
@@ -12,7 +13,8 @@ from unittest.mock import patch
 
 from . import config
 from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
-                   normalize_formats, plan_sync, plan_metadata_updates,
+                   normalize_formats, plan_collection_updates, plan_sync,
+                   plan_metadata_updates, series_map_from_metadata,
                    metadata_fingerprint, content_fingerprint,
                    metadata_update_fields, safe_format_path,
                    selected_book_ids, selected_table_rows, sync_summary,
@@ -1047,6 +1049,25 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
+    def test_automatic_cloud_actions_default_to_on_and_are_persisted(self):
+        """Serien-Sammlungen und Metadaten-Updates laufen wie bisher,
+        sind aber ausdrücklich schaltbar (0.12.0)."""
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            values = config.settings()
+            self.assertTrue(values["sync_collections"])
+            self.assertTrue(values["sync_metadata_updates"])
+            self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
+            config.save_settings({"sync_collections": False,
+                                  "sync_metadata_updates": False})
+            values = config.settings()
+            self.assertFalse(values["sync_collections"])
+            self.assertFalse(values["sync_metadata_updates"])
+            self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
+        finally:
+            config.PREFERENCES = original
+
     def test_partial_settings_get_missing_defaults(self):
         original = config.PREFERENCES
         try:
@@ -1461,6 +1482,21 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual(1, len(updates))
         self.assertNotIn("series", updates[0][3])
 
+    def test_automatic_metadata_updates_can_be_switched_off(self):
+        """Ausgeschaltet bleibt jeder geplante Upload ein Upload und es
+        gibt keine stillen /meta-Schreibvorgänge."""
+        book = self._book()
+        state = self._state(book, meta_fp="stale")
+        uploads = [(1, "u1", "EPUB", "d1")]
+        kept, updates = plan_metadata_updates({1: book}, state, uploads,
+                                              ["EPUB"], enabled=False)
+        self.assertEqual(uploads, kept)
+        self.assertEqual([], updates)
+        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
+                                              enabled=False)
+        self.assertEqual([], kept)
+        self.assertEqual([], updates)
+
     def test_meta_update_record_validation(self):
         with self.assertRaisesRegex(ValueError, "invalid metadata update"):
             unpack_meta_update_record((1, "u1"))
@@ -1483,6 +1519,43 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual({"title": "T", "author": "A, B"},
                          metadata_update_fields({"title": " T ",
                                                  "authors": ["A", "B"]}))
+
+
+class CollectionPlanTests(unittest.TestCase):
+    """Serien → Sammlungen (0.12.0): Planung ohne Cloud-Zugriff.
+
+    Der Abgleich selbst ist idempotent -- hier wird nur geprüft, welche
+    Paare überhaupt in Frage kommen.
+    """
+
+    def test_series_map_keeps_only_books_with_a_series(self):
+        metadata = {
+            1: {"uuid": "u1", "series": "Adamsberg"},
+            2: {"uuid": "u2", "series": "   "},
+            3: {"uuid": "", "series": "Ohne UUID"},
+            4: {"uuid": "u4"},
+        }
+        self.assertEqual({"u1": "Adamsberg"},
+                         series_map_from_metadata(metadata))
+        self.assertEqual({}, series_map_from_metadata(None))
+
+    def test_pairs_only_include_books_already_in_the_cloud(self):
+        series_map = {"u1": "Adamsberg", "u2": "Adamsberg", "u3": "Neu"}
+        state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": ""},
+                 "u3": {}}
+        self.assertEqual([("t1", "Adamsberg")],
+                         plan_collection_updates(series_map, state))
+
+    def test_pairs_are_sorted_and_deduplicated(self):
+        series_map = {"u1": "SciFi", "u2": "Adamsberg"}
+        state = {"u1": {"tolino_id": "t2"}, "u2": {"tolino_id": "t1"}}
+        self.assertEqual([("t1", "Adamsberg"), ("t2", "SciFi")],
+                         plan_collection_updates(series_map, state))
+
+    def test_pairs_are_empty_for_missing_input(self):
+        self.assertEqual([], plan_collection_updates(None, {"u": {}}))
+        self.assertEqual([], plan_collection_updates({"u": "Serie"}, None))
+        self.assertEqual([], plan_collection_updates({}, {}))
 
 
 class LiveGrabTests(unittest.TestCase):
@@ -2349,8 +2422,13 @@ class ToolbarIconTests(unittest.TestCase):
     """The toolbar action must receive an icon in real Calibre runs."""
 
     @staticmethod
-    def _load_ui_module(get_icons_result):
-        """Import ui.py with Calibre and Qt imports stubbed."""
+    def _load_ui_module(get_icons_result, qt_stub=None):
+        """Import ui.py with Calibre and Qt imports stubbed.
+
+        `qt_stub` überschreibt einzelne Qt-Namen (z. B. einen ehrlichen
+        QDialog/QTableWidget-Ersatz, damit der Aufbau eines Fensters
+        wirklich durchlaufen werden kann).
+        """
         import sys
         import types
 
@@ -2373,6 +2451,10 @@ class ToolbarIconTests(unittest.TestCase):
             setattr(qt_core, name, type(name, (), {}))
         qt_core.pyqtSignal = lambda *a, **k: None
         qt_core.Signal = lambda *a, **k: None
+        if qt_stub:
+            # Zuletzt, damit ein Stub auch pyqtSignal/Signal ersetzen darf.
+            for name, value in qt_stub.items():
+                setattr(qt_core, name, value)
         calibre = types.ModuleType("calibre")
         calibre_gui2 = types.ModuleType("calibre.gui2")
         calibre_gui2.error_dialog = None
@@ -2393,7 +2475,13 @@ class ToolbarIconTests(unittest.TestCase):
                              ("qt.core", qt_core)):
             sys.modules[name] = module
         sys.modules.pop("calibre_plugin.ui", None)
-        from calibre_plugin import ui as ui_module
+        import calibre_plugin
+        # Das Paket hält sonst die Referenz auf das zuvor geladene
+        # ui-Modul (anderer Qt-Stub) und `from ... import ui` gäbe genau
+        # diese alte Fassung zurück.
+        if getattr(calibre_plugin, "ui", None) is not None:
+            delattr(calibre_plugin, "ui")
+        ui_module = importlib.import_module("calibre_plugin.ui")
         # Stubs stay active until restore_stubs() so that function-level
         # imports (from calibre.gui2 import get_icons) still resolve.
         def restore_stubs():
@@ -2446,8 +2534,8 @@ class ToolbarIconTests(unittest.TestCase):
 
 
 class TolinoClientFeatureTests(unittest.TestCase):
-    """Tests for pytolino-derived client features: device list, download,
-    sync-data collections/read-state, refresh expiry tracking."""
+    """Tests for the cloud client: device list, download, sync-data
+    collections/read-state and refresh expiry tracking."""
 
     def _client(self):
         return TolinoClient(4, "hardware", "refresh-token")
@@ -3373,6 +3461,9 @@ class InventoryDialogSortTests(unittest.TestCase):
                 def setEnabled(self, value):
                     pass
 
+                def setToolTip(self, text):
+                    self.tooltip = text
+
             class FakeHeader:
                 def setSortIndicatorShown(self, shown):
                     pass
@@ -3409,13 +3500,17 @@ class InventoryDialogSortTests(unittest.TestCase):
                 ui_module.InventoryDialog)
             rows = [
                 {"selected": False, "title": "Alpha", "authors": "A",
-                 "status": "identical", "book_id": 1, "tolino_id": "c1"},
+                 "status": "identical", "book_id": 1, "tolino_id": "c1",
+                 "explanation": "Titel stimmt mit der Cloud überein."},
                 {"selected": True, "title": "Zulu", "authors": "Z",
-                 "status": "new_in_calibre", "book_id": 2, "tolino_id": ""},
+                 "status": "new_in_calibre", "book_id": 2, "tolino_id": "",
+                 "explanation": "Noch nicht in der Cloud – zum Hochladen angehakt."},
                 {"selected": False, "title": "beta", "authors": "B",
-                 "status": "changed", "book_id": 3, "tolino_id": "c3"},
+                 "status": "changed", "book_id": 3, "tolino_id": "c3",
+                 "explanation": "In der Cloud vorhanden, aber abweichend."},
                 {"selected": True, "title": "alpha", "authors": "M",
-                 "status": "new_in_calibre", "book_id": 4, "tolino_id": ""},
+                 "status": "new_in_calibre", "book_id": 4, "tolino_id": "",
+                 "explanation": "Noch nicht in der Cloud – zum Hochladen angehakt."},
             ]
             dialog.rows = rows
             dialog.checks = [FakeCheck() for _ in rows]
@@ -3427,7 +3522,7 @@ class InventoryDialogSortTests(unittest.TestCase):
 
             # Klick auf den Titel: aufsteigend, gehaekelte Buchstaben
             # bleiben denselben Buechern zugeordnet.
-            dialog._sort_by_column(4)
+            dialog._sort_by_column(1)
             self.assertEqual(
                 ["alpha", "alpha", "beta", "zulu"],
                 [row["title"].casefold() for row in dialog.rows])
@@ -3436,7 +3531,7 @@ class InventoryDialogSortTests(unittest.TestCase):
                        if check.isChecked()}
             self.assertEqual({"alpha", "zulu"}, checked)
             # Zweiter Klick auf dieselbe Spalte: absteigend.
-            dialog._sort_by_column(4)
+            dialog._sort_by_column(1)
             self.assertEqual(
                 ["zulu", "beta", "alpha", "alpha"],
                 [row["title"].casefold() for row in dialog.rows])
@@ -3452,6 +3547,427 @@ class InventoryDialogSortTests(unittest.TestCase):
                              [row["title"].casefold() for row in first_two])
         finally:
             ui_module._restore_stubs_for_tests()
+
+
+    def test_columns_sort_keys_and_status_text_stay_in_sync(self):
+        """Spaltenzahl, Sortierschlüssel, technische Spalten und die
+        Status-Texte müssen zusammenpassen -- sonst sortiert ein Klick
+        falsch oder eine Zeile bleibt ohne Klartext."""
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            dialog_cls = ui_module.InventoryDialog
+            self.assertEqual(len(dialog_cls.HEADERS),
+                             len(dialog_cls._SORT_KEYS))
+            for column in dialog_cls.TECHNICAL_COLUMNS:
+                self.assertLess(column, len(dialog_cls.HEADERS))
+            self.assertEqual(
+                {"new_in_calibre", "only_tolino", "identical", "changed",
+                 "duplicate_tolino", "not_matchable"},
+                set(dialog_cls.STATUS_TEXT))
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_automatic_note_names_the_enabled_actions(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            dialog = ui_module.InventoryDialog.__new__(
+                ui_module.InventoryDialog)
+            dialog.options = {"collections": True, "metadata_updates": True,
+                              "deletions": False}
+            note = dialog._automatic_note()
+            self.assertIn("Serien werden in der Tolino Cloud", note)
+            self.assertIn("aktualisiert", note)
+            self.assertNotIn("gelöscht", note)
+            dialog.options = {"deletions": True}
+            self.assertIn("gelöscht", dialog._automatic_note())
+            # Ohne automatische Aktionen sagt der Hinweis das ausdrücklich.
+            dialog.options = {}
+            self.assertIn("sonst passiert nichts", dialog._automatic_note())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_selection_helpers_mark_differences_and_clear(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            class FakeCheck:
+                def __init__(self):
+                    self._checked = False
+
+                def setChecked(self, value):
+                    self._checked = bool(value)
+
+                def isChecked(self):
+                    return self._checked
+
+                def setEnabled(self, value):
+                    pass
+
+                def setToolTip(self, text):
+                    self.tooltip = text
+
+            ui_module.QCheckBox = FakeCheck
+            dialog = ui_module.InventoryDialog.__new__(
+                ui_module.InventoryDialog)
+            rows = [
+                {"selected": False, "status": "identical", "book_id": 1},
+                {"selected": False, "status": "changed", "book_id": 2},
+                {"selected": False, "status": "new_in_calibre", "book_id": 3},
+                {"selected": False, "status": "only_tolino", "book_id": None},
+            ]
+            dialog.rows = rows
+            dialog.checks = [FakeCheck() for _ in rows]
+            dialog.select_all_differences()
+            self.assertEqual({2, 3}, dialog.selected_ids())
+            self.assertEqual([False, True, True, False],
+                             [check.isChecked() for check in dialog.checks])
+            dialog.clear_all_selection()
+            self.assertEqual(set(), dialog.selected_ids())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+
+class InventoryDialogBuildTests(unittest.TestCase):
+    """Der Aufbau des Bestandsvergleichs wird vollständig durchlaufen.
+
+    Qt wird dabei minimal, aber ehrlich nachgebildet (fehlende Methoden
+    fallen als AttributeError auf). Damit sind Tippfehler und falsche
+    Spaltenindizes sichtbar, auch ohne Calibre auf dem Rechner.
+    """
+
+    @staticmethod
+    def _qt_stub():
+        class Signal:
+            def __init__(self):
+                self.slots = []
+
+            def connect(self, slot):
+                self.slots.append(slot)
+
+            def emit(self, *args):
+                for slot in self.slots:
+                    slot(*args)
+
+        class Widget:
+            def __init__(self, *args, **_kwargs):
+                self.args = args
+                self.tooltip = None
+
+            def setToolTip(self, text):
+                self.tooltip = text
+
+            def setEnabled(self, value):
+                self.enabled = value
+
+            def setVisible(self, value):
+                self.visible = value
+
+            def isVisible(self):
+                return getattr(self, "visible", True)
+
+            def setWindowTitle(self, title):
+                self.window_title = title
+
+            def setMinimumSize(self, *args):
+                self.minimum_size = args
+
+            def setMinimumWidth(self, width):
+                self.minimum_width = width
+
+            def setWordWrap(self, value):
+                self.word_wrap = value
+
+            def setText(self, text):
+                self._text = text
+
+            def text(self):
+                """Text des Widgets -- auch wenn er beim Bau kam."""
+                if hasattr(self, "_text"):
+                    return self._text
+                return self.args[0] if self.args else ""
+
+            def setLayout(self, layout):
+                self.layout = layout
+
+            def setChecked(self, value):
+                self.checked = bool(value)
+
+            def isChecked(self):
+                return getattr(self, "checked", False)
+
+            def setSelectionBehavior(self, value):
+                self.selection_behavior = value
+
+            def setRowCount(self, count):
+                self.row_count = count
+
+            def setCellWidget(self, row, column, widget):
+                self.cell_widgets = getattr(self, "cell_widgets", [])
+                self.cell_widgets.append((row, column, widget))
+
+            def setItem(self, row, column, item):
+                self.items = getattr(self, "items", {})
+                self.items[(row, column)] = item.text
+
+            def resizeColumnsToContents(self):
+                self.resized = True
+
+            def setColumnHidden(self, column, hidden):
+                self.hidden = getattr(self, "hidden", {})
+                self.hidden[column] = hidden
+
+        class Layout:
+            def __init__(self, *args, **_kwargs):
+                self.children = []
+
+            def addWidget(self, *args):
+                self.children.append(args)
+
+            def addLayout(self, layout):
+                self.children.append(layout)
+
+            def addRow(self, *args):
+                self.children.append(args)
+
+            def addStretch(self, *args):
+                pass
+
+        class Header:
+            def __init__(self):
+                self.sectionClicked = Signal()
+
+            def setSortIndicatorShown(self, shown):
+                self.shown = shown
+
+            def setSortIndicator(self, column, order):
+                self.indicator = (column, order)
+
+        class Table(Widget):
+            SelectRows = "SelectRows"
+
+            def __init__(self, rows, columns):
+                Widget.__init__(self)
+                self.columns = columns
+                self.header_items = {}
+
+            def setHorizontalHeaderLabels(self, labels):
+                self.headers = list(labels)
+
+            def horizontalHeader(self):
+                self.header = Header()
+                return self.header
+
+            def horizontalHeaderItem(self, index):
+                return self.header_items.setdefault(index, Widget())
+
+        class Item:
+            def __init__(self, text):
+                self.text = text
+
+        class Dialog(Widget):
+            def __init__(self, parent=None):
+                Widget.__init__(self)
+                self.parent = parent
+
+            def exec(self):
+                return 0
+
+            def accept(self):
+                pass
+
+            def reject(self):
+                pass
+
+        class CheckBox(Widget):
+            def __init__(self, text=""):
+                Widget.__init__(self, text)
+                self.stateChanged = Signal()
+                self.toggled = Signal()
+
+        class Button(Widget):
+            def __init__(self, text=""):
+                Widget.__init__(self, text)
+                self.clicked = Signal()
+
+        class SelectRows:
+            pass
+
+        qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1,
+                             "SelectRows": SelectRows})
+        return {
+            "Qt": qt,
+            "QDialog": Dialog,
+            "QVBoxLayout": Layout,
+            "QHBoxLayout": Layout,
+            "QLabel": Widget,
+            "QPushButton": Button,
+            "QCheckBox": CheckBox,
+            "QGroupBox": Widget,
+            "QTableWidget": Table,
+            "QTableWidgetItem": Item,
+        }
+
+    def _build(self, options):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None, qt_stub=self._qt_stub())
+        rows = [
+            {"selected": False, "title": "Zulu", "authors": "Z",
+             "status": "identical", "book_id": 1, "tolino_id": "c1",
+             "isbn": "111", "explanation": "Titel stimmt mit der Cloud "
+             "überein."},
+            {"selected": True, "title": "Alpha", "authors": "A",
+             "status": "new_in_calibre", "book_id": 2, "tolino_id": "",
+             "isbn": "222", "explanation": "Noch nicht in der Cloud – zum "
+             "Hochladen angehakt."},
+        ]
+        return ui_module, ui_module.InventoryDialog(rows, options=options)
+
+    def test_constructor_writes_every_column_in_the_right_order(self):
+        ui_module, dialog = self._build({"collections": True})
+        try:
+            self.assertEqual(list(ui_module.InventoryDialog.HEADERS),
+                             dialog.table.headers)
+            for index, row in enumerate(dialog.rows):
+                self.assertEqual(row["title"], dialog.table.items[(index, 1)])
+                self.assertEqual(row["authors"], dialog.table.items[(index, 2)])
+                self.assertEqual(
+                    ui_module.InventoryDialog.STATUS_TEXT[row["status"]],
+                    dialog.table.items[(index, 3)])
+                self.assertEqual(row["explanation"],
+                                 dialog.table.items[(index, 4)])
+                self.assertEqual(row["isbn"], dialog.table.items[(index, 5)])
+                self.assertEqual(row["tolino_id"],
+                                 dialog.table.items[(index, 6)])
+            # Nur die technischen Spalten sind zunächst verborgen.
+            self.assertEqual({5: True, 6: True}, dialog.table.hidden)
+            self.assertIn("Serien werden in der Tolino Cloud",
+                          dialog.note.text())
+            self.assertIn("1 von 2 Büchern angehakt", dialog.summary.text())
+            self.assertEqual("Auswahl hochladen (1)", dialog.confirm.text())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_toggles_switch_technical_columns_and_extra_actions(self):
+        ui_module, dialog = self._build({"metadata_updates": True})
+        try:
+            self.assertFalse(dialog.actions.isVisible())
+            dialog._toggle_more_actions(True)
+            self.assertTrue(dialog.actions.isVisible())
+            dialog._toggle_technical_columns(True)
+            self.assertEqual({5: False, 6: False}, dialog.table.hidden)
+            dialog._toggle_technical_columns(False)
+            self.assertEqual({5: True, 6: True}, dialog.table.hidden)
+            self.assertIn("aktualisiert", dialog.note.text())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+
+class CollectionReconcileWorkerTests(unittest.TestCase):
+    """Serien → Sammlungen im SyncWorker (0.12.0).
+
+    Feldbefund des Nutzers: „ich habe das Gefühl, es synchronisiert die
+    Ordner automatisch“. Genau das passiert hier -- aber nur, wenn die
+    Sammlungen eingeschaltet sind, und vorhandene Zuordnungen werden
+    nicht erneut geschrieben.
+    """
+
+    @staticmethod
+    def _signal_descriptor():
+        class Signal:
+            def __init__(self):
+                self.slots = []
+
+            def connect(self, slot):
+                self.slots.append(slot)
+
+            def emit(self, *args):
+                for slot in self.slots:
+                    slot(*args)
+
+        class Descriptor:
+            def __init__(self, *_types):
+                self.name = ""
+
+            def __set_name__(self, owner, name):
+                self.name = name
+
+            def __get__(self, obj, objtype=None):
+                if obj is None:
+                    return self
+                return obj.__dict__.setdefault(self.name, Signal())
+
+        return Descriptor, Signal
+
+    def _run_worker(self, series_map, state, known_pairs):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub={"pyqtSignal": self._signal_descriptor()[0]})
+        calls = {"pairs_reads": 0, "added": [], "progress": [],
+                 "completed": None, "failed": None}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.refresh = "rotated-refresh"
+
+            def login(self):
+                return "rotated-refresh"
+
+            def inventory_ids(self):
+                return set()
+
+            def collection_pairs(self):
+                calls["pairs_reads"] += 1
+                return set(known_pairs)
+
+            def add_to_collection(self, tolino_id, series):
+                calls["added"].append((tolino_id, series))
+                return 1
+
+        settings = {"partner_id": 4, "hardware_id": "hw",
+                    "refresh_token": "tok", "username": "", "password": "",
+                    "enable_deletions": False, "state": state}
+        try:
+            with patch("calibre_plugin.ui.TolinoClient", FakeClient):
+                worker = ui_module.SyncWorker(settings, [], [], [], series_map)
+                worker.progress.connect(
+                    lambda *args: calls["progress"].append(args))
+                worker.completed.connect(
+                    lambda *args: calls.update(completed=args))
+                worker.failed.connect(
+                    lambda *args: calls.update(failed=args))
+                worker.run()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        return calls
+
+    def test_switched_on_creates_only_missing_collections(self):
+        calls = self._run_worker(
+            {"u1": "Adamsberg", "u2": "Neu"},
+            {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": "t2"}},
+            {("t1", "Adamsberg")})
+        # t1/Adamsberg ist schon da, nur t2/Neu fehlt.
+        self.assertEqual([("t2", "Neu")], calls["added"])
+        self.assertEqual(1, calls["pairs_reads"])
+        self.assertIsNotNone(calls["completed"])
+        self.assertIsNone(calls["failed"])
+        self.assertTrue(any("Serie in der Cloud: Neu" in text
+                            for _done, _total, text in calls["progress"]))
+
+    def test_switched_off_leaves_the_cloud_untouched(self):
+        calls = self._run_worker(
+            {}, {"u1": {"tolino_id": "t1"}},
+            {("t1", "Adamsberg")})
+        self.assertEqual([], calls["added"])
+        self.assertEqual(0, calls["pairs_reads"])
+        self.assertIsNotNone(calls["completed"])
+
+    def test_books_without_cloud_copy_get_no_collection(self):
+        calls = self._run_worker(
+            {"u2": "Neu"}, {"u1": {"tolino_id": "t1"}}, set())
+        self.assertEqual([], calls["added"])
+        self.assertEqual(0, calls["pairs_reads"])
 
 
 class ComparisonSortTests(unittest.TestCase):

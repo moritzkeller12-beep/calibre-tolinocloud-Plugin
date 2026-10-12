@@ -1348,10 +1348,9 @@ def _curl_binary():
     return None
 
 
-# curl_cffi (if installed) impersonates Chrome's TLS fingerprint exactly like
-# the pytolino reference client; plain urllib/curl handshakes are rejected by
-# the bot protection in front of some partner token endpoints (HTTP 403
-# without an OAuth error body).
+# curl_cffi (if installed) impersonates Chrome's TLS fingerprint; plain
+# urllib/curl handshakes are rejected by the bot protection in front of some
+# partner token endpoints (HTTP 403 without an OAuth error body).
 def _impersonate_session():
     """Return a curl_cffi session that impersonates Chrome, or None."""
     try:
@@ -1536,7 +1535,7 @@ class TolinoClient:
                     "Die Tolino-Sitzung dieses Refresh-Tokens ist beendet "
                     "(Session not active): Der Account wurde im Web Reader "
                     "abgemeldet oder die Sitzung ist abgelaufen. Melde dich "
-                    "im Web Reader (Bibliothek) neu an und starte danach "
+                    "im Web Reader (Bücherliste) neu an und starte danach "
                     "die Browser-Anmeldung erneut."
                 ) from exc
             if "invalid_grant" in folded or "reuse exceeded" in folded:
@@ -1817,7 +1816,7 @@ class TolinoClient:
     def delete(self, deliverable_id):
         self._request(BASE_URL + "/deletecontent?deliverableId=" + str(deliverable_id))
 
-    # --- In-place metadata (pytolino/darkphoenix-derived /meta flow) -------
+    # --- In-place metadata: update an existing book via /meta -----------
     META_URL = BASE_URL + "/meta"
 
     def update_metadata(self, deliverable_id, fields):
@@ -1841,7 +1840,7 @@ class TolinoClient:
                       content_type="application/json")
         return metadata
 
-    # --- Device list (pytolino-derived): resolve the real hardware ID ------
+    # --- Device list: resolve the real hardware ID ----------------------
 
     DEVICES_URL = "https://bosh.pageplace.de/bosh/rest/handshake/devices/list"
 
@@ -1919,7 +1918,7 @@ class TolinoClient:
         finally:
             self._in_device_recovery = False
 
-    # --- Download (pytolino-derived): fetch an uploaded ebook back ---------
+    # --- Download: fetch an uploaded ebook back -------------------------
 
     def download(self, deliverable_id):
         """Download one book from the cloud; returns (content_bytes, metadata)."""
@@ -1950,7 +1949,7 @@ class TolinoClient:
                 return content, item
         return content, {}
 
-    # --- Collections & read state (pytolino-derived sync-data patches) -----
+    # --- Collections & read state via sync-data patches -----------------
 
     SYNC_DATA_URL = BASE_URL + "/sync-data?paths=publications"
 
