@@ -22,11 +22,17 @@ Historie der Feldbefunde steht im Git-Log (`git log`).
    Fenster offen ohne Reader-Tab → offen lassen, Neu-Anmeldung vor Ort
    (das Fenster wird wiederverwendet). Meldungen nennen das ALTER des
    Kandidaten (JWT-iat), nie den Wert.
-5. Ohne Chromium: Disk-Scrape-Fallback (vorher ALLE Browserfenster schließen,
-   damit der letzte Token geflushed wird).
+5. Ohne Chromium: kein stiller Fallback mehr. Der Login endet mit einem
+   Hinweis auf die fehlende Chromium-Installation; der Zugang kann stattdessen
+   von Hand eingetragen werden (F12 → Netzwerk, siehe README).
 
 ## Was historisch schiefging — und jetzt abgesichert ist
 
+- **Kein Disk-Scrape mehr:** Der frühere Fallback, den Refresh-Token direkt
+  aus den Browser-Dateien (LevelDB/SQLite/mozlz4) zu kratzen, hing an
+  Flush-Timing und fand meist nur verbrauchte Kopien. Er ist entfernt; es
+  gibt genau einen Weg (Live-Grab im eigenen Chromium-Fenster) plus den
+  manuellen Import.
 - **Nur der neueste Token zählt:** Replay verbrauchter Kopien löst Keycloak-
   Reuse-Schutz aus und beendet die Sitzung → Live-Grab, genau ein Tausch.
 - **Gekoderte/verschlüsselte Kandidaten** werden vor dem Tausch entpackt bzw.

@@ -191,8 +191,6 @@ def chromium_candidates(home=None):
 
 
 def _windows_chrome_paths():
-    home = os.environ.get("LOCALAPPDATA") or \
-        os.path.join(os.path.expanduser("~"), "AppData", "Local")
     program_dirs = [
         os.environ.get("PROGRAMFILES") or "C:\\Program Files",
         os.environ.get("PROGRAMFILES(X86)") or "C:\\Program Files (x86)",

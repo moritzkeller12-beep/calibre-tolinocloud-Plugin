@@ -19,8 +19,9 @@ Es ist kein Bauen nötig – die Zip ist direkt installierbar.
 ## Benutzung
 
 1. **Anmelden:** Symbolleiste **Tolino Cloud Sync** öffnen → Buchhändler
-   wählen → **„Jetzt bei Tolino anmelden“**. Im Anmeldefenster im Web Reader
-   einloggen und die Bücherliste öffnen; das Fenster schließt sich selbst.
+   wählen → **„Jetzt bei Tolino anmelden“**. Im Anmeldefenster (es braucht
+   Chrome, Chromium, Brave oder Edge) im Web Reader einloggen und die
+   Bücherliste öffnen; das Fenster schließt sich selbst.
 2. **Synchronisieren:** **„Vergleichen und hochladen …“** drücken.
 3. Im Bestandsvergleich die gewünschten Bücher anhaken → **„Auswahl
    hochladen“**.
@@ -31,14 +32,18 @@ eingestellt.
 
 ## Wenn die Anmeldung nicht automatisch klappt
 
-- **Ohne Chromium installiert:** „Jetzt bei Tolino anmelden“ drücken, im
-  System-Browser im Web Reader anmelden, **alle Browserfenster schließen**
-  und den Knopf erneut drücken.
-- **Nur im Notfall manuell:** In den erweiterten Einstellungen Hardware-ID und
-  Refresh-Token von Hand eintragen. F12 → Netzwerk → Aufnahme an → im Web
-  Reader anmelden → `hardware_id` (Filter `registerhw`) und `refresh_token`
-  (Filter `token`) kopieren. Ein Tolino-Token ist nach einmaliger Nutzung
-  ungültig – kein Inkognito-Fenster verwenden.
+Die automatische Anmeldung braucht einen **Chromium-Browser**
+(Chrome, Chromium, Brave oder Edge) – der Standardbrowser genügt nicht.
+Ist keiner installiert, öffnet „Jetzt bei Tolino anmelden“ **kein Fenster**
+und sagt dir das direkt.
+
+- **Browser installieren:** Chrome, Chromium, Brave oder Edge installieren,
+  danach „Jetzt bei Tolino anmelden“ erneut drücken.
+- **Zugang von Hand eintragen (geht immer):** In den erweiterten Einstellungen
+  Hardware-ID und Refresh-Token von Hand eintragen. F12 → Netzwerk → Aufnahme
+  an → im Web Reader anmelden → `hardware_id` (Filter `registerhw`) und
+  `refresh_token` (Filter `token`) kopieren. Ein Tolino-Token ist nach
+  einmaliger Nutzung ungültig – kein Inkognito-Fenster verwenden.
 
 ## Häufige Probleme
 
@@ -63,4 +68,4 @@ Request.
 
 ## Version
 
-Aktuell: **0.10.0** — siehe `__init__.py`.
+Aktuell: **0.11.0** — siehe `__init__.py`.

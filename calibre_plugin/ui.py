@@ -1,6 +1,5 @@
 import os
 import tempfile
-import time
 import traceback
 
 from calibre.gui2 import error_dialog, info_dialog
@@ -11,7 +10,7 @@ try:
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QTextEdit, QObject, QInputDialog,
-                         QFileDialog, Qt, QTimer, pyqtSignal)
+                         QFileDialog, Qt, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog,
@@ -19,7 +18,7 @@ except ImportError:
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QTextEdit, QObject, QInputDialog,
-                         QFileDialog, Qt, QTimer, Signal as pyqtSignal)
+                         QFileDialog, Qt, Signal as pyqtSignal)
 
 try:
     from .config import (account_by_name, save_account, save_settings,
@@ -37,9 +36,7 @@ try:
     from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                          chromium_available, hardware_id,
                          normalize_refresh_token, sanitize_error,
-                         scrape_browser_tokens, spent_token_advice,
-                         start_token_keepalive, try_live_grab_first,
-                         validate_refresh_candidates)
+                         start_token_keepalive, try_live_grab_first)
 except ImportError:
     from config import (account_by_name, save_account, save_settings,
                         set_active_account, settings)
@@ -56,18 +53,16 @@ except ImportError:
     from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
                         chromium_available, hardware_id,
                         normalize_refresh_token, sanitize_error,
-                        scrape_browser_tokens, spent_token_advice,
-                        start_token_keepalive, try_live_grab_first,
-                        validate_refresh_candidates)
+                        start_token_keepalive, try_live_grab_first)
 
 
 def _plugin_version():
-    """Plugin version tuple for display; safe outside Calibre."""
+    """Plugin version string for display; safe outside Calibre."""
     try:
         from . import PLUGIN_VERSION
-        return PLUGIN_VERSION
     except Exception:
-        return (0, 9, 0)
+        return "unbekannt"
+    return ".".join(str(part) for part in PLUGIN_VERSION)
 
 
 def _metadata_value(item, name, default=""):
@@ -682,8 +677,8 @@ class SyncDashboard(QDialog):
         self.login_worker = None
         self.sync_column_enabled = False
         self.temp_files = []
-        self.setWindowTitle("Tolino Cloud Sync (Plugin-Version %s)" %
-                            ".".join(str(v) for v in _plugin_version()))
+        self.setWindowTitle("Tolino Cloud Sync (Plugin-Version %s)"
+                            % _plugin_version())
         self.setMinimumWidth(560)
         root = QVBoxLayout(self)
 
@@ -712,9 +707,9 @@ class SyncDashboard(QDialog):
         self.browser.clicked.connect(self.browser_login)
         self.scrape_browser = QPushButton("Zugang aus offenem Browser holen")
         self.scrape_browser.setToolTip(
-            "Holt den Zugang aus einem bereits geöffneten Anmeldefenster. "
-            "Ohne Chromium prüft das Plugin die gespeicherten "
-            "Browser-Daten – dann vorher alle Browserfenster schließen.")
+            "Holt den Zugang aus einem bereits geöffneten oder neu "
+            "geöffneten Anmeldefenster (benötigt Chrome, Chromium, Brave "
+            "oder Edge).")
         self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
         setup_form.addRow("Buchhändler", self.partner)
         setup_form.addRow("", self.browser)
@@ -927,16 +922,10 @@ class SyncDashboard(QDialog):
             "hardware_id": str(hardware),
         }, active=self.account_name)
 
-    def _validate_scraped_candidates(self, refreshes, hardwares):
-        """Validate scraped candidates live; return the fresh pair or None."""
-        return validate_refresh_candidates(
-            self.partner.currentData(), "", refreshes)
-
     def scrape_browser_tokens(self):
-        """Extract a working refresh_token and hardware_id from browsers."""
+        """Read the current token from the plugin's own sign-in window."""
         try:
-            # Ein laufendes Anmeldefenster haelt den AKTUELLEN Token -- immer
-            # besser als jede Festplatten-Kopie: erst live lesen, sonst Scheibe.
+            # Ein laufendes Anmeldefenster haelt den AKTUELLEN Token.
             grabbed = try_live_grab_first(
                 self.partner.currentData(), self.hardware.text().strip())
             if grabbed:
@@ -951,8 +940,8 @@ class SyncDashboard(QDialog):
                     "Das Anmeldefenster wurde geschlossen."
                     % (hardware_id_value or "unver\u00e4ndert"))
                 return
-            # Kein Fenster: selbst das eigene Chromium-Fenster oeffnen und live
-            # uebernehmen (nur dieses Fenster schliesst sich, 0.9.41).
+            # Kein Fenster: selbst das eigene Chromium-Fenster oeffnen und
+            # den Token live uebernehmen.
             if chromium_available():
                 if (self.login_thread is not None
                         and self.login_thread.isRunning()):
@@ -963,119 +952,29 @@ class SyncDashboard(QDialog):
                     "dieses Fenster schließt sich danach.")
                 self.browser_login()
                 return
-            refreshes, hardwares, notes = scrape_browser_tokens(
-                diagnose=True, all_candidates=True)
-            if refreshes:
-                validated = self._validate_scraped_candidates(
-                    refreshes, hardwares)
-                if validated:
-                    refresh_token, hardware_id = validated
-                    if hardware_id:
-                        self.hardware.setText(hardware_id)
-                    self.refresh.setText(refresh_token)
-                    self.persist_refresh_token(refresh_token)
-                    QMessageBox.information(
-                        self, "Anmeldung erfolgreich",
-                        "Der Zugang wurde gefunden und gespeichert "
-                        "(Hardware-ID: %s)." % (hardware_id or "unverändert"))
-                    return
-                self._offer_spent_token_retry(len(refreshes), notes)
-                return
-            result = scrape_browser_tokens(diagnose=True)
-            refresh_token, hardware_id = result[0], result[1]
-            notes = result[2] if len(result) > 2 else []
-            detail = "\n".join("- %s" % note for note in notes) or \
-                "- Kein Browserprofil gefunden"
-            QMessageBox.warning(
-                self, "Keine Anmeldung gefunden",
-                "Es wurde kein gültiger Tolino-Zugang gefunden.\n\n"
-                "Am einfachsten: alle Browserfenster schließen und oben "
-                "„Jetzt bei Tolino anmelden“ drücken.\n\n"
-                "Befund:\n%s" % detail
-            )
+            QMessageBox.information(
+                self, "Kein Chromium-Browser gefunden",
+                "Dieser Knopf liest den Zugang aus dem eigenen "
+                "Anmeldefenster und benötigt dafür Chrome, Chromium, "
+                "Brave oder Edge.\n\n"
+                "Entweder einen dieser Browser installieren und danach "
+                "„Jetzt bei Tolino anmelden“ erneut drücken.\n\n"
+                "Oder den Zugang von Hand eintragen: im Web Reader "
+                "anmelden, F12 → Netzwerk → Aufnahme starten, im "
+                "Netzwerk-Protokoll refresh_token und hardware_id "
+                "kopieren und unter „Erweiterte Einstellungen“ in die "
+                "Felder „Refresh-Token“ und „Hardware-ID“ einfügen.")
         except TolinoAuthError as exc:
             QMessageBox.warning(
                 self, "Live-\u00dcbernahme",
                 "%s\n\nDas Anmeldefenster ist noch offen: dort im Web "
-                "Reader anmelden (B\u00fccherliste laden) und den Knopf "
-                "erneut dr\u00fccken. Oder das Fenster schlie\u00dfen und "
-                "alle anderen Browserfenster schlie\u00dfen, um die "
-                "Festplatten-Kopien zu pr\u00fcfen." % sanitize_error(exc))
+                "Reader anmelden (Bücherliste laden) und den Knopf "
+                "erneut drücken." % sanitize_error(exc))
         except Exception as exc:
             QMessageBox.critical(
                 self, "Fehler",
                 "Fehler beim Extrahieren der Tokens: %s" % sanitize_error(exc)
             )
-
-    def _offer_spent_token_retry(self, count, notes):
-        """Explain spent candidates and offer a 30 s background retry poll."""
-        detail = "\n".join("- %s" % note for note in notes) or \
-            "- Kein Browserprofil gefunden"
-        answer = QMessageBox.question(
-            self, "Zugang abgelaufen",
-            ("Es wurden %d Zugangsdaten gefunden, aber alle sind bereits "
-             "verbraucht.\n\n"
-             "%s\n\n"
-             "Jetzt 5 Minuten lang alle 30 Sekunden erneut prüfen?\n\n"
-             "Befund:\n%s") % (count, spent_token_advice(), detail),
-            QMessageBox.Yes | QMessageBox.No)
-        if answer != QMessageBox.Yes:
-            return
-        self._stop_scrape_retry()
-        self._scrape_retry_deadline = time.time() + 5 * 60
-        timer = QTimer(self)
-        timer.setInterval(30 * 1000)
-        timer.timeout.connect(self._scrape_retry_tick)
-        self._scrape_retry_timer = timer
-        timer.start()
-        try:
-            self.status.setText(
-                "Warte auf frischen Token (Prüfung alle 30 s, bis zu "
-                "5 Minuten) – Web Reader geöffnet lassen ...")
-        except RuntimeError:
-            pass
-
-    def _scrape_retry_tick(self):
-        """Re-scrape and validate once per poll interval until fresh."""
-        if time.time() > getattr(self, "_scrape_retry_deadline", 0):
-            self._stop_scrape_retry()
-            QMessageBox.information(
-                self, "Zugang abgelaufen",
-                "Auch nach 5 Minuten kam kein gültiger Zugang an. Bitte "
-                "im Web Reader neu anmelden und „Jetzt bei Tolino "
-                "anmelden“ erneut drücken.")
-            return
-        try:
-            refreshes, hardwares, _notes = scrape_browser_tokens(
-                diagnose=True, all_candidates=True)
-        except Exception:
-            return  # transient scan error: try again on the next tick
-        if not refreshes:
-            return
-        validated = self._validate_scraped_candidates(refreshes, hardwares)
-        if not validated:
-            return
-        self._stop_scrape_retry()
-        refresh_token, hw = validated
-        if hw:
-            self.hardware.setText(str(hw))
-        self.refresh.setText(refresh_token)
-        self.persist_refresh_token(refresh_token)
-        self.update_status()
-        QMessageBox.information(
-            self, "Anmeldung erfolgreich",
-            "Der Zugang wurde gespeichert.")
-
-    def _stop_scrape_retry(self):
-        """Stop the 30 s retry poll (new poll, success or shutdown)."""
-        timer = getattr(self, "_scrape_retry_timer", None)
-        if timer is not None:
-            timer.stop()
-        self._scrape_retry_timer = None
-        try:
-            self.status.setText("Bereit")
-        except RuntimeError:
-            pass  # dialog already destroyed (Calibre shutdown)
 
     def _selected_account(self):
         """The account this dialog shows -- never a different 'active' one."""
@@ -1375,7 +1274,6 @@ class SyncDashboard(QDialog):
         self.update_status()
 
     def closeEvent(self, event):
-        self._stop_scrape_retry()
         if self.thread:
             self.cancel_sync()
             self.thread.quit()
