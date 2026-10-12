@@ -1972,23 +1972,51 @@ class TolinoClient:
         data = self._sync_patch({"revision": None, "patches": []})
         return data.get("revision"), data.get("patches") or []
 
-    def add_to_collection(self, book_id, collection_name):
-        """Add an uploaded/purchased book to a named collection."""
+    READ_TAG = "collection_finished_readings_name"
+
+    @staticmethod
+    def _find_tag(patches, book_id, name, category):
+        """Find one existing tag of a book in a sync-data patch list."""
+        needle = "/publications/%s/tags" % book_id
+        for item in patches:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("value")
+            if not isinstance(value, dict):
+                continue
+            if (needle in str(item.get("path") or "")
+                    and value.get("category") == category
+                    and value.get("name") == name):
+                return item
+        return None
+
+    def _current_revision(self, revision):
+        """Revision fuer einen Schreibvorgang: die aktuelle, nie None.
+
+        Ein PATCH ohne Revision kann den vorhandenen Stand ersetzen und
+        damit fremde Marken (Lese-Status, andere Sammlungen) verlieren.
+        Die Revision wird deshalb gelesen und mitgeschickt.
+        """
+        if revision is not None:
+            return revision
+        revision, _patches = self.get_sync_data()
+        return revision
+
+    def add_to_collection(self, book_id, collection_name, revision=None):
+        """Add an uploaded/purchased book to a named collection.
+
+        `revision` kann aus dem vorigen Aufruf weitergereicht werden, damit
+        mehrere Zuordnungen nur eine Cloud-Anfrage zum Lesen brauchen.
+        """
         patch = self._tag_patch("add", book_id, collection_name, "collection")
-        data = self._sync_patch({"revision": None, "patches": [patch]})
+        data = self._sync_patch(
+            {"revision": self._current_revision(revision), "patches": [patch]})
         return data.get("revision")
 
     def remove_from_collection(self, book_id, collection_name):
         """Remove a book from a named collection (the book itself stays)."""
         revision, patches = self.get_sync_data()
-        existing = next((
-            item for item in patches
-            if isinstance(item, dict)
-            and "/publications/%s/tags" % book_id in str(item.get("path", ""))
-            and isinstance(item.get("value"), dict)
-            and item["value"].get("category") == "collection"
-            and item["value"].get("name") == collection_name
-        ), None)
+        existing = self._find_tag(patches, book_id, collection_name, "collection")
         if existing is None:
             raise TolinoApiError(
                 "Book %s is not part of collection %r." % (book_id, collection_name))
@@ -1999,27 +2027,38 @@ class TolinoClient:
         return data.get("revision")
 
     def mark_read(self, book_id, finished=True):
-        """Mark a book as finished (or unmark it) via the system tag patch."""
-        name = "collection_finished_readings_name"
-        if finished:
-            patch = self._tag_patch("add", book_id, name, "system")
-            data = self._sync_patch({"revision": None, "patches": [patch]})
-            return data.get("revision")
+        """Mark a book as finished (or unmark it) via the system tag patch.
+
+        Es wird nur die eine System-Marke gesetzt bzw. entfernt -- der
+        restliche Cloud-Stand (Sammlungen, andere Marken) bleibt, wie er ist.
+        """
+        return self.mark_read_many([book_id], finished=finished)
+
+    def mark_read_many(self, book_ids, finished=True):
+        """Set (or clear) the finished mark for several books at once.
+
+        Ein Lesevorgang, ein PATCH: alle Bücher bekommen dieselbe Revision.
+        Bereits gesetzte Marken werden nicht erneut geschrieben, fehlende
+        beim Entfernen übersprungen.
+        """
+        ids = [str(book_id) for book_id in book_ids or [] if str(book_id or "").strip()]
+        if not ids:
+            raise TolinoApiError("Marking as read requires at least one book id.")
         revision, patches = self.get_sync_data()
-        existing = next((
-            item for item in patches
-            if isinstance(item, dict)
-            and "/publications/%s/tags" % book_id in str(item.get("path", ""))
-            and isinstance(item.get("value"), dict)
-            and item["value"].get("category") == "system"
-            and item["value"].get("name") == name
-        ), None)
-        if existing is None:
-            raise TolinoApiError("Book %s is not marked as finished." % book_id)
-        patch = self._tag_patch(
-            "remove", book_id, name, "system",
-            revision=existing["value"].get("revision"))
-        data = self._sync_patch({"revision": revision, "patches": [patch]})
+        updates = []
+        for book_id in ids:
+            existing = self._find_tag(patches, book_id, self.READ_TAG, "system")
+            if finished:
+                if existing is None:
+                    updates.append(self._tag_patch(
+                        "add", book_id, self.READ_TAG, "system"))
+            elif existing is not None:
+                updates.append(self._tag_patch(
+                    "remove", book_id, self.READ_TAG, "system",
+                    revision=existing["value"].get("revision")))
+        if not updates:
+            return revision
+        data = self._sync_patch({"revision": revision, "patches": updates})
         return data.get("revision")
 
     def collection_pairs(self):

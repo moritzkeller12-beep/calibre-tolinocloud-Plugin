@@ -607,17 +607,54 @@ def series_map_from_metadata(metadata_by_id):
     return series_map
 
 
-def plan_collection_updates(series_map, state):
-    """Sammlungspaare (Tolino-ID, Serienname) fuer den Cloud-Abgleich.
+def recorded_collections(entry):
+    """Serien, die für diese Cloud-Kopie schon zugeordnet wurden.
 
-    Der Abgleich selbst ist idempotent: der Aufrufer liest die vorhandenen
-    Sammlungen und schreibt nur fehlende Paare. Ohne Serien (oder ohne
-    bekannte Tolino-ID) ist das Ergebnis leer -- Ordner entstehen dann
-    nie automatisch.
+    Wird von `remember_collection` gefüllt und macht den Serien-Abgleich
+    dauerhaft: der nächste Sync plant nur noch, was noch nicht geschrieben
+    wurde, und fragt die Cloud überhaupt nicht mehr danach.
+    """
+    if not isinstance(entry, dict):
+        return set()
+    recorded = entry.get("collections")
+    if not isinstance(recorded, list):
+        return set()
+    return {str(name).strip() for name in recorded if str(name or "").strip()}
+
+
+def remember_collection(state, book_uuid, series):
+    """Nach erfolgreichem Schreiben: Zuordnung im Zustand merken (0.14.0)."""
+    if not isinstance(state, dict) or not str(book_uuid or "").strip():
+        return False
+    series = str(series or "").strip()
+    if not series:
+        return False
+    entry = state.get(book_uuid)
+    if not isinstance(entry, dict):
+        entry = {}
+        state[book_uuid] = entry
+    recorded = entry.get("collections")
+    if not isinstance(recorded, list):
+        recorded = []
+        entry["collections"] = recorded
+    if series in recorded:
+        return False
+    recorded.append(series)
+    return True
+
+
+def plan_collection_updates(series_map, state):
+    """Offene Serien-Zuordnungen als (Buch-UUID, Tolino-ID, Serienname).
+
+    Geplant wird nur, was noch nicht geschrieben wurde: bereits zugeordnete
+    Serien stehen als `collections` am Buch (siehe `remember_collection`) und
+    fallen hier heraus. Ohne offene Zuordnungen ist das Ergebnis leer -- dann
+    liest der Sync die Cloud gar nicht erst. Ohne Serien (oder ohne bekannte
+    Tolino-ID) ebenfalls leer: Ordner entstehen nie automatisch.
     """
     if not isinstance(series_map, dict) or not isinstance(state, dict):
         return []
-    pairs = set()
+    pending = set()
     for book_uuid, series in series_map.items():
         series = str(series or "").strip()
         if not book_uuid or not series:
@@ -626,9 +663,12 @@ def plan_collection_updates(series_map, state):
         if not isinstance(entry, dict):
             continue
         tolino_id = str(entry.get("tolino_id") or "").strip()
-        if tolino_id:
-            pairs.add((tolino_id, series))
-    return sorted(pairs)
+        if not tolino_id:
+            continue
+        if series in recorded_collections(entry):
+            continue
+        pending.add((str(book_uuid), tolino_id, series))
+    return sorted(pending, key=lambda item: (item[1], item[2], item[0]))
 
 
 def fingerprint(metadata, format_name):
@@ -795,11 +835,17 @@ def plan_sync(metadata_by_id, state, preferred_formats, deletions=False,
                 )
             continue
         fp = fingerprint(metadata, selected)
-        current[book_uuid] = {"tolino_id": state.get(book_uuid, {}).get("tolino_id"),
-                              "fingerprint": fp, "calibre_id": book_id,
-                              "content_fp": content_fingerprint(metadata, selected),
-                              "meta_fp": metadata_fingerprint(metadata)}
         old = state.get(book_uuid, {})
+        entry = {"tolino_id": old.get("tolino_id"),
+                 "fingerprint": fp, "calibre_id": book_id,
+                 "content_fp": content_fingerprint(metadata, selected),
+                 "meta_fp": metadata_fingerprint(metadata)}
+        # Gemerkte Serien-Zuordnungen gehören zum Buch und überleben den
+        # Neuaufbau des Zustands (0.14.0).
+        recorded = old.get("collections")
+        if isinstance(recorded, list) and recorded:
+            entry["collections"] = list(recorded)
+        current[book_uuid] = entry
         if upload_book_ids is not None:
             should_upload = book_id in upload_book_ids
         else:

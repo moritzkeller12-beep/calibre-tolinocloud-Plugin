@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.13.0-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.14.0-blue)](__init__.py)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Calibre-Plugin, das die eigene Bibliothek mit der **Tolino Cloud** abgleicht:
@@ -34,18 +34,21 @@ nicht).
 |---|---|
 | **Hochladen** | Buchdatei in die Cloud hochladen (ersetzt die Kopie dort). |
 | **Metadaten** | Nur Titel/Autor(en)/ISBN in der Cloud abgleichen, kein Upload. |
+| **Gelesen** | Buch im Tolino-Konto als gelesen markieren (nur Cloud, die Buchdatei bleibt unverändert). |
 | **In Calibre** ✓ / **In der Cloud** ✓ | Wo das Buch liegt. |
 
-Ohne Auswahl passiert nichts. **„Empfehlung auswählen“** setzt für jedes Buch
-die passende Aktion, **„Auswahl übernehmen“** führt sie aus. Sortieren per
+Ohne Auswahl passiert nichts – auch der **Lese-Status bleibt, wie er ist**, bis
+Sie die Spalte „Gelesen“ anhaken. **„Empfehlung auswählen“** setzt für jedes
+Buch Hochladen und/oder Metadaten (die Lese-Marke nie), **„Auswahl
+übernehmen“** führt genau die ausgewählten Aktionen aus. Sortieren per
 Spaltenkopf; ISBN und Tolino-ID über **„Technische Spalten anzeigen“**,
-Cloud-Einzelaktionen (herunterladen, Sammlung, gelesen markieren) über
-**„Weitere Aktionen anzeigen“**. Alles Übrige liegt unter **„Erweiterte
-Einstellungen anzeigen“**.
+Herunterladen und Sammlungen über **„Weitere Aktionen anzeigen“**. Alles Übrige
+liegt unter **„Erweiterte Einstellungen anzeigen“**.
 
 > [!NOTE]
 > Zusätzlich zu den ausgewählten Aktionen werden **Serien** in der Cloud
-> angelegt (abschaltbar); Löschungen sind standardmäßig aus.
+> angelegt (abschaltbar). Einmal zugeordnete Serien werden gemerkt und nicht
+> bei jedem Sync neu geschrieben; Löschungen sind standardmäßig aus.
 
 ## Anmeldung von Hand (ohne Chromium)
 

@@ -26,6 +26,7 @@ try:
     from .sync import (compare_inventory, format_error_details, iter_book_ids,
                        load_state, metadata_by_id, plan_sync, plan_metadata_updates,
                        plan_collection_updates, revert_unsynced_fingerprints,
+                       remember_collection,
                        selected_book_ids,
                        selected_table_rows, series_map_from_metadata,
                        sort_comparison_rows, sync_summary,
@@ -45,6 +46,7 @@ except ImportError:
     from sync import (compare_inventory, format_error_details, iter_book_ids,
                       load_state, metadata_by_id, plan_sync, plan_metadata_updates,
                       plan_collection_updates, revert_unsynced_fingerprints,
+                      remember_collection,
                       selected_book_ids,
                       selected_table_rows, series_map_from_metadata,
                       sort_comparison_rows, sync_summary,
@@ -116,20 +118,21 @@ class SyncJob:
 
 
 class InventoryDialog(QDialog):
-    """Bestandsvergleich: zwei getrennte Aktionen je Buch.
+    """Bestandsvergleich: pro Buch drei Aktionen zum Auswählen.
 
     Links steht, was mit dem Buch passieren soll -- **Hochladen** (die
-    Buchdatei in die Cloud) und **Metadaten** (nur Titel/Autor(en)/ISBN in
-    der Cloud abgleichen, ohne Upload). Daneben zeigen zwei ✓-Spalten,
-    wo das Buch liegt (Calibre und/oder Tolino Cloud). Alles Technische ist
-    eingeklappt und die automatischen Aktionen stehen im Klartext darüber.
+    Buchdatei in die Cloud), **Metadaten** (nur Titel/Autor(en)/ISBN in der
+    Cloud abgleichen, ohne Upload) und **Gelesen** (die Lese-Marke im
+    Tolino-Konto setzen). Daneben zeigen zwei ✓-Spalten, wo das Buch liegt
+    (Calibre und/oder Tolino Cloud). Alles Technische ist eingeklappt und die
+    automatischen Aktionen stehen im Klartext darüber.
     """
 
-    HEADERS = ("Hochladen", "Metadaten", "In Calibre", "In der Cloud",
+    HEADERS = ("Hochladen", "Metadaten", "Gelesen", "In Calibre", "In der Cloud",
                "Titel", "Autor(en)", "Status", "Hinweis",
                "ISBN", "Tolino-ID")
     # Technische Spalten stehen ganz rechts und sind standardmäßig aus.
-    TECHNICAL_COLUMNS = (8, 9)
+    TECHNICAL_COLUMNS = (9, 10)
 
     STATUS_TEXT = {
         "new_in_calibre": "Nur in Calibre",
@@ -141,7 +144,7 @@ class InventoryDialog(QDialog):
     }
 
     _SORT_KEYS = (
-        # 0 Hochladen / 1 Metadaten: ausgewählte zuerst, dann Titel/Autor(en)
+        # 0 Hochladen / 1 Metadaten: Ausgewähltes zuerst, dann Titel/Autor(en)
         lambda row: (0 if row.get("upload") else 1,
                      0 if row.get("metadata") else 1,
                      str(row.get("title") or "").casefold(),
@@ -150,22 +153,26 @@ class InventoryDialog(QDialog):
                      0 if row.get("upload") else 1,
                      str(row.get("title") or "").casefold(),
                      str(row.get("authors") or "").casefold()),
-        # 2 In Calibre / 3 In der Cloud
+        # 2 Gelesen: markierte Bücher zuerst
+        lambda row: (0 if row.get("read") else 1,
+                     str(row.get("title") or "").casefold(),
+                     str(row.get("authors") or "").casefold()),
+        # 3 In Calibre / 4 In der Cloud
         lambda row: (0 if row.get("book_id") is not None else 1,
                      str(row.get("title") or "").casefold()),
         lambda row: (0 if row.get("tolino_id") else 1,
                      str(row.get("title") or "").casefold()),
-        # 4 Titel / 5 Autor(en) (mit dem jeweils anderen als Zweitschlüssel)
+        # 5 Titel / 6 Autor(en) (mit dem jeweils anderen als Zweitschlüssel)
         lambda row: (str(row.get("title") or "").casefold(),
                      str(row.get("authors") or "").casefold()),
         lambda row: (str(row.get("authors") or "").casefold(),
                      str(row.get("title") or "").casefold()),
-        # 6 Status / 7 Hinweis
+        # 7 Status / 8 Hinweis
         lambda row: (str(row.get("status") or ""),
                      str(row.get("title") or "").casefold()),
         lambda row: (str(row.get("explanation") or ""),
                      str(row.get("title") or "").casefold()),
-        # 8 ISBN / 9 Tolino-ID
+        # 9 ISBN / 10 Tolino-ID
         lambda row: (str(row.get("isbn") or ""),
                      str(row.get("title") or "").casefold()),
         lambda row: (str(row.get("tolino_id") or ""),
@@ -179,6 +186,8 @@ class InventoryDialog(QDialog):
         Neue Bücher werden hochgeladen. Bei geänderten Büchern entscheidet
         der Unterschied: neue Buchdatei -> Hochladen, sonst reicht der
         Metadaten-Abgleich. Ohne Cloud-Kopie gibt es nichts abzugleichen.
+        Die Lese-Marke wird nie vorgeschlagen: der Lese-Status in der Cloud
+        bleibt, wie er ist, bis der Nutzer ihn ausdrücklich wählt.
         """
         if row.get("book_id") is None or not row.get("tolino_id"):
             new_book = row.get("book_id") is not None
@@ -199,6 +208,7 @@ class InventoryDialog(QDialog):
             row = dict(row)
             if "upload" not in row or "metadata" not in row:
                 row["upload"], row["metadata"] = self.default_actions(row)
+            row.setdefault("read", False)
             self.rows.append(row)
         # Ausgewählte Aktionen zuerst, dann Titel/Autor(en).
         self.rows = sort_comparison_rows(self.rows)
@@ -210,8 +220,9 @@ class InventoryDialog(QDialog):
             "Ihre Calibre-Bibliothek im Vergleich zur Tolino Cloud. "
             "Pro Buch auswählen, was passieren soll: <b>Hochladen</b> lädt die "
             "Buchdatei, <b>Metadaten</b> gleicht nur Titel/Autor(en)/ISBN in "
-            "der Cloud ab. Ohne Auswahl passiert nichts; ein Klick auf einen "
-            "Spaltenkopf sortiert.")
+            "der Cloud ab, <b>Gelesen</b> setzt die Lese-Marke im Tolino-Konto. "
+            "Ohne Auswahl passiert nichts; ein Klick auf einen Spaltenkopf "
+            "sortiert.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -242,6 +253,8 @@ class InventoryDialog(QDialog):
             "Ausgewählt = Buchdatei in die Tolino Cloud hochladen",
             "Ausgewählt = nur Titel/Autor(en)/ISBN in der Cloud aktualisieren "
             "(kein Upload)",
+            "Ausgewählt = im Tolino-Konto als gelesen markieren (nur Cloud, "
+            "die Buchdatei bleibt unverändert)",
             "Buch liegt in Ihrer Calibre-Bibliothek",
             "Buch liegt in der Tolino Cloud",
             "Buchtitel", "Autor(en)",
@@ -283,7 +296,7 @@ class InventoryDialog(QDialog):
         # können es deshalb nicht überleben (der gelöschte-QTableWidget-
         # Absturz).
         self.more_toggle = QCheckBox(
-            "Weitere Aktionen anzeigen (herunterladen, Sammlung, gelesen)")
+            "Weitere Aktionen anzeigen (herunterladen, Sammlung)")
         self.more_toggle.setToolTip(
             "Wirkt nur auf das markierte Buch in der Tolino Cloud, nicht "
             "auf Ihre Calibre-Bibliothek.")
@@ -305,12 +318,8 @@ class InventoryDialog(QDialog):
         self.collection_rm_btn.setToolTip(
             "Nimmt das markierte Cloud-Buch aus einer Sammlung der "
             "Tolino Cloud heraus -- der Name wird abgefragt.")
-        self.mark_read_btn = QPushButton("Gelesen markieren")
-        self.mark_read_btn.setToolTip(
-            "Setzt im Tolino-Konto die Lese-Marke „gelesen“ für das "
-            "markierte Cloud-Buch.")
         for button in (self.download_btn, self.collection_add_btn,
-                       self.collection_rm_btn, self.mark_read_btn):
+                       self.collection_rm_btn):
             action_row.addWidget(button)
         self.actions.setLayout(action_row)
         self.actions.setVisible(False)
@@ -318,13 +327,13 @@ class InventoryDialog(QDialog):
         self.download_btn.clicked.connect(self.download_selected)
         self.collection_add_btn.clicked.connect(self.add_selected_to_collection)
         self.collection_rm_btn.clicked.connect(self.remove_selected_from_collection)
-        self.mark_read_btn.clicked.connect(self.mark_selected_read)
 
         buttons = QHBoxLayout()
         confirm = QPushButton("Auswahl übernehmen")
         confirm.setToolTip(
-            "Führt genau die ausgewählten Aktionen aus: Buchdateien hochladen "
-            "und/oder Metadaten in der Cloud aktualisieren.")
+            "Führt genau die ausgewählten Aktionen aus: Buchdateien hochladen, "
+            "Metadaten in der Cloud aktualisieren und/oder als gelesen "
+            "markieren.")
         cancel = QPushButton("Abbrechen")
         cancel.setToolTip(
             "Schließt den Vergleich, ohne etwas zu ändern.")
@@ -345,16 +354,20 @@ class InventoryDialog(QDialog):
         """Klartext-Zeile: was über die Auswahl hinaus passiert."""
         parts = []
         if self.options.get("collections"):
-            parts.append("Serien werden in der Tolino Cloud angelegt")
+            parts.append("Serien werden in der Tolino Cloud angelegt und "
+                         "bereits zugeordnete Serien gemerkt")
         if self.options.get("deletions"):
             parts.append("Bücher, die nicht mehr in Calibre sind, werden "
                          "aus der Cloud gelöscht")
-        if not parts:
-            return ("Es passiert nur, was Sie auswählen -- außer dem Hochladen "
+        if parts:
+            head = ("Zusätzlich automatisch: %s. Abschaltbar unter "
+                    "„Erweiterte Einstellungen“." % "; ".join(parts))
+        else:
+            head = ("Es passiert nur, was Sie auswählen -- außer dem Hochladen "
                     "und dem Metadaten-Abgleich wird nichts in der Cloud "
                     "geändert.")
-        return ("Zusätzlich automatisch: %s. Abschaltbar unter „Erweiterte "
-                "Einstellungen“." % "; ".join(parts))
+        return (head + " Der Lese-Status in der Cloud bleibt, wie er ist; "
+                "nur die Spalte „Gelesen“ ändert ihn.")
 
     def _toggle_technical_columns(self, visible):
         self._technical_visible = bool(visible)
@@ -374,19 +387,28 @@ class InventoryDialog(QDialog):
             pass  # Qt-Stub oder bereits zerstörtes Fenster
 
     def _sync_checks_to_rows(self):
-        for row, uploads, metadata in zip(self.rows, self.checks,
-                                          self.meta_checks):
+        for row, uploads, metadata, read in zip(self.rows, self.checks,
+                                                self.meta_checks,
+                                                self.read_checks):
             row["upload"] = bool(uploads.isChecked())
             row["metadata"] = bool(metadata.isChecked())
+            row["read"] = bool(read.isChecked())
 
     def _set_selection(self, chooser):
-        """Auswahl in einem Schritt setzen (Zeilen und Widgets synchron)."""
-        for row, uploads, metadata in zip(self.rows, self.checks,
-                                          self.meta_checks):
-            wanted = chooser(row)
-            row["upload"], row["metadata"] = bool(wanted[0]), bool(wanted[1])
-            for check, value in ((uploads, row["upload"]),
-                                 (metadata, row["metadata"])):
+        """Auswahl in einem Schritt setzen (Zeilen und Widgets synchron).
+
+        `chooser` liefert (Hochladen, Metadaten); die Lese-Marke wird dabei
+        immer weggenommen -- sie ist nie Teil der Empfehlung.
+        """
+        for row, uploads, metadata, read in zip(self.rows, self.checks,
+                                                self.meta_checks,
+                                                self.read_checks):
+            wanted = tuple(chooser(row))
+            upload, meta = bool(wanted[0]), bool(wanted[1])
+            mark_read = bool(wanted[2]) if len(wanted) > 2 else False
+            row["upload"], row["metadata"], row["read"] = upload, meta, mark_read
+            for check, value in ((uploads, upload), (metadata, meta),
+                                 (read, mark_read)):
                 try:
                     check.setChecked(value)
                 except Exception:
@@ -413,6 +435,12 @@ class InventoryDialog(QDialog):
             dict(row, selected=check.isChecked())
             for row, check in zip(self.rows, self.meta_checks)
         ])
+
+    def selected_read_targets(self):
+        """Tolino-IDs der Bücher, die als gelesen markiert werden sollen."""
+        return [str(row["tolino_id"]) for row, check
+                in zip(self.rows, self.read_checks)
+                if check.isChecked() and row.get("tolino_id")]
 
     def selected_ids(self, rows=None):
         """Rückwärtskompatibel: die zum Hochladen ausgewählten Bücher."""
@@ -451,6 +479,7 @@ class InventoryDialog(QDialog):
         self.rows = list(rows)
         self.checks = []
         self.meta_checks = []
+        self.read_checks = []
         self.table.setRowCount(0)
         self.table.setRowCount(len(self.rows))
         for row_index, row in enumerate(self.rows):
@@ -468,6 +497,10 @@ class InventoryDialog(QDialog):
                  "Nur in Calibre – es gibt in der Cloud nichts zu "
                  "aktualisieren." if has_book else
                  "Kein Calibre-Buch – nichts zu aktualisieren."),
+                ("read", in_cloud,
+                 "Im Tolino-Konto als gelesen markieren – die Buchdatei "
+                 "bleibt unverändert.",
+                 "Geht erst, wenn das Buch in der Cloud liegt."),
             )
             for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
                 check = QCheckBox()
@@ -480,10 +513,8 @@ class InventoryDialog(QDialog):
                         state_signal.connect(self._update_summary)
                     except Exception:
                         pass  # Qt-Stub ohne echtes Signal
-                if column == 0:
-                    self.checks.append(check)
-                else:
-                    self.meta_checks.append(check)
+                (self.checks, self.meta_checks,
+                 self.read_checks)[column].append(check)
                 self.table.setCellWidget(row_index, column, check)
             values = (
                 "✓" if has_book else "",
@@ -495,7 +526,7 @@ class InventoryDialog(QDialog):
                 row.get("isbn", ""),
                 row.get("tolino_id", ""),
             )
-            for column, value in enumerate(values, 2):
+            for column, value in enumerate(values, 3):
                 self.table.setItem(
                     row_index, column, QTableWidgetItem(str(value or "")))
         self.table.resizeColumnsToContents()
@@ -507,15 +538,16 @@ class InventoryDialog(QDialog):
         try:
             uploads = len(self.selected_upload_ids())
             metadata = len(self.selected_metadata_ids())
+            marked_read = len(self.selected_read_targets())
             summary = getattr(self, "summary", None)
             if summary is not None:
                 summary.setText(
-                    "<b>%d zum Hochladen, %d für Metadaten</b> ausgewählt – nur "
-                    "das Ausgewählte wird in der Tolino Cloud geändert."
-                    % (uploads, metadata))
+                    "<b>%d zum Hochladen, %d für Metadaten, %d als gelesen</b> "
+                    "ausgewählt – nur das Ausgewählte wird in der Tolino Cloud "
+                    "geändert." % (uploads, metadata, marked_read))
             confirm = getattr(self, "confirm", None)
             if confirm is not None:
-                total = uploads + metadata
+                total = uploads + metadata + marked_read
                 confirm.setText("Auswahl übernehmen (%d)" % total
                                 if total else "Auswahl übernehmen")
         except Exception:
@@ -615,29 +647,6 @@ class InventoryDialog(QDialog):
             lambda client, book, name: client.remove_from_collection(book, name),
             "Aus Sammlung entfernen")
 
-    def mark_selected_read(self):
-        row = self._selected_row()
-        if row is None:
-            return
-        tolino_id = row.get("tolino_id")
-        if not tolino_id:
-            QMessageBox.information(
-                self, "Tolino Cloud Sync",
-                "Diese Zeile hat keine Tolino-ID.")
-            return
-        try:
-            client = self._client()
-            if client is None:
-                return
-            client.mark_read(tolino_id, finished=True)
-        except Exception as exc:
-            error_dialog(self, "Markieren fehlgeschlagen",
-                         sanitize_error(exc), show=True)
-            return
-        info_dialog(self, "Tolino Cloud Sync",
-                    "Als gelesen markiert.",
-                    show_copy_button=False)
-
 
 class DiagnosticDialog(QDialog):
     def __init__(self, dashboard, report, parent=None):
@@ -721,13 +730,18 @@ class SyncWorker(QObject):
     completed = pyqtSignal(object, object, object)
     failed = pyqtSignal(str, str)
 
-    def __init__(self, settings, jobs, removals, meta_updates=None, series_map=None):
+    def __init__(self, settings, jobs, removals, meta_updates=None,
+                 series_map=None, read_marks=None):
         QObject.__init__(self)
         self.settings = settings
         self.jobs = jobs
         self.removals = removals
         self.meta_updates = list(meta_updates or ())
         self.series_map = dict(series_map or {})
+        # Tolino-IDs, die in der Cloud als gelesen markiert werden sollen
+        # (Spalte "Gelesen"). Leer heißt: Lese-Status bleibt unangetastet.
+        self.read_marks = [str(item) for item in (read_marks or ())
+                           if str(item or "").strip()]
         self.cancelled = False
 
     def cancel(self):
@@ -748,8 +762,12 @@ class SyncWorker(QObject):
             remote_ids = (client.inventory_ids()
                           if self.settings["enable_deletions"] or needs_replacement_cleanup
                           else set())
+            # Serien → Sammlungen: nur noch OFFENE Zuordnungen. Bereits
+            # geschriebene stehen als "collections" am Buch (0.14.0).
+            series_items = plan_collection_updates(self.series_map, state)
             total = (len(self.jobs) + len(self.removals)
-                     + len(self.meta_updates) + len(self.series_map))
+                     + len(self.meta_updates) + len(series_items)
+                     + (1 if self.read_marks else 0))
             done = 0
             # Erst die in-place Metadaten-Updates, dann die Uploads (0.9.45).
             for update in self.meta_updates:
@@ -769,6 +787,8 @@ class SyncWorker(QObject):
                 # erhalten, nur die Tolino-ID wird neu (0.9.45).
                 entry = dict(state.get(job.book_uuid) or {})
                 entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
+                # Neue Cloud-Kopie: alte Serien-Zuordnungen gelten nicht mehr.
+                entry.pop("collections", None)
                 state[job.book_uuid] = entry
                 updates.append((job.book_id, new_id))
                 if job.cover_path:
@@ -786,22 +806,33 @@ class SyncWorker(QObject):
                 state.pop(book_uuid, None)
                 done += 1
                 self.progress.emit(done, total, "Erledigt: %s" % book_uuid)
-            # Serien → Cloud-Sammlungen: Bestand einmal lesen und nur fehlende
-            # Zuordnungen nachziehen (idempotent). Ohne eingeschaltete
-            # Sammlungen ist series_map leer und hier passiert nichts.
-            series_items = plan_collection_updates(self.series_map, state)
+            # Lese-Marke: nur die ausdrücklich ausgewählten Bücher, und nur,
+            # wenn sie in der Cloud noch nicht gesetzt ist. Sammlungen und
+            # andere Marken bleiben dabei unverändert (0.14.0).
+            if self.read_marks:
+                if self.cancelled:
+                    raise RuntimeError("Synchronisierung vom Benutzer abgebrochen.")
+                self.progress.emit(done, total, "Als gelesen markieren")
+                client.mark_read_many(self.read_marks)
+                done += 1
+                self.progress.emit(done, total, "Gelesen-Marke gesetzt")
+            # Serien → Cloud-Sammlungen: nur die offenen Zuordnungen. Der
+            # Cloud-Bestand wird einmal gelesen, jede geschriebene oder
+            # bereits vorhandene Zuordnung aber im Zustand gemerkt -- beim
+            # nächsten Sync ist hier deshalb nichts mehr zu tun (0.14.0).
             if series_items:
                 known = client.collection_pairs()
-                for tolino_id, series in series_items:
+                revision = None
+                for book_uuid, tolino_id, series in series_items:
                     if self.cancelled:
                         raise RuntimeError("Synchronisierung vom Benutzer abgebrochen.")
-                    if (tolino_id, series) in known:
-                        done += 1
-                        continue
-                    self.progress.emit(done, total,
-                                       "Serie in der Cloud: %s" % series)
-                    client.add_to_collection(tolino_id, series)
-                    known.add((tolino_id, series))
+                    if (tolino_id, series) not in known:
+                        self.progress.emit(done, total,
+                                           "Serie in der Cloud: %s" % series)
+                        revision = client.add_to_collection(
+                            tolino_id, series, revision=revision)
+                        known.add((tolino_id, series))
+                    remember_collection(state, book_uuid, series)
                     done += 1
                 self.progress.emit(done, total, "Serien geprüft")
             self.completed.emit(state, client.refresh, updates)
@@ -931,13 +962,17 @@ class SyncDashboard(QDialog):
         self.cancel.clicked.connect(self.cancel_sync)
         self.debug = QPushButton("Diagnose")
         self.debug.setToolTip(
-            "Prüfbericht zum Nachschauen bei Problemen. Führt ohne "
-            "Anmeldung keine Tolino-Anfrage aus.")
+            "Öffnet den Prüfbericht: Calibre-Datenbank, Formate und "
+            "Titelbilder werden ohne Anmeldung und ohne Tolino-Anfrage "
+            "geprüft. Erst der Knopf im Bericht greift auf das Netz zu.")
         self.debug.clicked.connect(self.debug_diagnose)
         action_form.addRow("", self.start)
         action_form.addRow("", self.progress_label)
         action_form.addRow("", self.progress)
         action_form.addRow("", self.cancel)
+        # Feldbefund: Der Knopf wurde seit 0.10.0 gebaut, aber nie in ein
+        # Layout gehängt -- er war dadurch unsichtbar (0.14.0).
+        action_form.addRow("", self.debug)
         root.addWidget(action)
 
         # --- Erweiterte Einstellungen (standardmäßig ausgeblendet) ---------
@@ -1374,6 +1409,7 @@ class SyncDashboard(QDialog):
             # nichts.
             selected_uploads = dialog.selected_upload_ids()
             selected_metadata = dialog.selected_metadata_ids()
+            selected_read = dialog.selected_read_targets()
             uploads, removals, current = unpack_plan_result(plan_sync(
                 metadata, state, settings["preferred_formats"],
                 settings["enable_deletions"],
@@ -1437,7 +1473,8 @@ class SyncDashboard(QDialog):
         self.progress.setRange(0, summary["total"] or 1)
         self.progress.setValue(0)
         self.thread = QThread(self)
-        self.worker = SyncWorker(settings, jobs, removals, meta_updates, series_map)
+        self.worker = SyncWorker(settings, jobs, removals, meta_updates,
+                                 series_map, selected_read)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)
