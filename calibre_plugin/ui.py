@@ -1086,6 +1086,17 @@ class SyncDashboard(QDialog):
             "Plugin sich anmeldet.")
         self.status = QLabel()
         self.status.setWordWrap(True)
+        # Kontoauswahl direkt auf der ersten Seite -- aber nur, wenn es
+        # wirklich mehrere Konten gibt. Bei einem einzigen Konto wäre die
+        # Zeile nur Ballast (0.15.4).
+        self.account_quick = QComboBox()
+        self.account_quick.setToolTip(
+            "Aktives Tolino-Konto. Bestimmt, mit welchem Konto verglichen "
+            "und synchronisiert wird; jedes Konto hat seinen eigenen "
+            "Zugang und eigenen Stand.")
+        self.account_quick.currentIndexChanged.connect(
+            self.quick_account_changed)
+        self.account_quick_label = QLabel("Konto")
         # Der Anmeldeknopf steht wieder sichtbar auf der ersten Seite --
         # auch wenn schon ein Zugang gespeichert ist, denn genau dann
         # braucht man ihn, wenn der Zugang abgelaufen ist (0.15.3).
@@ -1115,6 +1126,7 @@ class SyncDashboard(QDialog):
 
         action_form = QFormLayout()
         action_form.addRow("Buchhändler", self.partner)
+        action_form.addRow(self.account_quick_label, self.account_quick)
         action_form.addRow("", self.login_button)
         action_form.addRow("", self.primary)
         action_form.addRow("", self.status)
@@ -1221,21 +1233,35 @@ class SyncDashboard(QDialog):
         save_account(self.account_name, self.values(), active=self.account_name)
 
     def account_changed(self, index):
+        """Konto in den Einstellungen gewechselt."""
         if index < 0 or not getattr(self, "account_names", None):
             return
+        self.switch_account(self.account_select.itemData(index))
+
+    def quick_account_changed(self, index):
+        """Konto auf der ersten Seite gewechselt (0.15.4)."""
+        if index < 0 or not getattr(self, "account_names", None):
+            return
+        self.switch_account(self.account_quick.itemData(index))
+
+    def switch_account(self, name):
+        """Konto wechseln -- erst sichern, dann das neue laden.
+
+        Ein Weg für beide Stellen (erste Seite und Einstellungen): das
+        sichtbare Konto wird gespeichert, das gewählte wird das aktive, und
+        `load_values` holt Buchhändler, Hardware-ID und Zugang dazu.
+        Angezeigtes und aktives Konto sind danach IMMER dasselbe: sonst
+        lesen settings() und die Tolino-ID-Zuordnung das vorherige Konto.
+        """
+        name = str(name or "")
+        if not name or name == self.account_name:
+            return False
+        if name not in getattr(self, "account_names", ()):
+            return False
         self._save_visible_account()
-        self.account_name = self.account_select.itemData(index)
-        # Angezeigtes und aktives Konto sind ab jetzt IMMER dasselbe:
-        # settings(), Konten-State und Keep-alive lesen sonst weiter das
-        # vorherige Konto, und die Tolino-ID-Zuordnung landete beim
-        # falschen Konto.
-        set_active_account(self.account_name)
-        account = next(item for item in settings()["accounts"]
-                       if item["name"] == self.account_name)
-        self.partner.setCurrentIndex(max(0, self.partner.findData(account["partner_id"])))
-        self.hardware.setText(account["hardware_id"] or hardware_id())
-        self.refresh.setText(account["refresh_token"])
-        self.update_status()
+        set_active_account(name)
+        self.load_values()
+        return True
 
     def new_account(self):
         self._save_visible_account()
@@ -1275,14 +1301,18 @@ class SyncDashboard(QDialog):
     def load_values(self):
         values = settings()
         self.account_names = [item["name"] for item in values["accounts"]]
-        self.account_select.blockSignals(True)
-        self.account_select.clear()
-        for name in self.account_names:
-            self.account_select.addItem(name, name)
         self.account_name = values["active_account"]
-        self.account_select.setCurrentIndex(
-            max(0, self.account_select.findData(self.account_name)))
-        self.account_select.blockSignals(False)
+        for combo in (self.account_select, self.account_quick):
+            combo.blockSignals(True)
+            combo.clear()
+            for name in self.account_names:
+                combo.addItem(name, name)
+            combo.setCurrentIndex(max(0, combo.findData(self.account_name)))
+            combo.blockSignals(False)
+        # Ein einziges Konto braucht keine Auswahl auf der ersten Seite.
+        multiple = len(self.account_names) > 1
+        self.account_quick.setVisible(multiple)
+        self.account_quick_label.setVisible(multiple)
         self.partner.setCurrentIndex(max(0, self.partner.findData(values["partner_id"])))
         self.hardware.setText(values["hardware_id"] or hardware_id())
         self.refresh.setText(values["refresh_token"])

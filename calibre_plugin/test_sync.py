@@ -4800,6 +4800,184 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
         self.assertEqual([], calls["read_marks"])
 
 
+class DashboardAccountSwitchTests(unittest.TestCase):
+    """Mehrere Konten: Umschalten direkt auf der ersten Seite (0.15.4).
+
+    Feldbefund: „Kann man die Kontoauswahl, sofern mehrere Konten
+    vorhanden, ebenfalls auf die erste Seite bringen?“ Die Zeile erscheint
+    nur bei mehr als einem Konto -- sonst wäre sie nur Ballast.
+    """
+
+    class Combo:
+        """Minimaler Qt-Nachbau für Kombobox, Eingabe und Label."""
+
+        def __init__(self, *_args, **_kwargs):
+            self.items = []
+            self.current_index = 0
+            self.visible = True
+            self.text_value = ""
+
+        def blockSignals(self, value):
+            self.blocked = value
+
+        def clear(self):
+            self.items = []
+
+        def addItem(self, text, data=None):
+            self.items.append((text, data))
+
+        def setCurrentIndex(self, index):
+            self.current_index = index
+
+        def currentData(self):
+            return self.itemData(self.current_index)
+
+        def findData(self, data):
+            return next((index for index, (_text, item) in enumerate(self.items)
+                         if item == data), -1)
+
+        def itemData(self, index):
+            if 0 <= index < len(self.items):
+                return self.items[index][1]
+            return None
+
+        def setVisible(self, value):
+            self.visible = value
+
+        def setText(self, text):
+            self.text_value = text
+
+        def text(self):
+            return self.text_value
+
+        def setToolTip(self, text):
+            self.tooltip = text
+
+        def setEnabled(self, value):
+            self.enabled = value
+
+        def setChecked(self, value):
+            self.checked = bool(value)
+
+        def isChecked(self):
+            return getattr(self, "checked", False)
+
+        def setRange(self, *_args):
+            pass
+
+        def setValue(self, _value):
+            pass
+
+    def _dashboard(self):
+        dashboard = type("Dashboard", (), {})()
+        for name in ("account_select", "account_quick", "partner", "hardware",
+                     "refresh", "formats", "account_quick_label", "status",
+                     "progress", "progress_label", "primary", "covers",
+                     "deletions", "sync_collections", "tolino_column"):
+            setattr(dashboard, name, self.Combo())
+        dashboard.thread = None
+        return dashboard
+
+    @staticmethod
+    def _accounts(count):
+        return [{"name": "erstes", "partner_id": 1, "hardware_id": "hw-1",
+                 "refresh_token": "token-1", "username": "", "password": "",
+                 "state": {}},
+                {"name": "zweites", "partner_id": 2, "hardware_id": "hw-2",
+                 "refresh_token": "", "username": "", "password": "",
+                 "state": {}}][:count]
+
+    def _run(self, count, active="erstes"):
+        """load_values/switch_account mit gefälschten Einstellungen."""
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        original = (config.PREFERENCES, ui_module.hardware_id,
+                    ui_module.set_active_account)
+
+        def restore():
+            (config.PREFERENCES, ui_module.hardware_id,
+             ui_module.set_active_account) = original
+            ui_module._restore_stubs_for_tests()
+
+        # Erst NACH dem Test zurücknehmen: sonst ist der Umbau weg, bevor
+        # der Test umschaltet.
+        self.addCleanup(restore)
+        calls = []
+        config.PREFERENCES = config.JSONConfig("test")
+        config.PREFERENCES.update({"accounts": self._accounts(count),
+                                   "active_account": active})
+        ui_module.hardware_id = lambda: "auto-hw"
+        real_set_active = original[2]
+
+        def record(name):
+            calls.append(("active", name))
+            return real_set_active(name)
+
+        ui_module.set_active_account = record
+        dashboard = self._dashboard()
+        dashboard.partner.items = [("%s" % pid, pid)
+                                   for pid in sorted(ui_module.PARTNERS)]
+        # Die echten Methoden an das gefälschte Fenster binden: geprüft
+        # wird ihr Verhalten, nicht ein Nachbau davon.
+        for name in ("load_values", "switch_account", "update_status"):
+            setattr(dashboard, name,
+                    getattr(ui_module.SyncDashboard, name).__get__(dashboard))
+        dashboard._save_visible_account = lambda: calls.append(("save", None))
+        dashboard.load_values()
+        return ui_module, dashboard, calls
+
+    def test_one_account_hides_the_row(self):
+        ui_module, dashboard, _calls = self._run(1)
+        self.assertFalse(dashboard.account_quick.visible)
+        self.assertFalse(dashboard.account_quick_label.visible)
+        self.assertEqual([("erstes", "erstes")], dashboard.account_quick.items)
+
+    def test_two_accounts_show_the_row_on_the_first_page(self):
+        ui_module, dashboard, _calls = self._run(2)
+        self.assertTrue(dashboard.account_quick.visible)
+        self.assertTrue(dashboard.account_quick_label.visible)
+        self.assertEqual([("erstes", "erstes"), ("zweites", "zweites")],
+                         dashboard.account_quick.items)
+        self.assertEqual(0, dashboard.account_quick.current_index)
+        self.assertEqual(0, dashboard.account_select.current_index)
+
+    def test_switching_on_the_first_page_moves_the_active_account(self):
+        ui_module, dashboard, calls = self._run(2)
+        self.assertTrue(dashboard.switch_account("zweites"))
+        # Erst sichern, dann umschalten.
+        self.assertEqual([("save", None), ("active", "zweites")], calls)
+        self.assertEqual("zweites", dashboard.account_name)
+        # Beide Auswahlen zeigen dasselbe Konto -- sonst arbeitet der
+        # Plugin mit dem vorherigen weiter.
+        self.assertEqual(1, dashboard.account_quick.current_index)
+        self.assertEqual(1, dashboard.account_select.current_index)
+        # Buchhändler, Hardware-ID und Zugang kommen vom neuen Konto.
+        self.assertEqual(2, dashboard.partner.currentData())
+        self.assertEqual("hw-2", dashboard.hardware.text())
+        self.assertEqual("", dashboard.refresh.text())
+        self.assertIn("Noch nicht angemeldet", dashboard.status.text_value)
+        self.assertFalse(dashboard.primary.enabled)
+
+    def test_switching_to_the_same_or_unknown_account_does_nothing(self):
+        ui_module, dashboard, calls = self._run(2)
+        self.assertFalse(dashboard.switch_account("erstes"))
+        self.assertFalse(dashboard.switch_account("gibt-es-nicht"))
+        self.assertFalse(dashboard.switch_account(""))
+        self.assertEqual([], calls)
+
+    def test_both_places_use_the_same_switch(self):
+        source = (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
+        body = source.split("class SyncDashboard(QDialog):", 1)[1].split(
+            "\nclass ", 1)[0]
+        self.assertIn("self.account_quick.currentIndexChanged.connect(", body)
+        self.assertIn("self.quick_account_changed)", body)
+        for method in ("account_changed", "quick_account_changed"):
+            handler = body.split("    def %s(self, index):" % method, 1)[1]
+            handler = handler.split("\n    def ", 1)[0]
+            self.assertIn("self.switch_account(", handler)
+            self.assertIn("itemData(index)", handler)
+
+
 class DashboardLayoutTests(unittest.TestCase):
     """Feldbefund: Der Knopf „Diagnose“ wurde im Dashboard gebaut, aber nie
     in ein Layout gehängt -- er war dadurch ab 0.10.0 unsichtbar, obwohl
@@ -4818,14 +4996,20 @@ class DashboardLayoutTests(unittest.TestCase):
             "\nclass ", 1)[0]
 
     def test_every_created_button_is_added_to_a_layout(self):
-        """Auch der Knopf im neuen Einstellungsfenster (0.15.2)."""
+        """Auch der Knopf im Einstellungsfenster und die Kontoauswahl auf
+        der ersten Seite (0.15.2 / 0.15.4)."""
         source = self._source()
-        names = re.findall(r"self\.(\w+) = (?:QPushButton|QCheckBox)\(", source)
+        names = re.findall(
+            r"self\.(\w+) = (?:QPushButton|QCheckBox|QComboBox|QLineEdit)\(",
+            source)
         self.assertIn("debug", names)
+        # Beschriftungen wie "Hardware-ID (automatisch erkannt)" enthalten
+        # selbst Klammern -- deshalb zeilenweise prüfen: dieselbe Zeile muss
+        # an ein addRow/addWidget/addLayout gehen.
         for name in names:
-            self.assertRegex(
-                source,
-                r"add(?:Row|Widget|Layout)\([^)]*self\.%s\b" % name,
+            self.assertTrue(
+                re.search(r"add(?:Row|Widget|Layout)\([^\n]*self\.%s\b" % name,
+                          source),
                 "Widget %r hängt in keinem Layout" % name)
 
     def test_login_and_compare_have_their_own_buttons(self):
