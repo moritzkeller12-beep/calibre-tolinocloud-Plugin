@@ -798,8 +798,7 @@ def _normalize_live_grab(grabbed):
     return updated
 
 
-def _exchange_fresh_response(partner_id, hardware, ws_url, token_url,
-                             candidate, form, data):
+def _exchange_fresh_response(partner_id, hardware, candidate, data):
     """Exchange via in-page fetch and apply the response with full logic."""
     client = TolinoClient(partner_id, hardware or "")
     client.refresh = candidate
@@ -851,8 +850,7 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
                 data = {}
             if isinstance(data, dict) and data.get("access_token"):
                 return _exchange_fresh_response(
-                    partner_id, hardware_id, ws_url, partner["token_url"],
-                    candidate, form, data)
+                    partner_id, hardware_id, candidate, data)
         browser_note = "Browser-Tausch HTTP %s: %s" % (
             status, _compact_error_text(sanitize_error(body))[:200])
     else:

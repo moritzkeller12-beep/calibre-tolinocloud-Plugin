@@ -1039,6 +1039,15 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("tuple index out of range", rendered)
         self.assertIn("Traceback", rendered)
         self.assertNotIn("refresh-secret", rendered)
+    def test_first_install_prefers_epub_only(self):
+        """Erstinstallation: nur EPUB als bevorzugtes Format (0.15.2)."""
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            self.assertEqual(["EPUB"], config.settings()["preferred_formats"])
+        finally:
+            config.PREFERENCES = original
+
     def test_empty_settings_are_migrated_without_calibre(self):
         original = config.PREFERENCES
         try:
@@ -1052,20 +1061,51 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
-    def test_series_collections_default_to_on_and_are_persisted(self):
-        """Serien-Sammlungen laufen wie bisher, sind aber schaltbar
+    def test_series_collections_default_off_and_are_persisted(self):
+        """Serien-Sammlungen sind standardmäßig AUS (0.15.2) und schaltbar
         (0.12.0). Metadaten-Updates sind seit 0.13.0 eine Auswahl pro Buch
         und haben deshalb keine globale Option mehr."""
         original = config.PREFERENCES
         try:
             config.PREFERENCES = config.JSONConfig("test")
             values = config.settings()
-            self.assertTrue(values["sync_collections"])
+            self.assertFalse(values["sync_collections"])
             self.assertNotIn("sync_metadata_updates", values)
             self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
-            config.save_settings({"sync_collections": False})
-            self.assertFalse(config.settings()["sync_collections"])
+            config.save_settings({"sync_collections": True})
+            self.assertTrue(config.settings()["sync_collections"])
             self.assertEqual(set(config.DEFAULTS), set(config.PREFERENCES))
+        finally:
+            config.PREFERENCES = original
+
+    def test_existing_install_gets_the_new_defaults_once(self):
+        """Auch eine bestehende Installation landet bei EPUB-only und
+        „Serien aus“ -- aber nur einmal. Danach bleibt eine bewusste Wahl
+        stehen, selbst wenn sie dem alten Standard entspricht (0.15.2)."""
+        original = config.PREFERENCES
+        try:
+            stale = config.JSONConfig("test")
+            stale.update({"preferred_formats": ["EPUB", "PDF"],
+                          "sync_collections": True})
+            config.PREFERENCES = stale
+            values = config.settings()
+            self.assertEqual(["EPUB"], values["preferred_formats"])
+            self.assertFalse(values["sync_collections"])
+            self.assertEqual(["EPUB"], stale["preferred_formats"])
+            self.assertFalse(stale["sync_collections"])
+            config.save_settings({"sync_collections": True})
+            self.assertTrue(config.settings()["sync_collections"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_a_deliberate_format_choice_survives_the_migration(self):
+        original = config.PREFERENCES
+        try:
+            stale = config.JSONConfig("test")
+            stale.update({"preferred_formats": ["MOBI", "EPUB"]})
+            config.PREFERENCES = stale
+            self.assertEqual(["MOBI", "EPUB"],
+                             config.settings()["preferred_formats"])
         finally:
             config.PREFERENCES = original
 
@@ -3798,9 +3838,9 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog._sort_descending = False
             dialog.table = FakeTable()
 
-            # Klick auf den Titel (Spalte 5): aufsteigend, die Auswahl
+            # Klick auf den Titel (Spalte 4): aufsteigend, die Auswahl
             # bleibt denselben Büchern zugeordnet.
-            dialog._sort_by_column(5)
+            dialog._sort_by_column(4)
             self.assertEqual(
                 ["alpha", "alpha", "beta", "zulu"],
                 [row["title"].casefold() for row in dialog.rows])
@@ -3817,7 +3857,7 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertEqual({"beta"}, meta_titles)
             self.assertEqual({"beta"}, read_titles)
             # Zweiter Klick auf dieselbe Spalte: absteigend.
-            dialog._sort_by_column(5)
+            dialog._sort_by_column(4)
             self.assertEqual(
                 ["zulu", "beta", "alpha", "alpha"],
                 [row["title"].casefold() for row in dialog.rows])
@@ -3843,22 +3883,30 @@ class InventoryDialogSortTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
 
-    def test_columns_sort_keys_and_status_text_stay_in_sync(self):
-        """Spaltenzahl, Sortierschlüssel, technische Spalten und die
-        Status-Texte müssen zusammenpassen -- sonst sortiert ein Klick
-        falsch oder eine Zeile bleibt ohne Klartext."""
+    def test_columns_sort_keys_and_technical_columns_stay_in_sync(self):
+        """Spaltenzahl, Sortierschlüssel und technische Spalten müssen
+        zusammenpassen -- sonst sortiert ein Klick falsch (0.15.2: die
+        doppelten ✓-Spalten und die Statusspalte sind entfallen)."""
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
             dialog_cls = ui_module.InventoryDialog
+            # 7 sichtbare Spalten + 2 technische.
+            self.assertEqual(9, len(dialog_cls.HEADERS))
+            visible = [name for index, name in enumerate(dialog_cls.HEADERS)
+                       if index not in dialog_cls.TECHNICAL_COLUMNS]
+            self.assertEqual(7, len(visible))
+            self.assertEqual(["Hochladen", "Metadaten", "Gelesen", "Wo",
+                              "Titel", "Autor(en)", "Hinweis"], visible)
             self.assertEqual(len(dialog_cls.HEADERS),
                              len(dialog_cls._SORT_KEYS))
+            self.assertEqual(("Wo",), tuple(
+                dialog_cls.HEADERS[index]
+                for index in range(len(dialog_cls.HEADERS))
+                if dialog_cls.HEADERS[index] == "Wo"))
             for column in dialog_cls.TECHNICAL_COLUMNS:
                 self.assertLess(column, len(dialog_cls.HEADERS))
-            self.assertEqual(
-                {"new_in_calibre", "only_tolino", "identical", "changed",
-                 "duplicate_tolino", "not_matchable"},
-                set(dialog_cls.STATUS_TEXT))
+            self.assertEqual((7, 8), dialog_cls.TECHNICAL_COLUMNS)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -4120,6 +4168,8 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 Widget.__init__(self, text)
                 self.stateChanged = Signal()
                 self.toggled = Signal()
+                # Wie in Qt: nach dem Umschalten kommt clicked.
+                self.clicked = Signal()
 
         class Button(Widget):
             def __init__(self, text=""):
@@ -4171,21 +4221,17 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertIs(cells[(index, 0)], dialog.checks[index])
                 self.assertIs(cells[(index, 1)], dialog.meta_checks[index])
                 self.assertIs(cells[(index, 2)], dialog.read_checks[index])
-                # ... zwei ✓-Spalten (in Calibre / in der Cloud) ...
-                self.assertEqual("✓", dialog.table.items[(index, 3)])
-                self.assertEqual("✓" if in_cloud else "",
-                                 dialog.table.items[(index, 4)])
+                # ... die Spalte "Wo" in einem Wort ...
+                self.assertEqual("beide" if in_cloud else "nur Calibre",
+                                 dialog.table.items[(index, 3)])
                 # ... und danach die Textspalten.
-                self.assertEqual(row["title"], dialog.table.items[(index, 5)])
-                self.assertEqual(row["authors"], dialog.table.items[(index, 6)])
-                self.assertEqual(
-                    ui_module.InventoryDialog.STATUS_TEXT[row["status"]],
-                    dialog.table.items[(index, 7)])
+                self.assertEqual(row["title"], dialog.table.items[(index, 4)])
+                self.assertEqual(row["authors"], dialog.table.items[(index, 5)])
                 self.assertEqual(row["explanation"],
-                                 dialog.table.items[(index, 8)])
-                self.assertEqual(row["isbn"], dialog.table.items[(index, 9)])
+                                 dialog.table.items[(index, 6)])
+                self.assertEqual(row["isbn"], dialog.table.items[(index, 7)])
                 self.assertEqual(row["tolino_id"],
-                                 dialog.table.items[(index, 10)])
+                                 dialog.table.items[(index, 8)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
                 upload = dialog.checks[index]
@@ -4200,7 +4246,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertEqual(bool(row["metadata"]), metadata.isChecked())
                 self.assertFalse(mark_read.isChecked())
             # Nur die technischen Spalten sind zunächst verborgen.
-            self.assertEqual({9: True, 10: True}, dialog.table.hidden)
+            self.assertEqual({7: True, 8: True}, dialog.table.hidden)
             self.assertIn("Serien werden in der Tolino Cloud",
                           dialog.note.text())
             self.assertIn("Lese-Status in der Cloud bleibt",
@@ -4212,20 +4258,80 @@ class InventoryDialogBuildTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
 
-    def test_toggles_switch_technical_columns_and_extra_actions(self):
+    def test_toggle_switches_the_technical_columns(self):
         ui_module, dialog = self._build({"collections": True})
         try:
-            self.assertFalse(dialog.actions.isVisible())
-            dialog._toggle_more_actions(True)
-            self.assertTrue(dialog.actions.isVisible())
             dialog._toggle_technical_columns(True)
-            self.assertEqual({9: False, 10: False}, dialog.table.hidden)
+            self.assertEqual({7: False, 8: False}, dialog.table.hidden)
             dialog._toggle_technical_columns(False)
-            self.assertEqual({9: True, 10: True}, dialog.table.hidden)
+            self.assertEqual({7: True, 8: True}, dialog.table.hidden)
             self.assertIn("Serien werden in der Tolino Cloud",
                           dialog.note.text())
         finally:
             ui_module._restore_stubs_for_tests()
+
+
+class ComparisonLayoutTests(unittest.TestCase):
+    """Der Bestandsvergleich bleibt kurz: 7 sichtbare Spalten und EIN Knopf
+    für alle zeilenbezogenen Aktionen (0.15.2)."""
+
+    @staticmethod
+    def _source():
+        return (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
+
+    @staticmethod
+    def _body():
+        source = ComparisonLayoutTests._source()
+        return source.split("class InventoryDialog(QDialog):", 1)[1].split(
+            "\nclass ", 1)[0]
+
+    def test_seven_visible_columns_plus_two_technical_ones(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            headers = ui_module.InventoryDialog.HEADERS
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(
+            ("Hochladen", "Metadaten", "Gelesen", "Wo", "Titel", "Autor(en)",
+             "Hinweis", "ISBN", "Tolino-ID"), headers)
+        technical = ui_module.InventoryDialog.TECHNICAL_COLUMNS
+        self.assertEqual((7, 8), technical)
+        self.assertEqual(7, len(headers) - len(technical))
+        # Die beiden Häkchenspalten und die doppelte Statusspalte sind weg.
+        for gone in ("In Calibre", "In der Cloud", "Status"):
+            self.assertNotIn(gone, headers)
+
+    def test_one_button_holds_all_marked_row_actions(self):
+        body = self._body()
+        for gone in ("self.download_btn", "self.collection_add_btn",
+                     "self.collection_rm_btn", "self.read_selected",
+                     "self.more_toggle", "_toggle_more_actions"):
+            self.assertNotIn(gone, body, "%s sollte entfallen sein" % gone)
+        self.assertIn("self.row_actions = QPushButton(", body)
+        self.assertIn("self.row_actions.clicked.connect(self.choose_row_action)",
+                      body)
+
+    def test_the_menu_offers_exactly_the_four_row_actions(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            actions = ui_module.InventoryDialog.ROW_ACTIONS
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(["read", "download", "collection_add",
+                          "collection_remove"],
+                         [key for _label, key in actions])
+
+    def test_every_row_action_still_has_a_handler(self):
+        """Ein Menüpunkt ohne Handler wäre ein toter Eintrag."""
+        source = self._body().split("    def choose_row_action(self):", 1)[1]
+        source = source.split("\n    def ", 1)[0]
+        handlers = ("mark_read_for_marked_rows", "download_selected",
+                    "add_selected_to_collection",
+                    "remove_selected_from_collection")
+        for name in handlers:
+            self.assertIn(name, source, "Handler %s fehlt im Menü" % name)
 
 
 class InventoryDialogReadStateTests(unittest.TestCase):
@@ -4295,24 +4401,28 @@ class InventoryDialogReadStateTests(unittest.TestCase):
         ui_module.QMessageBox = MsgBox
         return calls
 
-    def test_cloud_read_book_is_prechecked_and_locked(self):
+    def test_cloud_read_book_is_prechecked_and_unlockable(self):
         ui_module = self._ui()
         try:
             self._with_message_box(ui_module)
             dialog = ui_module.InventoryDialog(self._rows())
             read_cell = self._cells_by_title(dialog)
-            # Schon gelesen: angehakt, gesperrt, Hinweis im Tooltip.
+            # Schon gelesen: angehakt -- aber anklickbar, damit man es auch
+            # wieder auf ungelesen setzen kann (0.15.2).
             self.assertTrue(read_cell["Gelesen"].isChecked())
-            self.assertFalse(read_cell["Gelesen"].enabled)
-            self.assertIn("schon als gelesen", read_cell["Gelesen"].tooltip)
+            self.assertTrue(read_cell["Gelesen"].enabled)
+            self.assertIn("Ein Klick löst die Sperre",
+                          read_cell["Gelesen"].tooltip)
             # Ungelesen: leer, aber anklickbar.
             self.assertFalse(read_cell["Ungelesen"].isChecked())
             self.assertTrue(read_cell["Ungelesen"].enabled)
             # Ohne Cloud-Kopie gibt es keine Lese-Marke.
             self.assertFalse(read_cell["Nur lokal"].enabled)
             self.assertIn("in der Cloud liegt", read_cell["Nur lokal"].tooltip)
-            # Nur echte Änderungen gehen an die Cloud.
+            # Nur echte Änderungen gehen an die Cloud -- und ohne Klick
+            # wird nichts ungelesen.
             self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual([], dialog.selected_read_unmarks())
             read_cell["Ungelesen"].setChecked(True)
             read_cell["Auch ungelesen"].setChecked(True)
             self.assertEqual({"t-2", "t-3"},
@@ -4336,6 +4446,69 @@ class InventoryDialogReadStateTests(unittest.TestCase):
             self.assertTrue(read_cell["Gelesen"].isChecked())
             self.assertFalse(read_cell["Ungelesen"].isChecked())
             self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual([], dialog.selected_read_unmarks())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_a_read_book_is_unmarked_with_two_clicks(self):
+        """Feldbefund 0.15.2: „Ein Buch, das in der Cloud als gelesen
+        markiert ist, kann ich nicht mehr auf ungelesen setzen.“
+
+        Der erste Klick löst nur die Sperre (Häkchen bleibt), der zweite
+        nimmt das Häkchen weg -- so löscht kein versehentlicher Klick eine
+        Lese-Marke in der Cloud.
+        """
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            cell = self._cells_by_title(dialog)["Gelesen"]
+            self.assertTrue(cell.isChecked())
+            # Erster Klick: Qt nimmt das Häkchen weg, der Handler gibt es
+            # zurück -- nur die Sperre fällt.
+            cell.setChecked(False)
+            cell.clicked.emit()
+            self.assertTrue(cell.isChecked())
+            self.assertIn("Noch einmal anklicken", cell.tooltip)
+            self.assertEqual([], dialog.selected_read_unmarks())
+            self.assertEqual([], dialog.selected_read_targets())
+            # Zweiter Klick: das Häkchen bleibt weg -> in der Cloud ungelesen.
+            cell.setChecked(False)
+            cell.clicked.emit()
+            self.assertFalse(cell.isChecked())
+            self.assertEqual(["t-1"], dialog.selected_read_unmarks())
+            self.assertEqual([], dialog.selected_read_targets())
+            dialog._update_summary()
+            self.assertIn("1 auf ungelesen", dialog.summary.text())
+            # Die Zahl im Knopf zählt alle Aktionen: 1 Upload („Nur lokal“),
+            # 1 Metadaten-Abgleich („Auch ungelesen“) und der neue
+            # Ungelesen-Schritt.
+            self.assertEqual("Auswahl übernehmen (3)", dialog.confirm.text())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_an_unmarked_book_stays_unmarked_after_sorting(self):
+        """Umsortieren baut die Zeilen neu -- der Wunsch bleibt."""
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            cell = self._cells_by_title(dialog)["Gelesen"]
+            cell.setChecked(False)
+            cell.clicked.emit()   # entsperren
+            cell.setChecked(False)
+            cell.clicked.emit()   # Häkchen weg
+            dialog._sort_by_column(0)
+            dialog._sort_by_column(0)
+            self.assertEqual(["t-1"], dialog.selected_read_unmarks())
+            rebuilt = self._cells_by_title(dialog)["Gelesen"]
+            self.assertFalse(rebuilt.isChecked())
+            # Die Sperre ist an derselben Zeile weiter aufgehoben: ein Klick
+            # hakt sie wieder an.
+            self.assertIn("Noch einmal anklicken", rebuilt.tooltip)
+            rebuilt.setChecked(True)
+            rebuilt.clicked.emit()
+            self.assertEqual([], dialog.selected_read_unmarks())
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -4379,14 +4552,18 @@ class InventoryDialogReadStateTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
 
-    def test_the_multi_selection_button_sits_next_to_the_helpers(self):
+    def test_one_button_handles_all_actions_for_marked_rows(self):
+        """Alle vier Zeilen-Aktionen liegen hinter EINEM Knopf (0.15.2)."""
         ui_module = self._ui()
         try:
             self._with_message_box(ui_module)
             dialog = ui_module.InventoryDialog(self._rows())
-            self.assertEqual("Gelesen für markierte Zeilen",
-                             dialog.read_selected.text())
-            self.assertIn("Strg", dialog.read_selected.tooltip)
+            self.assertEqual("Für markierte Zeilen …",
+                             dialog.row_actions.text())
+            self.assertIn("Strg", dialog.row_actions.tooltip)
+            keys = [key for _label, key in dialog.ROW_ACTIONS]
+            self.assertEqual(["read", "download", "collection_add",
+                              "collection_remove"], keys)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -4427,7 +4604,8 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
 
         return Descriptor, Signal
 
-    def _run_worker(self, series_map, state, known_pairs, read_marks=None):
+    def _run_worker(self, series_map, state, known_pairs, read_marks=None,
+                    read_unmarks=None):
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal": self._signal_descriptor()[0]})
@@ -4462,7 +4640,7 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
         try:
             with patch("calibre_plugin.ui.TolinoClient", FakeClient):
                 worker = ui_module.SyncWorker(settings, [], [], [], series_map,
-                                             read_marks)
+                                             read_marks, read_unmarks)
                 worker.progress.connect(
                     lambda *args: calls["progress"].append(args))
                 worker.completed.connect(
@@ -4526,6 +4704,26 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
         self.assertTrue(any("Als gelesen markieren" in text
                             for _done, _total, text in calls["progress"]))
 
+    def test_read_unmarks_are_one_bulk_call_with_finished_false(self):
+        """Häkchen weggeklickt: EIN Aufruf, der die Marke entfernt (0.15.2)."""
+        calls = self._run_worker(
+            {}, {"u1": {"tolino_id": "t1"}}, set(),
+            read_unmarks=["t1", "t2"])
+        self.assertEqual([(["t1", "t2"], False)], calls["read_marks"])
+        self.assertTrue(any("Als ungelesen markieren" in text
+                            for _done, _total, text in calls["progress"]))
+        self.assertIsNotNone(calls["completed"])
+        self.assertIsNone(calls["failed"])
+
+    def test_marking_and_unmarking_are_two_separate_calls(self):
+        calls = self._run_worker(
+            {}, {"u1": {"tolino_id": "t1"}}, set(),
+            read_marks=["t1"], read_unmarks=["t2"])
+        self.assertEqual([(["t1"], True), (["t2"], False)], calls["read_marks"])
+        # Beide Schritte zählen im Fortschritt mit.
+        self.assertEqual(2, max(total for _done, total, _text
+                                in calls["progress"]))
+
     def test_without_read_marks_the_cloud_status_is_untouched(self):
         calls = self._run_worker({}, {"u1": {"tolino_id": "t1"}}, set())
         self.assertEqual([], calls["read_marks"])
@@ -4541,20 +4739,47 @@ class DashboardLayoutTests(unittest.TestCase):
     wird -- sonst verschwindet er wieder stillschweigend.
     """
 
+    def _source(self):
+        return (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
+
     def _dashboard_body(self):
-        source = (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
-        return source.split("class SyncDashboard(QDialog):", 1)[1].split(
+        return self._source().split("class SyncDashboard(QDialog):", 1)[1].split(
             "\nclass ", 1)[0]
 
-    def test_every_dashboard_button_is_added_to_a_layout(self):
-        body = self._dashboard_body()
-        names = re.findall(r"self\.(\w+) = (?:QPushButton|QCheckBox)\(", body)
+    def test_every_created_button_is_added_to_a_layout(self):
+        """Auch der Knopf im neuen Einstellungsfenster (0.15.2)."""
+        source = self._source()
+        names = re.findall(r"self\.(\w+) = (?:QPushButton|QCheckBox)\(", source)
         self.assertIn("debug", names)
         for name in names:
             self.assertRegex(
-                body,
+                source,
                 r"add(?:Row|Widget|Layout)\([^)]*self\.%s\b" % name,
-                "Dashboard-Widget %r hängt in keinem Layout" % name)
+                "Widget %r hängt in keinem Layout" % name)
+
+    def test_one_primary_button_handles_login_compare_and_cancel(self):
+        """Zwei Anmeldeknöpfe und ein gesperrter Start-Knopf sind weg --
+        EIN Knopf entscheidet nach Zustand (0.15.2)."""
+        body = self._dashboard_body()
+        self.assertIn("self.primary.clicked.connect(self.primary_action)", body)
+        self.assertNotIn("self.browser = QPushButton(", body)
+        self.assertNotIn("self.start = QPushButton(", body)
+        self.assertNotIn("self.cancel = QPushButton(", body)
+
+    def test_the_settings_dialog_holds_the_rare_options(self):
+        """Alles Seltene liegt in EINEM Fenster, nicht hinter zwei
+        „… anzeigen“-Häkchen (0.15.2)."""
+        source = self._source()
+        self.assertIn("class SettingsDialog(QDialog):", source)
+        settings = source.split("class SettingsDialog(QDialog):", 1)[1].split(
+            "\nclass ", 1)[0]
+        for group in ("Übertragung", "Konten", "Diagnose"):
+            self.assertIn('QGroupBox("%s")' % group, settings)
+        body = self._dashboard_body()
+        self.assertNotIn("advanced_toggle", body)
+        self.assertNotIn("_toggle_advanced", body)
+        self.assertIn("self.settings_button.clicked.connect(self.open_settings)",
+                      body)
 
     def test_diagnostics_button_reports_without_network(self):
         """Der Knopf öffnet den Bericht; die Tolino-Anfrage passiert erst
@@ -4568,6 +4793,52 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn("diagnose_preparation", diagnose)
         self.assertNotIn("TolinoClient", diagnose)
         self.assertNotIn("login", diagnose)
+
+
+class DashboardPrimaryActionTests(unittest.TestCase):
+    """Der Hauptknopf tut je nach Zustand das Richtige (0.15.2)."""
+
+    @staticmethod
+    def _dashboard(token="", running=False):
+        class LineEdit:
+            def text(self):
+                return token
+
+        dashboard = type("D", (), {})()
+        calls = []
+        dashboard.thread = object() if running else None
+        dashboard.refresh = LineEdit()
+        dashboard.browser_login = lambda: calls.append("login")
+        dashboard.start_sync = lambda: calls.append("compare")
+        dashboard.cancel_sync = lambda: calls.append("cancel")
+        return dashboard, calls
+
+    def _click(self, token, running):
+        source = (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
+        body = source.split("    def primary_action(self):", 1)[1].split(
+            "\n    def ", 1)[0]
+        # Die Entscheidung wird hier nachgebaut: gleiche Reihenfolge wie im
+        # Quelltext, damit ein Umbau der Methode auffällt.
+        self.assertIn("if self.thread is not None:", body)
+        self.assertIn("elif self.refresh.text().strip():", body)
+        self.assertIn("else:", body)
+        dashboard, calls = self._dashboard(token, running)
+        if dashboard.thread is not None:
+            dashboard.cancel_sync()
+        elif dashboard.refresh.text().strip():
+            dashboard.start_sync()
+        else:
+            dashboard.browser_login()
+        return calls
+
+    def test_not_logged_in_starts_the_login(self):
+        self.assertEqual(["login"], self._click("", False))
+
+    def test_logged_in_starts_the_comparison(self):
+        self.assertEqual(["compare"], self._click("token-1", False))
+
+    def test_running_run_is_cancelled(self):
+        self.assertEqual(["cancel"], self._click("token-1", True))
 
 
 class ReadStateComparisonTests(unittest.TestCase):

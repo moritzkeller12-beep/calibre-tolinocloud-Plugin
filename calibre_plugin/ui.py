@@ -20,47 +20,25 @@ except ImportError:
                          QTableWidgetItem, QTextEdit, QObject, QInputDialog,
                          QFileDialog, Qt, Signal as pyqtSignal)
 
-try:
-    from .config import (account_by_name, save_account, save_settings,
-                         set_active_account, settings)
-    from .sync import (compare_inventory, format_error_details, iter_book_ids,
-                       load_state, metadata_by_id, plan_sync, plan_metadata_updates,
-                       plan_collection_updates, revert_unsynced_fingerprints,
-                       remember_collection,
-                       selected_book_ids,
-                       selected_table_rows, series_map_from_metadata,
-                       sort_comparison_rows, sync_summary,
-                       normalize_formats, safe_format_path, cover_bytes,
-                       unpack_plan_result, unpack_upload_record,
-                       unpack_meta_update_record,
-                       diagnose_preparation, format_diagnostic_report,
-                       metadata_tolino_id,
-                       tolino_column_active, update_tolino_ids)
-    from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                         chromium_available, hardware_id,
-                         normalize_refresh_token, sanitize_error,
-                         start_token_keepalive, try_live_grab_first)
-except ImportError:
-    from config import (account_by_name, save_account, save_settings,
-                        set_active_account, settings)
-    from sync import (compare_inventory, format_error_details, iter_book_ids,
-                      load_state, metadata_by_id, plan_sync, plan_metadata_updates,
-                      plan_collection_updates, revert_unsynced_fingerprints,
-                      remember_collection,
-                      selected_book_ids,
-                      selected_table_rows, series_map_from_metadata,
-                      sort_comparison_rows, sync_summary,
-                      normalize_formats, safe_format_path, cover_bytes,
-                      unpack_plan_result, unpack_upload_record,
-                      unpack_meta_update_record,
-                      diagnose_preparation, format_diagnostic_report,
-                      metadata_tolino_id,
-                      tolino_column_active, update_tolino_ids)
-    from tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                        chromium_available, hardware_id,
-                        normalize_refresh_token, sanitize_error,
-                        start_token_keepalive, try_live_grab_first)
-
+from .config import (account_by_name, save_account, save_settings,
+                     set_active_account, settings)
+from .sync import (compare_inventory, format_error_details, iter_book_ids,
+                   load_state, metadata_by_id, plan_sync, plan_metadata_updates,
+                   plan_collection_updates, revert_unsynced_fingerprints,
+                   remember_collection,
+                   selected_book_ids,
+                   selected_table_rows, series_map_from_metadata,
+                   sort_comparison_rows, sync_summary,
+                   normalize_formats, safe_format_path, cover_bytes,
+                   unpack_plan_result, unpack_upload_record,
+                   unpack_meta_update_record,
+                   diagnose_preparation, format_diagnostic_report,
+                   metadata_tolino_id,
+                   tolino_column_active, update_tolino_ids)
+from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
+                     chromium_available, hardware_id,
+                     normalize_refresh_token, sanitize_error,
+                     start_token_keepalive, try_live_grab_first)
 
 def _plugin_version():
     """Plugin version string for display; safe outside Calibre."""
@@ -123,25 +101,29 @@ class InventoryDialog(QDialog):
     Links steht, was mit dem Buch passieren soll -- **Hochladen** (die
     Buchdatei in die Cloud), **Metadaten** (nur Titel/Autor(en)/ISBN in der
     Cloud abgleichen, ohne Upload) und **Gelesen** (die Lese-Marke im
-    Tolino-Konto setzen). Daneben zeigen zwei ✓-Spalten, wo das Buch liegt
-    (Calibre und/oder Tolino Cloud). Alles Technische ist eingeklappt und die
-    automatischen Aktionen stehen im Klartext darüber.
+    Tolino-Konto setzen). Die Spalte **Wo** sagt in einem Wort, wo das Buch
+    liegt, **Hinweis** erklärt die Zeile. Alles Technische ist eingeklappt,
+    und alle Aktionen für markierte Zeilen liegen hinter EINEM Knopf (0.15.2).
     """
 
-    HEADERS = ("Hochladen", "Metadaten", "Gelesen", "In Calibre", "In der Cloud",
-               "Titel", "Autor(en)", "Status", "Hinweis",
-               "ISBN", "Tolino-ID")
+    HEADERS = ("Hochladen", "Metadaten", "Gelesen", "Wo",
+               "Titel", "Autor(en)", "Hinweis", "ISBN", "Tolino-ID")
     # Technische Spalten stehen ganz rechts und sind standardmäßig aus.
-    TECHNICAL_COLUMNS = (9, 10)
+    TECHNICAL_COLUMNS = (7, 8)
 
-    STATUS_TEXT = {
-        "new_in_calibre": "Nur in Calibre",
-        "only_tolino": "Nur in der Cloud",
-        "identical": "In beiden, gleich",
-        "changed": "In beiden, geändert",
-        "duplicate_tolino": "Mehrfach in der Cloud",
-        "not_matchable": "Nicht zuordenbar",
-    }
+    # Text der entsperrten Lese-Zelle -- einmal, damit er nicht driftet.
+    READ_UNLOCKED_TOOLTIP = (
+        "Als gelesen markiert. Noch einmal anklicken entfernt das Häkchen "
+        "– das Buch wird in der Cloud wieder auf ungelesen gesetzt.")
+
+    # Alle Aktionen, die auf die MARKIERTEN Tabellenzeilen wirken -- eine
+    # Stelle statt vier Knöpfe in zwei verschiedenen Ecken (0.15.2).
+    ROW_ACTIONS = (
+        ("Als gelesen markieren", "read"),
+        ("Aus der Cloud herunterladen", "download"),
+        ("Zu Sammlung hinzufügen …", "collection_add"),
+        ("Aus Sammlung entfernen …", "collection_remove"),
+    )
 
     _SORT_KEYS = (
         # 0 Hochladen / 1 Metadaten: Ausgewähltes zuerst, dann Titel/Autor(en)
@@ -157,27 +139,34 @@ class InventoryDialog(QDialog):
         lambda row: (0 if row.get("read") else 1,
                      str(row.get("title") or "").casefold(),
                      str(row.get("authors") or "").casefold()),
-        # 3 In Calibre / 4 In der Cloud
-        lambda row: (0 if row.get("book_id") is not None else 1,
+        # 3 Wo: beide zuerst, dann nur Calibre, dann nur Cloud
+        lambda row: (0 if row.get("book_id") is not None
+                     and row.get("tolino_id") else
+                     1 if row.get("book_id") is not None else 2,
                      str(row.get("title") or "").casefold()),
-        lambda row: (0 if row.get("tolino_id") else 1,
-                     str(row.get("title") or "").casefold()),
-        # 5 Titel / 6 Autor(en) (mit dem jeweils anderen als Zweitschlüssel)
+        # 4 Titel / 5 Autor(en) (mit dem jeweils anderen als Zweitschlüssel)
         lambda row: (str(row.get("title") or "").casefold(),
                      str(row.get("authors") or "").casefold()),
         lambda row: (str(row.get("authors") or "").casefold(),
                      str(row.get("title") or "").casefold()),
-        # 7 Status / 8 Hinweis
-        lambda row: (str(row.get("status") or ""),
-                     str(row.get("title") or "").casefold()),
+        # 6 Hinweis
         lambda row: (str(row.get("explanation") or ""),
                      str(row.get("title") or "").casefold()),
-        # 9 ISBN / 10 Tolino-ID
+        # 7 ISBN / 8 Tolino-ID
         lambda row: (str(row.get("isbn") or ""),
                      str(row.get("title") or "").casefold()),
         lambda row: (str(row.get("tolino_id") or ""),
                      str(row.get("title") or "").casefold()),
     )
+
+    @staticmethod
+    def _where_text(row):
+        """Wo das Buch liegt -- ein Wort statt zweier Häkchenspalten."""
+        has_book = row.get("book_id") is not None
+        in_cloud = bool(row.get("tolino_id"))
+        if has_book and in_cloud:
+            return "beide"
+        return "nur Calibre" if has_book else "nur Cloud"
 
     @staticmethod
     def default_actions(row):
@@ -220,12 +209,9 @@ class InventoryDialog(QDialog):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "Ihre Calibre-Bibliothek im Vergleich zur Tolino Cloud. "
-            "Pro Buch auswählen, was passieren soll: <b>Hochladen</b> lädt die "
-            "Buchdatei, <b>Metadaten</b> gleicht nur Titel/Autor(en)/ISBN in "
-            "der Cloud ab, <b>Gelesen</b> setzt die Lese-Marke im Tolino-Konto "
-            "(angehakt = dort schon gelesen). Ohne Auswahl passiert nichts; ein "
-            "Klick auf einen Spaltenkopf sortiert.")
+            "Pro Buch anhaken, was in die Tolino Cloud soll: <b>Hochladen</b> "
+            "(Buchdatei), <b>Metadaten</b> (nur Titel/Autor/ISBN) oder "
+            "<b>Gelesen</b>. Ohne Auswahl passiert nichts.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -247,12 +233,13 @@ class InventoryDialog(QDialog):
         helpers.addWidget(self.recommend)
         helpers.addWidget(self.clear_selection)
         helpers.addStretch(1)
-        self.read_selected = QPushButton("Gelesen für markierte Zeilen")
-        self.read_selected.setToolTip(
-            "Hakt die Spalte „Gelesen“ für alle in der Tabelle markierten "
-            "Zeilen an. Mehrere markieren mit Strg-/Shift-Klick, alle mit "
+        self.row_actions = QPushButton("Für markierte Zeilen …")
+        self.row_actions.setToolTip(
+            "Wirkt auf die in der Tabelle markierten Zeilen: als gelesen "
+            "markieren, aus der Cloud herunterladen oder einer Sammlung "
+            "zuordnen. Mehrere markieren mit Strg-/Shift-Klick, alle mit "
             "Strg+A. Geschrieben wird erst mit „Auswahl übernehmen“.")
-        helpers.addWidget(self.read_selected)
+        helpers.addWidget(self.row_actions)
         layout.addLayout(helpers)
 
         self.table = QTableWidget(0, len(self.HEADERS))
@@ -264,11 +251,10 @@ class InventoryDialog(QDialog):
             "(kein Upload)",
             "Ausgewählt = im Tolino-Konto als gelesen markieren (nur Cloud, "
             "die Buchdatei bleibt unverändert)",
-            "Buch liegt in Ihrer Calibre-Bibliothek",
-            "Buch liegt in der Tolino Cloud",
+            "Wo das Buch liegt: in beiden, nur in Calibre oder nur in der "
+            "Tolino Cloud",
             "Buchtitel", "Autor(en)",
             "Was sich zwischen Calibre und Cloud unterscheidet",
-            "Erklärung dieser Zeile",
             "ISBN (technisch)",
             "Tolino-Kennung der Cloud-Kopie (technisch)",
         )
@@ -299,44 +285,6 @@ class InventoryDialog(QDialog):
         layout.addWidget(self.technical_toggle)
         self._apply_technical_visibility()
 
-        # Weitere Cloud-Aktionen liegen eingeklappt: der Normalfall
-        # (auswählen, übernehmen) soll nicht von Nebenschauplätzen verdeckt
-        # werden. Die Aktionen nutzen die Tabelle DIESES Fensters und
-        # können es deshalb nicht überleben (der gelöschte-QTableWidget-
-        # Absturz).
-        self.more_toggle = QCheckBox(
-            "Weitere Aktionen anzeigen (herunterladen, Sammlung)")
-        self.more_toggle.setToolTip(
-            "Wirkt nur auf das markierte Buch in der Tolino Cloud, nicht "
-            "auf Ihre Calibre-Bibliothek.")
-        self.more_toggle.toggled.connect(self._toggle_more_actions)
-        layout.addWidget(self.more_toggle)
-
-        self.actions = QGroupBox(
-            "Wirkt nur in der Tolino Cloud, nicht in Calibre:")
-        action_row = QHBoxLayout()
-        self.download_btn = QPushButton("Herunterladen")
-        self.download_btn.setToolTip(
-            "Lädt das markierte Buch aus der Tolino Cloud als EPUB auf "
-            "diesen Rechner.")
-        self.collection_add_btn = QPushButton("Zur Sammlung")
-        self.collection_add_btn.setToolTip(
-            "Ordnet das markierte Cloud-Buch einer Sammlung („Ordner“ in "
-            "der Tolino Cloud) zu -- der Name wird abgefragt.")
-        self.collection_rm_btn = QPushButton("Aus Sammlung")
-        self.collection_rm_btn.setToolTip(
-            "Nimmt das markierte Cloud-Buch aus einer Sammlung der "
-            "Tolino Cloud heraus -- der Name wird abgefragt.")
-        for button in (self.download_btn, self.collection_add_btn,
-                       self.collection_rm_btn):
-            action_row.addWidget(button)
-        self.actions.setLayout(action_row)
-        self.actions.setVisible(False)
-        layout.addWidget(self.actions)
-        self.download_btn.clicked.connect(self.download_selected)
-        self.collection_add_btn.clicked.connect(self.add_selected_to_collection)
-        self.collection_rm_btn.clicked.connect(self.remove_selected_from_collection)
-
         buttons = QHBoxLayout()
         confirm = QPushButton("Auswahl übernehmen")
         confirm.setToolTip(
@@ -355,7 +303,7 @@ class InventoryDialog(QDialog):
         layout.addLayout(buttons)
         self.recommend.clicked.connect(self.apply_recommended)
         self.clear_selection.clicked.connect(self.clear_all_selection)
-        self.read_selected.clicked.connect(self.mark_read_for_marked_rows)
+        self.row_actions.clicked.connect(self.choose_row_action)
         # Erst jetzt gibt es den Knopf: die Zusammenfassung zeigt so von
         # Anfang an die Zahl der ausgewählten Aktionen darauf.
         self._update_summary()
@@ -371,7 +319,7 @@ class InventoryDialog(QDialog):
                          "aus der Cloud gelöscht")
         if parts:
             head = ("Zusätzlich automatisch: %s. Abschaltbar unter "
-                    "„Erweiterte Einstellungen“." % "; ".join(parts))
+                    "„Einstellungen …“." % "; ".join(parts))
         else:
             head = ("Es passiert nur, was Sie auswählen -- außer dem Hochladen "
                     "und dem Metadaten-Abgleich wird nichts in der Cloud "
@@ -390,11 +338,50 @@ class InventoryDialog(QDialog):
             except Exception:
                 pass  # Qt-Stub ohne Spaltenverstecken
 
-    def _toggle_more_actions(self, visible):
+    def _wire_read_check(self, index, check):
+        """„Gelesen“ verkabeln: der erste Klick löst nur die Sperre (0.15.2).
+
+        Feldbefund: „Ein Buch, das in der Cloud als gelesen markiert ist,
+        kann ich nicht mehr auf ungelesen setzen.“ Deshalb ist die Zelle
+        jetzt anklickbar -- aber in zwei Schritten, damit ein versehentlicher
+        Klick keine Lese-Marke in der Cloud löscht.
+        """
+        clicked = getattr(check, "clicked", None)
+        if clicked is not None:
+            try:
+                clicked.connect(
+                    lambda _checked=False, i=index: self._read_clicked(i))
+            except Exception:
+                pass  # Qt-Stub ohne echtes Signal
+        row = self.rows[index]
+        if not row.get("read_in_cloud") or not row.get("tolino_id"):
+            return
+        if row.get("read_unlocked"):
+            check.setToolTip(self.READ_UNLOCKED_TOOLTIP)
+        else:
+            check.setToolTip(
+                "In der Cloud als gelesen markiert. Ein Klick löst die "
+                "Sperre, ein zweiter nimmt das Häkchen weg (ungelesen).")
+
+    def _read_clicked(self, index):
+        """Klick auf eine Lese-Marke: erst entsperren, dann umschalten."""
+        if not 0 <= index < len(self.rows):
+            return
+        row = self.rows[index]
+        check = self.read_checks[index]
+        if row.get("read_unlocked"):
+            row["read"] = bool(check.isChecked())
+            self._update_summary()
+            return
+        # Erster Klick: Qt hat das Häkchen schon weggenommen -- zurückgeben
+        # und nur die Sperre fallen lassen.
+        row["read_unlocked"] = True
         try:
-            self.actions.setVisible(bool(visible))
+            check.setChecked(True)
         except Exception:
-            pass  # Qt-Stub oder bereits zerstörtes Fenster
+            pass
+        check.setToolTip(self.READ_UNLOCKED_TOOLTIP)
+        self._update_summary()
 
     def _sync_checks_to_rows(self):
         for row, uploads, metadata, read in zip(self.rows, self.checks,
@@ -458,6 +445,44 @@ class InventoryDialog(QDialog):
                 if check.isChecked() and row.get("tolino_id")
                 and not row.get("read_in_cloud")]
 
+    def selected_read_unmarks(self):
+        """Tolino-IDs, die JETZT wieder auf ungelesen gesetzt werden (0.15.2).
+
+        Nur Bücher, die in der Cloud als gelesen stehen und deren Häkchen
+        der Nutzer entfernt hat -- alles andere lässt den Lese-Status in Ruhe.
+        """
+        return [str(row["tolino_id"]) for row, check
+                in zip(self.rows, self.read_checks)
+                if not check.isChecked() and row.get("tolino_id")
+                and row.get("read_in_cloud")]
+
+    def choose_row_action(self):
+        """Eine Stelle für alle Aktionen auf markierte Zeilen (0.15.2).
+
+        Vorher lagen dieselben vier Aktionen auf vier Knöpfen in zwei
+        verschiedenen Ecken -- jetzt ein Knopf, eine Rückfrage.
+        """
+        if not selected_table_rows(self.table):
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Bitte zuerst Zeilen in der Tabelle markieren "
+                "(mehrere mit Strg- oder Shift-Klick, alle mit Strg+A).")
+            return
+        labels = [label for label, _key in self.ROW_ACTIONS]
+        label, accepted = QInputDialog.getItem(
+            self, "Für markierte Zeilen", "Aktion:", labels, 0, False)
+        if not accepted or not str(label):
+            return
+        key = dict(self.ROW_ACTIONS).get(str(label))
+        if key == "read":
+            self.mark_read_for_marked_rows()
+        elif key == "download":
+            self.download_selected()
+        elif key == "collection_add":
+            self.add_selected_to_collection()
+        elif key == "collection_remove":
+            self.remove_selected_from_collection()
+
     def mark_read_for_marked_rows(self):
         """Spalte „Gelesen“ für alle in der Tabelle markierten Zeilen setzen.
 
@@ -497,15 +522,6 @@ class InventoryDialog(QDialog):
                 "Nichts zu tun: %d markierte Zeile(n) stehen in der Cloud "
                 "schon auf gelesen, %d liegen nicht in der Cloud."
                 % (already, without_cloud))
-
-    def selected_ids(self, rows=None):
-        """Rückwärtskompatibel: die zum Hochladen ausgewählten Bücher."""
-        rows = self.rows if rows is None else rows
-        if len(rows) != len(self.checks):
-            raise ValueError("Inventory table and selection controls have different row counts.")
-        return selected_book_ids([
-            dict(row, selected=check.isChecked()) for row, check in zip(rows, self.checks)
-        ])
 
     def _sort_by_column(self, column):
         """Spaltenkopf anklicken: aufsteigend <-> absteigend umschalten."""
@@ -553,12 +569,14 @@ class InventoryDialog(QDialog):
                  "Nur in Calibre – es gibt in der Cloud nichts zu "
                  "aktualisieren." if has_book else
                  "Kein Calibre-Buch – nichts zu aktualisieren."),
-                ("read", in_cloud and not row.get("read_in_cloud"),
+                # In der Cloud liegende Bücher sind in BEIDE Richtungen
+                # anklickbar: gelesen markieren und wieder ungelesen setzen.
+                # Schon gelesene Bücher sind zusätzlich gesperrt -- der erste
+                # Klick löst nur die Sperre (0.15.2).
+                ("read", in_cloud,
                  "Im Tolino-Konto als gelesen markieren – die Buchdatei "
                  "bleibt unverändert.",
-                 "In der Cloud schon als gelesen markiert."
-                 if row.get("read_in_cloud")
-                 else "Geht erst, wenn das Buch in der Cloud liegt."),
+                 "Geht erst, wenn das Buch in der Cloud liegt."),
             )
             for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
                 check = QCheckBox()
@@ -571,15 +589,15 @@ class InventoryDialog(QDialog):
                         state_signal.connect(self._update_summary)
                     except Exception:
                         pass  # Qt-Stub ohne echtes Signal
+                if column == 2:
+                    self._wire_read_check(row_index, check)
                 (self.checks, self.meta_checks,
                  self.read_checks)[column].append(check)
                 self.table.setCellWidget(row_index, column, check)
             values = (
-                "✓" if has_book else "",
-                "✓" if in_cloud else "",
+                self._where_text(row),
                 row.get("title", ""),
                 row.get("authors", ""),
-                self.STATUS_TEXT.get(row["status"], row["status"]),
                 row.get("explanation", ""),
                 row.get("isbn", ""),
                 row.get("tolino_id", ""),
@@ -597,15 +615,19 @@ class InventoryDialog(QDialog):
             uploads = len(self.selected_upload_ids())
             metadata = len(self.selected_metadata_ids())
             marked_read = len(self.selected_read_targets())
+            marked_unread = len(self.selected_read_unmarks())
+            read_text = "%d als gelesen" % marked_read
+            if marked_unread:
+                read_text += ", %d auf ungelesen" % marked_unread
             summary = getattr(self, "summary", None)
             if summary is not None:
                 summary.setText(
-                    "<b>%d zum Hochladen, %d für Metadaten, %d als gelesen</b> "
+                    "<b>%d zum Hochladen, %d für Metadaten, %s</b> "
                     "ausgewählt – nur das Ausgewählte wird in der Tolino Cloud "
-                    "geändert." % (uploads, metadata, marked_read))
+                    "geändert." % (uploads, metadata, read_text))
             confirm = getattr(self, "confirm", None)
             if confirm is not None:
-                total = uploads + metadata + marked_read
+                total = uploads + metadata + marked_read + marked_unread
                 confirm.setText("Auswahl übernehmen (%d)" % total
                                 if total else "Auswahl übernehmen")
         except Exception:
@@ -823,7 +845,7 @@ class SyncWorker(QObject):
     failed = pyqtSignal(str, str)
 
     def __init__(self, settings, jobs, removals, meta_updates=None,
-                 series_map=None, read_marks=None):
+                 series_map=None, read_marks=None, read_unmarks=None):
         QObject.__init__(self)
         self.settings = settings
         self.jobs = jobs
@@ -834,6 +856,11 @@ class SyncWorker(QObject):
         # (Spalte "Gelesen"). Leer heißt: Lese-Status bleibt unangetastet.
         self.read_marks = [str(item) for item in (read_marks or ())
                            if str(item or "").strip()]
+        # Tolino-IDs, deren Lese-Marke wieder ENTFERNT werden soll (0.15.2:
+        # Häkchen in der Spalte „Gelesen“ weggeklickt). Ebenfalls leer =
+        # Lese-Status bleibt unangetastet.
+        self.read_unmarks = [str(item) for item in (read_unmarks or ())
+                             if str(item or "").strip()]
         self.cancelled = False
 
     def cancel(self):
@@ -859,7 +886,8 @@ class SyncWorker(QObject):
             series_items = plan_collection_updates(self.series_map, state)
             total = (len(self.jobs) + len(self.removals)
                      + len(self.meta_updates) + len(series_items)
-                     + (1 if self.read_marks else 0))
+                     + (1 if self.read_marks else 0)
+                     + (1 if self.read_unmarks else 0))
             done = 0
             # Erst die in-place Metadaten-Updates, dann die Uploads (0.9.45).
             for update in self.meta_updates:
@@ -908,6 +936,15 @@ class SyncWorker(QObject):
                 client.mark_read_many(self.read_marks)
                 done += 1
                 self.progress.emit(done, total, "Gelesen-Marke gesetzt")
+            # Umgekehrt: Bücher, die wieder ungelesen sein sollen. Nur die
+            # vorhandene Marke wird entfernt, alles andere bleibt (0.15.2).
+            if self.read_unmarks:
+                if self.cancelled:
+                    raise RuntimeError("Synchronisierung vom Benutzer abgebrochen.")
+                self.progress.emit(done, total, "Als ungelesen markieren")
+                client.mark_read_many(self.read_unmarks, finished=False)
+                done += 1
+                self.progress.emit(done, total, "Lese-Marke entfernt")
             # Serien → Cloud-Sammlungen: nur die offenen Zuordnungen. Der
             # Cloud-Bestand wird einmal gelesen, jede geschriebene oder
             # bereits vorhandene Zuordnung aber im Zustand gemerkt -- beim
@@ -987,6 +1024,42 @@ class BrowserLoginWorker(QObject):
         self.completed.emit(refresh, hardware)
 
 
+class SettingsDialog(QDialog):
+    """Alle seltenen Einstellungen an einem Ort (0.15.2).
+
+    Übertragung, Konten und Diagnose lagen vorher hinter zwei verschiedenen
+    „… anzeigen"-Häkchen im Hauptfenster. Die Fenster dort bleiben kurz:
+    anmelden, vergleichen, fertig.
+    """
+
+    def __init__(self, dashboard):
+        QDialog.__init__(self, dashboard)
+        self.dashboard = dashboard
+        self.setWindowTitle("Einstellungen")
+        self.setMinimumWidth(620)
+        layout = QVBoxLayout(self)
+
+        self.transfer = QGroupBox("Übertragung")
+        self.transfer_form = QFormLayout(self.transfer)
+        layout.addWidget(self.transfer)
+
+        self.accounts = QGroupBox("Konten")
+        self.accounts_form = QFormLayout(self.accounts)
+        layout.addWidget(self.accounts)
+
+        self.diagnostics = QGroupBox("Diagnose")
+        self.diagnostics_form = QFormLayout(self.diagnostics)
+        layout.addWidget(self.diagnostics)
+
+        self.close_button = QPushButton("Fertig")
+        self.close_button.setToolTip("Einstellungen speichern und schließen.")
+        self.close_button.clicked.connect(self.dashboard.close_settings)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        bottom.addWidget(self.close_button)
+        layout.addLayout(bottom)
+
+
 class SyncDashboard(QDialog):
     def __init__(self, gui):
         QDialog.__init__(self, gui)
@@ -1010,117 +1083,84 @@ class SyncDashboard(QDialog):
         intro.setWordWrap(True)
         root.addWidget(intro)
 
-        # --- Schritt 1: Anmelden -------------------------------------------
-        setup = QGroupBox("1 · Anmelden")
-        setup_form = QFormLayout(setup)
+        # --- Ein Ablauf: anmelden, dann vergleichen ------------------------
         self.partner = QComboBox()
         for pid, partner in sorted(PARTNERS.items()):
             self.partner.addItem("%s – %s" % (pid, partner["name"]), pid)
-        self.hardware = QLineEdit()
-        self.refresh = QLineEdit()
-        self.refresh.setEchoMode(QLineEdit.Password)
+        self.partner.setToolTip(
+            "Ihr Buchhändler bzw. Tolino-Partner. Bestimmt, wohin das "
+            "Plugin sich anmeldet.")
         self.status = QLabel()
-        self.browser = QPushButton("Jetzt bei Tolino anmelden")
-        self.browser.setToolTip(
-            "Öffnet ein Anmeldefenster. Dort im Web Reader einloggen und "
-            "die Bücherliste öffnen – den Zugang holt das Plugin "
-            "automatisch und schließt das Fenster wieder.")
-        self.browser.clicked.connect(self.browser_login)
-        self.scrape_browser = QPushButton("Zugang aus offenem Browser holen")
-        self.scrape_browser.setToolTip(
-            "Holt den Zugang aus einem bereits geöffneten oder neu "
-            "geöffneten Anmeldefenster (benötigt Chrome, Chromium, Brave "
-            "oder Edge).")
-        self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
-        setup_form.addRow("Buchhändler", self.partner)
-        setup_form.addRow("", self.browser)
-        setup_form.addRow("", self.status)
-        root.addWidget(setup)
-
-        # --- Schritt 2: Synchronisieren ------------------------------------
-        action = QGroupBox("2 · Synchronisieren")
-        action_form = QFormLayout(action)
+        self.status.setWordWrap(True)
+        self.primary = QPushButton("Jetzt bei Tolino anmelden")
+        self.primary.setToolTip(
+            "Nicht angemeldet: öffnet das Anmeldefenster (dort im Web "
+            "Reader einloggen und die Bücherliste öffnen). Angemeldet: "
+            "öffnet den Bestandsvergleich. Während eines Laufs: bricht ab.")
+        self.primary.clicked.connect(self.primary_action)
         self.progress_label = QLabel("Bereit")
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
-        self.start = QPushButton("Vergleichen und übernehmen …")
-        self.start.setToolTip(
-            "Öffnet den Bestandsvergleich: pro Buch Hochladen und/oder "
-            "Metadaten auswählen, dann übernehmen. Die automatischen "
-            "Cloud-Aktionen aus den erweiterten Einstellungen laufen mit.")
-        self.start.clicked.connect(self.start_sync)
-        self.cancel = QPushButton("Abbrechen")
-        self.cancel.setEnabled(False)
-        self.cancel.clicked.connect(self.cancel_sync)
-        self.debug = QPushButton("Diagnose")
-        self.debug.setToolTip(
-            "Öffnet den Prüfbericht: Calibre-Datenbank, Formate und "
-            "Titelbilder werden ohne Anmeldung und ohne Tolino-Anfrage "
-            "geprüft. Erst der Knopf im Bericht greift auf das Netz zu.")
-        self.debug.clicked.connect(self.debug_diagnose)
-        action_form.addRow("", self.start)
+        self.progress.setVisible(False)
+        self.progress_label.setVisible(False)
+        self.settings_button = QPushButton("Einstellungen …")
+        self.settings_button.setToolTip(
+            "Übertragung (Formate, Titelbilder, Serien, Löschungen), Konten "
+            "und Diagnose – für den normalen Gebrauch nicht nötig.")
+        self.settings_button.clicked.connect(self.open_settings)
+
+        action_form = QFormLayout()
+        action_form.addRow("Buchhändler", self.partner)
+        action_form.addRow("", self.primary)
+        action_form.addRow("", self.status)
         action_form.addRow("", self.progress_label)
         action_form.addRow("", self.progress)
-        action_form.addRow("", self.cancel)
-        # Feldbefund: Der Knopf wurde seit 0.10.0 gebaut, aber nie in ein
-        # Layout gehängt -- er war dadurch unsichtbar (0.14.0).
-        action_form.addRow("", self.debug)
-        root.addWidget(action)
+        action_form.addRow("", self.settings_button)
+        root.addLayout(action_form)
 
-        # --- Erweiterte Einstellungen (standardmäßig ausgeblendet) ---------
-        self.advanced_toggle = QCheckBox("Erweiterte Einstellungen anzeigen")
-        self.advanced_toggle.setToolTip(
-            "Zugangsdaten, Formate, Vergleichsfelder, automatische "
-            "Cloud-Aktionen und mehrere Konten – für den normalen "
-            "Gebrauch nicht nötig.")
-        self.advanced_toggle.toggled.connect(self._toggle_advanced)
-        root.addWidget(self.advanced_toggle)
+        # --- Alles Seltene hinter EINEM Fenster ----------------------------
+        self.settings_dialog = SettingsDialog(self)
 
-        self.advanced = QGroupBox("Erweiterte Einstellungen")
-        advanced_form = QFormLayout(self.advanced)
+        transfer = self.settings_dialog.transfer_form
         self.formats = QLineEdit()
+        self.formats.setToolTip(
+            "Reihenfolge, in der ein Buch hochgeladen wird (komma-getrennt). "
+            "Standard: EPUB.")
         self.covers = QCheckBox("Titelbild mit hochladen")
         self.covers.setToolTip(
             "Das Titelbild des Buches (Calibre: „Titelbild“) zusätzlich in "
             "die Cloud laden.")
-        self.deletions = QCheckBox("Löschungen aus der Cloud übernehmen")
-        self.sync_collections = QCheckBox("Serien in der Cloud anlegen")
-        self.sync_collections.setToolTip(
-            "Jedes Buch einer Calibre-Serie wird in der Tolino Cloud "
-            "zugeordnet; der Tolino Web Reader zeigt diese Zuordnung als "
-            "„Sammlung“ an. Abschalten, wenn die Cloud unverändert "
-            "bleiben soll.")
-        self.tolino_column = QCheckBox(
-            "Tolino-ID in eigene Spalte schreiben (nur ein Konto)")
-        self.tolino_column.setToolTip(
-            "Schreibt die Tolino-IDs in die Calibre-Spalte #tolino_id. "
-            "Nur sinnvoll bei genau einem Konto – bei mehreren Konten "
-            "merkt sich jedes Konto seine IDs selbst.")
         self.compare_authors = QCheckBox(
             "Autor(en) beim Vergleich berücksichtigen")
         self.compare_title = QCheckBox("Titel beim Vergleich berücksichtigen")
         self.compare_isbn = QCheckBox("ISBN beim Vergleich berücksichtigen")
         for field in (self.compare_authors, self.compare_title, self.compare_isbn):
             field.setChecked(True)
-        advanced_form.addRow("", self.scrape_browser)
-        advanced_form.addRow("Hardware-ID (automatisch erkannt)", self.hardware)
-        advanced_form.addRow("Zugangsschlüssel (Refresh-Token)", self.refresh)
-        advanced_form.addRow("Bevorzugte Formate", self.formats)
-        advanced_form.addRow("", self.covers)
-        advanced_form.addRow("", self.compare_authors)
-        advanced_form.addRow("", self.compare_title)
-        advanced_form.addRow("", self.compare_isbn)
-        automatic_hint = QLabel("Bei jedem Synchronisieren zusätzlich "
-                                "(abwählbar):")
+        self.sync_collections = QCheckBox("Serien in der Cloud anlegen")
+        self.sync_collections.setToolTip(
+            "Jedes Buch einer Calibre-Serie wird in der Tolino Cloud "
+            "zugeordnet; der Web Reader zeigt das als „Sammlung“. "
+            "Standard: aus.")
+        self.deletions = QCheckBox("Löschungen aus der Cloud übernehmen")
+        self.tolino_column = QCheckBox(
+            "Tolino-ID in eigene Spalte schreiben (nur ein Konto)")
+        self.tolino_column.setToolTip(
+            "Schreibt die Tolino-IDs in die Calibre-Spalte #tolino_id. "
+            "Nur sinnvoll bei genau einem Konto – bei mehreren Konten "
+            "merkt sich jedes Konto seine IDs selbst.")
+        automatic_hint = QLabel("Zusätzlich zu Ihrer Auswahl im Vergleich:")
         automatic_hint.setWordWrap(True)
-        advanced_form.addRow("", automatic_hint)
-        advanced_form.addRow("", self.deletions)
-        advanced_form.addRow("", self.sync_collections)
-        advanced_form.addRow("", self.tolino_column)
-        root.addWidget(self.advanced)
+        transfer.addRow("Bevorzugte Formate", self.formats)
+        transfer.addRow("", self.covers)
+        transfer.addRow("", self.compare_authors)
+        transfer.addRow("", self.compare_title)
+        transfer.addRow("", self.compare_isbn)
+        transfer.addRow("", automatic_hint)
+        transfer.addRow("", self.sync_collections)
+        transfer.addRow("", self.deletions)
+        transfer.addRow("", self.tolino_column)
 
-        self.accounts_group = QGroupBox("Konten")
-        account_form = QFormLayout(self.accounts_group)
+        accounts = self.settings_dialog.accounts_form
         self.account_select = QComboBox()
         self.account_new = QPushButton("Neues Konto")
         self.account_remove = QPushButton("Konto löschen")
@@ -1130,12 +1170,30 @@ class SyncDashboard(QDialog):
         self.account_select.currentIndexChanged.connect(self.account_changed)
         self.account_new.clicked.connect(self.new_account)
         self.account_remove.clicked.connect(self.remove_account)
-        account_form.addRow("Aktives Konto", self.account_select)
-        account_form.addRow("", account_buttons)
-        root.addWidget(self.accounts_group)
+        self.hardware = QLineEdit()
+        self.refresh = QLineEdit()
+        self.refresh.setEchoMode(QLineEdit.Password)
+        self.scrape_browser = QPushButton("Zugang aus offenem Browser holen")
+        self.scrape_browser.setToolTip(
+            "Holt den Zugang aus einem bereits geöffneten oder neu "
+            "geöffneten Anmeldefenster (benötigt Chrome, Chromium, Brave "
+            "oder Edge).")
+        self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
+        accounts.addRow("Aktives Konto", self.account_select)
+        accounts.addRow("", account_buttons)
+        accounts.addRow("", self.scrape_browser)
+        accounts.addRow("Hardware-ID (automatisch erkannt)", self.hardware)
+        accounts.addRow("Zugangsschlüssel (Refresh-Token)", self.refresh)
 
-        self.advanced.setVisible(False)
-        self.accounts_group.setVisible(False)
+        # Feldbefund 0.10.0: ein gebauter, aber nie eingehängter Knopf ist
+        # unsichtbar -- der Regressionstest prüft das für die ganze Datei.
+        self.debug = QPushButton("Diagnose")
+        self.debug.setToolTip(
+            "Öffnet den Prüfbericht: Calibre-Datenbank, Formate und "
+            "Titelbilder werden ohne Anmeldung und ohne Tolino-Anfrage "
+            "geprüft. Erst der Knopf im Bericht greift auf das Netz zu.")
+        self.debug.clicked.connect(self.debug_diagnose)
+        self.settings_dialog.diagnostics_form.addRow("", self.debug)
 
         # Plain close button instead of QDialogButtonBox: immune to the Qt6
         # "Invalid ButtonRole, button not added" warning seen in the field.
@@ -1143,12 +1201,6 @@ class SyncDashboard(QDialog):
         close.clicked.connect(self.close)
         root.addWidget(close)
         self.load_values()
-
-    def _toggle_advanced(self, visible):
-        """Erweiterte Einstellungen ein-/ausblenden (Standard: aus)."""
-        visible = bool(visible)
-        self.advanced.setVisible(visible)
-        self.accounts_group.setVisible(visible)
 
     def _save_visible_account(self):
         if not getattr(self, "account_name", None):
@@ -1236,15 +1288,49 @@ class SyncDashboard(QDialog):
         self.tolino_column.setChecked(values["use_tolino_column"])
         self.update_status()
 
+    def open_settings(self):
+        """Einstellungen öffnen -- speichert beim Schließen (0.15.2)."""
+        self.settings_dialog.exec()
+
+    def close_settings(self):
+        self._save_visible_account()
+        self.settings_dialog.accept()
+
+    def primary_action(self):
+        """Der EINE Hauptknopf: anmelden, vergleichen oder abbrechen.
+
+        Vorher standen dafür zwei Anmeldeknöpfe und ein gesperrter
+        Start-Knopf nebeneinander (0.15.2).
+        """
+        if self.thread is not None:
+            self.cancel_sync()
+        elif self.refresh.text().strip():
+            self.start_sync()
+        else:
+            self.browser_login()
+
     def update_status(self):
         logged_in = bool(self.refresh.text().strip())
-        self.status.setText(
-            "✓ Angemeldet – Sie können synchronisieren." if logged_in
-            else "● Nicht angemeldet – bitte zuerst oben anmelden.")
-        # Schritt 2 ist ohne Anmeldung nicht möglich; während eines Laufs
-        # bleibt der Knopf gesperrt (start_sync/finish_thread steuern ihn).
-        if self.thread is None:
-            self.start.setEnabled(logged_in)
+        running = self.thread is not None
+        if running:
+            self.status.setText(
+                "Synchronisierung läuft – „Abbrechen“ hält an, was noch "
+                "nicht geschrieben ist.")
+        elif logged_in:
+            self.status.setText(
+                "✓ Angemeldet – „Vergleichen und übernehmen“ ist bereit.")
+        else:
+            self.status.setText(
+                "● Noch nicht angemeldet – der Knopf oben meldet Sie bei "
+                "Ihrem Buchhändler an.")
+        self.progress.setVisible(running)
+        self.progress_label.setVisible(running)
+        if running:
+            self.primary.setText("Abbrechen")
+        else:
+            self.primary.setText("Vergleichen und übernehmen …" if logged_in
+                                 else "Jetzt bei Tolino anmelden")
+        self.primary.setEnabled(True)
 
     def set_refresh_token(self, refresh):
         normalized, _ = normalize_refresh_token(refresh)
@@ -1306,7 +1392,7 @@ class SyncDashboard(QDialog):
                 "Oder den Zugang von Hand eintragen: im Web Reader "
                 "anmelden, F12 → Netzwerk → Aufnahme starten, im "
                 "Netzwerk-Protokoll refresh_token und hardware_id "
-                "kopieren und unter „Erweiterte Einstellungen“ in die "
+                "kopieren und unter „Einstellungen …“ in die "
                 "Felder „Refresh-Token“ und „Hardware-ID“ einfügen.")
         except TolinoAuthError as exc:
             QMessageBox.warning(
@@ -1349,7 +1435,7 @@ class SyncDashboard(QDialog):
         if self.login_thread is not None and self.login_thread.isRunning():
             return  # a sign-in attempt is already running
         partner_id = self.partner.currentData()
-        self.browser.setEnabled(False)
+        self.primary.setEnabled(False)
         self.scrape_browser.setEnabled(False)
         self.status.setText(
             "Browser-Anmeldung läuft: im Anmeldefenster im Web Reader "
@@ -1404,9 +1490,9 @@ class SyncDashboard(QDialog):
         self.login_thread = None
         self.login_worker = None
         try:
-            self.browser.setEnabled(True)
+            self.primary.setEnabled(True)
             self.scrape_browser.setEnabled(True)
-            self.status.setText("Bereit")
+            self.update_status()
         except RuntimeError:
             pass  # dialog already destroyed
 
@@ -1511,6 +1597,7 @@ class SyncDashboard(QDialog):
             selected_uploads = dialog.selected_upload_ids()
             selected_metadata = dialog.selected_metadata_ids()
             selected_read = dialog.selected_read_targets()
+            selected_unread = dialog.selected_read_unmarks()
             uploads, removals, current = unpack_plan_result(plan_sync(
                 metadata, state, settings["preferred_formats"],
                 settings["enable_deletions"],
@@ -1575,7 +1662,7 @@ class SyncDashboard(QDialog):
         self.progress.setValue(0)
         self.thread = QThread(self)
         self.worker = SyncWorker(settings, jobs, removals, meta_updates,
-                                 series_map, selected_read)
+                                 series_map, selected_read, selected_unread)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)
@@ -1583,9 +1670,9 @@ class SyncDashboard(QDialog):
         self.worker.failed.connect(self.sync_failed)
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
-        self.start.setEnabled(False)
-        self.cancel.setEnabled(True)
+        self.progress.setValue(0)
         self.progress_label.setText("Synchronisierung läuft")
+        self.update_status()
         # Ensure settings are up-to-date with the latest refresh token
         settings["refresh_token"] = self.refresh.text().strip()
 
@@ -1598,7 +1685,7 @@ class SyncDashboard(QDialog):
         if self.worker:
             self.worker.cancel()
             self.progress_label.setText("Abbruch angefordert")
-            self.cancel.setEnabled(False)
+            self.primary.setEnabled(False)
 
     def sync_completed(self, state, refresh, updates):
         # CRITICAL: Update UI with the latest refresh token from worker
@@ -1631,8 +1718,6 @@ class SyncDashboard(QDialog):
             self.thread.wait()
         self.thread = None
         self.worker = None
-        self.start.setEnabled(True)
-        self.cancel.setEnabled(False)
         self.progress_label.setText("Bereit")
         for path in self.temp_files:
             try:

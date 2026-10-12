@@ -7,14 +7,10 @@ import traceback
 import unicodedata
 from collections.abc import Iterable
 
-try:
-    from .tolino import sanitize_error
-except ImportError:
-    from tolino import sanitize_error
+from .tolino import sanitize_error
 
 
 TOLINO_COLUMN = "#tolino_id"
-TOLINO_COLUMN_LABEL = "Tolino ID"
 
 
 def metadata_tolino_id(metadata):
@@ -464,11 +460,27 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             "normalized_title": normalize_title(normalized["title"]),
         })
     title_counts = {}
-    for row in remote_rows:
+    # Suchindexe: die Zuordnung suchte früher fuer JEDES Buch die ganze
+    # Cloud-Liste erneut ab -- quadratisch mit der Bibliotheksgroesse.
+    # Die Indexe enthalten dieselben Zeilen in derselben Reihenfolge.
+    by_tolino_id = {}
+    by_uuid = {}
+    by_isbn = {}
+    by_title = {}
+    for index, row in enumerate(remote_rows):
+        if row["tolino_id"]:
+            by_tolino_id.setdefault(row["tolino_id"], []).append(index)
+        row_uuid = str(row.get("uuid") or "")
+        if row_uuid:
+            by_uuid.setdefault(row_uuid, []).append(index)
+        row_isbn = _normalize_isbn(row["isbn"])
+        if row_isbn:
+            by_isbn.setdefault(row_isbn, []).append(index)
         if row["normalized_title"]:
             title_counts[row["normalized_title"]] = (
                 title_counts.get(row["normalized_title"], 0) + 1
             )
+            by_title.setdefault(row["normalized_title"], []).append(index)
     matched = set()
     rows = []
     for book_id, metadata in metadata_by_id.items():
@@ -483,20 +495,16 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                         (metadata_tolino_id(metadata) if use_metadata_ids else "") or "")
         candidates = []
         if stored_id:
-            candidates = [i for i, row in enumerate(remote_rows)
-                          if row["tolino_id"] == stored_id]
+            candidates = list(by_tolino_id.get(stored_id, ()))
         if not candidates and book_uuid:
-            candidates = [i for i, row in enumerate(remote_rows)
-                          if str(row["uuid"]) == book_uuid]
+            candidates = list(by_uuid.get(book_uuid, ()))
         if not candidates and "isbn" in comparison_fields and isbn:
             normalized_isbn = _normalize_isbn(isbn)
-            candidates = [i for i, row in enumerate(remote_rows)
-                          if normalized_isbn and _normalize_isbn(row["isbn"]) == normalized_isbn]
+            candidates = list(by_isbn.get(normalized_isbn, ())) if normalized_isbn else []
         title_key = normalize_title(title)
         matched_by_title = not candidates and bool(title_key)
         if matched_by_title:
-            candidates = [i for i, row in enumerate(remote_rows)
-                          if row["normalized_title"] == title_key]
+            candidates = list(by_title.get(title_key, ()))
         remote_index = next((i for i in candidates if i not in matched), None)
         match_reason = ""
         selected_format = next(
@@ -557,16 +565,19 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                                              file_changed),
         })
     for i, row in enumerate(remote_rows):
-        if i not in matched:
-            if not row["title"]:
-                row = dict(row, status="not_matchable",
-                           explanation=(
-                               "Tolino-Datensatz ohne Titel – nicht zuordenbar."
-                           ))
-            elif title_counts.get(row["normalized_title"], 0) > 1:
-                row = dict(row, status="duplicate_tolino",
-                           explanation="Titel mehrfach in der Cloud – nicht automatisch hochladen.")
-            rows.append(row)
+        if i in matched:
+            continue
+        if not row["title"]:
+            entry = dict(row, status="not_matchable",
+                         explanation=(
+                             "Tolino-Datensatz ohne Titel – nicht zuordenbar."
+                         ))
+        elif title_counts.get(row["normalized_title"], 0) > 1:
+            entry = dict(row, status="duplicate_tolino",
+                         explanation="Titel mehrfach in der Cloud – nicht automatisch hochladen.")
+        else:
+            entry = row
+        rows.append(entry)
     return rows
 
 

@@ -14,18 +14,43 @@ except ImportError:
 
 
 PARTNER_SCHEMA_VERSION = 2
+SETTINGS_SCHEMA_VERSION = 2
+
+# Was dieser Plugin bis 0.15.1 von selbst eingestellt hat. Wer diese Werte
+# nie angefasst hat, bekommt beim ersten Start in 0.15.2 die neuen Standards
+# (nur EPUB, Serien aus) -- genau einmal. Danach gilt jede Auswahl als
+# gewollt, auch wenn sie dem alten Standard entspricht.
+OLD_DEFAULTS = {
+    "preferred_formats": ["EPUB", "PDF"],
+    "sync_collections": True,
+}
 
 
 def _force_legacy_partner_id(value):
     """Unconditionally map a historic partner ID (lazy import)."""
-    try:
-        from .tolino import force_legacy_partner_id
-    except ImportError:
-        try:
-            from tolino import force_legacy_partner_id
-        except ImportError:
-            return value
+    from .tolino import force_legacy_partner_id
     return force_legacy_partner_id(value)
+
+
+def _migrate_settings_defaults():
+    """Neue Standards auch in einer bestehenden Installation ankommen lassen.
+
+    Eine reine Erstinstallation bekommt sie schon aus DEFAULTS. Bestehende
+    Installationen haben die alten Standards aber gespeichert; ohne diese
+    einmalige Umschreibung bliebe dort „EPUB, PDF“ und das Serien-Häkchen
+    gesetzt -- und niemand könnte unterscheiden, ob das gewollt war.
+    """
+    try:
+        version = int(PREFERENCES.get("settings_schema_version", 1) or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version >= SETTINGS_SCHEMA_VERSION:
+        return
+    for key, old_default in OLD_DEFAULTS.items():
+        if PREFERENCES.get(key, None) == old_default:
+            PREFERENCES[key] = _copy(DEFAULTS[key])
+    PREFERENCES["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+    PREFERENCES.commit()
 
 
 def _migrate_partner_ids(accounts):
@@ -37,11 +62,13 @@ def _migrate_partner_ids(accounts):
     if version >= PARTNER_SCHEMA_VERSION:
         return accounts
     migrated = []
-    for item in accounts:
-        if isinstance(item, dict):
-            item = dict(item)
-            item["partner_id"] = _force_legacy_partner_id(item.get("partner_id"))
-        migrated.append(item)
+    for account in accounts:
+        if isinstance(account, dict):
+            entry = dict(account)
+            entry["partner_id"] = _force_legacy_partner_id(entry.get("partner_id"))
+            migrated.append(entry)
+        else:
+            migrated.append(account)
     PREFERENCES["partner_schema_version"] = PARTNER_SCHEMA_VERSION
     PREFERENCES["accounts"] = migrated
     if migrated:
@@ -68,12 +95,12 @@ DEFAULT_ACCOUNT = {
 DEFAULTS = {
     **DEFAULT_ACCOUNT,
     "partner_schema_version": PARTNER_SCHEMA_VERSION,
-    "preferred_formats": ["EPUB", "PDF"],
+    "settings_schema_version": SETTINGS_SCHEMA_VERSION,
+    "preferred_formats": ["EPUB"],
     "upload_covers": True,
     "enable_deletions": False,
-    "sync_collections": True,
+    "sync_collections": False,
     "use_tolino_column": True,
-    "tolino_column_notice_shown": False,
     "accounts": [],
     "active_account": DEFAULT_ACCOUNT_NAME,
 }
@@ -117,6 +144,7 @@ def _migrate_accounts():
 
 def settings():
     """Return a complete snapshot, migrating old single-account preferences."""
+    _migrate_settings_defaults()
     accounts, active = _migrate_accounts()
     values = {}
     changed = False
@@ -143,9 +171,7 @@ def settings():
         for key, value in current.items():
             PREFERENCES[key] = value
         for key in ("preferred_formats", "upload_covers", "enable_deletions",
-                    "sync_collections",
-                    "use_tolino_column",
-                    "tolino_column_notice_shown"):
+                    "sync_collections", "use_tolino_column"):
             PREFERENCES[key] = values[key]
         PREFERENCES.commit()
     return values
@@ -196,9 +222,7 @@ def save_settings(values):
     """Persist global options and the selected account (legacy-compatible)."""
     current = settings()
     for key in ("preferred_formats", "upload_covers", "enable_deletions",
-                "sync_collections",
-                "use_tolino_column",
-                "tolino_column_notice_shown"):
+                "sync_collections", "use_tolino_column"):
         if key in values:
             PREFERENCES[key] = values[key]
     accounts = values.get("accounts", current["accounts"])
