@@ -22,14 +22,13 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    _diagnostic_formats, metadata_by_id, format_error_details,
                    normalize_title, normalize_inventory_item, custom_column_available,
                    metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN)
-from .tolino import (PARTNERS, TolinoAuthError, TolinoApiError,
+from .tolino import (PARTNERS, TolinoAuthError,
                      callback_redirect_uri,
                      TolinoClient, hardware_id,
                      force_legacy_partner_id, normalize_hardware_id,
                      normalize_refresh_token, resolve_partner_id,
                      sanitize_error,
-                     validate_callback, scrape_browser_tokens, browser_login,
-                     validate_refresh_candidates)
+                     validate_callback, browser_login)
 import calibre_plugin.tolino as tolino_module
 
 
@@ -1165,26 +1164,18 @@ class SyncPlanTests(unittest.TestCase):
                         self.assertNotIn("only registers its Web Reader redirect URI", error_msg)
 
     def test_browser_login_routes_keycloak_partner_to_assisted_login(self):
-        """Orell Füssli (reseller 8) must use the guided Web Reader login."""
+        """Orell Füssli (reseller 8) nutzt den Live-Grab, nie den
+        System-Browser."""
         opened = []
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 1000.0
-            return clock["t"]
-
         with patch("calibre_plugin.tolino.webbrowser.open",
                    side_effect=lambda url: opened.append(url) or True), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   return_value=(None, [], [])), \
-             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            with self.assertRaises(TolinoAuthError):
-                browser_login(4, "test_hardware")
-        self.assertEqual(1, len(opened))
-        self.assertEqual(PARTNERS[4]["reader_url"], opened[0])
-        self.assertNotIn("127.0.0.1", opened[0])
-        self.assertNotIn("redirect_uri", opened[0])
+             patch("calibre_plugin.tolino.grab_live_refresh",
+                   return_value=("rotated", "hw-live")) as grab:
+            self.assertEqual(("rotated", "hw-live"),
+                             browser_login(4, "test_hardware"))
+        grab.assert_called_once()
+        self.assertEqual([], opened)
+
 
     def test_browser_login_keeps_localhost_callback_without_shared_reader(self):
         """Nur Shops OHNE den gemeinsamen Web Reader behalten den
@@ -1326,344 +1317,11 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(("rotated-live", "cfg-hw"), result)
         closer.assert_called_once_with()
 
-    def test_keycloak_assisted_login_validates_each_new_candidate_once(self):
-        """Every newly harvested candidate is validated exactly once."""
-        from .tolino import _keycloak_assisted_login
-
-        validations = []
-
-        def fake_validate(partner_id, hw, candidate):
-            validations.append(candidate)
-            if candidate == "fresh-1":
-                return ("ok", "rotated-fresh", "hw1")
-            return ("spent", None, None)
-
-        polls = {"n": 0}
-
-        def fake_scrape(diagnose=False, all_candidates=False):
-            polls["n"] += 1
-            if polls["n"] == 1:
-                return (["spent-1"], ["hw1"], ["note"])
-            if polls["n"] == 2:
-                return (["spent-1", "spent-2"], ["hw1"], ["note"])
-            # The reader's rotation wrote a fresh token.
-            return (["spent-1", "spent-2", "fresh-1"], ["hw1"], ["note"])
-
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 5.0
-            return clock["t"]
-
-        with patch("calibre_plugin.tolino.webbrowser.open",
-                   return_value=True), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   side_effect=fake_scrape), \
-             patch("calibre_plugin.tolino._validate_one",
-                   side_effect=fake_validate), \
-             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
-        self.assertEqual(("rotated-fresh", "hw1"), (refresh, hardware))
-        # Each candidate was tried exactly once, in harvest order; the
-        # fresh one is adopted, no dead token was ever re-tested.
-        self.assertEqual(["spent-1", "spent-2", "fresh-1"], validations)
-
-    def test_keycloak_assisted_login_reports_close_reader_hint(self):
-        """When candidates were harvested but all were rejected, the error
-        must tell the user to CLOSE the Web Reader before retrying: an open
-        reader consumes/rotates the token in the background, which is the
-        most common reason every candidate is already spent."""
-        from .tolino import _keycloak_assisted_login
-
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 10.0
-            return clock["t"]
-
-        with patch("calibre_plugin.tolino.webbrowser.open", return_value=True), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   return_value=(["cand1"], ["hw1"], ["note"])), \
-             patch("calibre_plugin.tolino._validate_one",
-                   return_value=("spent", None, None)), \
-             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                _keycloak_assisted_login(4, "test_hardware")
-        message = str(ctx.exception)
-        self.assertIn("SCHLIESSEN", message)
-        self.assertIn("1 gefundene(n)", message)
-
-    def test_keycloak_assisted_login_keeps_polling_after_exhausted(self):
-        """A run that exhausts all candidates must not end immediately."""
-        from .tolino import _keycloak_assisted_login
-
-        polls = {"n": 0}
-        validations = []
-
-        def fake_scrape(diagnose=False, all_candidates=False):
-            polls["n"] += 1
-            if polls["n"] <= 10:
-                return (["dead-1", "dead-2"], ["hw1"], ["note"])
-            # The user closed the reader tab: the fresh token lands late.
-            return (["dead-1", "dead-2", "late-fresh"], ["hw1"], ["note"])
-
-        def fake_validate(partner_id, hw, candidate):
-            validations.append(candidate)
-            if candidate == "late-fresh":
-                return ("ok", "rotated-late", "hw1")
-            return ("spent", None, None)
-
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 5.0
-            return clock["t"]
-
-        with patch("calibre_plugin.tolino.webbrowser.open",
-                   return_value=True), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   side_effect=fake_scrape), \
-             patch("calibre_plugin.tolino._validate_one",
-                   side_effect=fake_validate), \
-             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
-        self.assertEqual(("rotated-late", "hw1"), (refresh, hardware))
-        # The dead pair was validated once and then never again.
-        self.assertEqual(["dead-1", "dead-2", "late-fresh"], validations)
-
-    def test_keycloak_assisted_login_retries_unclear_candidates(self):
-        """Unclear verdicts are retried after a cooldown, not declared dead."""
-        from .tolino import _keycloak_assisted_login
-
-        attempts = {"tok": 0}
-        attempts_dead = []
-
-        def fake_validate(partner_id, hw, candidate):
-            if candidate == "tok":
-                attempts["tok"] += 1
-                if attempts["tok"] >= 3:
-                    return ("ok", "rotated", "hw1")
-                return ("unclear", None, None)
-            attempts_dead.append(candidate)
-            return ("spent", None, None)
-
-        polls = {"n": 0}
-
-        def fake_scrape(diagnose=False, all_candidates=False):
-            polls["n"] += 1
-            return (["tok", "dead"], ["hw1"], ["note"])
-
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 30.0
-            return clock["t"]
-
-        with patch("calibre_plugin.tolino.webbrowser.open",
-                   return_value=True), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   side_effect=fake_scrape), \
-             patch("calibre_plugin.tolino._validate_one",
-                   side_effect=fake_validate), \
-             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
-        self.assertEqual(("rotated", "hw1"), (refresh, hardware))
-        # Two unclear rounds plus the successful third attempt; the dead
-        # candidate was spent from round one, so it is never retried.
-        self.assertEqual(3, attempts["tok"])
-        self.assertEqual(["dead"], attempts_dead)
-
-    def test_validate_one_network_failure_is_unclear_not_spent(self):
-        """A transport failure wrapped by _login must NOT burn a candidate."""
-        from .tolino import _validate_one
-
-        def wrapped_network_error(self):
-            raise TolinoAuthError(
-                "Tolino authentication failed: <urlopen error [Errno -3] "
-                "Temporary failure in name resolution>")
-
-        def bot_protection_page(self):
-            raise TolinoAuthError(
-                "Tolino authentication failed: Zugriff geblockt")
-
-        def session_not_active(self):
-            raise TolinoAuthError(
-                'Tolino HTTP 400: {"error": "invalid_grant", '
-                '"error_description": "Token is not active"}')
-
-        cases = [
-            (wrapped_network_error, "unclear"),
-            (bot_protection_page, "unclear"),
-            (session_not_active, "spent"),
-        ]
-        for login_impl, expected in cases:
-            with patch.object(tolino_module.TolinoClient, "_login",
-                              login_impl):
-                verdict, rotated, _hw = _validate_one(4, "hw-x", "tok")
-            self.assertEqual(expected, verdict)
-
-    def test_keycloak_assisted_login_one_post_per_candidate(self):
-        """Each candidate gets exactly ONE token-endpoint attempt."""
-        from .tolino import _keycloak_assisted_login
-
-        validations = []
-
-        def fake_validate(partner_id, hw, candidate):
-            validations.append((candidate, hw))
-            if candidate == "fresh-1":
-                return ("ok", "rotated-fresh", "hw1")
-            return ("spent", None, None)
-
-        polls = {"n": 0}
-
-        def fake_scrape(diagnose=False, all_candidates=False):
-            polls["n"] += 1
-            if polls["n"] == 1:
-                return (["spent-1", "spent-2"], ["hw1", "hw2"], ["note"])
-            return (["spent-1", "spent-2", "fresh-1"], ["hw1", "hw2"],
-                    ["note"])
-
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 5.0
-            return clock["t"]
-
-        with patch("calibre_plugin.tolino.webbrowser.open",
-                   return_value=True), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   side_effect=fake_scrape), \
-             patch("calibre_plugin.tolino._validate_one",
-                   side_effect=fake_validate), \
-             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            refresh, hardware = _keycloak_assisted_login(4, "test_hardware")
-        self.assertEqual(("rotated-fresh", "hw1"), (refresh, hardware))
-        # Every candidate validated exactly once -- not once per hardware ID.
-        self.assertEqual(
-            [("spent-1", "test_hardware"), ("spent-2", "test_hardware"),
-             ("fresh-1", "test_hardware")],
-            validations)
-
-    def test_keycloak_assisted_login_prefers_newest_token_per_session(self):
-        """Only the freshest sibling of one Keycloak session is validated."""
-        from .tolino import _keycloak_assisted_login, _select_candidate_round
-
-        import base64 as b64
-
-        def jwt(payload):
-            head = b64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
-            body = b64.urlsafe_b64encode(json.dumps(payload).encode())
-            return "%s.%s.sig" % (head.decode().rstrip("="),
-                                  body.decode().rstrip("="))
-
-        old_sibling = jwt({"iat": 100, "sid": "sess-A", "typ": "Refresh"})
-        new_sibling = jwt({"iat": 900, "sid": "sess-A", "typ": "Refresh"})
-        other_session_newest = jwt({"iat": 500, "sid": "sess-B",
-                                    "typ": "Refresh"})
-        older_b = jwt({"iat": 400, "sid": "sess-B", "typ": "Refresh"})
-        no_sid = jwt({"iat": 950, "typ": "Refresh"})
-
-        # Pure selector behaviour: freshest per session, order preserved.
-        picked = _select_candidate_round(
-            [old_sibling, new_sibling, older_b, other_session_newest, no_sid],
-            set())
-        self.assertEqual([new_sibling, other_session_newest, no_sid], picked)
-
-        # A session with a spent sibling is skipped entirely.
-        picked = _select_candidate_round(
-            [new_sibling, other_session_newest], {old_sibling})
-        self.assertEqual([other_session_newest], picked)
-
-        validations = []
-
-        def fake_validate(partner_id, hw, candidate):
-            validations.append(candidate)
-            return ("spent", None, None)
-
-        polls = {"n": 0}
-
-        def fake_scrape(diagnose=False, all_candidates=False):
-            polls["n"] += 1
-            return ([old_sibling, new_sibling, older_b,
-                     other_session_newest, no_sid], ["hw1"], ["note"])
-
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 5.0
-            return clock["t"]
-
-        with patch("calibre_plugin.tolino.webbrowser.open",
-                   return_value=True), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   side_effect=fake_scrape), \
-             patch("calibre_plugin.tolino._validate_one",
-                   side_effect=fake_validate), \
-             patch("calibre_plugin.tolino.time.time", side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            with self.assertRaises(TolinoAuthError):
-                _keycloak_assisted_login(4, "test_hardware")
-        # Exactly one endpoint attempt per session (the newest sibling of
-        # sess-A and sess-B each) plus the sid-less token; the OLDER
-        # siblings old_sibling and older_b were never replayed, and the
-        # dead sessions were not retried in later rounds.
-        self.assertEqual([new_sibling, other_session_newest, no_sid],
-                         validations)
-
-    def test_validate_one_classifies_spent_vs_unclear(self):
-        """Only a definitive Keycloak rejection counts as spent."""
-        from .tolino import _validate_one
-
-        def ok_login(self):
-            self.refresh = self.refresh + "-rotated"
-
-        def invalid_grant(self):
-            raise TolinoApiError(
-                'Tolino HTTP 400: {"error": "invalid_grant", '
-                '"error_description": "Token is not active"}')
-
-        def network_down(self):
-            raise TolinoApiError("Tolino request failed: connection reset")
-
-        cases = [
-            (invalid_grant, "spent"),
-            (network_down, "unclear"),
-            (ok_login, "ok"),
-        ]
-        for login_impl, expected in cases:
-            with patch.object(tolino_module.TolinoClient, "_login",
-                              login_impl):
-                verdict, rotated, _hw = _validate_one(4, "hw-x", "tok")
-            self.assertEqual(expected, verdict)
-            if expected == "ok":
-                self.assertEqual("tok-rotated", rotated)
-
-    def test_validate_refresh_candidates_retries_unclear_calls(self):
-        """The list wrapper skips unclear candidates without consuming."""
-        from .tolino import _validate_one
-        attempts = []
-
-        def flaky_login(self):
-            attempts.append(self.refresh)
-            if self.refresh == "flaky":
-                raise TolinoApiError("Tolino request failed: timeout")
-            raise TolinoAuthError("invalid_grant: nope")
-
-        with patch.object(tolino_module.TolinoClient, "_login", flaky_login):
-            self.assertIsNone(validate_refresh_candidates(
-                4, "hw-x", ["flaky", "dead"]))
-        self.assertEqual(["flaky", "dead"], attempts)
 
     def test_jwt_helpers_parse_iat_and_age(self):
-        """JWT payload parsing extracts iat; age text reflects freshness."""
+        """JWT payload parsing extracts iat and shape."""
         import base64 as b64
-        from .tolino import (_refresh_token_iat,
-                             _candidate_age_text, _jwt_shaped)
+        from .tolino import _refresh_token_iat, _jwt_shaped
 
         def make_jwt(payload):
             head = b64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
@@ -1673,68 +1331,11 @@ class SyncPlanTests(unittest.TestCase):
 
         now = time.time()
         fresh = make_jwt({"iat": now - 30, "typ": "Refresh"})
-        old = make_jwt({"iat": now - 3 * 3600, "typ": "Refresh"})
         self.assertEqual(now - 30, _refresh_token_iat(fresh))
         self.assertIsNone(_refresh_token_iat("plain-not-a-jwt"))
         self.assertTrue(_jwt_shaped(fresh))
         self.assertFalse(_jwt_shaped("short.not.jwt"))
-        self.assertIn("gerade geschrieben", _candidate_age_text(fresh, now))
-        self.assertIn("3 h", _candidate_age_text(old, now))
 
-    def test_sort_candidates_orders_jwt_tokens_by_issue_time(self):
-        """Tokens with a JWT iat sort newest-first, ahead of opaque ones."""
-        import base64 as b64
-        from .tolino import _sort_candidates_by_recency, _RECENCY_BUCKETS
-
-        def make_jwt(iat):
-            body = b64.urlsafe_b64encode(json.dumps({"iat": iat}).encode())
-            return "h.%s.s" % body.decode().rstrip("=")
-
-        now = time.time()
-        old_jwt = make_jwt(now - 7200)
-        fresh_jwt = make_jwt(now - 60)
-        opaque = "o" * 120
-        try:
-            _RECENCY_BUCKETS.clear()
-            _RECENCY_BUCKETS[opaque] = 0  # freshest storage tier
-            ordered = _sort_candidates_by_recency([old_jwt, opaque, fresh_jwt])
-            self.assertEqual([fresh_jwt, old_jwt, opaque], ordered)
-        finally:
-            _RECENCY_BUCKETS.clear()
-
-    def test_extract_all_tokens_sweeps_opaque_oidc_keys(self):
-        """The Keycloak reader's oidc.user blob must yield its token."""
-        import base64 as b64
-        from .tolino import _extract_all_tokens_from_storage
-
-        body = b64.urlsafe_b64encode(json.dumps({
-            "iat": time.time() - 30, "typ": "Refresh"}).encode())
-        fresh_jwt = "eyJhbGciOiJIUzUxMiJ9.%s.sigpart9sigpart9" % (
-            body.decode().rstrip("="))
-
-        storage = {
-            "webreader.mytolino.com/refresh_token": "spent-old",
-            "webreader.mytolino.com/oidc.user:https://issuer:webreader":
-                json.dumps({"refresh_token": fresh_jwt,
-                            "hardware_id": "hw-oidc"}),
-        }
-        refreshes, hardwares = _extract_all_tokens_from_storage(storage)
-        self.assertIn("spent-old", refreshes)
-        self.assertIn(fresh_jwt, refreshes)
-        self.assertIn("hw-oidc", hardwares)
-
-    def test_extract_all_tokens_does_not_sweep_unrelated_values(self):
-        """Swept non-credential values must never become candidates."""
-        from .tolino import _extract_all_tokens_from_storage
-
-        storage = {
-            "webreader.mytolino.com/settings":
-                '{"font": "serif", "theme": "dark"}',
-            "webreader.mytolino.com/lastPage": "42",
-            "webreader.mytolino.com/refresh_token": "spent-old",
-        }
-        refreshes, _hardwares = _extract_all_tokens_from_storage(storage)
-        self.assertEqual(["spent-old"], refreshes)
 
     def test_keepalive_refresh_rotates_and_persists(self):
         """Keep-alive must silently rotate the stored token and persist it."""
@@ -1772,536 +1373,6 @@ class SyncPlanTests(unittest.TestCase):
                 lambda: {"refresh_token": "tok"}, None)
         self.assertIsNone(result)
         client_mock.assert_not_called()
-
-    def test_keycloak_assisted_login_opens_web_reader_not_authorize_url(self):
-        """Keycloak partners must open the Web Reader page itself."""
-        from .tolino import _keycloak_assisted_login
-
-        clock = {"t": 1000.0}
-
-        def fake_time():
-            clock["t"] += 1000.0
-            return clock["t"]
-
-        with patch("calibre_plugin.tolino.webbrowser.open",
-                   return_value=True) as open_mock, \
-             patch("calibre_plugin.tolino.time.time",
-                   side_effect=fake_time), \
-             patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-            with self.assertRaises(TolinoAuthError):
-                _keycloak_assisted_login(4, "test_hardware")
-        opened = open_mock.call_args[0][0]
-        self.assertEqual(PARTNERS[4]["reader_url"], opened)
-        self.assertNotIn("redirect_uri", opened)
-        self.assertNotIn("response_type", opened)
-
-    def test_scrape_browser_tokens_returns_none_when_not_found(self):
-        with patch("calibre_plugin.tolino._find_browser_storage_paths",
-                   return_value=[]):
-            refresh, hardware = scrape_browser_tokens()
-        self.assertIsNone(refresh)
-        self.assertIsNone(hardware)
-
-    def test_scrape_browser_tokens_diagnose_lists_scanned_locations(self):
-        with patch("calibre_plugin.tolino._find_browser_storage_paths",
-                   return_value=["/nonexistent/path"]):
-            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
-        self.assertIsNone(refresh)
-        self.assertIsNone(hardware)
-        self.assertTrue(notes)
-
-    def test_walk_discovery_finds_chromium_profile_and_reports_diagnosis(self):
-        from .tolino import _collect_storage_under
-        import struct as _struct
-
-        def varint(value):
-            out = bytearray()
-            while True:
-                byte = value & 0x7F
-                value >>= 7
-                if value:
-                    out.append(byte | 0x80)
-                else:
-                    out.append(byte)
-                    return bytes(out)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            profile = os.path.join(tmp, "Default")
-            db_dir = os.path.join(profile, "Local Storage", "leveldb")
-            os.makedirs(db_dir)
-            key = b"_https://webreader.mytolino.com\x00\x01refresh_token"
-            value = b"\x01tok-walk"
-            payload = (_struct.pack("<QI", 1, 1) + b"\x01"
-                       + varint(len(key)) + key + varint(len(value)) + value)
-            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
-                fh.write(_struct.pack("<IHB", 0, len(payload), 1) + payload)
-
-            notes = []
-            found = _collect_storage_under(tmp, notes)
-            self.assertTrue(any("refresh" in k for k in found), found)
-            self.assertTrue(any("tok-walk" == v for v in found.values()), found)
-            self.assertTrue(any("Chromium-Storage" in n for n in notes), notes)
-
-            # Full scrape path returns the token pair
-            refresh, hardware = scrape_browser_tokens()
-        self.assertIsNone(refresh)  # real machine: no real browser with token
-
-    def test_diagnose_reports_found_tolino_keys_when_token_shape_missing(self):
-        with patch("calibre_plugin.tolino._find_browser_storage_paths",
-                   return_value=["/fake/profile"]), \
-                patch("calibre_plugin.tolino.os.path.isdir", return_value=True), \
-                patch("calibre_plugin.tolino._collect_storage_under",
-                      return_value={
-                          "webreader.mytolino.com/some_flag": "1",
-                          "other.example.com/refresh_token": "hidden",
-                      }):
-            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
-        self.assertIsNone(refresh)
-        joined = "\n".join(notes)
-        self.assertIn("webreader.mytolino.com/some_flag", joined)
-        self.assertIn("geschwärzt", joined)
-        self.assertNotIn("hidden", joined)
-
-    def test_diagnose_hints_reader_when_no_tolino_keys(self):
-        with patch("calibre_plugin.tolino._find_browser_storage_paths",
-                   return_value=["/fake/profile"]), \
-                patch("calibre_plugin.tolino.os.path.isdir", return_value=True), \
-                patch("calibre_plugin.tolino._collect_storage_under",
-                      return_value={"other.example.com/x": "1"}):
-            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
-        self.assertIsNone(refresh)
-        self.assertTrue(any("Web Reader" in n for n in notes), notes)
-
-    def test_diagnose_lists_checked_paths_when_nothing_found(self):
-        missing = tempfile.mkdtemp()  # exists but empty -> no storage notes
-        self.addCleanup(__import__("shutil").rmtree, missing, True)
-        with patch("calibre_plugin.tolino._find_browser_storage_paths",
-                   return_value=[missing, "/definitely/missing/path"]):
-            refresh, hardware, notes = scrape_browser_tokens(diagnose=True)
-        self.assertIsNone(refresh)
-        self.assertIsNone(hardware)
-        joined = "\n".join(notes)
-        self.assertIn(missing, joined)
-        self.assertIn("/definitely/missing/path", joined)
-        self.assertIn("fehlt", joined)
-
-    def test_extract_tokens_from_storage_reads_leveldb_records(self):
-        from .tolino import _extract_tokens_from_storage
-        storage = {
-            "webreader.mytolino.com/refresh_token": "tok-abc",
-            "webreader.mytolino.com/hardware_id": "hw-77",
-            "unrelated.example.com/other": "nope",
-        }
-        self.assertEqual(
-            ("tok-abc", "hw-77"),
-            _extract_tokens_from_storage(storage),
-        )
-
-    def test_leveldb_log_parser_extracts_origin_keyed_records(self):
-        from .tolino import (_leveldb_records_from_log, _scan_chromium_leveldb,
-                             _TOLINO_ORIGIN_MARKER)
-        import struct as _struct
-
-        def varint(value):
-            out = bytearray()
-            while True:
-                byte = value & 0x7F
-                value >>= 7
-                if value:
-                    out.append(byte | 0x80)
-                else:
-                    out.append(byte)
-                    return bytes(out)
-
-        def writebatch(key, value):
-            payload = (_struct.pack("<QI", 1, 1)  # sequence + count
-                       + b"\x01" + varint(len(key)) + key
-                       + varint(len(value)) + value)
-            # FULL record: crc(4) + length(2) + type(1) + payload
-            return _struct.pack("<IHB", 0, len(payload), 1) + payload
-
-        key = b"_https://webreader.mytolino.com\x00\x01refresh_token"
-        value = b"\x01tok-from-log"
-        blob = writebatch(key, value)
-        pairs = list(_leveldb_records_from_log(blob))
-        self.assertEqual([(key, value)], pairs)
-
-        # The directory scanner reads .log files and returns origin-keyed data
-        with tempfile.TemporaryDirectory() as tmp:
-            db_dir = os.path.join(tmp, "leveldb")
-            os.makedirs(db_dir)
-            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
-                fh.write(blob)
-            found = _scan_chromium_leveldb(db_dir)
-        self.assertTrue(any("refresh" in key for key in found), found)
-        self.assertTrue(any("tok-from-log" == value for value in found.values()), found)
-        self.assertIn(_TOLINO_ORIGIN_MARKER, blob)
-
-    def test_firefox_lsng_reader_decodes_blob_values(self):
-        import sqlite3
-        from .tolino import _read_firefox_storage
-        with tempfile.TemporaryDirectory() as tmp:
-            # Modern LSNG per-origin database: storage/default/<origin>/ls/
-            origin_dir = os.path.join(tmp, "storage", "default",
-                                      "https+++webreader.mytolino.com", "ls")
-            os.makedirs(origin_dir)
-            db_path = os.path.join(origin_dir, "data.sqlite")
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE data (key TEXT PRIMARY KEY, "
-                         "utf16_length INTEGER, conversion_type INTEGER, "
-                         "compression_type INTEGER, last_access_time INTEGER, "
-                         "value BLOB)")
-            # conversion_type 0 => raw UTF-16LE units (Firefox's NONE mode)
-            conn.execute(
-                "INSERT INTO data (key, conversion_type, value) "
-                "VALUES (?, 0, ?)",
-                ("refresh_token", "tok-ff-utf16".encode("utf-16-le")))
-            # conversion_type 1 (UTF16_UTF8) => UTF-8 text
-            conn.execute(
-                "INSERT INTO data (key, conversion_type, value) "
-                "VALUES (?, 1, ?)",
-                ("hardware_id", b"hw-ff-utf8"))
-            conn.commit()
-            conn.close()
-            storage = _read_firefox_storage(tmp)
-        self.assertEqual(storage.get(
-            "https+++webreader.mytolino.com/refresh_token"), "tok-ff-utf16")
-        self.assertEqual(storage.get(
-            "https+++webreader.mytolino.com/hardware_id"), "hw-ff-utf8")
-
-    def test_legacy_webappsstore2_columns_are_read(self):
-        import sqlite3
-        from .tolino import _read_firefox_storage
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = os.path.join(tmp, "webappsstore.sqlite")
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE webappsstore2 (originAttributes TEXT, "
-                         "originKey TEXT, scope TEXT, key TEXT, value BLOB)")
-            conn.execute(
-                "INSERT INTO webappsstore2 VALUES (?, ?, ?, ?, ?)",
-                ("", "https://webreader.mytolino.com", "",
-                 "refresh_token", "legacy-tok"))
-            conn.commit()
-            conn.close()
-            storage = _read_firefox_storage(tmp)
-        self.assertEqual(storage.get(
-            "https://webreader.mytolino.com/refresh_token"), "legacy-tok")
-
-    def test_firefox_session_storage_reads_mozlz4_sessionstore(self):
-        import json as json_module
-        import struct
-        from .tolino import _read_firefox_session_storage, _read_mozlz4
-
-        def lz4_block(data):
-            # Final-sequence-only encoder: literals without a trailing match.
-            n = len(data)
-            if n <= 15:
-                return bytes([n << 4]) + data
-            continuation = bytearray()
-            remaining = n - 15
-            while remaining >= 255:
-                continuation.append(255)
-                remaining -= 255
-            continuation.append(remaining)
-            return bytes([0xF0]) + bytes(continuation) + data
-
-        payload = json_module.dumps({
-            "windows": [{"tabs": [{"entries": [{
-                "url": "https://webreader.mytolino.com/library/",
-                "storage": {"session": {
-                    "https://webreader.mytolino.com": {
-                        "t_auth_token": "sess-tok-1"},
-                }},
-            }]}]}],
-        }).encode()
-        with tempfile.TemporaryDirectory() as tmp:
-            backup_dir = os.path.join(tmp, "sessionstore-backups")
-            os.makedirs(backup_dir)
-            path = os.path.join(backup_dir, "recovery.jsonlz4")
-            with open(path, "wb") as handle:
-                handle.write(b"mozLz40\x00"
-                             + struct.pack("<I", len(payload))
-                             + lz4_block(payload))
-            self.assertEqual(_read_mozlz4(path), payload)
-            storage = _read_firefox_session_storage(tmp)
-        self.assertEqual(storage.get(
-            "https://webreader.mytolino.com/t_auth_token"), "sess-tok-1")
-
-    def test_cryptojs_decrypt_reads_reader_user_token(self):
-        from .tolino import cryptojs_decrypt, _extract_tokens_from_storage
-        import base64 as b64
-        import hashlib
-        import struct
-        try:
-            # Independent reference implementation of the CryptoJS blob;
-            # without it there is nothing to cross-check against.
-            from Crypto.Cipher import AES
-        except ImportError:
-            self.skipTest("pycryptodome missing: no reference AES available")
-
-        def encrypt(plain, phrase=""):
-            salt = os.urandom(8)
-            derived = b""
-            prev = b""
-            while len(derived) < 48:
-                prev = hashlib.md5(prev + phrase.encode() + salt).digest()
-                derived += prev
-            key, iv = derived[:32], derived[32:]
-            data = plain.encode()
-            pad = 16 - len(data) % 16
-            data += bytes([pad]) * pad
-            ct = AES.new(key, AES.MODE_CBC, iv).encrypt(data)
-            return b64.b64encode(b"Salted__" + salt + ct).decode()
-
-        # The reader stores {"refresh": AES(refresh_token)} under userToken.
-        encrypted = encrypt("bosh-refresh-inside")
-        import json as json_module
-        usertoken = json_module.dumps({"refresh": encrypted, "expireTime": 1})
-        self.assertEqual(
-            _extract_tokens_from_storage(
-                {"webreader.mytolino.com/userToken": usertoken})[0],
-            "bosh-refresh-inside")
-        # Direct decrypt helper matches.
-        self.assertEqual(cryptojs_decrypt(encrypted), "bosh-refresh-inside")
-        # userInfos: AES(JSON with hardwareId) under userInfos.
-        userinfos = encrypt(json_module.dumps(
-            {"userId": "u", "devKey": "d", "hardwareId": "hw-99"}))
-        self.assertEqual(
-            _extract_tokens_from_storage(
-                {"webreader.mytolino.com/userInfos": userinfos})[1],
-            "hw-99")
-
-    def test_validate_refresh_candidates_walks_candidate_list(self):
-        """First candidate accepted wins; the rotated token is returned."""
-        seen = []
-
-        def fake_login(self):
-            seen.append(self.refresh)
-            if self.refresh in ("spent-old", "spent-newer"):
-                raise TolinoAuthError("invalid_grant: Invalid refresh token")
-            assert self.refresh == "fresh-now", self.refresh
-            self.refresh = "rotated-fresh"
-
-        with patch.object(tolino_module.TolinoClient, "_login", fake_login):
-            result = validate_refresh_candidates(
-                4, "hw-x", ["spent-old", "spent-newer", "fresh-now"])
-        self.assertEqual(("rotated-fresh", "hw-x"), result)
-        self.assertEqual(["spent-old", "spent-newer", "fresh-now"], seen)
-
-    def test_validate_refresh_candidates_rejects_all_spent(self):
-        def fake_login(self):
-            raise TolinoAuthError("invalid_grant: Invalid refresh token")
-
-        with patch.object(tolino_module.TolinoClient, "_login", fake_login):
-            self.assertIsNone(validate_refresh_candidates(
-                4, "hw-x", ["spent-a", "spent-b"]))
-
-    def test_validate_refresh_candidates_skips_blank_and_bad_input(self):
-        with patch.object(tolino_module.TolinoClient, "_login") as fake:
-            fake.side_effect = TolinoAuthError("nope")
-            self.assertIsNone(validate_refresh_candidates(4, "", []))
-            self.assertIsNone(validate_refresh_candidates(4, "", [None, "  "]))
-        fake.assert_not_called()
-
-    def test_extract_all_tokens_returns_every_historical_candidate(self):
-        from .tolino import _extract_all_tokens_from_storage
-
-        storage = {
-            "webreader.mytolino.com/refresh_token": "spent-old",
-            "webreader.mytolino.com/userToken": 
-                '{"refresh": "spent-newer", "expireTime": 1}',
-            "webreader.mytolino.com/hardware_id": "hw-77",
-        }
-        refreshes, hardwares = _extract_all_tokens_from_storage(storage)
-        self.assertEqual(["spent-old", "spent-newer"], refreshes)
-        self.assertEqual(["hw-77"], hardwares)
-
-    def test_scrape_browser_tokens_all_candidates_returns_lists(self):
-        with patch("calibre_plugin.tolino._find_browser_storage_paths",
-                   return_value=["/fake/profile"]), \
-                patch("calibre_plugin.tolino.os.path.isdir", return_value=True), \
-                patch("calibre_plugin.tolino._collect_storage_under",
-                      return_value={
-                          "webreader.mytolino.com/refresh_token": "spent-old",
-                          "webreader.mytolino.com/hardware_id": "hw-77",
-                      }):
-            refreshes, hardwares, notes = scrape_browser_tokens(
-                diagnose=True, all_candidates=True)
-        self.assertEqual(["spent-old"], refreshes)
-        self.assertEqual(["hw-77"], hardwares)
-        self.assertTrue(any("Kandidat" in n for n in notes), notes)
-
-    def test_recency_sorting_puts_freshest_and_uuid_candidates_first(self):
-        from .tolino import (_sort_candidates_by_recency,
-                             _sort_hardware_candidates, _RECENCY_BUCKETS,
-                             _RECENCY_LIVE, _RECENCY_LDB, _RECENCY_LEGACY)
-        try:
-            _RECENCY_BUCKETS.clear()
-            _RECENCY_BUCKETS["legacy-tok"] = _RECENCY_LEGACY
-            _RECENCY_BUCKETS["ldb-tok"] = _RECENCY_LDB
-            _RECENCY_BUCKETS["fresh-log-tok"] = _RECENCY_LIVE
-            ordered = _sort_candidates_by_recency(
-                ["ldb-tok", "legacy-tok", "fresh-log-tok"])
-            self.assertEqual(["fresh-log-tok", "ldb-tok", "legacy-tok"],
-                             ordered)
-            uuid_hw = "da284d4b-6348-43c8-b0ab-17edcddfb25d"
-            ordered_hw = _sort_hardware_candidates(
-                ["plain-hw", uuid_hw, "0123456789abcdef0123456789abcdef"])
-            self.assertEqual(uuid_hw, ordered_hw[0])
-        finally:
-            _RECENCY_BUCKETS.clear()
-
-    def test_scan_chromium_leveldb_live_hint_reads_only_log_files(self):
-        import struct as _struct
-        from .tolino import (_scan_chromium_leveldb, _RECENCY_BUCKETS,
-                             _RECENCY_LIVE, _RECENCY_LDB)
-
-        def varint(value):
-            out = bytearray()
-            while True:
-                byte = value & 0x7F
-                value >>= 7
-                if value:
-                    out.append(byte | 0x80)
-                else:
-                    out.append(byte)
-                    return bytes(out)
-
-        def writebatch(key, value):
-            payload = (_struct.pack("<QI", 1, 1)
-                       + b"\x01" + varint(len(key)) + key
-                       + varint(len(value)) + value)
-            return _struct.pack("<IHB", 0, len(payload), 1) + payload
-
-        key = b"_https://webreader.mytolino.com\x00\x01refresh_token"
-        blob = writebatch(key, b"\x01tok-from-log")
-        with tempfile.TemporaryDirectory() as tmp:
-            db_dir = os.path.join(tmp, "leveldb")
-            os.makedirs(db_dir)
-            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
-                fh.write(blob)
-            with open(os.path.join(db_dir, "000005.ldb"), "wb") as fh:
-                fh.write(b"not-a-real-table-but-big-enough" * 40)
-            try:
-                _RECENCY_BUCKETS.clear()
-                live = _scan_chromium_leveldb(
-                    db_dir, recency_hint=_RECENCY_LIVE)
-                self.assertEqual(
-                    {"webreader.mytolino.com\x00\x01refresh_token":
-                     "tok-from-log"},
-                    live)
-                self.assertEqual(
-                    _RECENCY_LIVE,
-                    _RECENCY_BUCKETS.get("tok-from-log"))
-                _RECENCY_BUCKETS.clear()
-                plain = _scan_chromium_leveldb(db_dir)
-                self.assertEqual(
-                    {"webreader.mytolino.com\x00\x01refresh_token":
-                     "tok-from-log"},
-                    plain)
-                self.assertEqual(
-                    _RECENCY_LDB, _RECENCY_BUCKETS.get("tok-from-log"))
-            finally:
-                _RECENCY_BUCKETS.clear()
-
-    def test_scrape_all_candidates_ranks_fresh_log_token_first(self):
-        """A .log-harvested token outranks the compacted-history token."""
-        import struct as _struct
-        from .tolino import (_CHROMIUM_STORAGE_DIRS, _RECENCY_BUCKETS)
-
-        def varint(value):
-            out = bytearray()
-            while True:
-                byte = value & 0x7F
-                value >>= 7
-                if value:
-                    out.append(byte | 0x80)
-                else:
-                    out.append(byte)
-                    return bytes(out)
-
-        def writebatch(records):
-            payload = _struct.pack("<QI", 1, len(records))
-            for key, value in records:
-                payload += (b"\x01" + varint(len(key)) + key
-                            + varint(len(value)) + value)
-            return _struct.pack("<IHB", 0, len(payload), 1) + payload
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_dir = os.path.join(tmp, "Local Storage", "leveldb")
-            os.makedirs(db_dir)
-            blob = writebatch([
-                (b"_https://webreader.mytolino.com\x00\x01refresh_token",
-                 b"\x01fresh-log-token"),
-                (b"_https://webreader.mytolino.com\x00\x01hardware_id",
-                 b"\x01hw-fresh-log"),
-            ])
-            with open(os.path.join(db_dir, "000003.log"), "wb") as fh:
-                fh.write(blob)
-
-            def fake_collect(path, notes):
-                if path == "/fake/profile-old":
-                    # Simulate compacted .ldb history found first; the real
-                    # live dir is discovered like _collect_storage_under does.
-                    _CHROMIUM_STORAGE_DIRS.append(db_dir)
-                    return {
-                        "webreader.mytolino.com/refresh_token":
-                            "spent-ldb-token",
-                        "webreader.mytolino.com/hardware_id": "hw-spent",
-                    }
-                return {}
-
-            try:
-                with patch("calibre_plugin.tolino._find_browser_storage_paths",
-                           return_value=["/fake/profile-old", db_dir]), \
-                        patch("calibre_plugin.tolino.os.path.isdir",
-                              return_value=True), \
-                        patch("calibre_plugin.tolino._collect_storage_under",
-                              side_effect=fake_collect):
-                    refreshes, hardwares, notes = scrape_browser_tokens(
-                        diagnose=True, all_candidates=True)
-            finally:
-                _RECENCY_BUCKETS.clear()
-                del _CHROMIUM_STORAGE_DIRS[:]
-        self.assertIn("fresh-log-token", refreshes)
-        self.assertIn("spent-ldb-token", refreshes)
-        self.assertEqual("fresh-log-token", refreshes[0])
-        self.assertEqual("hw-fresh-log", hardwares[0])
-        self.assertTrue(any("Kandidat" in n for n in notes), notes)
-
-    def test_firefox_lsng_rows_are_not_overwritten_by_legacy_shadow(self):
-        import sqlite3
-        from .tolino import _read_firefox_storage
-        with tempfile.TemporaryDirectory() as tmp:
-            origin_dir = os.path.join(
-                tmp, "https+++webreader.mytolino.com", "ls")
-            os.makedirs(origin_dir)
-            conn = sqlite3.connect(os.path.join(origin_dir, "data.sqlite"))
-            conn.execute(
-                "CREATE TABLE data (key TEXT PRIMARY KEY, "
-                "utf16_length INTEGER, conversion_type INTEGER, "
-                "compression_type INTEGER, last_access_time INTEGER, "
-                "value BLOB)")
-            conn.execute(
-                "INSERT INTO data (key, conversion_type, value) "
-                "VALUES (?, 1, ?)", ("refresh_token", b"fresh-lsng-token"))
-            conn.commit()
-            conn.close()
-            # Legacy shadow copy holds an OLDER token for the same key.
-            legacy = sqlite3.connect(os.path.join(tmp, "webappsstore.sqlite"))
-            legacy.execute(
-                "CREATE TABLE webappsstore2 (originAttributes TEXT, "
-                "originKey TEXT, scope TEXT, key TEXT, value BLOB)")
-            legacy.execute(
-                "INSERT INTO webappsstore2 VALUES (?, ?, ?, ?, ?)",
-                ("", "https+++webreader.mytolino.com", "",
-                 "refresh_token", "legacy-shadow-token"))
-            legacy.commit()
-            legacy.close()
-            storage = _read_firefox_storage(tmp)
-        self.assertEqual(
-            storage.get("https+++webreader.mytolino.com/refresh_token"),
-            "fresh-lsng-token")
 
 class MetadataUpdatePlanTests(unittest.TestCase):
     """In-place metadata updates instead of full re-uploads (0.9.45)."""
@@ -2587,32 +1658,17 @@ class LiveGrabTests(unittest.TestCase):
         self.assertEqual([fresh], logins)
 
     def test_keycloak_assisted_login_uses_live_grab_first(self):
-        """browser_login(4) geht ueber den Live-Grab und beruehrt weder
-        webbrowser.open noch den Disk-Scrape."""
+        """browser_login(4) geht ueber den Live-Grab und oeffnet nie den
+        System-Browser."""
         from .tolino import _keycloak_assisted_login
         with patch("calibre_plugin.tolino.grab_live_refresh",
                    return_value=("rotated", "hw-live")) as grab, \
              patch("calibre_plugin.tolino.webbrowser.open",
-                   side_effect=AssertionError("webbrowser.open called")), \
-             patch("calibre_plugin.tolino.scrape_browser_tokens",
-                   side_effect=AssertionError("scrape called")):
+                   side_effect=AssertionError("webbrowser.open called")):
             result = _keycloak_assisted_login(4, "test_hardware")
         self.assertEqual(("rotated", "hw-live"), result)
         grab.assert_called_once()
 
-    def test_keycloak_assisted_login_falls_back_without_chromium(self):
-        """Fehlt ein Chromium-Browser, greift der Disk-Scrape-Flow."""
-        from .tolino import _keycloak_assisted_login
-        with patch("calibre_plugin.tolino.grab_live_refresh",
-                   side_effect=TolinoAuthError(
-                       "Kein Chromium-Browser gefunden (Chrome/Chromium/"
-                       "Brave/Edge). Die Browser-Anmeldung ben\u00f6tigt "
-                       "eines davon.")), \
-             patch("calibre_plugin.tolino._disk_assisted_login",
-                   return_value=("disk-rotated", "disk-hw")) as disk:
-            result = _keycloak_assisted_login(4, "test_hardware")
-        self.assertEqual(("disk-rotated", "disk-hw"), result)
-        disk.assert_called_once()
 
     def test_grab_live_refresh_never_retries_a_rejected_candidate(self):
         """Ein am Endpunkt abgelehnter Kandidat wird nie wieder probiert
@@ -3061,17 +2117,16 @@ class LiveGrabTests(unittest.TestCase):
 
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht
-        -- kein stiller Wechsel in den Replay-gefaehrdeten Disk-Pfad."""
+        -- kein stiller Wechsel auf einen anderen Weg."""
         from .tolino import _keycloak_assisted_login
         with patch("calibre_plugin.tolino.grab_live_refresh",
                    side_effect=TolinoAuthError(
                        "Timeout: Im Anmeldefenster wurde keine Web-"
-                       "Reader-Anmeldung erkannt.")), \
-             patch("calibre_plugin.tolino._disk_assisted_login",
-                   side_effect=AssertionError("fallback called")):
+                       "Reader-Anmeldung erkannt.")):
             with self.assertRaises(TolinoAuthError) as ctx:
                 _keycloak_assisted_login(4, "test_hardware")
         self.assertIn("Timeout", str(ctx.exception))
+
 
     def test_collect_grab_waits_while_window_is_on_partner_login_page(self):
         """Feldbefund 0.9.27: Waehrend der Anmeldung verlaesst der Tab
@@ -4749,30 +3804,18 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                              captured.get("client_type"), pid)
             self.assertEqual("5.2.0", captured.get("client_version"), pid)
 
-    def test_browser_login_opens_reader_for_every_shared_shop(self):
-        """Alle Shops mit dem gemeinsamen Reader: der gefuehrte Weg
-        oeffnet den Web Reader selbst, nie einen localhost-Callback."""
+    def test_browser_login_never_falls_back_to_system_browser(self):
+        """Shops auf dem gemeinsamen Reader: fehlt Chromium, wird der
+        Fehler sichtbar -- der System-Browser wird NICHT geoeffnet."""
         for pid in (1, 5, 8):
             opened = []
-            clock = {"t": 1000.0}
-
-            def fake_time():
-                clock["t"] += 1000.0
-                return clock["t"]
-
             with patch("calibre_plugin.tolino.webbrowser.open",
-                       side_effect=lambda url: opened.append(url) or True), \
-                 patch("calibre_plugin.tolino.scrape_browser_tokens",
-                       return_value=(None, [], [])), \
-                 patch("calibre_plugin.tolino.time.time",
-                       side_effect=fake_time), \
-                 patch("calibre_plugin.tolino.time.sleep", lambda _s: None):
-                with self.assertRaises(TolinoAuthError):
+                       side_effect=lambda url: opened.append(url) or True):
+                with self.assertRaises(TolinoAuthError) as ctx:
                     browser_login(pid, "test_hardware")
-            self.assertEqual(1, len(opened), pid)
-            self.assertEqual(PARTNERS[pid]["reader_url"], opened[0])
-            self.assertNotIn("127.0.0.1", opened[0])
-            self.assertNotIn("redirect_uri", opened[0])
+            self.assertIn("Kein Chromium-Browser gefunden",
+                          str(ctx.exception))
+            self.assertEqual([], opened, pid)
 
 
 class AccountStateBindingTests(unittest.TestCase):
@@ -4920,20 +3963,17 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         """Der Öffner-Fehler nennt in der Sandbox den override-Befehl
         und den manuellen Token-Weg statt nur "konnte nicht geöffnet
         werden" -- sonst bleibt der Feldbefund ohne Lösung."""
-        from .tolino import _disk_assisted_login
+        from .tolino import _system_browser_open_error
 
         with patch("calibre_plugin.tolino.in_flatpak_sandbox",
-                   return_value=True), \
-             patch("calibre_plugin.tolino.open_system_browser",
-                   return_value=False):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                _disk_assisted_login(4, "test_hardware")
-        message = str(ctx.exception)
+                   return_value=True):
+            message = _system_browser_open_error()
         self.assertIn("Der System-Browser konnte nicht geöffnet werden.",
                       message)
         self.assertIn("flatpak override", message)
         self.assertIn("org.freedesktop.Flatpak", message)
         self.assertIn("manuell", message)
+
 
     def test_launch_reader_window_names_flatpak_permission(self):
         """Ohne Chromium in der Sandbox nennt der Grabber-Fehler den
@@ -5051,40 +4091,6 @@ class ExtractOpensOwnChromiumWindowTests(unittest.TestCase):
         with patch("calibre_plugin.cdp.pick_chromium",
                    side_effect=OSError("boom")):
             self.assertFalse(chromium_available())
-
-    def test_advice_recommends_own_window_when_chromium_exists(self):
-        from .tolino import spent_token_advice
-
-        with patch("calibre_plugin.tolino.chromium_available",
-                   return_value=True):
-            advice = spent_token_advice()
-        self.assertIn("eigenes Chromium-Fenster", advice)
-        self.assertIn("NUR dieses Fenster", advice)
-        self.assertIn("Firefox", advice)
-        self.assertNotIn("Festplatten-Kopien", advice)
-
-    def test_advice_names_installation_without_chromium(self):
-        from .tolino import spent_token_advice
-
-        with patch("calibre_plugin.tolino.chromium_available",
-                   return_value=False), \
-             patch("calibre_plugin.tolino.in_flatpak_sandbox",
-                   return_value=False):
-            advice = spent_token_advice()
-        self.assertIn("Festplatten-Kopien", advice)
-        self.assertIn("installieren", advice)
-        self.assertNotIn("flatpak override", advice)
-
-    def test_advice_adds_flatpak_permission_without_chromium(self):
-        from .tolino import spent_token_advice
-
-        with patch("calibre_plugin.tolino.chromium_available",
-                   return_value=False), \
-             patch("calibre_plugin.tolino.in_flatpak_sandbox",
-                   return_value=True):
-            advice = spent_token_advice()
-        self.assertIn("flatpak override", advice)
-        self.assertIn("com.calibre_ebook.calibre", advice)
 
 
 class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
@@ -5253,24 +4259,6 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
         self.assertTrue(opened)
         system.assert_called_once_with("https://example.invalid/auth")
 
-    def test_keycloak_surfaces_flatpak_hint_instead_of_system_browser(self):
-        """In der Flatpak-Sandbox fällt der Login NICHT mehr still auf
-        den System-Browser (Firefox) zurück -- der Freigabe-Hint wird
-        als Fehler sichtbar (Feldbefund 0.9.42)."""
-        from .tolino import _keycloak_assisted_login
-
-        with patch("calibre_plugin.tolino.grab_live_refresh",
-                   side_effect=TolinoAuthError(
-                       "Kein Chromium-Browser gefunden (Chrome/Chromium/"
-                       "Brave/Edge). Die Browser-Anmeldung benötigt "
-                       "eines davon.")), \
-             patch("calibre_plugin.tolino.in_flatpak_sandbox",
-                   return_value=True), \
-             patch("calibre_plugin.tolino._disk_assisted_login",
-                   side_effect=AssertionError("fallback called")):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                _keycloak_assisted_login(4, "test_hardware")
-        self.assertIn("Kein Chromium-Browser gefunden", str(ctx.exception))
 
     def test_local_callback_opens_chromium_variant(self):
         """Der localhost-Callback-Weg öffnet den Auth-Link in der
@@ -5305,7 +4293,6 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                       spawned["args"][-1])
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1",
                       spawned["args"][-1])
-
 
 
 class FlatpakHostProbeReportTests(unittest.TestCase):
