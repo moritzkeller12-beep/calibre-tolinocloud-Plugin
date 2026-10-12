@@ -2921,6 +2921,66 @@ class TolinoClientFeatureTests(unittest.TestCase):
              {"name": "collection_finished_readings_name", "category": "system"}],
             sent["tags"])
 
+    def test_read_ids_reads_the_system_tag(self):
+        """Gelesen-Marken des Kontos -- nur die System-Marke zählt, und eine
+        remove-Marke nimmt das Buch wieder heraus (0.15.0)."""
+        patches = [
+            {"op": "add", "path": "/publications/b-1/tags",
+             "value": {"name": "collection_finished_readings_name",
+                       "category": "system"}},
+            {"op": "add", "path": "/publications/b-2/tags",
+             "value": {"name": "Adamsberg", "category": "collection"}},
+            {"op": "add", "path": "/publications/b-3/tags",
+             "value": {"name": "collection_finished_readings_name",
+                       "category": "system"}},
+            {"op": "remove", "path": "/publications/b-3/tags",
+             "value": {"name": "collection_finished_readings_name",
+                       "category": "system"}},
+        ]
+        client, calls = self._patching_client(
+            [{"revision": 5, "patches": patches}])
+        self.assertEqual({"b-1"}, client.read_ids())
+        self.assertEqual(1, len(calls))
+
+    def test_snapshot_serves_collections_and_read_state_once(self):
+        """Sammlungen und Lese-Status liegen in denselben Daten: EIN
+        Lesevorgang reicht (Feldbefund: nicht bei jedem Sync alles neu)."""
+        patches = [
+            {"op": "add", "path": "/publications/b-1/tags",
+             "value": {"name": "Adamsberg", "category": "collection"}},
+            {"op": "add", "path": "/publications/b-1/tags",
+             "value": {"name": "collection_finished_readings_name",
+                       "category": "system"}},
+        ]
+        client, calls = self._patching_client(
+            [{"revision": 5, "patches": patches}])
+        self.assertEqual({("b-1", "Adamsberg")}, client.collection_pairs())
+        self.assertEqual({"b-1"}, client.read_ids())
+        self.assertEqual(1, len(calls))
+
+    def test_snapshot_is_dropped_after_a_write(self):
+        """Nach einem Schreibvorgang wird neu gelesen -- keine veraltete
+        Revision, kein zweiter Schreibversuch auf altem Stand."""
+        client, calls = self._patching_client([
+            {"revision": 5, "patches": []},   # snapshot
+            {"revision": 6},                  # add_to_collection
+            {"revision": 6, "patches": []},   # neuer snapshot
+        ])
+        client.collection_pairs()
+        client.add_to_collection("b-1", "SciFi")
+        client.read_ids()
+        self.assertEqual(3, len(calls))
+        self.assertEqual("PATCH", calls[1]["method"])
+
+    def test_mark_read_many_uses_the_snapshot(self):
+        """Der Bulk-Aufruf liest den Stand einmal und schreibt einmal."""
+        client, calls = self._patching_client([
+            {"revision": 7, "patches": []},
+            {"revision": 8},
+        ])
+        client.mark_read_many(["b-1", "b-2"])
+        self.assertEqual(2, len(calls))
+
     def test_collection_pairs_reads_sync_data_patches(self):
         patches = [
             {"op": "add", "path": "/publications/b-1/tags",
@@ -4168,6 +4228,169 @@ class InventoryDialogBuildTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
 
+class InventoryDialogReadStateTests(unittest.TestCase):
+    """Spalte „Gelesen“ kommt aus der Cloud und lässt sich mehrfach setzen.
+
+    Feldbefund 0.15.0: „Der Knopf Gelesen soll bereits ausgewählt sein, wenn
+    das Buch in der Cloud als gelesen markiert ist“ und „Jetzt muss ich alle
+    meine 500 Bücher einzeln anklicken“.
+    """
+
+    def _ui(self):
+        return ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub=InventoryDialogBuildTests._qt_stub())
+
+    def _rows(self):
+        return [
+            {"title": "Gelesen", "authors": "A", "status": "identical",
+             "book_id": 1, "tolino_id": "t-1", "read_in_cloud": True},
+            {"title": "Ungelesen", "authors": "B", "status": "identical",
+             "book_id": 2, "tolino_id": "t-2"},
+            {"title": "Auch ungelesen", "authors": "C", "status": "changed",
+             "book_id": 3, "tolino_id": "t-3"},
+            {"title": "Nur lokal", "authors": "D",
+             "status": "new_in_calibre", "book_id": 4, "tolino_id": ""},
+        ]
+
+    @staticmethod
+    def _marked_table(marked):
+        class Index:
+            def __init__(self, row):
+                self._row = row
+
+            def row(self):
+                return self._row
+
+        class Model:
+            def selectedRows(self):
+                return [Index(row) for row in marked]
+
+        class Table:
+            def selectionModel(self):
+                return Model()
+
+        return Table()
+
+    @staticmethod
+    def _cells_by_title(dialog):
+        """Zeilen-Widgets, nach Titel -- das Fenster sortiert beim Bau."""
+        cells = {(row, column): widget
+                 for row, column, widget in dialog.table.cell_widgets}
+        return {row["title"]: cells[(index, 2)]
+                for index, row in enumerate(dialog.rows)}
+
+    def _with_message_box(self, ui_module):
+        calls = []
+
+        class MsgBox:
+            @staticmethod
+            def information(*args, **kwargs):
+                calls.append(" ".join(str(a) for a in args))
+
+            @staticmethod
+            def warning(*args, **kwargs):
+                calls.append(" ".join(str(a) for a in args))
+
+        ui_module.QMessageBox = MsgBox
+        return calls
+
+    def test_cloud_read_book_is_prechecked_and_locked(self):
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            read_cell = self._cells_by_title(dialog)
+            # Schon gelesen: angehakt, gesperrt, Hinweis im Tooltip.
+            self.assertTrue(read_cell["Gelesen"].isChecked())
+            self.assertFalse(read_cell["Gelesen"].enabled)
+            self.assertIn("schon als gelesen", read_cell["Gelesen"].tooltip)
+            # Ungelesen: leer, aber anklickbar.
+            self.assertFalse(read_cell["Ungelesen"].isChecked())
+            self.assertTrue(read_cell["Ungelesen"].enabled)
+            # Ohne Cloud-Kopie gibt es keine Lese-Marke.
+            self.assertFalse(read_cell["Nur lokal"].enabled)
+            self.assertIn("in der Cloud liegt", read_cell["Nur lokal"].tooltip)
+            # Nur echte Änderungen gehen an die Cloud.
+            self.assertEqual([], dialog.selected_read_targets())
+            read_cell["Ungelesen"].setChecked(True)
+            read_cell["Auch ungelesen"].setChecked(True)
+            self.assertEqual({"t-2", "t-3"},
+                             set(dialog.selected_read_targets()))
+            dialog._update_summary()
+            self.assertIn("2 als gelesen", dialog.summary.text())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_recommendation_keeps_the_cloud_read_marks(self):
+        """„Empfehlung auswählen“ hakt nie etwas Neues auf gelesen und
+        nimmt die Cloud-Marken nicht weg."""
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            read_cell = self._cells_by_title(dialog)
+            read_cell["Ungelesen"].setChecked(True)
+            dialog._sync_checks_to_rows()
+            dialog.apply_recommended()
+            self.assertTrue(read_cell["Gelesen"].isChecked())
+            self.assertFalse(read_cell["Ungelesen"].isChecked())
+            self.assertEqual([], dialog.selected_read_targets())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_marked_rows_get_the_read_mark_in_one_click(self):
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            dialog.table = self._marked_table(range(len(dialog.rows)))
+            dialog.mark_read_for_marked_rows()
+            # Das gelesene Buch hat schon seine Marke, „Nur lokal“ keine
+            # Cloud-Kopie -- nur die zwei ungelesenen Cloud-Bücher bleiben.
+            self.assertEqual({"t-2", "t-3"},
+                             set(dialog.selected_read_targets()))
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_marked_rows_without_cloud_copy_change_nothing(self):
+        ui_module = self._ui()
+        try:
+            calls = self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            local_index = [index for index, row in enumerate(dialog.rows)
+                           if not row["tolino_id"]]
+            dialog.table = self._marked_table(local_index)
+            dialog.mark_read_for_marked_rows()
+            self.assertEqual([], dialog.selected_read_targets())
+            self.assertTrue(any("Nichts zu tun" in text for text in calls))
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_click_without_marked_rows_explains_the_multi_selection(self):
+        ui_module = self._ui()
+        try:
+            calls = self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            dialog.table = self._marked_table([])
+            dialog.mark_read_for_marked_rows()
+            self.assertTrue(any("Strg" in text for text in calls), calls)
+            self.assertEqual([], dialog.selected_read_targets())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_the_multi_selection_button_sits_next_to_the_helpers(self):
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            self.assertEqual("Gelesen für markierte Zeilen",
+                             dialog.read_selected.text())
+            self.assertIn("Strg", dialog.read_selected.tooltip)
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+
 class CollectionReconcileWorkerTests(unittest.TestCase):
     """Serien → Sammlungen im SyncWorker (0.12.0).
 
@@ -4345,6 +4568,47 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn("diagnose_preparation", diagnose)
         self.assertNotIn("TolinoClient", diagnose)
         self.assertNotIn("login", diagnose)
+
+
+class ReadStateComparisonTests(unittest.TestCase):
+    """Der Bestandsvergleich bekommt die Gelesen-Marken der Cloud und
+    belegt damit die Spalte „Gelesen“ vor (0.15.0)."""
+
+    BOOK = {"uuid": "u1", "title": "Der Fall Collini",
+            "authors": "Ferdinand von Schirach", "isbn": "1",
+            "formats": ["EPUB"], "last_modified": "1",
+            "format_signatures": {"EPUB": "1:1"}}
+
+    def _rows(self, read_ids):
+        from .sync import compare_inventory
+        inventory = [{"deliverableId": "t-1",
+                      "epubMetaData": {"title": "Der Fall Collini",
+                                       "author": [{"name": "F. v. Schirach"}]}},
+                     {"deliverableId": "t-9",
+                      "epubMetaData": {"title": "Die Bucht",
+                                       "author": [{"name": "Unbekannt"}]}}]
+        state = {"u1": {"tolino_id": "t-1"}}
+        return compare_inventory({1: self.BOOK}, state, inventory, ["EPUB"],
+                                 read_ids=read_ids)
+
+    def test_matching_book_carries_the_cloud_read_state(self):
+        rows = self._rows({"t-1"})
+        matched = next(row for row in rows if row["book_id"] == 1)
+        self.assertTrue(matched["read_in_cloud"])
+        self.assertTrue(matched["read"])
+        self.assertEqual("t-1", matched["tolino_id"])
+
+    def test_cloud_only_book_carries_the_read_state_too(self):
+        rows = self._rows({"t-9"})
+        only_cloud = next(row for row in rows if row["tolino_id"] == "t-9")
+        self.assertEqual("only_tolino", only_cloud["status"])
+        self.assertTrue(only_cloud["read_in_cloud"])
+        self.assertTrue(only_cloud["read"])
+
+    def test_without_read_ids_nothing_is_prechecked(self):
+        for row in self._rows(()):
+            self.assertFalse(row["read_in_cloud"])
+            self.assertFalse(row["read"])
 
 
 class ComparisonSortTests(unittest.TestCase):

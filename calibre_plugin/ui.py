@@ -208,7 +208,10 @@ class InventoryDialog(QDialog):
             row = dict(row)
             if "upload" not in row or "metadata" not in row:
                 row["upload"], row["metadata"] = self.default_actions(row)
-            row.setdefault("read", False)
+            # „Gelesen“ kommt aus der Cloud: was dort schon gelesen ist, ist
+            # angehakt (und gesperrt) -- nichts muss doppelt geschrieben
+            # werden (0.15.0).
+            row.setdefault("read", bool(row.get("read_in_cloud")))
             self.rows.append(row)
         # Ausgewählte Aktionen zuerst, dann Titel/Autor(en).
         self.rows = sort_comparison_rows(self.rows)
@@ -220,9 +223,9 @@ class InventoryDialog(QDialog):
             "Ihre Calibre-Bibliothek im Vergleich zur Tolino Cloud. "
             "Pro Buch auswählen, was passieren soll: <b>Hochladen</b> lädt die "
             "Buchdatei, <b>Metadaten</b> gleicht nur Titel/Autor(en)/ISBN in "
-            "der Cloud ab, <b>Gelesen</b> setzt die Lese-Marke im Tolino-Konto. "
-            "Ohne Auswahl passiert nichts; ein Klick auf einen Spaltenkopf "
-            "sortiert.")
+            "der Cloud ab, <b>Gelesen</b> setzt die Lese-Marke im Tolino-Konto "
+            "(angehakt = dort schon gelesen). Ohne Auswahl passiert nichts; ein "
+            "Klick auf einen Spaltenkopf sortiert.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -244,6 +247,12 @@ class InventoryDialog(QDialog):
         helpers.addWidget(self.recommend)
         helpers.addWidget(self.clear_selection)
         helpers.addStretch(1)
+        self.read_selected = QPushButton("Gelesen für markierte Zeilen")
+        self.read_selected.setToolTip(
+            "Hakt die Spalte „Gelesen“ für alle in der Tabelle markierten "
+            "Zeilen an. Mehrere markieren mit Strg-/Shift-Klick, alle mit "
+            "Strg+A. Geschrieben wird erst mit „Auswahl übernehmen“.")
+        helpers.addWidget(self.read_selected)
         layout.addLayout(helpers)
 
         self.table = QTableWidget(0, len(self.HEADERS))
@@ -346,6 +355,7 @@ class InventoryDialog(QDialog):
         layout.addLayout(buttons)
         self.recommend.clicked.connect(self.apply_recommended)
         self.clear_selection.clicked.connect(self.clear_all_selection)
+        self.read_selected.clicked.connect(self.mark_read_for_marked_rows)
         # Erst jetzt gibt es den Knopf: die Zusammenfassung zeigt so von
         # Anfang an die Zahl der ausgewählten Aktionen darauf.
         self._update_summary()
@@ -397,15 +407,16 @@ class InventoryDialog(QDialog):
     def _set_selection(self, chooser):
         """Auswahl in einem Schritt setzen (Zeilen und Widgets synchron).
 
-        `chooser` liefert (Hochladen, Metadaten); die Lese-Marke wird dabei
-        immer weggenommen -- sie ist nie Teil der Empfehlung.
+        `chooser` liefert (Hochladen, Metadaten). Die Lese-Marke ist nie Teil
+        der Empfehlung: sie fällt auf den Cloud-Stand zurück -- angehakt
+        bleibt, was im Konto schon gelesen ist.
         """
         for row, uploads, metadata, read in zip(self.rows, self.checks,
                                                 self.meta_checks,
                                                 self.read_checks):
             wanted = tuple(chooser(row))
             upload, meta = bool(wanted[0]), bool(wanted[1])
-            mark_read = bool(wanted[2]) if len(wanted) > 2 else False
+            mark_read = bool(row.get("read_in_cloud"))
             row["upload"], row["metadata"], row["read"] = upload, meta, mark_read
             for check, value in ((uploads, upload), (metadata, meta),
                                  (read, mark_read)):
@@ -437,10 +448,55 @@ class InventoryDialog(QDialog):
         ])
 
     def selected_read_targets(self):
-        """Tolino-IDs der Bücher, die als gelesen markiert werden sollen."""
+        """Tolino-IDs, die JETZT als gelesen markiert werden (0.15.0).
+
+        Schon gelesene Bücher fallen heraus -- die Cloud bekommt nur, was
+        sich wirklich ändert.
+        """
         return [str(row["tolino_id"]) for row, check
                 in zip(self.rows, self.read_checks)
-                if check.isChecked() and row.get("tolino_id")]
+                if check.isChecked() and row.get("tolino_id")
+                and not row.get("read_in_cloud")]
+
+    def mark_read_for_marked_rows(self):
+        """Spalte „Gelesen“ für alle in der Tabelle markierten Zeilen setzen.
+
+        Feldbefund 0.15.0: Hunderte Bücher einzeln anhaken ist keine
+        Zumutung -- deshalb Mehrfachauswahl in der Tabelle plus dieser Knopf.
+        """
+        marked = selected_table_rows(self.table)
+        if not marked:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Bitte zuerst Zeilen in der Tabelle markieren "
+                "(mehrere mit Strg- oder Shift-Klick, alle mit Strg+A).")
+            return
+        changed = 0
+        already = 0
+        without_cloud = 0
+        for index in marked:
+            if index >= len(self.rows):
+                continue
+            row = self.rows[index]
+            if not row.get("tolino_id"):
+                without_cloud += 1
+                continue
+            if row.get("read_in_cloud"):
+                already += 1
+                continue
+            row["read"] = True
+            try:
+                self.read_checks[index].setChecked(True)
+            except Exception:
+                pass  # Qt-Stub ohne echtes Signal
+            changed += 1
+        self._update_summary()
+        if not changed:
+            QMessageBox.information(
+                self, "Tolino Cloud Sync",
+                "Nichts zu tun: %d markierte Zeile(n) stehen in der Cloud "
+                "schon auf gelesen, %d liegen nicht in der Cloud."
+                % (already, without_cloud))
 
     def selected_ids(self, rows=None):
         """Rückwärtskompatibel: die zum Hochladen ausgewählten Bücher."""
@@ -497,10 +553,12 @@ class InventoryDialog(QDialog):
                  "Nur in Calibre – es gibt in der Cloud nichts zu "
                  "aktualisieren." if has_book else
                  "Kein Calibre-Buch – nichts zu aktualisieren."),
-                ("read", in_cloud,
+                ("read", in_cloud and not row.get("read_in_cloud"),
                  "Im Tolino-Konto als gelesen markieren – die Buchdatei "
                  "bleibt unverändert.",
-                 "Geht erst, wenn das Buch in der Cloud liegt."),
+                 "In der Cloud schon als gelesen markiert."
+                 if row.get("read_in_cloud")
+                 else "Geht erst, wenn das Buch in der Cloud liegt."),
             )
             for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
                 check = QCheckBox()
@@ -1390,10 +1448,19 @@ class SyncDashboard(QDialog):
                     ("isbn", self.compare_isbn),
                 ) if checkbox.isChecked()
             ]
+            # Lese-Status aus der Cloud holen, damit die Spalte „Gelesen“
+            # vorbelegt ist. Scheitert das (z. B. Netzfehler), läuft der
+            # Vergleich ohne Vorbelegung weiter (0.15.0).
+            inventory = client.inventory()
+            try:
+                read_ids = client.read_ids()
+            except Exception:
+                read_ids = set()
             comparison = compare_inventory(
-                metadata, state, client.inventory(), settings["preferred_formats"],
+                metadata, state, inventory, settings["preferred_formats"],
                 comparison_fields,
                 use_metadata_ids=self.sync_column_enabled,
+                read_ids=read_ids,
             )
             dialog = InventoryDialog(
                 comparison, self,

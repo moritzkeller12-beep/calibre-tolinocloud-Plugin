@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.14.0-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.15.0-blue)](__init__.py)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Calibre-Plugin, das die eigene Bibliothek mit der **Tolino Cloud** abgleicht:
@@ -34,16 +34,20 @@ nicht).
 |---|---|
 | **Hochladen** | Buchdatei in die Cloud hochladen (ersetzt die Kopie dort). |
 | **Metadaten** | Nur Titel/Autor(en)/ISBN in der Cloud abgleichen, kein Upload. |
-| **Gelesen** | Buch im Tolino-Konto als gelesen markieren (nur Cloud, die Buchdatei bleibt unverändert). |
+| **Gelesen** | Buch im Tolino-Konto als gelesen markieren (nur Cloud, die Buchdatei bleibt unverändert). Ist das Buch dort schon gelesen, ist die Spalte angehakt und gesperrt. |
 | **In Calibre** ✓ / **In der Cloud** ✓ | Wo das Buch liegt. |
 
-Ohne Auswahl passiert nichts – auch der **Lese-Status bleibt, wie er ist**, bis
-Sie die Spalte „Gelesen“ anhaken. **„Empfehlung auswählen“** setzt für jedes
-Buch Hochladen und/oder Metadaten (die Lese-Marke nie), **„Auswahl
-übernehmen“** führt genau die ausgewählten Aktionen aus. Sortieren per
-Spaltenkopf; ISBN und Tolino-ID über **„Technische Spalten anzeigen“**,
-Herunterladen und Sammlungen über **„Weitere Aktionen anzeigen“**. Alles Übrige
-liegt unter **„Erweiterte Einstellungen anzeigen“**.
+Ohne Auswahl passiert nichts – der **Lese-Status in der Cloud bleibt, wie er
+ist**, bis Sie die Spalte „Gelesen“ anhaken. **„Empfehlung auswählen“** setzt
+für jedes Buch Hochladen und/oder Metadaten (die Lese-Marke nie), **„Auswahl
+übernehmen“** führt genau die ausgewählten Aktionen aus.
+
+**Viele Bücher auf einmal als gelesen markieren:** in der Tabelle mehrere Zeilen
+markieren (Strg- oder Shift-Klick, alle mit **Strg+A**) und **„Gelesen für
+markierte Zeilen“** drücken – angehakt wird nur, was in der Cloud noch nicht
+gelesen ist. Sortieren per Spaltenkopf; ISBN und Tolino-ID über **„Technische
+Spalten anzeigen“**, Herunterladen und Sammlungen über **„Weitere Aktionen
+anzeigen“**. Alles Übrige liegt unter **„Erweiterte Einstellungen anzeigen“**.
 
 > [!NOTE]
 > Zusätzlich zu den ausgewählten Aktionen werden **Serien** in der Cloud

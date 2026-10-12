@@ -1439,6 +1439,9 @@ class TolinoClient:
         self._in_device_recovery = False
         self._hw_registered_now = False
         self._login_lock = threading.Lock()
+        # Ein Lesevorgang der sync-data reicht, bis etwas geschrieben wird:
+        # Lese-Status und Sammlungen brauchen dieselben Daten (0.15.0).
+        self._sync_cache = None
 
     def auth_diagnostics(self):
         """Return safe authentication context for the debug report."""
@@ -1954,6 +1957,10 @@ class TolinoClient:
     SYNC_DATA_URL = BASE_URL + "/sync-data?paths=publications"
 
     def _sync_patch(self, payload):
+        # Jeder Schreibvorgang macht den Zwischenspeicher ungültig: danach
+        # wird wieder gelesen, damit keine veraltete Revision weitergereicht
+        # wird.
+        self._sync_cache = None
         data = self._request(self.SYNC_DATA_URL, "PATCH", payload,
                              content_type="application/json")
         return data if isinstance(data, dict) else {}
@@ -1971,6 +1978,57 @@ class TolinoClient:
         """Return (revision, patches) describing tags/collections state."""
         data = self._sync_patch({"revision": None, "patches": []})
         return data.get("revision"), data.get("patches") or []
+
+    def sync_snapshot(self):
+        """(revision, patches) aus EINEM Lesevorgang, mehrfach nutzbar.
+
+        Sammlungen und Lese-Status liegen in denselben sync-data-Daten;
+        ohne Zwischenspeicher würde derselbe Stand zweimal geholt. Jeder
+        Schreibvorgang verwirft ihn wieder (siehe `_sync_patch`).
+        """
+        if self._sync_cache is None:
+            data = self._sync_patch({"revision": None, "patches": []})
+            self._sync_cache = (data.get("revision"),
+                                data.get("patches") or [])
+        return self._sync_cache
+
+    @staticmethod
+    def _tag_pairs(patches, category, name=None):
+        """{(Buch-ID, Markenname)} aus einer sync-data-Patchliste.
+
+        `remove`-Patches nehmen das Paar wieder heraus -- der letzte
+        Eintrag einer Buch/Marken-Kombination entscheidet.
+        """
+        pairs = set()
+        for item in patches:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("value")
+            if not isinstance(value, dict) or value.get("category") != category:
+                continue
+            if name is not None and value.get("name") != name:
+                continue
+            parts = str(item.get("path") or "").split("/")
+            if (len(parts) != 4 or parts[1] != "publications"
+                    or parts[3] != "tags" or not parts[2]):
+                continue
+            pair = (str(parts[2]), str(value.get("name") or ""))
+            if str(item.get("op") or "add") == "remove":
+                pairs.discard(pair)
+            else:
+                pairs.add(pair)
+        return pairs
+
+    def read_ids(self):
+        """Bücher, die im Konto als gelesen markiert sind (0.15.0).
+
+        Quelle ist die System-Marke des Web Readers -- dieselbe, die
+        `mark_read_many` setzt. Damit kann der Bestandsvergleich die
+        Spalte „Gelesen“ vorbelegen.
+        """
+        _revision, patches = self.sync_snapshot()
+        return {book_id for book_id, _name
+                in self._tag_pairs(patches, "system", self.READ_TAG)}
 
     READ_TAG = "collection_finished_readings_name"
 
@@ -1999,7 +2057,7 @@ class TolinoClient:
         """
         if revision is not None:
             return revision
-        revision, _patches = self.get_sync_data()
+        revision, _patches = self.sync_snapshot()
         return revision
 
     def add_to_collection(self, book_id, collection_name, revision=None):
@@ -2044,7 +2102,7 @@ class TolinoClient:
         ids = [str(book_id) for book_id in book_ids or [] if str(book_id or "").strip()]
         if not ids:
             raise TolinoApiError("Marking as read requires at least one book id.")
-        revision, patches = self.get_sync_data()
+        revision, patches = self.sync_snapshot()
         updates = []
         for book_id in ids:
             existing = self._find_tag(patches, book_id, self.READ_TAG, "system")
@@ -2067,21 +2125,5 @@ class TolinoClient:
         Reads sync-data once so the series reconcile (0.9.45) only has to
         PATCH genuinely missing assignments.
         """
-        _revision, patches = self.get_sync_data()
-        pairs = set()
-        for item in patches:
-            if not isinstance(item, dict):
-                continue
-            value = item.get("value")
-            if not isinstance(value, dict) or value.get("category") != "collection":
-                continue
-            parts = str(item.get("path") or "").split("/")
-            if (len(parts) != 4 or parts[1] != "publications"
-                    or parts[3] != "tags" or not parts[2]):
-                continue
-            pair = (str(parts[2]), str(value.get("name") or ""))
-            if str(item.get("op") or "add") == "remove":
-                pairs.discard(pair)
-            else:
-                pairs.add(pair)
-        return pairs
+        _revision, patches = self.sync_snapshot()
+        return self._tag_pairs(patches, "collection")

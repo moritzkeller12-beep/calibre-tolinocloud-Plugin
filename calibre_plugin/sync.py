@@ -435,11 +435,17 @@ def _row_explanation(status, match_reason, file_changed):
 
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                       comparison_fields=("authors", "title", "isbn"),
-                      use_metadata_ids=True):
-    """Return deterministic local/remote rows for the pre-sync confirmation view."""
+                      use_metadata_ids=True, read_ids=()):
+    """Return deterministic local/remote rows for the pre-sync confirmation view.
+
+    `read_ids` sind die Tolino-IDs, die im Konto schon als gelesen markiert
+    sind (0.15.0). Sie belegen die Spalte „Gelesen“ vor: was in der Cloud
+    gelesen ist, ist angehakt -- und muss nicht erneut geschrieben werden.
+    """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
     preferred_formats = normalize_formats(preferred_formats)
+    read_ids = {str(item) for item in (read_ids or ()) if str(item or "").strip()}
     remote_rows = []
     for item in _inventory_records(inventory):
         normalized = normalize_inventory_item(item)
@@ -452,6 +458,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             "status": "only_tolino",
             "selected": False,
             "file_changed": False,
+            "read_in_cloud": str(normalized["tolino_id"]) in read_ids,
+            "read": str(normalized["tolino_id"]) in read_ids,
             "explanation": "Nur in der Cloud – kann heruntergeladen werden.",
             "normalized_title": normalize_title(normalized["title"]),
         })
@@ -543,6 +551,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             "match_reason": match_reason,
             "duplicate_count": title_counts.get(title_key, 0),
             "file_changed": file_changed,
+            "read_in_cloud": bool(tolino_id) and str(tolino_id) in read_ids,
+            "read": bool(tolino_id) and str(tolino_id) in read_ids,
             "explanation": _row_explanation(status, match_reason,
                                              file_changed),
         })
