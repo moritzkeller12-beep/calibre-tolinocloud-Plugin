@@ -2842,7 +2842,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
         from .tolino import TolinoApiError
         existing = {
             "op": "add",
-            "path": "/publications/book-1/tags",
+            "path": "/publications/book-1/tags/6438286",
             "value": {"name": "SciFi", "category": "collection",
                       "revision": 3, "modified": 1},
         }
@@ -2855,6 +2855,9 @@ class TolinoClientFeatureTests(unittest.TestCase):
         patch = calls[1]["data"]["patches"][0]
         self.assertEqual("remove", patch["op"])
         self.assertEqual(3, patch["value"]["revision"])
+        # Der Pfad muss die Marken-ID tragen -- sonst antwortet der Server
+        # mit HTTP 400 „missing mandatory unitid fragment“ (0.15.3).
+        self.assertEqual("/publications/book-1/tags/6438286", patch["path"])
 
         client2, _ = self._patching_client([
             {"revision": 7, "patches": []}])
@@ -2879,7 +2882,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
     def test_mark_read_many_writes_one_patch_for_all_books(self):
         """Mehrere Bücher: ein Lesevorgang, ein PATCH, und schon markierte
         Bücher werden nicht erneut geschrieben."""
-        already = {"op": "add", "path": "/publications/book-1/tags",
+        already = {"op": "add", "path": "/publications/book-1/tags/6438286",
                    "value": {"name": "collection_finished_readings_name",
                              "category": "system", "revision": 3,
                              "modified": 1}}
@@ -2895,7 +2898,12 @@ class TolinoClientFeatureTests(unittest.TestCase):
                          [item["path"] for item in calls[1]["data"]["patches"]])
 
     def test_mark_read_many_clears_only_existing_marks(self):
-        marked = {"op": "add", "path": "/publications/book-1/tags",
+        """Ungelesen setzen: der Pfad trägt die Marken-ID der Cloud-Marke.
+
+        Feldbefund 0.15.3: ohne ID antwortet der Server mit HTTP 400
+        „missing mandatory unitid fragment inside property path for remove“.
+        """
+        marked = {"op": "add", "path": "/publications/book-1/tags/6438286",
                   "value": {"name": "collection_finished_readings_name",
                             "category": "system", "revision": 3,
                             "modified": 1}}
@@ -2907,6 +2915,48 @@ class TolinoClientFeatureTests(unittest.TestCase):
         patches = calls[1]["data"]["patches"]
         self.assertEqual(["remove"], [item["op"] for item in patches])
         self.assertEqual(3, patches[0]["value"]["revision"])
+        self.assertEqual("/publications/book-1/tags/6438286",
+                         patches[0]["path"])
+        self.assertEqual(12, calls[1]["data"]["revision"])
+
+    def test_mark_read_many_mixes_add_and_remove_in_one_patch(self):
+        """Zwei Bücher, zwei Richtungen: „gelesen“ ohne ID (der Server
+        vergibt sie), „ungelesen“ mit der ID der vorhandenen Marke."""
+        marked = {"op": "add", "path": "/publications/book-1/tags/6438286",
+                  "value": {"name": "collection_finished_readings_name",
+                            "category": "system", "revision": 3,
+                            "modified": 1}}
+        client, calls = self._patching_client([
+            {"revision": 12, "patches": [marked]},   # lesen
+            {"revision": 13},                        # entfernen
+            {"revision": 14, "patches": [marked]},   # wieder lesen
+            {"revision": 15},                        # hinzufügen
+        ])
+        client.mark_read_many(["book-1"], finished=False)
+        client.mark_read_many(["book-3"], finished=True)
+        removed = calls[1]["data"]["patches"]
+        added = calls[3]["data"]["patches"]
+        self.assertEqual(["/publications/book-1/tags/6438286"],
+                         [item["path"] for item in removed])
+        self.assertEqual(["/publications/book-3/tags"],
+                         [item["path"] for item in added])
+
+    def test_removing_a_mark_without_an_id_fails_loudly(self):
+        """Liefert der Server keine Marken-ID, gibt es kein Raten: der
+        Fehler kommt sofort und im Klartext, nicht als HTTP 400."""
+        from .tolino import TolinoApiError
+        marked = {"op": "add", "path": "/publications/book-1/tags",
+                  "value": {"name": "collection_finished_readings_name",
+                            "category": "system", "revision": 3,
+                            "modified": 1}}
+        client, calls = self._patching_client([
+            {"revision": 12, "patches": [marked]},
+            {"revision": 13},
+        ])
+        with self.assertRaises(TolinoApiError) as caught:
+            client.mark_read_many(["book-1"], finished=False)
+        self.assertIn("Marken-ID", str(caught.exception))
+        self.assertEqual(1, len(calls))   # kein Schreibversuch
 
     def test_mark_read_many_requires_ids(self):
         from .tolino import TolinoApiError
@@ -3838,9 +3888,9 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog._sort_descending = False
             dialog.table = FakeTable()
 
-            # Klick auf den Titel (Spalte 4): aufsteigend, die Auswahl
+            # Klick auf den Titel (Spalte 5): aufsteigend, die Auswahl
             # bleibt denselben Büchern zugeordnet.
-            dialog._sort_by_column(4)
+            dialog._sort_by_column(5)
             self.assertEqual(
                 ["alpha", "alpha", "beta", "zulu"],
                 [row["title"].casefold() for row in dialog.rows])
@@ -3857,7 +3907,7 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertEqual({"beta"}, meta_titles)
             self.assertEqual({"beta"}, read_titles)
             # Zweiter Klick auf dieselbe Spalte: absteigend.
-            dialog._sort_by_column(4)
+            dialog._sort_by_column(5)
             self.assertEqual(
                 ["zulu", "beta", "alpha", "alpha"],
                 [row["title"].casefold() for row in dialog.rows])
@@ -3880,33 +3930,47 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertEqual("beta", dialog.rows[0]["title"].casefold())
             self.assertTrue(dialog.rows[0]["read"])
             self.assertFalse(any(row["read"] for row in dialog.rows[1:]))
+            # In Calibre (3): Bücher mit Calibre-Kopie zuerst -- hier haben
+            # alle eine, also sortiert der Titel als Zweitschlüssel.
+            dialog._sort_by_column(3)
+            self.assertTrue(all(row["book_id"] is not None
+                                for row in dialog.rows))
+            self.assertEqual(
+                ["alpha", "alpha", "beta", "zulu"],
+                [row["title"].casefold() for row in dialog.rows])
+            # In der Cloud (4): Cloud-Kopien zuerst, ohne Cloud-Kopie hinten.
+            dialog._sort_by_column(4)
+            self.assertEqual(
+                ["c1", "c3", "", ""],
+                [row["tolino_id"] for row in dialog.rows])
         finally:
             ui_module._restore_stubs_for_tests()
 
     def test_columns_sort_keys_and_technical_columns_stay_in_sync(self):
         """Spaltenzahl, Sortierschlüssel und technische Spalten müssen
-        zusammenpassen -- sonst sortiert ein Klick falsch (0.15.2: die
-        doppelten ✓-Spalten und die Statusspalte sind entfallen)."""
+        zusammenpassen -- sonst sortiert ein Klick falsch. Die doppelte
+        Statusspalte entfällt, die beiden Orts-Spalten stehen wieder
+        einzeln da (0.15.3, Feldbefund)."""
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
             dialog_cls = ui_module.InventoryDialog
-            # 7 sichtbare Spalten + 2 technische.
-            self.assertEqual(9, len(dialog_cls.HEADERS))
+            # 8 sichtbare Spalten + 2 technische.
+            self.assertEqual(10, len(dialog_cls.HEADERS))
             visible = [name for index, name in enumerate(dialog_cls.HEADERS)
                        if index not in dialog_cls.TECHNICAL_COLUMNS]
-            self.assertEqual(7, len(visible))
-            self.assertEqual(["Hochladen", "Metadaten", "Gelesen", "Wo",
+            self.assertEqual(8, len(visible))
+            self.assertEqual(["Hochladen", "Metadaten", "Gelesen",
+                              "In Calibre", "In der Cloud",
                               "Titel", "Autor(en)", "Hinweis"], visible)
             self.assertEqual(len(dialog_cls.HEADERS),
                              len(dialog_cls._SORT_KEYS))
-            self.assertEqual(("Wo",), tuple(
-                dialog_cls.HEADERS[index]
-                for index in range(len(dialog_cls.HEADERS))
-                if dialog_cls.HEADERS[index] == "Wo"))
+            # Jede Spalte hat einen eigenen Sortierschlüssel: "Wo" gibt es
+            # nicht mehr, die beiden Orts-Spalten sind getrennt sortierbar.
+            self.assertNotIn("Wo", dialog_cls.HEADERS)
             for column in dialog_cls.TECHNICAL_COLUMNS:
                 self.assertLess(column, len(dialog_cls.HEADERS))
-            self.assertEqual((7, 8), dialog_cls.TECHNICAL_COLUMNS)
+            self.assertEqual((8, 9), dialog_cls.TECHNICAL_COLUMNS)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -4221,17 +4285,19 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertIs(cells[(index, 0)], dialog.checks[index])
                 self.assertIs(cells[(index, 1)], dialog.meta_checks[index])
                 self.assertIs(cells[(index, 2)], dialog.read_checks[index])
-                # ... die Spalte "Wo" in einem Wort ...
-                self.assertEqual("beide" if in_cloud else "nur Calibre",
+                # ... die zwei Orts-Spalten mit je einem Häkchen ...
+                self.assertEqual("✓" if row["book_id"] is not None else "",
                                  dialog.table.items[(index, 3)])
+                self.assertEqual("✓" if in_cloud else "",
+                                 dialog.table.items[(index, 4)])
                 # ... und danach die Textspalten.
-                self.assertEqual(row["title"], dialog.table.items[(index, 4)])
-                self.assertEqual(row["authors"], dialog.table.items[(index, 5)])
+                self.assertEqual(row["title"], dialog.table.items[(index, 5)])
+                self.assertEqual(row["authors"], dialog.table.items[(index, 6)])
                 self.assertEqual(row["explanation"],
-                                 dialog.table.items[(index, 6)])
-                self.assertEqual(row["isbn"], dialog.table.items[(index, 7)])
+                                 dialog.table.items[(index, 7)])
+                self.assertEqual(row["isbn"], dialog.table.items[(index, 8)])
                 self.assertEqual(row["tolino_id"],
-                                 dialog.table.items[(index, 8)])
+                                 dialog.table.items[(index, 9)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
                 upload = dialog.checks[index]
@@ -4246,7 +4312,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertEqual(bool(row["metadata"]), metadata.isChecked())
                 self.assertFalse(mark_read.isChecked())
             # Nur die technischen Spalten sind zunächst verborgen.
-            self.assertEqual({7: True, 8: True}, dialog.table.hidden)
+            self.assertEqual({8: True, 9: True}, dialog.table.hidden)
             self.assertIn("Serien werden in der Tolino Cloud",
                           dialog.note.text())
             self.assertIn("Lese-Status in der Cloud bleibt",
@@ -4262,9 +4328,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
         ui_module, dialog = self._build({"collections": True})
         try:
             dialog._toggle_technical_columns(True)
-            self.assertEqual({7: False, 8: False}, dialog.table.hidden)
+            self.assertEqual({8: False, 9: False}, dialog.table.hidden)
             dialog._toggle_technical_columns(False)
-            self.assertEqual({7: True, 8: True}, dialog.table.hidden)
+            self.assertEqual({8: True, 9: True}, dialog.table.hidden)
             self.assertIn("Serien werden in der Tolino Cloud",
                           dialog.note.text())
         finally:
@@ -4285,7 +4351,12 @@ class ComparisonLayoutTests(unittest.TestCase):
         return source.split("class InventoryDialog(QDialog):", 1)[1].split(
             "\nclass ", 1)[0]
 
-    def test_seven_visible_columns_plus_two_technical_ones(self):
+    def test_two_location_columns_plus_technical_ones(self):
+        """Die zwei Orts-Spalten stehen wieder einzeln da (0.15.3).
+
+        Feldbefund: „Bring mir die zwei Spalten zurück, wo die Bücher
+        sind.“ Die doppelte Statusspalte bleibt entfallen.
+        """
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
@@ -4293,13 +4364,13 @@ class ComparisonLayoutTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(
-            ("Hochladen", "Metadaten", "Gelesen", "Wo", "Titel", "Autor(en)",
-             "Hinweis", "ISBN", "Tolino-ID"), headers)
+            ("Hochladen", "Metadaten", "Gelesen", "In Calibre", "In der Cloud",
+             "Titel", "Autor(en)", "Hinweis", "ISBN", "Tolino-ID"), headers)
         technical = ui_module.InventoryDialog.TECHNICAL_COLUMNS
-        self.assertEqual((7, 8), technical)
-        self.assertEqual(7, len(headers) - len(technical))
-        # Die beiden Häkchenspalten und die doppelte Statusspalte sind weg.
-        for gone in ("In Calibre", "In der Cloud", "Status"):
+        self.assertEqual((8, 9), technical)
+        self.assertEqual(8, len(headers) - len(technical))
+        # Die eine zusammengefasste Spalte und der doppelte Status sind weg.
+        for gone in ("Wo", "Status"):
             self.assertNotIn(gone, headers)
 
     def test_one_button_holds_all_marked_row_actions(self):
@@ -4757,11 +4828,13 @@ class DashboardLayoutTests(unittest.TestCase):
                 r"add(?:Row|Widget|Layout)\([^)]*self\.%s\b" % name,
                 "Widget %r hängt in keinem Layout" % name)
 
-    def test_one_primary_button_handles_login_compare_and_cancel(self):
-        """Zwei Anmeldeknöpfe und ein gesperrter Start-Knopf sind weg --
-        EIN Knopf entscheidet nach Zustand (0.15.2)."""
+    def test_login_and_compare_have_their_own_buttons(self):
+        """Der alte Doppelweg (zwei Anmeldeknöpfe) bleibt weg, aber der
+        Anmeldeknopf steht wieder sichtbar auf der ersten Seite (0.15.3)."""
         body = self._dashboard_body()
         self.assertIn("self.primary.clicked.connect(self.primary_action)", body)
+        self.assertIn(
+            "self.login_button.clicked.connect(self.browser_login)", body)
         self.assertNotIn("self.browser = QPushButton(", body)
         self.assertNotIn("self.start = QPushButton(", body)
         self.assertNotIn("self.cancel = QPushButton(", body)
@@ -4796,49 +4869,101 @@ class DashboardLayoutTests(unittest.TestCase):
 
 
 class DashboardPrimaryActionTests(unittest.TestCase):
-    """Der Hauptknopf tut je nach Zustand das Richtige (0.15.2)."""
+    """Hauptknopf und Anmeldeknopf getrennt (0.15.3).
+
+    Feldbefund: „Bring mir den Anmeldeknopf auf die erste Seite zurück.“
+    Vorher war das Anmelden nur ein Zustand des Hauptknopfes -- bei
+    gespeichertem, aber abgelaufenem Zugang war es damit nicht erreichbar.
+    """
 
     @staticmethod
     def _dashboard(token="", running=False):
         class LineEdit:
+            def __init__(self, value):
+                self.value = value
+
             def text(self):
-                return token
+                return self.value
 
-        dashboard = type("D", (), {})()
-        calls = []
+        class Widget:
+            def setText(self, text):
+                self.text_value = text
+
+            def setVisible(self, value):
+                self.visible = value
+
+            def setEnabled(self, value):
+                self.enabled = value
+
+            def setToolTip(self, text):
+                self.tooltip = text
+
+        dashboard = type("Dashboard", (), {})()
         dashboard.thread = object() if running else None
-        dashboard.refresh = LineEdit()
-        dashboard.browser_login = lambda: calls.append("login")
-        dashboard.start_sync = lambda: calls.append("compare")
-        dashboard.cancel_sync = lambda: calls.append("cancel")
-        return dashboard, calls
+        dashboard.refresh = LineEdit(token)
+        dashboard.status = Widget()
+        dashboard.progress = Widget()
+        dashboard.progress_label = Widget()
+        dashboard.primary = Widget()
+        return dashboard
 
-    def _click(self, token, running):
-        source = (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
-        body = source.split("    def primary_action(self):", 1)[1].split(
-            "\n    def ", 1)[0]
-        # Die Entscheidung wird hier nachgebaut: gleiche Reihenfolge wie im
-        # Quelltext, damit ein Umbau der Methode auffällt.
+    @staticmethod
+    def _source():
+        return (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
+
+    def _update_status(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            return ui_module.SyncDashboard.update_status
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_primary_action_compares_or_cancels_never_logs_in(self):
+        body = self._source().split("    def primary_action(self):", 1)[1]
+        body = body.split("\n    def ", 1)[0]
         self.assertIn("if self.thread is not None:", body)
-        self.assertIn("elif self.refresh.text().strip():", body)
-        self.assertIn("else:", body)
-        dashboard, calls = self._dashboard(token, running)
-        if dashboard.thread is not None:
-            dashboard.cancel_sync()
-        elif dashboard.refresh.text().strip():
-            dashboard.start_sync()
-        else:
-            dashboard.browser_login()
-        return calls
+        self.assertIn("self.cancel_sync()", body)
+        self.assertIn("self.start_sync()", body)
+        self.assertNotIn("browser_login", body)
 
-    def test_not_logged_in_starts_the_login(self):
-        self.assertEqual(["login"], self._click("", False))
+    def test_the_login_button_sits_on_the_first_page(self):
+        body = self._source().split("class SyncDashboard(QDialog):", 1)[1]
+        body = body.split("\nclass ", 1)[0]
+        self.assertIn(
+            'self.login_button = QPushButton("Jetzt bei Tolino anmelden")',
+            body)
+        self.assertIn(
+            "self.login_button.clicked.connect(self.browser_login)", body)
+        self.assertRegex(body, r"addRow\([^)]*self\.login_button\b")
 
-    def test_logged_in_starts_the_comparison(self):
-        self.assertEqual(["compare"], self._click("token-1", False))
+    def test_compare_button_waits_for_the_login(self):
+        update_status = self._update_status()
+        dashboard = self._dashboard("")
+        update_status(dashboard)
+        self.assertEqual("Vergleichen und übernehmen …",
+                         dashboard.primary.text_value)
+        self.assertFalse(dashboard.primary.enabled)
+        self.assertIn("anmelden", dashboard.primary.tooltip)
+        self.assertIn("Noch nicht angemeldet", dashboard.status.text_value)
 
-    def test_running_run_is_cancelled(self):
-        self.assertEqual(["cancel"], self._click("token-1", True))
+    def test_compare_button_is_ready_when_signed_in(self):
+        update_status = self._update_status()
+        dashboard = self._dashboard("token-1")
+        update_status(dashboard)
+        self.assertEqual("Vergleichen und übernehmen …",
+                         dashboard.primary.text_value)
+        self.assertTrue(dashboard.primary.enabled)
+        self.assertIn("Angemeldet", dashboard.status.text_value)
+
+    def test_a_running_sync_turns_the_button_into_cancel(self):
+        update_status = self._update_status()
+        dashboard = self._dashboard("token-1", running=True)
+        update_status(dashboard)
+        self.assertEqual("Abbrechen", dashboard.primary.text_value)
+        self.assertTrue(dashboard.primary.enabled)
+        self.assertTrue(dashboard.progress.visible)
+        self.assertIn("Synchronisierung läuft", dashboard.status.text_value)
 
 
 class ReadStateComparisonTests(unittest.TestCase):

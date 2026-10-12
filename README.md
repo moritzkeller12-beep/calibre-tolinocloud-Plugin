@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.15.2-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.15.3-blue)](__init__.py)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Gleicht die eigene Calibre-Bibliothek mit der **Tolino Cloud** ab: Bücher hoch-
@@ -20,8 +20,9 @@ zusätzlich **Chrome, Chromium, Brave oder Edge**.
 ## Benutzung
 
 1. **Tolino Cloud Sync** öffnen, Buchhändler wählen, **„Jetzt bei Tolino
-   anmelden“** → im Anmeldefenster im Web Reader einloggen. Danach heißt
-   derselbe Knopf **„Vergleichen und übernehmen …“**.
+   anmelden“** → im Anmeldefenster im Web Reader einloggen. Der Anmeldeknopf
+   bleibt immer sichtbar (auch zum Neuanmelden), darunter wird
+   **„Vergleichen und übernehmen …“** aktiv.
 2. Im **Bestandsvergleich** je Buch anhaken:
 
 | Spalte | Bedeutung |
@@ -29,6 +30,7 @@ zusätzlich **Chrome, Chromium, Brave oder Edge**.
 | **Hochladen** | Buchdatei in die Cloud laden (ersetzt die Kopie dort). |
 | **Metadaten** | Nur Titel/Autor(en)/ISBN abgleichen, kein Upload. |
 | **Gelesen** | Im Tolino-Konto als gelesen markieren – oder wieder auf ungelesen setzen: bei einem schon gelesenen Buch löst der erste Klick die Sperre, der zweite nimmt das Häkchen weg. |
+| **In Calibre** / **In der Cloud** | Ein Häkchen zeigt, wo das Buch liegt. |
 
 **„Empfehlung auswählen“** hakt Hochladen/Metadaten für die passenden Bücher
 an, **„Auswahl übernehmen“** führt genau diese Aktionen aus – ohne Auswahl

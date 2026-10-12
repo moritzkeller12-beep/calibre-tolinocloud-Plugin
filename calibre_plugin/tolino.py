@@ -1964,13 +1964,34 @@ class TolinoClient:
         return data if isinstance(data, dict) else {}
 
     @staticmethod
-    def _tag_patch(op, book_id, name, category, revision=None):
+    def _tag_patch(op, book_id, name, category, revision=None, tag_id=None):
+        """Ein Marken-Patch -- beim Entfernen MIT Marken-ID im Pfad.
+
+        Feldbefund 0.15.3: „tolino http 400 missing mandatory unitid
+        fragment inside property path for remove“. Der Server identifiziert
+        die zu löschende Marke über ihre ID, nicht über den Namen:
+        ``/publications/<Buch-ID>/tags/<Marken-ID>``. Beim Anlegen vergibt
+        er die ID selbst, dort bleibt der Pfad ohne ID.
+        """
         value = {"modified": int(time.time() * 1000),
                  "name": name, "category": category}
         if revision is not None:
             value["revision"] = revision
-        return {"op": op, "value": value,
-                "path": "/publications/%s/tags" % book_id}
+        path = "/publications/%s/tags" % book_id
+        if op == "remove":
+            if not str(tag_id or "").strip():
+                raise TolinoApiError(
+                    "Zum Entfernen fehlt die Marken-ID der Cloud-Marke "
+                    "(%s / %s)." % (book_id, name))
+            path = "%s/%s" % (path, tag_id)
+        return {"op": op, "value": value, "path": path}
+
+    @classmethod
+    def _tag_id_from_patch(cls, item):
+        """Marken-ID aus einem gelesenen Patch -- leer, wenn der Server
+        keine mitgeschickt hat."""
+        parts = cls._tag_path_parts((item or {}).get("path"))
+        return parts[1] if parts else ""
 
     def get_sync_data(self):
         """Return (revision, patches) describing tags/collections state."""
@@ -2094,7 +2115,8 @@ class TolinoClient:
                 "Book %s is not part of collection %r." % (book_id, collection_name))
         patch = self._tag_patch(
             "remove", book_id, collection_name, "collection",
-            revision=existing["value"].get("revision"))
+            revision=existing["value"].get("revision"),
+            tag_id=self._tag_id_from_patch(existing))
         data = self._sync_patch({"revision": revision, "patches": [patch]})
         return data.get("revision")
 
@@ -2127,7 +2149,8 @@ class TolinoClient:
             elif existing is not None:
                 updates.append(self._tag_patch(
                     "remove", book_id, self.READ_TAG, "system",
-                    revision=existing["value"].get("revision")))
+                    revision=existing["value"].get("revision"),
+                    tag_id=self._tag_id_from_patch(existing)))
         if not updates:
             return revision
         data = self._sync_patch({"revision": revision, "patches": updates})

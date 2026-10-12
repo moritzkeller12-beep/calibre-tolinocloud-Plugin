@@ -101,15 +101,16 @@ class InventoryDialog(QDialog):
     Links steht, was mit dem Buch passieren soll -- **Hochladen** (die
     Buchdatei in die Cloud), **Metadaten** (nur Titel/Autor(en)/ISBN in der
     Cloud abgleichen, ohne Upload) und **Gelesen** (die Lese-Marke im
-    Tolino-Konto setzen). Die Spalte **Wo** sagt in einem Wort, wo das Buch
-    liegt, **Hinweis** erklärt die Zeile. Alles Technische ist eingeklappt,
-    und alle Aktionen für markierte Zeilen liegen hinter EINEM Knopf (0.15.2).
+    Tolino-Konto setzen oder wieder wegnehmen). **In Calibre** und **In der
+    Cloud** sagen mit einem Häkchen, wo das Buch liegt, **Hinweis** erklärt
+    die Zeile. Alles Technische ist eingeklappt, und alle Aktionen für
+    markierte Zeilen liegen hinter EINEM Knopf.
     """
 
-    HEADERS = ("Hochladen", "Metadaten", "Gelesen", "Wo",
+    HEADERS = ("Hochladen", "Metadaten", "Gelesen", "In Calibre", "In der Cloud",
                "Titel", "Autor(en)", "Hinweis", "ISBN", "Tolino-ID")
     # Technische Spalten stehen ganz rechts und sind standardmäßig aus.
-    TECHNICAL_COLUMNS = (7, 8)
+    TECHNICAL_COLUMNS = (8, 9)
 
     # Text der entsperrten Lese-Zelle -- einmal, damit er nicht driftet.
     READ_UNLOCKED_TOOLTIP = (
@@ -139,34 +140,26 @@ class InventoryDialog(QDialog):
         lambda row: (0 if row.get("read") else 1,
                      str(row.get("title") or "").casefold(),
                      str(row.get("authors") or "").casefold()),
-        # 3 Wo: beide zuerst, dann nur Calibre, dann nur Cloud
-        lambda row: (0 if row.get("book_id") is not None
-                     and row.get("tolino_id") else
-                     1 if row.get("book_id") is not None else 2,
+        # 3 In Calibre: vorhandene Bücher zuerst
+        lambda row: (0 if row.get("book_id") is not None else 1,
                      str(row.get("title") or "").casefold()),
-        # 4 Titel / 5 Autor(en) (mit dem jeweils anderen als Zweitschlüssel)
+        # 4 In der Cloud: Cloud-Kopien zuerst
+        lambda row: (0 if row.get("tolino_id") else 1,
+                     str(row.get("title") or "").casefold()),
+        # 5 Titel / 6 Autor(en) (mit dem jeweils anderen als Zweitschlüssel)
         lambda row: (str(row.get("title") or "").casefold(),
                      str(row.get("authors") or "").casefold()),
         lambda row: (str(row.get("authors") or "").casefold(),
                      str(row.get("title") or "").casefold()),
-        # 6 Hinweis
+        # 7 Hinweis
         lambda row: (str(row.get("explanation") or ""),
                      str(row.get("title") or "").casefold()),
-        # 7 ISBN / 8 Tolino-ID
+        # 8 ISBN / 9 Tolino-ID
         lambda row: (str(row.get("isbn") or ""),
                      str(row.get("title") or "").casefold()),
         lambda row: (str(row.get("tolino_id") or ""),
                      str(row.get("title") or "").casefold()),
     )
-
-    @staticmethod
-    def _where_text(row):
-        """Wo das Buch liegt -- ein Wort statt zweier Häkchenspalten."""
-        has_book = row.get("book_id") is not None
-        in_cloud = bool(row.get("tolino_id"))
-        if has_book and in_cloud:
-            return "beide"
-        return "nur Calibre" if has_book else "nur Cloud"
 
     @staticmethod
     def default_actions(row):
@@ -249,10 +242,10 @@ class InventoryDialog(QDialog):
             "Ausgewählt = Buchdatei in die Tolino Cloud hochladen",
             "Ausgewählt = nur Titel/Autor(en)/ISBN in der Cloud aktualisieren "
             "(kein Upload)",
-            "Ausgewählt = im Tolino-Konto als gelesen markieren (nur Cloud, "
-            "die Buchdatei bleibt unverändert)",
-            "Wo das Buch liegt: in beiden, nur in Calibre oder nur in der "
-            "Tolino Cloud",
+            "Ausgewählt = im Tolino-Konto als gelesen markieren bzw. wieder "
+            "auf ungelesen setzen (nur Cloud, die Buchdatei bleibt unverändert)",
+            "Buch liegt in Ihrer Calibre-Bibliothek",
+            "Buch liegt in der Tolino Cloud",
             "Buchtitel", "Autor(en)",
             "Was sich zwischen Calibre und Cloud unterscheidet",
             "ISBN (technisch)",
@@ -595,7 +588,8 @@ class InventoryDialog(QDialog):
                  self.read_checks)[column].append(check)
                 self.table.setCellWidget(row_index, column, check)
             values = (
-                self._where_text(row),
+                "✓" if has_book else "",
+                "✓" if in_cloud else "",
                 row.get("title", ""),
                 row.get("authors", ""),
                 row.get("explanation", ""),
@@ -1092,11 +1086,21 @@ class SyncDashboard(QDialog):
             "Plugin sich anmeldet.")
         self.status = QLabel()
         self.status.setWordWrap(True)
-        self.primary = QPushButton("Jetzt bei Tolino anmelden")
+        # Der Anmeldeknopf steht wieder sichtbar auf der ersten Seite --
+        # auch wenn schon ein Zugang gespeichert ist, denn genau dann
+        # braucht man ihn, wenn der Zugang abgelaufen ist (0.15.3).
+        self.login_button = QPushButton("Jetzt bei Tolino anmelden")
+        self.login_button.setToolTip(
+            "Öffnet das Anmeldefenster: dort im Web Reader einloggen und "
+            "die Bücherliste öffnen – den Zugang holt das Plugin "
+            "automatisch. Auch zum Neuanmelden, wenn der gespeicherte "
+            "Zugang abgelaufen ist.")
+        self.login_button.clicked.connect(self.browser_login)
+        self.primary = QPushButton("Vergleichen und übernehmen …")
         self.primary.setToolTip(
-            "Nicht angemeldet: öffnet das Anmeldefenster (dort im Web "
-            "Reader einloggen und die Bücherliste öffnen). Angemeldet: "
-            "öffnet den Bestandsvergleich. Während eines Laufs: bricht ab.")
+            "Öffnet den Bestandsvergleich: pro Buch Hochladen, Metadaten "
+            "und/oder die Lese-Marke auswählen, dann übernehmen. Während "
+            "eines Laufs bricht dieser Knopf ab.")
         self.primary.clicked.connect(self.primary_action)
         self.progress_label = QLabel("Bereit")
         self.progress = QProgressBar()
@@ -1111,6 +1115,7 @@ class SyncDashboard(QDialog):
 
         action_form = QFormLayout()
         action_form.addRow("Buchhändler", self.partner)
+        action_form.addRow("", self.login_button)
         action_form.addRow("", self.primary)
         action_form.addRow("", self.status)
         action_form.addRow("", self.progress_label)
@@ -1297,17 +1302,15 @@ class SyncDashboard(QDialog):
         self.settings_dialog.accept()
 
     def primary_action(self):
-        """Der EINE Hauptknopf: anmelden, vergleichen oder abbrechen.
+        """Hauptknopf: vergleichen -- oder einen laufenden Sync abbrechen.
 
-        Vorher standen dafür zwei Anmeldeknöpfe und ein gesperrter
-        Start-Knopf nebeneinander (0.15.2).
+        Das Anmelden hat seit 0.15.3 wieder seinen eigenen Knopf darüber,
+        damit es auch bei abgelaufenem Zugang sofort erreichbar ist.
         """
         if self.thread is not None:
             self.cancel_sync()
-        elif self.refresh.text().strip():
-            self.start_sync()
         else:
-            self.browser_login()
+            self.start_sync()
 
     def update_status(self):
         logged_in = bool(self.refresh.text().strip())
@@ -1321,16 +1324,24 @@ class SyncDashboard(QDialog):
                 "✓ Angemeldet – „Vergleichen und übernehmen“ ist bereit.")
         else:
             self.status.setText(
-                "● Noch nicht angemeldet – der Knopf oben meldet Sie bei "
-                "Ihrem Buchhändler an.")
+                "● Noch nicht angemeldet – „Jetzt bei Tolino anmelden“ "
+                "holt den Zugang für den Vergleich.")
         self.progress.setVisible(running)
         self.progress_label.setVisible(running)
         if running:
             self.primary.setText("Abbrechen")
+            self.primary.setEnabled(True)
         else:
-            self.primary.setText("Vergleichen und übernehmen …" if logged_in
-                                 else "Jetzt bei Tolino anmelden")
-        self.primary.setEnabled(True)
+            self.primary.setText("Vergleichen und übernehmen …")
+            # Ohne Zugang gibt es nichts zu vergleichen -- der Grund steht
+            # im Tooltip und in der Statuszeile, der Anmeldeknopf ist direkt
+            # darüber sichtbar.
+            self.primary.setEnabled(logged_in)
+            self.primary.setToolTip(
+                "Öffnet den Bestandsvergleich: pro Buch Hochladen, "
+                "Metadaten und/oder die Lese-Marke auswählen, dann "
+                "übernehmen." if logged_in else
+                "Bitte zuerst oben „Jetzt bei Tolino anmelden“ drücken.")
 
     def set_refresh_token(self, refresh):
         normalized, _ = normalize_refresh_token(refresh)
