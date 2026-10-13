@@ -5,8 +5,7 @@
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Gleicht die eigene Calibre-Bibliothek mit der **Tolino Cloud** ab: Bücher hoch-
-und herunterladen, gelesen markieren, Titelbilder mitnehmen. Windows, Linux,
-macOS – auch als Flatpak.
+und herunterladen, gelesen markieren, Titelbilder mitnehmen.
 
 ## Installation
 
