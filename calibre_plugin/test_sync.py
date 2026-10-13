@@ -6795,5 +6795,379 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         self.assertEqual(4, seen)
 
 
+class StartSyncOrchestrationTests(unittest.TestCase):
+    """`start_sync` bleibt Ablaufsteuerung, die Arbeit steckt in Schritten.
+
+    Vorher las, anmeldete, verglich, plante und startete eine einzige
+    160-Zeilen-Methode. Diese Tests halten Reihenfolge, Fehlergrenze und
+    die Weitergabe der Werte an die neuen Schritte fest (0.15.6).
+    """
+
+    @staticmethod
+    def _ui_module():
+        return ToolbarIconTests._load_ui_module(lambda *args, **kwargs: None)
+
+    @staticmethod
+    def _source():
+        return (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
+
+    @classmethod
+    def _method_body(cls, name):
+        body = cls._source().split(f"    def {name}(", 1)[1]
+        return body.split("\n    def ", 1)[0]
+
+    @staticmethod
+    def _settings():
+        return {
+            "refresh_token": "token-1", "partner_id": "thalia",
+            "hardware_id": "hw-1", "username": "", "password": "",
+            "state": {}, "preferred_formats": ("EPUB",),
+            "sync_collections": False, "enable_deletions": False,
+            "upload_covers": False,
+        }
+
+    def _dashboard(self, ui_module, settings, thread=None):
+        dashboard = ui_module.SyncDashboard.__new__(ui_module.SyncDashboard)
+        dashboard.thread = thread
+        dashboard.values = lambda: settings
+        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.sync_column_enabled = None
+        return dashboard
+
+    @staticmethod
+    def _stub_warning(ui_module, warnings):
+        """QMessageBox.warning durch einen Recorder ersetzen."""
+
+        def warning(*args, **kwargs):
+            warnings.append(args)
+
+        ui_module.QMessageBox = type("QMessageBox", (),
+                                     {"warning": staticmethod(warning)})
+
+    @staticmethod
+    def _install_fake_qt(ui_module):
+        """QThread/SyncWorker durch Recorder ersetzen (Thread-Start messbar)."""
+
+        class FakeSignal:
+            def __init__(self):
+                self.slots = []
+
+            def connect(self, slot):
+                self.slots.append(slot)
+
+        class FakeThread:
+            def __init__(self, parent=None):
+                self.started = FakeSignal()
+                self.finished = FakeSignal()
+                self.starts = 0
+
+            def start(self):
+                self.starts += 1
+
+            def deleteLater(self):
+                self.deleted = True
+
+        class FakeWorker:
+            def __init__(self, settings, jobs, removals, meta_updates=None,
+                         series_map=None, selected_read=(),
+                         selected_unread=()):
+                self.arguments = (settings, jobs, removals, meta_updates,
+                                  series_map, selected_read, selected_unread)
+                self.progress = FakeSignal()
+                self.completed = FakeSignal()
+                self.failed = FakeSignal()
+
+            def moveToThread(self, thread):
+                self.moved_to = thread
+
+            def run(self):
+                pass
+
+        ui_module.QThread = FakeThread
+        ui_module.SyncWorker = FakeWorker
+        return FakeThread, FakeWorker
+
+    def test_the_work_goes_to_the_named_steps(self):
+        ui_module = self._ui_module()
+        try:
+            settings = self._settings()
+            ui_module.tolino_column_active = lambda *args: True
+            dashboard = self._dashboard(ui_module, settings)
+            seen = []
+            preparation = {"jobs": [], "skipped_uploads": []}
+            dashboard._prepare_sync = lambda given: (
+                seen.append(("prepare", given)) or preparation)
+            dashboard._start_sync_worker = lambda given, prep: seen.append(
+                ("worker", given, prep))
+            dashboard.start_sync()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(["prepare", "worker"], [item[0] for item in seen])
+        self.assertIs(settings, seen[0][1])
+        self.assertIs(settings, seen[1][1])
+        self.assertIs(preparation, seen[1][2])
+
+    def test_without_a_token_it_only_warns(self):
+        ui_module = self._ui_module()
+        try:
+            warnings = []
+            self._stub_warning(ui_module, warnings)
+            ui_module.tolino_column_active = lambda *args: True
+            settings = dict(self._settings(), refresh_token="")
+            dashboard = self._dashboard(ui_module, settings)
+            prepared = []
+            dashboard._prepare_sync = lambda given: prepared.append(given)
+            dashboard.start_sync()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(1, len(warnings))
+        self.assertIn("Noch nicht angemeldet", warnings[0][1])
+        self.assertIn("anmelden", warnings[0][2])
+        self.assertEqual([], prepared)
+
+    def test_a_failed_preparation_is_reported_and_stops_everything(self):
+        ui_module = self._ui_module()
+        try:
+            errors = []
+            ui_module.error_dialog = lambda *args, **kwargs: errors.append(args)
+            ui_module.tolino_column_active = lambda *args: True
+            settings = self._settings()
+            dashboard = self._dashboard(ui_module, settings)
+
+            def boom(given):
+                raise RuntimeError("kaputt")
+
+            dashboard._prepare_sync = boom
+            started = []
+            dashboard._start_sync_worker = lambda given, prep: started.append(prep)
+            dashboard.start_sync()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(1, len(errors))
+        self.assertEqual("Vorbereitung fehlgeschlagen", errors[0][1])
+        self.assertIn("kaputt", errors[0][2])
+        self.assertEqual([], started)
+
+    def test_a_cancelled_dialog_starts_nothing(self):
+        ui_module = self._ui_module()
+        try:
+            errors = []
+            ui_module.error_dialog = lambda *args, **kwargs: errors.append(args)
+            ui_module.tolino_column_active = lambda *args: True
+            settings = self._settings()
+            dashboard = self._dashboard(ui_module, settings)
+            dashboard._prepare_sync = lambda given: None
+            started = []
+            dashboard._start_sync_worker = lambda given, prep: started.append(prep)
+            dashboard.start_sync()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], errors)
+        self.assertEqual([], started)
+
+    def test_a_running_sync_ignores_the_second_click(self):
+        ui_module = self._ui_module()
+        try:
+            settings = self._settings()
+            dashboard = self._dashboard(ui_module, settings, thread=object())
+            calls = []
+            dashboard.values = lambda: calls.append("values")
+            dashboard._prepare_sync = lambda given: calls.append("prepare")
+            dashboard._start_sync_worker = lambda given, prep: calls.append("worker")
+            dashboard.start_sync()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], calls)
+
+    def test_prepare_sync_runs_the_steps_in_order(self):
+        ui_module = self._ui_module()
+        try:
+            settings = self._settings()
+            order = []
+            state = {"fingerprints": {}}
+            metadata = {1: {"title": "A"}}
+            client = object()
+            comparison = [{"status": "identical"}]
+            selection = {"uploads": {1}, "metadata": set(),
+                         "read": set(), "unread": set()}
+            preparation = {"jobs": []}
+            captured = {}
+            ui_module.load_state = lambda value: order.append("state") or state
+            dashboard = self._dashboard(ui_module, settings)
+            dashboard._local_metadata = lambda: order.append("metadata") or metadata
+            dashboard._logged_in_client = lambda given: order.append("login") or client
+
+            def cloud(given, meta, st, cl):
+                order.append("compare")
+                captured["cloud"] = (given, meta, st, cl)
+                return comparison
+
+            def confirm(comp, given):
+                order.append("confirm")
+                captured["confirm"] = (comp, given)
+                return selection
+
+            def plan(given, meta, st, sel):
+                order.append("plan")
+                captured["plan"] = (given, meta, st, sel)
+                return preparation
+
+            dashboard._cloud_comparison = cloud
+            dashboard._confirm_comparison = confirm
+            dashboard._plan_actions = plan
+            result = dashboard._prepare_sync(settings)
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(
+            ["metadata", "state", "login", "compare", "confirm", "plan"], order)
+        self.assertIs(preparation, result)
+        self.assertEqual((settings, metadata, state, client), captured["cloud"])
+        self.assertEqual((comparison, settings), captured["confirm"])
+        self.assertEqual((settings, metadata, state, selection), captured["plan"])
+        self.assertIs(state, captured["plan"][2])
+
+    def test_prepare_sync_stops_when_the_dialog_is_cancelled(self):
+        ui_module = self._ui_module()
+        try:
+            settings = self._settings()
+            ui_module.load_state = lambda value: {}
+            dashboard = self._dashboard(ui_module, settings)
+            dashboard._local_metadata = lambda: {}
+            dashboard._logged_in_client = lambda given: object()
+            dashboard._cloud_comparison = lambda *args: []
+            dashboard._confirm_comparison = lambda comp, given: None
+            planned = []
+            dashboard._plan_actions = lambda *args: planned.append(args)
+            result = dashboard._prepare_sync(settings)
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertIsNone(result)
+        self.assertEqual([], planned)
+
+    def test_the_worker_gets_the_finished_plan(self):
+        ui_module = self._ui_module()
+        try:
+            self._install_fake_qt(ui_module)
+            settings = self._settings()
+            dashboard = self._dashboard(ui_module, settings)
+            ranges, values, labels, status_updates = [], [], [], []
+            dashboard.progress = type("Bar", (), {
+                "setRange": lambda self, *args: ranges.append(args),
+                "setValue": lambda self, value: values.append(value),
+            })()
+            dashboard.progress_label = type("Label", (), {
+                "setText": lambda self, text: labels.append(text),
+            })()
+            dashboard.refresh = type("Edit", (), {
+                "text": lambda self: "token-neu",
+            })()
+            dashboard.update_status = lambda: status_updates.append(True)
+            for name in ("progress_changed", "sync_completed", "sync_failed"):
+                setattr(dashboard, name, lambda *args: None)
+            jobs = ["job-1", "job-2"]
+            preparation = {
+                "jobs": jobs, "removals": ["remove-1"],
+                "meta_updates": [("uuid-1", 7)], "series_map": {"Reihe": ["Sammlung"]},
+                "skipped_uploads": [], "selected_read": {"t-read"},
+                "selected_unread": {"t-unread"},
+            }
+            dashboard._start_sync_worker(settings, preparation)
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(settings, dashboard.worker.arguments[0])
+        self.assertEqual(jobs, dashboard.worker.arguments[1])
+        self.assertEqual(["remove-1"], dashboard.worker.arguments[2])
+        self.assertEqual([("uuid-1", 7)], dashboard.worker.arguments[3])
+        self.assertEqual({"Reihe": ["Sammlung"]}, dashboard.worker.arguments[4])
+        self.assertEqual({"t-read"}, dashboard.worker.arguments[5])
+        self.assertEqual({"t-unread"}, dashboard.worker.arguments[6])
+        self.assertIs(dashboard.thread, dashboard.worker.moved_to)
+        self.assertEqual(1, dashboard.thread.starts)
+        self.assertEqual(1, len(dashboard.worker.progress.slots))
+        self.assertEqual(1, len(dashboard.worker.completed.slots))
+        self.assertEqual(1, len(dashboard.worker.failed.slots))
+        # sync_summary zählt 2 Uploads + 1 Löschung.
+        self.assertEqual([(0, 3)], ranges)
+        self.assertEqual([0, 0], values)
+        self.assertEqual(["Synchronisierung läuft"], labels)
+        self.assertEqual([True], status_updates)
+        self.assertEqual("token-neu", settings["refresh_token"])
+
+    def test_skipped_uploads_are_reported_before_the_run(self):
+        ui_module = self._ui_module()
+        try:
+            warnings = []
+            self._stub_warning(ui_module, warnings)
+            self._install_fake_qt(ui_module)
+            settings = self._settings()
+            dashboard = self._dashboard(ui_module, settings)
+            ranges, values, labels = [], [], []
+            dashboard.progress = type("Bar", (), {
+                "setRange": lambda self, *args: ranges.append(args),
+                "setValue": lambda self, value: values.append(value),
+            })()
+            dashboard.progress_label = type("Label", (), {
+                "setText": lambda self, text: labels.append(text),
+            })()
+            dashboard.refresh = type("Edit", (), {"text": lambda self: "t"})()
+            dashboard.update_status = lambda: None
+            dashboard.persist_refresh_token = lambda value: None
+            for name in ("progress_changed", "sync_completed", "sync_failed"):
+                setattr(dashboard, name, lambda *args: None)
+            dashboard._start_sync_worker(settings, {
+                "jobs": [], "removals": [], "meta_updates": [], "series_map": {},
+                "skipped_uploads": ["Buch 1 (Titel), Format EPUB: fehlt"],
+                "selected_read": set(), "selected_unread": set(),
+            })
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(1, len(warnings))
+        self.assertIn("übersprungen", warnings[0][2])
+        self.assertIn("Buch 1 (Titel), Format EPUB: fehlt", warnings[0][2])
+        # Der Lauf startet trotzdem -- nur mit den übrigen Büchern.
+        self.assertEqual(1, dashboard.thread.starts)
+        self.assertEqual([], dashboard.worker.arguments[1])
+
+    def test_the_new_steps_are_small_and_exist(self):
+        methods = ("start_sync", "_prepare_sync", "_local_metadata",
+                   "_logged_in_client", "_cloud_comparison",
+                   "_confirm_comparison", "_plan_actions", "_upload_jobs",
+                   "_start_sync_worker")
+        for name in methods:
+            with self.subTest(method=name):
+                body = self._method_body(name)
+                code = [line for line in body.splitlines()
+                        if line.strip() and not line.strip().startswith("#")]
+                self.assertLessEqual(
+                    len(code), 40,
+                    f"{name} ist wieder auf {len(code)} Zeilen gewachsen")
+
+    def test_start_sync_only_orders_the_steps(self):
+        body = self._method_body("start_sync")
+        code = [line for line in body.splitlines()
+                if line.strip() and not line.strip().startswith("#")]
+        self.assertLessEqual(len(code), 30)
+        self.assertIn("self._prepare_sync(settings)", body)
+        self.assertIn("self._start_sync_worker(settings, preparation)", body)
+        self.assertIn("Vorbereitung fehlgeschlagen", body)
+        # Die eigentliche Arbeit liegt nicht mehr hier.
+        for name in ("compare_inventory(", "plan_sync(", "QThread(",
+                     "InventoryDialog(", "safe_format_path("):
+            self.assertNotIn(name, body)
+
+    def test_sync_dashboard_defines_every_step(self):
+        tree = ast.parse(self._source())
+        dashboard = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "SyncDashboard")
+        defined = {node.name for node in dashboard.body
+                   if isinstance(node, ast.FunctionDef)}
+        expected = {"start_sync", "_prepare_sync", "_local_metadata",
+                    "_logged_in_client", "_cloud_comparison",
+                    "_confirm_comparison", "_plan_actions", "_upload_jobs",
+                    "_start_sync_worker"}
+        self.assertLessEqual(expected, defined)
+
+
 if __name__ == "__main__":
     unittest.main()

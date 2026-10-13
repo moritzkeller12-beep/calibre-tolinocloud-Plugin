@@ -1588,6 +1588,14 @@ class SyncDashboard(QDialog):
         return client
 
     def start_sync(self):
+        """Vergleichen und den Hintergrundlauf starten.
+
+        Hier steht nur die Reihenfolge und die Fehlerbehandlung der
+        Vorbereitung; die Schritte selbst liegen in `_prepare_sync`
+        (Metadaten lesen, anmelden, vergleichen, Auswahl einholen, planen)
+        und `_start_sync_worker` (übersprungene Uploads melden, Thread
+        starten).
+        """
         if self.thread is not None:
             return
         settings = self.values()
@@ -1601,121 +1609,7 @@ class SyncDashboard(QDialog):
         self.sync_column_enabled = tolino_column_active(
             settings, self.gui.current_db)
         try:
-            metadata = {}
-            for book_id in iter_book_ids(self.gui.current_db):
-                item = metadata_by_id(self.gui.current_db, book_id)
-                metadata[book_id] = {
-                    "uuid": _metadata_value(item, "uuid"),
-                    "title": _metadata_value(item, "title"),
-                    "authors": _display_value(_metadata_value(item, "authors",
-                                                               _metadata_value(item, "author"))),
-                    "isbn": _display_value(_metadata_value(item, "isbn",
-                                                            _metadata_value(item, "identifiers"))),
-                    "formats": _metadata_value(item, "formats"),
-                    "last_modified": str(_metadata_value(item, "last_modified")),
-                    "tolino_id": metadata_tolino_id(item) if self.sync_column_enabled else "",
-                    "series": str(_metadata_value(item, "series") or "").strip(),
-                }
-            for book_id, item in metadata.items():
-                item["formats"] = normalize_formats(item["formats"])
-                item["format_signatures"] = _format_signatures(
-                    self.gui.current_db, book_id, item["formats"])
-            state = load_state(settings["state"])
-            client = TolinoClient(settings["partner_id"], settings["hardware_id"],
-                                  settings["refresh_token"], settings["username"],
-                                  settings["password"],
-                                  token_callback=self.persist_refresh_token,
-                                  hardware_callback=self.persist_hardware)
-            client.login()
-            self.set_refresh_token(client.refresh)
-            # CRITICAL: Ensure the new refresh token is persisted immediately
-            # This prevents "reuse exceeded" errors during sync
-            if client.refresh != settings["refresh_token"]:
-                self.persist_refresh_token(client.refresh)
-            comparison_fields = [
-                name for name, checkbox in (
-                    ("authors", self.compare_authors),
-                    ("title", self.compare_title),
-                    ("isbn", self.compare_isbn),
-                ) if checkbox.isChecked()
-            ]
-            # Lese-Status aus der Cloud holen, damit die Spalte „Gelesen“
-            # vorbelegt ist. Scheitert das (z. B. Netzfehler), läuft der
-            # Vergleich ohne Vorbelegung weiter (0.15.0).
-            inventory = client.inventory()
-            try:
-                read_ids = client.read_ids()
-            except Exception:
-                read_ids = set()
-            comparison = compare_inventory(
-                metadata, state, inventory, settings["preferred_formats"],
-                comparison_fields,
-                use_metadata_ids=self.sync_column_enabled,
-                read_ids=read_ids,
-            )
-            dialog = InventoryDialog(
-                comparison, self,
-                client_factory=lambda: self._cloud_client(),
-                options={
-                    "collections": bool(settings["sync_collections"]),
-                    "deletions": bool(settings["enable_deletions"]),
-                })
-            if dialog.exec() != QDialog.Accepted:
-                return
-            # Die Auswahl des bestätigten Fensters entscheidet, was
-            # passiert -- jede Aktion für sich; eine leere Auswahl ändert
-            # nichts.
-            selected_uploads = dialog.selected_upload_ids()
-            selected_metadata = dialog.selected_metadata_ids()
-            selected_read = dialog.selected_read_targets()
-            selected_unread = dialog.selected_read_unmarks()
-            uploads, removals, current = unpack_plan_result(plan_sync(
-                metadata, state, settings["preferred_formats"],
-                settings["enable_deletions"],
-                upload_book_ids=selected_uploads,
-            ))
-            # "Metadaten" gleicht vorhandene Cloud-Einträge in-place ab
-            # (/meta) -- nur für die ausgewählten Bücher (0.13.0).
-            uploads, meta_updates = plan_metadata_updates(
-                metadata, state, uploads, settings["preferred_formats"],
-                only_book_ids=selected_metadata)
-            # Serien → Sammlungen: ohne eingeschaltete Sammlungen bleibt
-            # die Zuordnung leer und die Cloud wird nicht angefasst.
-            series_map = (series_map_from_metadata(metadata)
-                          if settings["sync_collections"] else {})
-            jobs = []
-            skipped_uploads = []
-            for upload in uploads:
-                record = unpack_upload_record(upload)
-                book_id = record["book_id"]
-                book_uuid = record["book_uuid"]
-                fmt = record["format_name"]
-                old_id = record["old_id"]
-                try:
-                    path = safe_format_path(self.gui.current_db, book_id, fmt)
-                    if not os.path.isfile(path):
-                        raise ValueError("Datei nicht gefunden: %s" % path)
-                except ValueError as exc:
-                    title = metadata.get(book_id, {}).get("title") or "ohne Titel"
-                    skipped_uploads.append(
-                        "Buch %s (%s), Format %s: %s" % (book_id, title, fmt, exc))
-                    continue
-                cover_path = None
-                if settings["upload_covers"]:
-                    cover = cover_bytes(self.gui.current_db, book_id)
-                    if cover:
-                        temp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                        temp.write(cover)
-                        temp.close()
-                        cover_path = temp.name
-                        self.temp_files.append(cover_path)
-                jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path, cover_path))
-            # Nur wirklich ausgeführte Aktionen zählen als abgeglichen:
-            # alles andere behält den alten Cloud-Stand (0.13.0).
-            synced = {job.book_uuid for job in jobs}
-            synced.update(str(record[1]) for record in meta_updates)
-            revert_unsynced_fingerprints(current, state, synced)
-            settings["state"] = current
+            preparation = self._prepare_sync(settings)
         except Exception as exc:
             error_dialog(
                 self, "Vorbereitung fehlgeschlagen",
@@ -1723,17 +1617,187 @@ class SyncDashboard(QDialog):
                 show=True,
             )
             return
+        if preparation is None:
+            # Der Nutzer hat das Bestätigungsfenster abgebrochen.
+            return
+        self._start_sync_worker(settings, preparation)
+
+    def _prepare_sync(self, settings):
+        """Alles vor dem Hintergrundlauf; None bei Abbruch im Fenster."""
+        metadata = self._local_metadata()
+        state = load_state(settings["state"])
+        client = self._logged_in_client(settings)
+        comparison = self._cloud_comparison(settings, metadata, state, client)
+        selection = self._confirm_comparison(comparison, settings)
+        if selection is None:
+            return None
+        return self._plan_actions(settings, metadata, state, selection)
+
+    def _local_metadata(self):
+        """Calibre-Metadaten aller Bücher inkl. Format-Signaturen lesen."""
+        metadata = {}
+        for book_id in iter_book_ids(self.gui.current_db):
+            item = metadata_by_id(self.gui.current_db, book_id)
+            metadata[book_id] = {
+                "uuid": _metadata_value(item, "uuid"),
+                "title": _metadata_value(item, "title"),
+                "authors": _display_value(_metadata_value(item, "authors",
+                                                           _metadata_value(item, "author"))),
+                "isbn": _display_value(_metadata_value(item, "isbn",
+                                                        _metadata_value(item, "identifiers"))),
+                "formats": _metadata_value(item, "formats"),
+                "last_modified": str(_metadata_value(item, "last_modified")),
+                "tolino_id": metadata_tolino_id(item) if self.sync_column_enabled else "",
+                "series": str(_metadata_value(item, "series") or "").strip(),
+            }
+        for book_id, item in metadata.items():
+            item["formats"] = normalize_formats(item["formats"])
+            item["format_signatures"] = _format_signatures(
+                self.gui.current_db, book_id, item["formats"])
+        return metadata
+
+    def _logged_in_client(self, settings):
+        """Anmelden und einen rotierten Refresh-Token sofort persistieren."""
+        client = TolinoClient(settings["partner_id"], settings["hardware_id"],
+                              settings["refresh_token"], settings["username"],
+                              settings["password"],
+                              token_callback=self.persist_refresh_token,
+                              hardware_callback=self.persist_hardware)
+        client.login()
+        self.set_refresh_token(client.refresh)
+        # CRITICAL: Ensure the new refresh token is persisted immediately
+        # This prevents "reuse exceeded" errors during sync
+        if client.refresh != settings["refresh_token"]:
+            self.persist_refresh_token(client.refresh)
+        return client
+
+    def _cloud_comparison(self, settings, metadata, state, client):
+        """Cloud-Inventar und Lese-Status holen, Vergleichszeilen bilden."""
+        comparison_fields = [
+            name for name, checkbox in (
+                ("authors", self.compare_authors),
+                ("title", self.compare_title),
+                ("isbn", self.compare_isbn),
+            ) if checkbox.isChecked()
+        ]
+        # Lese-Status aus der Cloud holen, damit die Spalte „Gelesen“
+        # vorbelegt ist. Scheitert das (z. B. Netzfehler), läuft der
+        # Vergleich ohne Vorbelegung weiter (0.15.0).
+        inventory = client.inventory()
+        try:
+            read_ids = client.read_ids()
+        except Exception:
+            read_ids = set()
+        return compare_inventory(
+            metadata, state, inventory, settings["preferred_formats"],
+            comparison_fields,
+            use_metadata_ids=self.sync_column_enabled,
+            read_ids=read_ids,
+        )
+
+    def _confirm_comparison(self, comparison, settings):
+        """Bestätigungsfenster zeigen; None, wenn es abgebrochen wurde."""
+        dialog = InventoryDialog(
+            comparison, self,
+            client_factory=lambda: self._cloud_client(),
+            options={
+                "collections": bool(settings["sync_collections"]),
+                "deletions": bool(settings["enable_deletions"]),
+            })
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        # Die Auswahl des bestätigten Fensters entscheidet, was
+        # passiert -- jede Aktion für sich; eine leere Auswahl ändert
+        # nichts.
+        return {
+            "uploads": dialog.selected_upload_ids(),
+            "metadata": dialog.selected_metadata_ids(),
+            "read": dialog.selected_read_targets(),
+            "unread": dialog.selected_read_unmarks(),
+        }
+
+    def _plan_actions(self, settings, metadata, state, selection):
+        """Aus der Auswahl die Jobs und den neuen Sync-Stand bauen."""
+        uploads, removals, current = unpack_plan_result(plan_sync(
+            metadata, state, settings["preferred_formats"],
+            settings["enable_deletions"],
+            upload_book_ids=selection["uploads"],
+        ))
+        # "Metadaten" gleicht vorhandene Cloud-Einträge in-place ab
+        # (/meta) -- nur für die ausgewählten Bücher (0.13.0).
+        uploads, meta_updates = plan_metadata_updates(
+            metadata, state, uploads, settings["preferred_formats"],
+            only_book_ids=selection["metadata"])
+        # Serien → Sammlungen: ohne eingeschaltete Sammlungen bleibt
+        # die Zuordnung leer und die Cloud wird nicht angefasst.
+        series_map = (series_map_from_metadata(metadata)
+                      if settings["sync_collections"] else {})
+        jobs, skipped_uploads = self._upload_jobs(settings, metadata, uploads)
+        # Nur wirklich ausgeführte Aktionen zählen als abgeglichen:
+        # alles andere behält den alten Cloud-Stand (0.13.0).
+        synced = {job.book_uuid for job in jobs}
+        synced.update(str(record[1]) for record in meta_updates)
+        revert_unsynced_fingerprints(current, state, synced)
+        settings["state"] = current
+        return {
+            "jobs": jobs,
+            "removals": removals,
+            "meta_updates": meta_updates,
+            "series_map": series_map,
+            "skipped_uploads": skipped_uploads,
+            "selected_read": selection["read"],
+            "selected_unread": selection["unread"],
+        }
+
+    def _upload_jobs(self, settings, metadata, uploads):
+        """Upload-Jobs bauen; fehlende Dateien landen in `skipped_uploads`."""
+        jobs = []
+        skipped_uploads = []
+        for upload in uploads:
+            record = unpack_upload_record(upload)
+            book_id = record["book_id"]
+            book_uuid = record["book_uuid"]
+            fmt = record["format_name"]
+            old_id = record["old_id"]
+            try:
+                path = safe_format_path(self.gui.current_db, book_id, fmt)
+                if not os.path.isfile(path):
+                    raise ValueError("Datei nicht gefunden: %s" % path)
+            except ValueError as exc:
+                title = metadata.get(book_id, {}).get("title") or "ohne Titel"
+                skipped_uploads.append(
+                    "Buch %s (%s), Format %s: %s" % (book_id, title, fmt, exc))
+                continue
+            cover_path = None
+            if settings["upload_covers"]:
+                cover = cover_bytes(self.gui.current_db, book_id)
+                if cover:
+                    temp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                    temp.write(cover)
+                    temp.close()
+                    cover_path = temp.name
+                    self.temp_files.append(cover_path)
+            jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path, cover_path))
+        return jobs, skipped_uploads
+
+    def _start_sync_worker(self, settings, preparation):
+        """Übersprungene Uploads melden und den Hintergrundlauf starten."""
+        skipped_uploads = preparation["skipped_uploads"]
         if skipped_uploads:
             QMessageBox.warning(
                 self, "Tolino Cloud Sync",
                 "Einige Uploads wurden übersprungen:\n\n%s" %
                 "\n".join(skipped_uploads))
-        summary = sync_summary(len(jobs), len(removals))
+        jobs = preparation["jobs"]
+        summary = sync_summary(len(jobs), len(preparation["removals"]))
         self.progress.setRange(0, summary["total"] or 1)
         self.progress.setValue(0)
         self.thread = QThread(self)
-        self.worker = SyncWorker(settings, jobs, removals, meta_updates,
-                                 series_map, selected_read, selected_unread)
+        self.worker = SyncWorker(settings, jobs, preparation["removals"],
+                                 preparation["meta_updates"],
+                                 preparation["series_map"],
+                                 preparation["selected_read"],
+                                 preparation["selected_unread"])
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)
@@ -1746,7 +1810,6 @@ class SyncDashboard(QDialog):
         self.update_status()
         # Ensure settings are up-to-date with the latest refresh token
         settings["refresh_token"] = self.refresh.text().strip()
-
     def progress_changed(self, done, total, text):
         self.progress.setRange(0, total or 1)
         self.progress.setValue(done)
