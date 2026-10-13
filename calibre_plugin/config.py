@@ -1,3 +1,5 @@
+import threading
+
 try:
     from calibre.utils.config import JSONConfig
 except ImportError:
@@ -15,6 +17,12 @@ except ImportError:
 
 PARTNER_SCHEMA_VERSION = 2
 SETTINGS_SCHEMA_VERSION = 2
+
+# Die Einstellungen werden aus ZWEI Threads benutzt: der Dialog speichert im
+# GUI-Thread, waehrend der Keep-alive im Hintergrund den Refresh-Token
+# rotiert. Ohne Lock kann ein Lesen-Aendern-Schreiben dazwischenfunken und
+# die Rotation des anderen Threads verlieren (0.15.5).
+_SETTINGS_LOCK = threading.RLock()
 
 # Was dieser Plugin bis 0.15.1 von selbst eingestellt hat. Wer diese Werte
 # nie angefasst hat, bekommt beim ersten Start in 0.15.2 die neuen Standards
@@ -143,7 +151,17 @@ def _migrate_accounts():
 
 
 def settings():
-    """Return a complete snapshot, migrating old single-account preferences."""
+    """Return a complete snapshot, migrating old single-account preferences.
+
+    Laeuft unter dem Einstellungs-Lock, weil der Aufruf den Speicher
+    umschreiben kann (Migration, Standardwerte) und auch aus dem
+    Keep-alive-Thread kommt (0.15.5).
+    """
+    with _SETTINGS_LOCK:
+        return _settings_unlocked()
+
+
+def _settings_unlocked():
     _migrate_settings_defaults()
     accounts, active = _migrate_accounts()
     values = {}
@@ -178,7 +196,17 @@ def settings():
 
 
 def save_account(name, values, active=None):
-    """Persist one account without changing any other account's state."""
+    """Persist one account without changing any other account's state.
+
+    Lesen UND Schreiben des ganzen Konto-Blocks passieren unter dem
+    Einstellungs-Lock: die Funktion wird aus dem GUI-Thread und aus dem
+    Keep-alive aufgerufen (0.15.5).
+    """
+    with _SETTINGS_LOCK:
+        _save_account_unlocked(name, values, active)
+
+
+def _save_account_unlocked(name, values, active=None):
     snapshot = settings()
     accounts = snapshot["accounts"]
     existing = next((item for item in accounts if item["name"] == name), {})
@@ -218,8 +246,28 @@ def set_active_account(name):
     save_account(name, {}, active=name)
 
 
+def save_credentials(account_name, refresh_token, hardware):
+    """Zugang eines Kontos speichern: Refresh-Token + Hardware-ID.
+
+    Dialog und Sync-Worker schrieben dieselben zwei Felder bisher an vier
+    Stellen von Hand zusammen; hier stehen Feldnamen, aktives Konto und der
+    Lock an EINEM Ort (0.15.5). Ohne Kontonamen gibt es nichts zu speichern.
+    """
+    if not account_name:
+        return
+    save_account(account_name, {
+        "refresh_token": refresh_token,
+        "hardware_id": hardware,
+    }, active=account_name)
+
+
 def save_settings(values):
     """Persist global options and the selected account (legacy-compatible)."""
+    with _SETTINGS_LOCK:
+        _save_settings_unlocked(values)
+
+
+def _save_settings_unlocked(values):
     current = settings()
     for key in ("preferred_formats", "upload_covers", "enable_deletions",
                 "sync_collections", "use_tolino_column"):

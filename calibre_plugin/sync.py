@@ -404,7 +404,7 @@ def _file_changed(metadata, state_entry, format_name):
     """True, wenn sich die Buchdatei seit dem letzten Sync geändert hat.
 
     Nur aussagekräftig, wenn beide Seiten einen Content-Fingerabdruck
-    haben; sonst False -- die Oberfläche schlägt dann den Metadaten-Abgleich
+    haben; sonst False – die Oberfläche schlägt dann den Metadaten-Abgleich
     vor, der ohne erneuten Upload auskommt.
     """
     if not format_name:
@@ -435,8 +435,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     """Return deterministic local/remote rows for the pre-sync confirmation view.
 
     `read_ids` sind die Tolino-IDs, die im Konto schon als gelesen markiert
-    sind (0.15.0). Sie belegen die Spalte „Gelesen“ vor: was in der Cloud
-    gelesen ist, ist angehakt -- und muss nicht erneut geschrieben werden.
+    sind (0.15.0). Sie belegen die Spalte «Gelesen» vor: was in der Cloud
+    gelesen ist, ist angehakt – und muss nicht erneut geschrieben werden.
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
@@ -669,7 +669,7 @@ def plan_collection_updates(series_map, state):
 
     Geplant wird nur, was noch nicht geschrieben wurde: bereits zugeordnete
     Serien stehen als `collections` am Buch (siehe `remember_collection`) und
-    fallen hier heraus. Ohne offene Zuordnungen ist das Ergebnis leer -- dann
+    fallen hier heraus. Ohne offene Zuordnungen ist das Ergebnis leer – dann
     liest der Sync die Cloud gar nicht erst. Ohne Serien (oder ohne bekannte
     Tolino-ID) ebenfalls leer: Ordner entstehen nie automatisch.
     """
@@ -715,7 +715,7 @@ def metadata_fingerprint(metadata):
 
 def content_fingerprint(metadata, format_name):
     """Hash of the format FILE itself (uuid|format|size:mtime); '' when the
-    signature was never collected -- an unknown file must never be mistaken
+    signature was never collected – an unknown file must never be mistaken
     for an unchanged one, so '' blocks in-place metadata updates."""
     signatures = metadata.get("format_signatures")
     signature = (str(signatures.get(format_name) or "")
@@ -770,7 +770,7 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
     Metadaten-Fingerabdruck kennt). `only_book_ids` grenzt auf die vom
     Nutzer ausgewählten Bücher ein; ohne Angabe werden alle passenden Bücher
     berücksichtigt. Bücher, die ohnehin hochgeladen werden, werden NIE
-    zusätzlich gepatcht -- der Upload trägt die Metadaten mit.
+    zusätzlich gepatcht – der Upload trägt die Metadaten mit.
 
     Returns (kept_uploads, meta_updates).
     """
@@ -981,7 +981,7 @@ def diagnose_preparation(database, preferred_formats=(), upload_covers=False, st
     step("Metadaten-Schlüssel/-Typen", lambda: _metadata_shapes(metadata))
     step("Format-Rückgaben", lambda: _diagnostic_formats(database, metadata))
     if upload_covers:
-        step("Titelbild-Typ/-Größe",
+        step("Titelbild-Typ/-Grösse",
              lambda: _diagnostic_covers(database, book_ids))
     state_result = step("Lokaler Sync-Status", lambda: state if isinstance(state, dict) else {})
     state = state_result.get("value", {}) if state_result.get("status") == "ok" else {}
@@ -994,7 +994,7 @@ def _calibre_version():
         import calibre
         return getattr(calibre, "__version__", "unbekannt")
     except ImportError:
-        return "Calibre-Modul nicht verfügbar (Diagnose außerhalb Calibre)"
+        return "Calibre-Modul nicht verfügbar (Diagnose ausserhalb Calibre)"
 
 
 def _diagnostic_ids(database):

@@ -28,6 +28,20 @@ class TolinoApiError(TolinoError):
     pass
 
 
+def log_warning(message):
+    """Schreibt eine Warnung ins Calibre-Log -- ohne Zugangsdaten.
+
+    Die Meldung darf NIE einen Token-Wert enthalten. Ausserhalb von Calibre
+    (Tests, direkter Import) bleibt der Aufruf still: das ist die Naht zum
+    Log und darf selbst nicht werfen.
+    """
+    try:
+        from calibre.utils.logging import default_log
+        default_log.warn(str(message))
+    except Exception:
+        pass
+
+
 # --- Gemeinsamer Web Reader: EIN Login-Profil fuer alle Shops ---------#
 # Jeder Reseller (thalia, Hugendubel, eBook.de, ...) traegt als OAuth-
 # Redirect https://webreader.mytolino.com/library/; uses_shared_webreader()
@@ -590,7 +604,7 @@ LOCAL_CALLBACK_UNSUPPORTED_RESELLERS = ("8",)
 
 
 def _undatable_shape(token):
-    """Structural fingerprint of an undatable candidate -- never its value."""
+    """Structural fingerprint of an undatable candidate – never its value."""
     text = str(token or "")
     parts = text.split(".")
     shape = "%d %s, %d Zeichen" % (
@@ -613,9 +627,9 @@ def _candidate_age_note(candidates):
         token = next(iter(candidates or ()), None)
         if token is None:
             return ""
-        return ("Refresh-Kandidat ohne datierbares JWT-alter (%s)"
+        return ("Alter des gefundenen Zugangs unbekannt (%s)"
                 % _undatable_shape(token))
-    return "Refresh-Kandidat %d Sekunden alt" % max(
+    return "Der gefundene Zugang war %d Sekunden alt." % max(
         0, int(time.time() - best))
 
 
@@ -864,10 +878,10 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     except TolinoAuthError as exc:
         # The exchange consumed one grant; a retry would only replay.
         raise TolinoAuthError(
-            "Der live gelesene Token wurde am Token-Endpunkt abgelehnt "
-            "(%s; Browser-Tausch: %s). Bitte die Browser-Anmeldung "
-            "erneut starten -- dabei wird der aktuelle Token direkt aus "
-            "dem ge\u00f6ffneten Web Reader frisch gelesen."
+            "Tolino hat den aus dem Anmeldefenster gelesenen Zugang "
+            "abgelehnt (%s; Browser-Tausch: %s). Bitte erneut auf "
+            "«Jetzt bei Tolino anmelden» klicken – der aktuelle Zugang "
+            "wird dann frisch aus dem Web Reader gelesen."
             % (exc, browser_note)) from exc
     return client.refresh or candidate, client.hardware or hardware_id
 
@@ -890,7 +904,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     """Read the Web Reader's CURRENT token via a private CDP window.
 
     Returns (rotated_refresh, hardware_id). Raises TolinoAuthError when
-    no Chromium browser is installed -- callers fall back to the
+    no Chromium browser is installed – callers fall back to the
     historical disk-scrape flow in that case.
     """
     from . import cdp as cdp_module
@@ -907,7 +921,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             (grabbed or {}).get("refresh") or ()) if token not in tried]
         if fresh:
             if progress:
-                progress("Tausche den gelesenen Token am Token-Endpunkt ...")
+                progress("Prüfe den gelesenen Zugang bei Tolino …")
             try:
                 result = _exchange_grabbed_token(partner_id, hardware,
                                                  grabbed, fresh)
@@ -919,13 +933,13 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                 first_error = str(exc)
                 tried.update((grabbed or {}).get("refresh") or ())
                 if progress:
-                    progress("Token am Token-Endpunkt abgelehnt -- warte "
-                             "auf eine frische Rotation des Web Readers ...")
+                    progress("Zugang abgelehnt – warte auf einen frischen "
+                             "Zugang aus dem Web Reader …")
             else:
                 # Der Token gehoert ab jetzt Calibre: ein offener Reader rotiert weiter
                 # und wuerde die uebernommene Kopie verbrennen (Reuse-Schutz).
                 if progress:
-                    progress("Token übernommen -- das Anmeldefenster "
+                    progress("Zugang übernommen – das Anmeldefenster "
                              "wird geschlossen.")
                 cdp_module.close_grabber_window()
                 return result
@@ -935,15 +949,13 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             break
         if progress:
             if at_login_page:
-                progress("Das Anmeldefenster ist offen, zeigt aber keine "
-                         "angemeldete Web-Reader-Seite -- bitte dort JETZT "
-                         "im Web Reader neu anmelden (bis die Bücherliste "
-                         "lädt); der frische Token wird dann automatisch "
-                         "übernommen (Versuch %d) ..." % attempt)
+                progress("Bitte im Anmeldefenster im Web Reader anmelden, "
+                         "bis die Bücherliste lädt – der Zugang wird dann "
+                         "automatisch übernommen (Versuch %d) …" % attempt)
             else:
-                progress("Warte auf einen neu geschriebenen Token im Seiten-"
-                         "Speicher (Versuch %d von %d; im Fenster angemeldet "
-                         "bleiben) ..." % (attempt, _NEW_TOKEN_ATTEMPTS))
+                progress("Warte auf den frischen Zugang aus dem Web Reader "
+                         "(Versuch %d von %d) – bitte im Fenster angemeldet "
+                         "bleiben …" % (attempt, _NEW_TOKEN_ATTEMPTS))
         time.sleep(_NEW_TOKEN_INTERVAL)
         more = _normalize_live_grab(
             cdp_module.grab_once_from_grabber())
@@ -977,11 +989,11 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     if window.get("window") and not window.get("reader_tab"):
         # Fenster auf der Anmeldeseite: NICHT schliessen -- dort kann neu
         # angemeldet werden; launch_reader_window wiederverwendet es.
-        action = ("Das Anmeldefenster ist noch offen und zeigt gerade "
-                  "keine angemeldete Web-Reader-Seite: bitte dort im Web "
-                  "Reader neu anmelden, bis die Bücherliste lädt, und den "
-                  "Knopf erneut drücken -- das Fenster bleibt offen und "
-                  "wird wiederverwendet.")
+        action = ("Das Anmeldefenster ist noch offen, zeigt aber keine "
+                  "angemeldete Seite. Bitte dort im Web Reader anmelden, "
+                  "bis die Bücherliste lädt, und danach erneut auf "
+                  "«Jetzt bei Tolino anmelden» klicken. Das Fenster "
+                  "bleibt offen.")
     else:
         # Nichts Tauschbares im Fenster: offen zu lassen wuerde den
         # naechsten Versuch wieder zum Loop machen (dieselbe tote Kopie,
@@ -989,15 +1001,14 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         # Profil und echter Anmeldeseite statt gecachter Buecherliste.
         cdp_module.close_grabber_window()
         action = ("Das Anmeldefenster wurde geschlossen, weil dort nur ein "
-                  "verbrauchter Token liegt: die Browser-Anmeldung erneut "
-                  "starten und im neuen Fenster anmelden, bis die "
-                  "Bücherliste lädt.")
+                  "verbrauchter Zugang lag. Bitte erneut auf «Jetzt bei "
+                  "Tolino anmelden» klicken und im neuen Fenster anmelden, "
+                  "bis die Bücherliste lädt.")
     age_note = _candidate_age_note(
         tried or (grabbed or {}).get("refresh") or ())
     raise TolinoAuthError(
-        "Im Web Reader wurde weder ein frischer Token im Seiten-"
-        "Speicher gefunden noch innerhalb der Wartezeit nachgeschoben "
-        "(%s). %s"
+        "Im Web Reader wurde innerhalb der Wartezeit kein frischer "
+        "Zugang gefunden (%s). %s"
         % (state, action)
         + (" Letzter Fehler: %s" % first_error if first_error else "")
         + (" %s." % age_note if age_note else ""))
@@ -1010,7 +1021,7 @@ def try_live_grab_first(partner_id, hardware, timeout=12):
     page yielded an exchangeable token; the window is closed first --
     the plugin owns the session now, and a reader left running would
     rotate the adopted copy away (reuse protection kills the session).
-    Returns None when no grabber window is running -- the caller should
+    Returns None when no grabber window is running – the caller should
     then use the historical disk-scrape flow.
     """
     from . import cdp as cdp_module
@@ -1037,11 +1048,10 @@ def try_live_grab_first(partner_id, hardware, timeout=12):
             return result
     age_note = _candidate_age_note((grabbed or {}).get("refresh") or ())
     raise TolinoAuthError(
-        "Im Anmeldefenster war kein tauschbarer Token zu gewinnen: "
-        "Kandidaten \u00e4lter als 30 Minuten oder am Endpoint "
-        "abgelehnt (%s). Bitte im Fenster einmal neu anmelden (F5 "
-        "gen\u00fcgt oft) und den Knopf direkt danach erneut "
-        "dr\u00fccken."
+        "Im Anmeldefenster wurde kein brauchbarer Zugang gefunden: Er "
+        "war älter als 30 Minuten oder wurde von Tolino abgelehnt (%s). "
+        "Bitte im Fenster neu anmelden (oft genügt F5) und danach erneut "
+        "auf «Jetzt bei Tolino anmelden» klicken."
         % (state + ("; Letzter Fehler: %s" % first_error
                     if first_error else ""))
         + (" %s." % age_note if age_note else ""))
@@ -1108,26 +1118,26 @@ def open_login_browser(url):
 
 
 def _system_browser_open_error():
-    """Fehler für "kein Browser geöffnet" -- in der Sandbox mit Fix dazu."""
+    """Fehler für "kein Browser geöffnet" – in der Sandbox mit Fix dazu."""
     base = "Der System-Browser konnte nicht geöffnet werden."
     if not in_flatpak_sandbox():
         return base
     return base + (
-        " Calibre läuft als Flatpak (Flathub): aus der Sandbox heraus"
-        " sind die Browser des Rechners nicht erreichbar. Einmalig die"
-        " Freigabe erteilen -- bitte zur Installation passend -- und"
-        " Calibre danach VOLLSTÄNDIG neu starten (laufende Fenster"
-        " behalten die alten Rechte):"
-        "\nUser-Installation: flatpak override --user"
-        " --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre"
-        "\nSystem-Installation (flatpak info zeigt \"Installation:"
-        " system\"): sudo flatpak override --talk-name=org.freedesktop."
-        "Flatpak com.calibre_ebook.calibre"
-        "\nWirksam ist die Freigabe, wenn flatpak info"
-        " --show-permissions com.calibre_ebook.calibre"
-        " org.freedesktop.Flatpak enthält."
-        "\nOhne diese Freigabe alternativ den Refresh-Token manuell aus"
-        " einem laufenden Web Reader übernehmen (siehe README).")
+        "\n\nCalibre läuft als Flatpak und darf die Browser des Rechners"
+        " nicht sehen. Einmalig die Freigabe erteilen und Calibre danach"
+        " vollständig neu starten."
+        "\n\nBenutzer-Installation:"
+        "\nflatpak override --user --talk-name=org.freedesktop.Flatpak"
+        " com.calibre_ebook.calibre"
+        "\n\nSystem-Installation («flatpak info» zeigt"
+        " «Installation: system»):"
+        "\nsudo flatpak override --talk-name=org.freedesktop.Flatpak"
+        " com.calibre_ebook.calibre"
+        "\n\nKontrolle: «flatpak info --show-permissions"
+        " com.calibre_ebook.calibre» muss org.freedesktop.Flatpak enthalten."
+        "\n\nOhne Freigabe lässt sich alternativ der Zugangsschlüssel"
+        " (Refresh-Token) in den Einstellungen von Hand eintragen"
+        " (siehe README).")
 
 
 def chromium_available():
@@ -1157,11 +1167,29 @@ def _keycloak_assisted_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
 _KEEPALIVE_LOCK = threading.Lock()
 _KEEPALIVE_STOP = threading.Event()
 
+# Ein laufender Sync und der Keep-alive duerfen NICHT gleichzeitig denselben
+# Refresh-Token einloesen -- der Reuse-Schutz von Keycloak beendet die
+# Sitzung dann sofort. Waehrend eines Syncs haelt der Keep-alive deshalb
+# still (0.15.5).
+_SYNC_ACTIVE = False
+
+
+def mark_sync_active(active):
+    """Merkt sich, ob gerade ein Sync laeuft (bremst den Keep-alive)."""
+    global _SYNC_ACTIVE
+    _SYNC_ACTIVE = bool(active)
+
 
 def keepalive_refresh(get_credentials, persist):
     """One silent keep-alive login; returns the rotated token or None."""
+    if _SYNC_ACTIVE:
+        # Waehrend eines Syncs wird nicht rotiert: beide wuerden denselben
+        # Refresh-Token einloesen und der Reuse-Schutz die Sitzung beenden.
+        return None
     if not _KEEPALIVE_LOCK.acquire(blocking=False):
         return None
+    creds = {}
+    token = ""
     try:
         creds = get_credentials() or {}
         token = str(creds.get("refresh_token") or "").strip()
@@ -1183,7 +1211,11 @@ def keepalive_refresh(get_credentials, persist):
         client.login()
         _persist(client.refresh)
         return client.refresh
-    except Exception:
+    except Exception as exc:
+        # Ein stumm verschluckter Fehler faellt erst Stunden spaeter als
+        # abgelaufene Sitzung auf; deshalb sichtbar machen -- ohne Token.
+        log_warning("Tolino-Keep-alive fehlgeschlagen: %s"
+                    % sanitize_error(exc, (token,)))
         return None
     finally:
         _KEEPALIVE_LOCK.release()
@@ -1212,15 +1244,15 @@ def browser_login(partner_id, hardware, timeout=OAUTH_STATE_TTL,
 
     if not partner or not partner.get("auth_url"):
         raise TolinoAuthError(
-            "F\u00fcr diesen Buchh\u00e4ndler ist keine OAuth-Anmeldeseite "
-            "hinterlegt. Alternativ ein Refresh-Token aus dem Web Reader "
-            "im Dialog eintragen."
+            "Für diesen Buchhändler ist keine Anmeldeseite hinterlegt. "
+            "Alternativ den Zugangsschlüssel (Refresh-Token) in den "
+            "Einstellungen von Hand eintragen."
         )
     if not partner.get("token_url"):
         raise TolinoAuthError(
-            "F\u00fcr diesen Buchh\u00e4ndler ist kein Token-Endpunkt "
-            "hinterlegt. Alternativ ein Refresh-Token aus dem Web Reader "
-            "im Dialog eintragen."
+            "Für diesen Buchhändler ist keine Anmelde-Adresse hinterlegt. "
+            "Alternativ den Zugangsschlüssel (Refresh-Token) in den "
+            "Einstellungen von Hand eintragen."
         )
 
     # Gemeinsamer Web Reader: ein Weg fuer alle Shops, die dort liegen
@@ -1418,7 +1450,7 @@ class TolinoClient:
                  hardware_callback=None):
         partner_id = resolve_partner_id(partner_id)
         if partner_id not in PARTNERS:
-            raise TolinoError("Unsupported Tolino partner ID: %s" % partner_id)
+            raise TolinoError("Unbekannter Tolino-Partner: %s" % partner_id)
         self.partner_id = int(partner_id)
         self.partner = PARTNERS[self.partner_id]
         self.hardware = normalize_hardware_id(hardware) or hardware_id()
@@ -1501,8 +1533,8 @@ class TolinoClient:
         if self.refresh:
             if not self.partner.get("token_url"):
                 raise TolinoAuthError(
-                    "F\u00fcr diesen Buchh\u00e4ndler ist kein gepr\u00fcfter "
-                    "Refresh-Token-Endpunkt hinterlegt."
+                    "Für diesen Buchhändler ist keine geprüfte "
+                    "Anmelde-Adresse hinterlegt."
                 )
             payload = {
                 "client_id": self.partner["client_id"],
@@ -1512,12 +1544,13 @@ class TolinoClient:
             }
         elif self.username and self.password:
             raise TolinoAuthError(
-                "Benutzername/Passwort erfordert die OAuth-Anmeldung des "
-                "Buchh\u00e4ndlers. F\u00fcr dieses Plugin ein Refresh-Token "
-                "aus dem Web Reader verwenden."
+                "Die Anmeldung mit Benutzername und Passwort wird nicht "
+                "unterstützt. Bitte «Jetzt bei Tolino anmelden» verwenden "
+                "oder den Zugangsschlüssel (Refresh-Token) in den "
+                "Einstellungen eintragen."
             )
         else:
-            raise TolinoAuthError("Bitte zuerst ein Refresh-Token konfigurieren.")
+            raise TolinoAuthError("Bitte zuerst anmelden: «Jetzt bei Tolino anmelden».")
         try:
             data = self._request(self.partner["token_url"], "POST", payload,
                                  form=True, authenticated=False)
@@ -1533,11 +1566,10 @@ class TolinoClient:
                 self.access = None
                 self.expires_at = 0
                 raise TolinoAuthError(
-                    "Die Tolino-Sitzung dieses Refresh-Tokens ist beendet "
-                    "(Session not active): Der Account wurde im Web Reader "
-                    "abgemeldet oder die Sitzung ist abgelaufen. Melde dich "
-                    "im Web Reader (Bücherliste) neu an und starte danach "
-                    "die Browser-Anmeldung erneut."
+                    "Die Tolino-Sitzung ist beendet: Sie wurden im Web Reader "
+                    "abgemeldet oder die Sitzung ist abgelaufen. Bitte im Web "
+                    "Reader neu anmelden und danach erneut auf "
+                    "«Jetzt bei Tolino anmelden» klicken."
                 ) from exc
             if "invalid_grant" in folded or "reuse exceeded" in folded:
                 # Invalidate the current refresh token to prevent reuse
@@ -1545,11 +1577,13 @@ class TolinoClient:
                 self.access = None
                 self.expires_at = 0
                 raise TolinoAuthError(
-                    "Tolino hat diesen Refresh-Token abgelehnt (verbraucht oder "
-                    "widerrufen). Melde dich im Web Reader neu an und "
-                    "verwende den neuen Token nicht mehrfach."
+                    "Tolino hat den gespeicherten Zugang abgelehnt (bereits "
+                    "verbraucht oder widerrufen). Bitte im Web Reader neu "
+                    "anmelden und einen frischen Zugang holen. Ein Zugang "
+                    "darf nicht an mehreren Orten gleichzeitig verwendet "
+                    "werden."
                 ) from exc
-            raise TolinoAuthError("Tolino authentication failed: %s" % exc)
+            raise TolinoAuthError("Anmeldung bei Tolino fehlgeschlagen: %s" % exc)
         return self._apply_token_response(data)
 
     @property
@@ -1560,8 +1594,11 @@ class TolinoClient:
         return max(0, int(self.refresh_expires_at - time.time()))
 
     def _request(self, url, method="GET", data=None, form=False,
-                 authenticated=True, content_type=None, _retry=True,
-                 _extra_headers=None):
+                 authenticated=True, content_type=None, _auth_retry=True,
+                 _hw_retry=True, _waf_rounds=0, _extra_headers=None):
+        # Drei GETRENNTE Zaehler statt eines Tri-States (True/1/False) in
+        # `_retry`: eine verbrauchte Rettung darf die andere nicht sperren,
+        # und der WAF-Warteversuch zaehlt sichtbar mit (0.15.5).
         if authenticated and (not self.access or time.time() >= self.expires_at):
             self.login()
         body = None
@@ -1607,7 +1644,7 @@ class TolinoClient:
             try:
                 return json.loads(raw.decode("utf-8"))
             except ValueError:
-                raise TolinoApiError("Tolino returned invalid JSON.")
+                raise TolinoApiError("Tolino hat eine ungültige Antwort geliefert (kein gültiges JSON).")
 
         def _error(exc, raw_detail):
             self.last_http_status = exc.code
@@ -1635,7 +1672,8 @@ class TolinoClient:
                 detail, (self.refresh, self.access)
             )[:500]
             retryable_auth = (
-                exc.code == 401 and authenticated and self.refresh and _retry
+                exc.code == 401 and authenticated and self.refresh
+                and _auth_retry
                 and "invalid_grant" not in self.last_error_text.casefold()
                 and "reuse exceeded" not in self.last_error_text.casefold()
             )
@@ -1643,14 +1681,16 @@ class TolinoClient:
                 self.access = None
                 self.login()
                 return self._request(url, method, data, form, True,
-                                     content_type, _retry=False,
+                                     content_type, _auth_retry=False,
+                                     _hw_retry=_hw_retry,
+                                     _waf_rounds=_waf_rounds,
                                      _extra_headers=_extra_headers)
             if (exc.code == 400 and authenticated
                     and url != self.partner.get("token_url")):
                 # 400 am authentifizierten BOSH-Call = unbekannte Hardware-ID (Antwort:
                 # leeres "{}"): Geraet uebernehmen/registrieren und nach kurzem Warten
                 # (registerhw braucht einen Moment) wiederholen.
-                if _retry:
+                if _hw_retry:
                     self._hw_registered_now = False
                     try:
                         recovered = self._recover_device_registration()
@@ -1660,28 +1700,35 @@ class TolinoClient:
                         if self._hw_registered_now:
                             time.sleep(_REGISTER_SETTLE_SECONDS)
                         return self._request(url, method, data, form, True,
-                                             content_type, _retry=False,
+                                             content_type,
+                                             _auth_retry=_auth_retry,
+                                             _hw_retry=False,
+                                             _waf_rounds=_waf_rounds,
                                              _extra_headers=_extra_headers)
                 elif self._hw_registered_now:
                     # Exactly one more attempt after the registration wait.
                     self._hw_registered_now = False
                     time.sleep(_REGISTER_SETTLE_SECONDS)
                     return self._request(url, method, data, form, True,
-                                         content_type, _retry=False,
+                                         content_type,
+                                         _auth_retry=_auth_retry,
+                                         _hw_retry=False,
+                                         _waf_rounds=_waf_rounds,
                                          _extra_headers=_extra_headers)
             if exc.code in (401, 403):
                 if (exc.code == 403
                         and url == self.partner.get("token_url")
-                        and _retry
+                        and _waf_rounds < len(_WAF_RETRY_SECONDS)
                         and _bot_check_detected(self.last_error_text)):
                     # Kurz warten und den Transport-Wechsel erneut
-                    # probieren (zwei Warteversuche, danach sichtbarer
-                    # Fehler).
-                    time.sleep(_WAF_RETRY_SECONDS[0] if _retry is True
-                               else _WAF_RETRY_SECONDS[1])
+                    # probieren (genau so viele Warteversuche wie
+                    # _WAF_RETRY_SECONDS, danach sichtbarer Fehler).
+                    time.sleep(_WAF_RETRY_SECONDS[_waf_rounds])
                     return self._request(
                         url, method, data, form, authenticated, content_type,
-                        _retry=1 if _retry is True else False,
+                        _auth_retry=_auth_retry,
+                        _hw_retry=_hw_retry,
+                        _waf_rounds=_waf_rounds + 1,
                         _extra_headers=_extra_headers)
                 self.access = None
                 message = (_compact_error_text(self.last_error_text)
@@ -1689,7 +1736,7 @@ class TolinoClient:
                 raise TolinoAuthError(
                     "Tolino hat die Anmeldung abgelehnt (%s): %s" % (exc.code, message)
                 )
-            raise TolinoApiError("Tolino HTTP %s: %s" % (exc.code, self.last_error_text))
+            raise TolinoApiError("Tolino-Fehler (HTTP %s): %s" % (exc.code, self.last_error_text))
 
         # Token-Endpunkt bevorzugt ueber curl_cffi (impersonate="chrome") --
         # der Bot-Schutz mag Chrome-TLS lieber; curl und urllib bleiben
@@ -1700,7 +1747,7 @@ class TolinoClient:
             """Run one optional transport, falling through on failure.
 
             Returns the decoded payload or the `fallthrough` sentinel when
-            the next transport -- and finally urllib -- should be tried.
+            the next transport – and finally urllib – should be tried.
             A 403 bot-protection page also falls through; a real OAuth/API
             error is raised/handled by _error.
             """
@@ -1750,7 +1797,7 @@ class TolinoClient:
         except HTTPError as exc:
             return _error(exc, exc.read().decode("utf-8", "replace"))
         except (URLError, OSError) as exc:
-            raise TolinoApiError("Tolino request failed: %s" %
+            raise TolinoApiError("Verbindung zu Tolino fehlgeschlagen: %s" %
                                  sanitize_error(exc, (self.refresh, self.access)))
         return _decode(raw)
 
@@ -1807,7 +1854,7 @@ class TolinoClient:
                              content_type=content_type)
         deliverable = data.get("metadata", {}).get("deliverableId")
         if not deliverable:
-            raise TolinoApiError("Upload response did not contain deliverableId.")
+            raise TolinoApiError("Tolino hat den Upload nicht bestätigt (keine Tolino-ID in der Antwort).")
         return str(deliverable)
 
     def upload_cover(self, deliverable_id, file_path):
@@ -1825,16 +1872,16 @@ class TolinoClient:
         re-uploading the file (0.9.45).
 
         GET /meta?deliverableId=... returns the book with its "metadata"
-        dict; the merged dict goes back via PUT as {"uploadMetaData": ...}.
+        dict; the merged dict goes back via PUT as {"uploadMetaData": …}.
         """
         if not isinstance(fields, dict) or not fields:
-            raise TolinoApiError("Metadata update requires at least one field.")
+            raise TolinoApiError("Für die Metadaten-Aktualisierung fehlt mindestens ein Feld.")
         url = self.META_URL + "/?deliverableId=" + _url_quote(str(deliverable_id))
         book = self._request(url)
         metadata = book.get("metadata") if isinstance(book, dict) else None
         if not isinstance(metadata, dict):
             raise TolinoApiError(
-                "Tolino metadata response had no metadata for %s."
+                "Tolino hat keine Metadaten zu %s geliefert."
                 % deliverable_id)
         metadata.update(fields)
         self._request(url, "PUT", {"uploadMetaData": metadata},
@@ -1860,11 +1907,11 @@ class TolinoClient:
         devices = (data.get("deviceListResponse") or {}).get("devices") or []
         devices = [item for item in devices if isinstance(item, dict)]
         if not devices:
-            raise TolinoApiError("Tolino device list returned no devices.")
+            raise TolinoApiError("Tolino hat kein registriertes Gerät gemeldet.")
         devices.sort(key=lambda item: str(item.get("deviceLastUsage", "")))
         hardware = devices[-1].get("deviceId")
         if not hardware:
-            raise TolinoApiError("Tolino device list entry has no deviceId.")
+            raise TolinoApiError("Ein Gerät in der Tolino-Geräteliste hat keine Geräte-ID.")
         return str(hardware)
 
     def _notify_hardware(self):
@@ -1929,7 +1976,7 @@ class TolinoClient:
         info = self._request(info_url)
         content_url = (info.get("DownloadInfo") or {}).get("contentUrl")
         if not content_url:
-            raise TolinoApiError("DownloadInfo response had no contentUrl.")
+            raise TolinoApiError("Tolino hat keinen Download-Link geliefert.")
         request = Request(content_url, headers={
             "User-Agent": BROWSER_USER_AGENT,
             "t_auth_token": self.access,
@@ -1940,7 +1987,7 @@ class TolinoClient:
             with urlopen(request, timeout=self.timeout) as response:
                 content = response.read()
         except (HTTPError, URLError, OSError) as exc:
-            raise TolinoApiError("Tolino download failed: %s" %
+            raise TolinoApiError("Download von Tolino fehlgeschlagen: %s" %
                                  sanitize_error(exc, (self.refresh, self.access)))
         # Metadata comes from the inventory record.
         for item in self.inventory():
@@ -1965,10 +2012,10 @@ class TolinoClient:
 
     @staticmethod
     def _tag_patch(op, book_id, name, category, revision=None, tag_id=None):
-        """Ein Marken-Patch -- beim Entfernen MIT Marken-ID im Pfad.
+        """Ein Marken-Patch – beim Entfernen MIT Marken-ID im Pfad.
 
-        Feldbefund 0.15.3: „tolino http 400 missing mandatory unitid
-        fragment inside property path for remove“. Der Server identifiziert
+        Feldbefund 0.15.3: «tolino http 400 missing mandatory unitid
+        fragment inside property path for remove». Der Server identifiziert
         die zu löschende Marke über ihre ID, nicht über den Namen:
         ``/publications/<Buch-ID>/tags/<Marken-ID>``. Beim Anlegen vergibt
         er die ID selbst, dort bleibt der Pfad ohne ID.
@@ -1988,7 +2035,7 @@ class TolinoClient:
 
     @classmethod
     def _tag_id_from_patch(cls, item):
-        """Marken-ID aus einem gelesenen Patch -- leer, wenn der Server
+        """Marken-ID aus einem gelesenen Patch – leer, wenn der Server
         keine mitgeschickt hat."""
         parts = cls._tag_path_parts((item or {}).get("path"))
         return parts[1] if parts else ""
@@ -2013,13 +2060,13 @@ class TolinoClient:
 
     @staticmethod
     def _tag_path_parts(path):
-        """(Buch-ID, Marken-ID) aus einem Tag-Pfad -- sonst None.
+        """(Buch-ID, Marken-ID) aus einem Tag-Pfad – sonst None.
 
         Der Server schickt Marken als
         ``/publications/<Buch-ID>/tags/<Marken-ID>`` (die Marken-ID
         vergibt der Server), der Plugin schreibt beim Setzen
         ``/publications/<Buch-ID>/tags``. Beide Formen müssen gelesen
-        werden können -- sonst findet der Bestandsvergleich keine
+        werden können – sonst findet der Bestandsvergleich keine
         Gelesen-Marke in der Cloud (0.15.1).
         """
         parts = str(path or "").split("/")
@@ -2032,7 +2079,7 @@ class TolinoClient:
     def _tag_pairs(cls, patches, category, name=None):
         """{(Buch-ID, Markenname)} aus einer sync-data-Patchliste.
 
-        `remove`-Patches nehmen das Paar wieder heraus -- der letzte
+        `remove`-Patches nehmen das Paar wieder heraus – der letzte
         Eintrag einer Buch/Marken-Kombination entscheidet.
         """
         pairs = set()
@@ -2057,9 +2104,9 @@ class TolinoClient:
     def read_ids(self):
         """Bücher, die im Konto als gelesen markiert sind (0.15.0).
 
-        Quelle ist die System-Marke des Web Readers -- dieselbe, die
+        Quelle ist die System-Marke des Web Readers – dieselbe, die
         `mark_read_many` setzt. Damit kann der Bestandsvergleich die
-        Spalte „Gelesen“ vorbelegen.
+        Spalte «Gelesen» vorbelegen.
         """
         _revision, patches = self.sync_snapshot()
         return {book_id for book_id, _name
@@ -2112,7 +2159,7 @@ class TolinoClient:
         existing = self._find_tag(patches, book_id, collection_name, "collection")
         if existing is None:
             raise TolinoApiError(
-                "Book %s is not part of collection %r." % (book_id, collection_name))
+                "Das Buch %s gehört nicht zur Sammlung %r." % (book_id, collection_name))
         patch = self._tag_patch(
             "remove", book_id, collection_name, "collection",
             revision=existing["value"].get("revision"),
@@ -2123,7 +2170,7 @@ class TolinoClient:
     def mark_read(self, book_id, finished=True):
         """Mark a book as finished (or unmark it) via the system tag patch.
 
-        Es wird nur die eine System-Marke gesetzt bzw. entfernt -- der
+        Es wird nur die eine System-Marke gesetzt bzw. entfernt – der
         restliche Cloud-Stand (Sammlungen, andere Marken) bleibt, wie er ist.
         """
         return self.mark_read_many([book_id], finished=finished)
@@ -2137,7 +2184,7 @@ class TolinoClient:
         """
         ids = [str(book_id) for book_id in book_ids or [] if str(book_id or "").strip()]
         if not ids:
-            raise TolinoApiError("Marking as read requires at least one book id.")
+            raise TolinoApiError("Zum Markieren als gelesen wird mindestens ein Buch benötigt.")
         revision, patches = self.sync_snapshot()
         updates = []
         for book_id in ids:

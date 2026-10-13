@@ -14,7 +14,7 @@ import time
 
 try:
     from .tolino import PARTNERS, TolinoAuthError, in_flatpak_sandbox
-except ImportError:  # direkter Import (außerhalb des Plugin-Pakets)
+except ImportError:  # direkter Import (ausserhalb des Plugin-Pakets)
     from tolino import PARTNERS, TolinoAuthError, in_flatpak_sandbox
 
 
@@ -184,7 +184,7 @@ def chromium_candidates(home=None):
         found.append(([shutil.which("snap"), "run", "chromium"],
                       "Chromium (Snap)"))
     # Flatpak-Sandbox (Calibre von Flathub): die Browser des Rechners
-    # sind von hier unsichtbar -- Sonde außerhalb der Sandbox.
+    # sind von hier unsichtbar -- Sonde ausserhalb der Sandbox.
     if in_flatpak_sandbox():
         found.extend(_sandbox_host_launchers())
     return found
@@ -242,7 +242,7 @@ def pick_chromium():
     """Best available Chromium-family browser, or None.
 
     Returns ``(argv_prefix, label)``; the argv prefix is either a binary
-    path or a flatpak/snap launcher followed by nothing yet -- the
+    path or a flatpak/snap launcher followed by nothing yet – the
     Chromium flags are appended by the caller.
     """
     found = chromium_options()
@@ -623,7 +623,7 @@ def _evaluate_raw_in_target(ws_url, expression, timeout=10,
     """Like _evaluate_in_target but returns CDP's full result dict.
 
     Returns ``{"ok": bool, "value": <decoded JSON value or raw string>,
-    "exception": str}`` -- callers that need the exceptionDetails (e.g.
+    "exception": str}`` – callers that need the exceptionDetails (e.g.
     an in-page fetch whose failure text matters) use this variant.
     """
     try:
@@ -723,42 +723,40 @@ def launch_reader_window(partner_id):
     binary, label = pick_chromium() or (None, None)
     if not binary:
         message = (
-            "Kein Chromium-Browser gefunden (Chrome/Chromium/Brave/Edge). "
-            "Die Browser-Anmeldung benötigt eines davon für die Live-"
-            "Token-Übernahme. Alternativ: aktuellen Refresh-Token manuell "
-            "aus einem laufenden Web Reader übernehmen (siehe README)."
+            "Es wurde kein Chromium-Browser gefunden (Chrome, Chromium, "
+            "Brave oder Edge). Die automatische Anmeldung braucht einen "
+            "davon. Alternativ den Zugangsschlüssel (Refresh-Token) in den "
+            "Einstellungen von Hand eintragen (siehe README)."
         )
         if _host_probe_status == "empty":
             message += (
-                " Die Sonde außerhalb der Sandbox fand ebenfalls keinen "
-                "Chromium-Browser -- bitte Chrome/Chromium/Brave/Edge "
-                "installieren; danach öffnet sich das eigene Fenster "
-                "unabhängig vom Standardbrowser."
+                " Auch ausserhalb der Sandbox wurde kein Chromium-Browser "
+                "gefunden. Bitte Chrome, Chromium, Brave oder Edge "
+                "installieren; das Anmeldefenster öffnet sich unabhängig "
+                "vom Standardbrowser."
             )
         elif in_flatpak_sandbox() and _host_probe_status == "unavailable":
             message += (
-                " Calibre läuft als Flatpak (Flathub), aber das Werkzeug "
-                "flatpak-spawn fehlt in der Sandbox. Einmalig `flatpak "
-                "update` ausführen und Calibre danach vollständig neu "
-                "starten -- danach findet die Sonde die Browser des "
-                "Rechners."
+                " Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt in "
+                "der Sandbox. Bitte einmal «flatpak update» ausführen und "
+                "Calibre danach vollständig neu starten."
             )
         elif in_flatpak_sandbox():
             message += (
-                " Calibre läuft als Flatpak (Flathub): Browser des "
-                "Rechners sind ohne Freigabe unsichtbar. Einmalig die "
-                "Freigabe erteilen -- bitte zur Installation passend, "
-                "danach Calibre VOLLSTÄNDIG neu starten (laufende "
-                "Fenster behalten die alten Rechte): User-Installation: "
+                "\n\nCalibre läuft als Flatpak und darf die Browser des "
+                "Rechners nicht sehen. Einmalig die Freigabe erteilen und "
+                "Calibre danach vollständig neu starten.\n\n"
+                "Benutzer-Installation:\n"
                 "flatpak override --user --talk-name=org.freedesktop."
-                "Flatpak com.calibre_ebook.calibre; System-Installation "
-                "(flatpak info zeigt \"Installation: system\"): sudo "
-                "flatpak override --talk-name=org.freedesktop.Flatpak "
-                "com.calibre_ebook.calibre. Wirksam ist die Freigabe, "
-                "wenn flatpak info --show-permissions "
-                "com.calibre_ebook.calibre org.freedesktop.Flatpak "
-                "enthält. Ohne sie bricht die Anmeldung hier mit "
-                "diesem Hinweis ab, statt im Standardbrowser zu landen."
+                "Flatpak com.calibre_ebook.calibre\n\n"
+                "System-Installation («flatpak info» zeigt "
+                "«Installation: system»):\n"
+                "sudo flatpak override --talk-name=org.freedesktop."
+                "Flatpak com.calibre_ebook.calibre\n\n"
+                "Kontrolle: «flatpak info --show-permissions "
+                "com.calibre_ebook.calibre» muss org.freedesktop.Flatpak "
+                "enthalten. Ohne Freigabe bricht die Anmeldung mit diesem "
+                "Hinweis ab, statt im Standardbrowser zu öffnen."
             )
         raise TolinoAuthError(message)
     port = _start_port()
@@ -811,9 +809,10 @@ def launch_reader_window(partner_id):
             return binary, port
         time.sleep(0.5)
     raise TolinoAuthError(
-        "Chromium startete, aber der DevTools-Port %d blieb stumm. Läuft "
-        "evtl. schon eine Instanz ohne Debugging-Port? Schließe alle "
-        "Chromium-Fenster und versuche es erneut." % port)
+        "Chromium wurde gestartet, hat aber nicht reagiert (Port %d). "
+        "Vermutlich läuft schon ein Chromium-Fenster ohne Debug-Zugang. "
+        "Bitte alle Chromium-Fenster schliessen und es erneut versuchen."
+        % port)
 
 
 def _idb_expression(db_name):
@@ -866,7 +865,7 @@ def grab_once_from_grabber(port=None, timeout=12):
     Returns the grabbed dict (refresh/hardware/idb lists, possibly empty)
     or None when no reader tab exists. Used by the extract button so the
     Calibre GUI never blocks for minutes waiting for a sign-in that may
-    not happen -- the user just clicks the button again after signing in.
+    not happen – the user just clicks the button again after signing in.
     """
     port = port or _start_port()
     targets = _http_get_json("http://127.0.0.1:%d/json/list" % port) or []
@@ -939,7 +938,7 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     Returns ``(status, body_text)``. ``status`` mirrors the endpoint's
     HTTP code (0 when the in-page fetch itself failed). The bot-protection
     WAF in front of the token endpoint accepts this request because it is
-    the reader's own fingerprint -- the exact request family the reader
+    the reader's own fingerprint – the exact request family the reader
     performs on every background rotation.
 
     Raises TolinoAuthError on a definitive OAuth rejection of this
@@ -967,9 +966,8 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     reason = _oauth_rejection_reason(body) if status in (400, 401, 403) else ""
     if reason:
         raise TolinoAuthError(
-            "Der live gelesene Token wurde am Token-Endpunkt abgelehnt "
-            "(HTTP %d, %s) -- dieser Refresh-Token ist bereits verbraucht "
-            "oder widerrufen." % (status, reason))
+            "Tolino hat den gelesenen Zugang abgelehnt (HTTP %d, %s) – "
+            "er ist bereits verbraucht oder widerrufen." % (status, reason))
     # Everything else is passed through unchanged for the caller's
     # diagnostics (page failures, WAF HTML pages, unexpected payloads).
     return status, body
@@ -991,7 +989,7 @@ def reader_ws_url(port=None):
 
 
 def close_grabber_window(timeout=2):
-    """Das private Anmeldefenster schließen; niemals werfend."""
+    """Das private Anmeldefenster schliessen; niemals werfend."""
     try:
         version = _http_get_json(
             "http://127.0.0.1:%d/json/version" % _start_port(), timeout)
@@ -1052,8 +1050,8 @@ def describe_grab_state(port=None, timeout=12):
     if grabbed is None:
         return ("Anmeldefenster offen, aber der Web-Reader-Tab war gerade "
                 "nicht lesbar")
-    return ("%d Refresh-Kandidat(en), %d Hardware-Kandidat(en) live in der "
-            "Seite (IndexedDB-Datenbanken: %s)" % (
+    return ("In der Seite gefundene Zugänge: %d, Hardware-IDs: %d "
+            "(IndexedDB: %s)" % (
                 len(grabbed.get("refresh") or []),
                 len(grabbed.get("hardware") or []),
                 ", ".join(sorted(set(grabbed.get("idb") or []))) or "keine"))
@@ -1073,11 +1071,12 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
             endpoint_misses += 1
             if endpoint_misses >= 3:
                 if progress:
-                    progress("Fenster geschlossen -- Abbruch.")
+                    progress("Anmeldefenster geschlossen – abgebrochen.")
                 raise TolinoAuthError(
-                    "Das Anmeldefenster wurde geschlossen, bevor ein Token "
-                    "gelesen werden konnte. Bitte erneut versuchen und das "
-                    "Fenster offen lassen, bis die Übernahme durch ist.")
+                    "Das Anmeldefenster wurde geschlossen, bevor der Zugang "
+                    "übernommen werden konnte. Bitte erneut versuchen und das "
+                    "Fenster offen lassen, bis die Übernahme abgeschlossen "
+                    "ist.")
             time.sleep(1)
             continue
         endpoint_misses = 0
@@ -1099,13 +1098,10 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
             # Tab lädt gerade. Beides ist KEIN geschlossenes Fenster.
             if progress:
                 if foreign_page:
-                    progress("Anmeldefenster ist offen -- bitte im Web "
-                             "Reader anmelden und die Bücherliste laden "
-                             "(der Tab zeigt gerade die Anmeldeseite des "
-                             "Buchhändlers) ...")
+                    progress("Das Anmeldefenster ist offen – bitte dort "
+                             "anmelden, bis die Bücherliste lädt …")
                 else:
-                    progress("Anmeldefenster ist offen -- der Web Reader "
-                             "wird geladen ...")
+                    progress("Der Web Reader wird geladen …")
             time.sleep(2)
             continue
         saw_reader = True
@@ -1115,18 +1111,17 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
             if result and result.get("refresh"):
                 return result
             if progress:
-                progress("Warte auf Web-Reader-Anmeldung "
-                         "(Bücherliste laden) ...")
+                progress("Warte auf die Anmeldung im Web Reader …")
         time.sleep(2)
     if saw_reader:
         raise TolinoAuthError(
-            "Timeout: Im Anmeldefenster wurde keine Web-Reader-Anmeldung "
-            "erkannt. Bitte im Fenster anmelden, bis die Bücherliste sichtbar "
-            "ist, und es erneut versuchen.")
+            "Zeitüberschreitung: Im Anmeldefenster wurde keine Anmeldung "
+            "erkannt. Bitte im Fenster anmelden, bis die Bücherliste "
+            "sichtbar ist, und es danach erneut versuchen.")
     raise TolinoAuthError(
-        "Timeout: Das Anmeldefenster blieb ohne Web-Reader-Tab -- die "
-        "Anmeldung im Fenster wurde nicht abgeschlossen. Bitte dort bis "
-        "zur Bücherliste anmelden und die Browser-Anmeldung erneut starten.")
+        "Zeitüberschreitung: Die Anmeldung im Anmeldefenster wurde nicht "
+        "abgeschlossen. Bitte erneut auf «Jetzt bei Tolino anmelden» "
+        "klicken und dort anmelden, bis die Bücherliste lädt.")
 
 
 def grab_live_tokens(partner_id, hardware, timeout=300, progress=None):
@@ -1138,10 +1133,10 @@ def grab_live_tokens(partner_id, hardware, timeout=300, progress=None):
     """
     _binary, port = launch_reader_window(partner_id)
     if progress:
-        progress("Anmeldefenster geöffnet -- im Web Reader anmelden "
-                 "(Bücherliste abwarten).")
+        progress("Anmeldefenster geöffnet – bitte anmelden und warten, "
+                 "bis die Bücherliste lädt.")
     grabbed = collect_grab(partner_id, port, timeout=timeout, progress=progress)
     if progress:
-        progress("Aktueller Token aus dem Web Reader gelesen -- werde "
-                 "ihn jetzt am Token-Endpunkt tauschen ...")
+        progress("Zugang aus dem Web Reader gelesen – prüfe ihn jetzt "
+                 "bei Tolino …")
     return grabbed

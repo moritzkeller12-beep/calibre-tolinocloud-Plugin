@@ -13,12 +13,12 @@ Historie der Feldbefunde steht im Git-Log (`git log`).
    werden entpackt, CryptoJS-verschlüsselte userToken/userInfos-Blobs
    entschlüsselt (Klartext-JWT plus Hardware-Id).
 3. Tausch **in der Reader-Seite** (in-page fetch) → sofortiges Speichern des
-   rotierten Tokens; danach schließt sich das Anmeldefenster (die Sitzung
+   rotierten Tokens; danach schliesst sich das Anmeldefenster (die Sitzung
    gehört ab jetzt Calibre).
 4. Bei Ablehnung/Leere: Speicher alle 3 s erneut lesen, bis der Reader selbst
    einen frischen Token schreibt (bis ~90 s; Fenster auf der Anmeldeseite bis
    ~180 s mit Aufforderung zur Neu-Anmeldung vor Ort), dann genau einmal
-   tauschen. Kommt nichts: Fenster weg → schließen und Neustart auffordern;
+   tauschen. Kommt nichts: Fenster weg → schliessen und Neustart auffordern;
    Fenster offen ohne Reader-Tab → offen lassen, Neu-Anmeldung vor Ort
    (das Fenster wird wiederverwendet). Meldungen nennen das ALTER des
    Kandidaten (JWT-iat), nie den Wert.

@@ -579,9 +579,9 @@ class SyncPlanTests(unittest.TestCase):
         })["isbn"])
 
     def test_title_matching_normalizes_unicode_punctuation_and_extension(self):
-        self.assertEqual(normalize_title("Der „Überblick“ – Band 2.epub"),
+        self.assertEqual(normalize_title("Der «Überblick» – Band 2.epub"),
                          normalize_title("DER Überblick - Band 2"))
-        metadata = {1: {"uuid": "u1", "title": "Der „Überblick“ – Band 2",
+        metadata = {1: {"uuid": "u1", "title": "Der «Überblick» – Band 2",
                         "authors": "Andere", "formats": ["EPUB"]}}
         rows = compare_inventory(
             metadata, {}, [{"id": "t1", "title": "DER Überblick - Band 2.pdf"}],
@@ -841,7 +841,7 @@ class SyncPlanTests(unittest.TestCase):
     def test_waf_403_on_token_endpoint_waits_and_retries(self):
         """Feldbefund 0.9.38: der erste Token-Aufruf nach der Browser-
         Anmeldung traf 403 (Bot-Schutz-Laufzeitbahn), jeder spaetere
-        Klick lief -- jetzt wird kurz gewartet und zwei Mal wiederholt."""
+        Klick lief – jetzt wird kurz gewartet und zwei Mal wiederholt."""
         from urllib.error import HTTPError
 
         bot = HTTPError("https://example.invalid/token", 403, "Forbidden",
@@ -1062,7 +1062,7 @@ class SyncPlanTests(unittest.TestCase):
             config.PREFERENCES = original
 
     def test_series_collections_default_off_and_are_persisted(self):
-        """Serien-Sammlungen sind standardmäßig AUS (0.15.2) und schaltbar
+        """Serien-Sammlungen sind standardmässig AUS (0.15.2) und schaltbar
         (0.12.0). Metadaten-Updates sind seit 0.13.0 eine Auswahl pro Buch
         und haben deshalb keine globale Option mehr."""
         original = config.PREFERENCES
@@ -1080,7 +1080,7 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_existing_install_gets_the_new_defaults_once(self):
         """Auch eine bestehende Installation landet bei EPUB-only und
-        „Serien aus“ -- aber nur einmal. Danach bleibt eine bewusste Wahl
+        «Serien aus» – aber nur einmal. Danach bleibt eine bewusste Wahl
         stehen, selbst wenn sie dem alten Standard entspricht (0.15.2)."""
         original = config.PREFERENCES
         try:
@@ -1243,7 +1243,7 @@ class SyncPlanTests(unittest.TestCase):
         """Nur Shops OHNE den gemeinsamen Web Reader behalten den
         lokalen Callback-Server (127.0.0.1). Fuer Thalia, Hugendubel,
         eBook.de, buecher.de, Osiander und Orell Fuestli (alle mit
-        webreader.mytolino.com) laeuft jetzt der gefuehrte Weg -- deren
+        webreader.mytolino.com) laeuft jetzt der gefuehrte Weg – deren
         OAuth-Redirect zeigt auf den Reader, nie auf localhost.
         """
         opened = []
@@ -1297,7 +1297,7 @@ class SyncPlanTests(unittest.TestCase):
         closer.assert_called_once_with()
 
     def test_grab_live_refresh_closes_window_when_nothing_exchangeable(self):
-        """Ohne tauschbaren Token schließt das Fenster: der nächste
+        """Ohne tauschbaren Token schliesst das Fenster: der nächste
         Versuch startet mit frischem Profil statt derselben toten
         Kopie (Feldbefund: invalid_grant-Loop, 0.9.30)."""
         from .tolino import grab_live_refresh
@@ -1314,8 +1314,8 @@ class SyncPlanTests(unittest.TestCase):
         closer.assert_called_once_with()
         message = str(ctx.exception)
         self.assertIn("wurde geschlossen", message)
-        self.assertIn("erneut starten", message)
-        self.assertIn("weder ein frischer Token", message)
+        self.assertIn("Jetzt bei Tolino anmelden", message)
+        self.assertIn("kein frischer Zugang", message)
         # Alter des Kandidaten (ohne Token-Wert) ordnet den Fehler ein.
         self.assertIn("Sekunden alt", message)
         self.assertNotIn(stale, message)
@@ -1324,7 +1324,7 @@ class SyncPlanTests(unittest.TestCase):
         """Die Fehlermeldung nennt nur das Alter des geprüften
         Kandidaten: „5 Sekunden alt" (frische Anmeldung sofort
         abgelehnt) unterscheidet sich klar von „3700 Sekunden alt"
-        (verbrauchte Kopie aus wiederverwendetem Fenster) -- und der
+        (verbrauchte Kopie aus wiederverwendetem Fenster) – und der
         Token-Wert selbst darf nie in der Meldung stehen.
         """
         from .tolino import grab_live_refresh
@@ -1354,7 +1354,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertNotIn(fresh, message)
 
     def test_try_live_grab_first_closes_window_after_adopting_token(self):
-        """Die Extrahier-Schaltfläche schließt das Fenster nach dem
+        """Die Extrahier-Schaltfläche schliesst das Fenster nach dem
         erfolgreichen Übernehmen derselben Sitzung (0.9.30)."""
         from .tolino import try_live_grab_first
 
@@ -1474,7 +1474,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
                          record["fields"])
 
     def test_unchecked_books_are_never_touched(self):
-        """Ohne Auswahl kein /meta-Schreibvorgang -- auch wenn sich die
+        """Ohne Auswahl kein /meta-Schreibvorgang – auch wenn sich die
         Metadaten unterscheiden (genau das war vorher unsichtbar)."""
         book = self._book()
         state = self._state(book, meta_fp="stale")
@@ -1485,7 +1485,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
             self.assertEqual([], updates)
 
     def test_selected_upload_is_never_silently_converted(self):
-        """"Hochladen" heißt hochladen -- kein heimliches /meta."""
+        """"Hochladen" heisst hochladen – kein heimliches /meta."""
         book = self._book()
         state = self._state(book, meta_fp="stale")
         uploads = [(1, "u1", "EPUB", "d1")]
@@ -1504,7 +1504,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual([], updates)
 
     def test_selected_metadata_update_does_not_need_the_book_file(self):
-        """Ein reiner Metadaten-Abgleich braucht die Datei nicht -- der
+        """Ein reiner Metadaten-Abgleich braucht die Datei nicht – der
         Nutzer hat ausdrücklich nur die Metadaten ausgewählt."""
         book = self._book(format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
@@ -1575,11 +1575,11 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual(metadata_fingerprint(book), current["u1"]["meta_fp"])
 
     def test_unselected_book_keeps_the_old_fingerprints(self):
-        """Ohne Auswahl darf der Zustand nicht „abgeglichen“ behaupten.
+        """Ohne Auswahl darf der Zustand nicht «abgeglichen» behaupten.
 
-        `plan_sync` schreibt den neuen Stand für jedes Buch -- auch für die,
+        `plan_sync` schreibt den neuen Stand für jedes Buch – auch für die,
         die der Nutzer nicht ausgewählt hat. Ohne Rücknahme hielte der nächste
-        Vergleich die Cloud für aktuell, und ein späteres „Metadaten“ wäre
+        Vergleich die Cloud für aktuell, und ein späteres «Metadaten» wäre
         ein stiller Leerlauf.
         """
         old_book = self._book()
@@ -1642,7 +1642,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
 class CollectionPlanTests(unittest.TestCase):
     """Serien → Sammlungen (0.12.0): Planung ohne Cloud-Zugriff.
 
-    Der Abgleich selbst ist idempotent -- hier wird nur geprüft, welche
+    Der Abgleich selbst ist idempotent – hier wird nur geprüft, welche
     Paare überhaupt in Frage kommen.
     """
 
@@ -1676,8 +1676,8 @@ class CollectionPlanTests(unittest.TestCase):
         self.assertEqual([], plan_collection_updates({}, {}))
 
     def test_remembered_collection_is_not_planned_again(self):
-        """Feldbefund: „Serie in der Cloud wird jedes Mal ausgeführt“.
-        Einmal geschrieben heißt gemerkt -- der nächste Sync plant nichts
+        """Feldbefund: «Serie in der Cloud wird jedes Mal ausgeführt».
+        Einmal geschrieben heisst gemerkt – der nächste Sync plant nichts
         und fragt die Cloud gar nicht erst."""
         series_map = {"u1": "Adamsberg"}
         state = {"u1": {"tolino_id": "t1"}}
@@ -1705,7 +1705,7 @@ class CollectionPlanTests(unittest.TestCase):
         self.assertFalse(remember_collection({}, "u1", "   "))
 
     def test_recorded_collections_survive_plan_sync(self):
-        """Der Zustand wird bei jedem Sync neu aufgebaut -- die gemerkten
+        """Der Zustand wird bei jedem Sync neu aufgebaut – die gemerkten
         Zuordnungen dürfen dabei nicht verloren gehen."""
         book = {"uuid": "u1", "title": "A", "authors": "A", "isbn": "1",
                 "formats": ["EPUB"], "last_modified": "1",
@@ -1852,11 +1852,11 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        self.assertIn("weder ein frischer Token", str(ctx.exception))
+        self.assertIn("kein frischer Zugang", str(ctx.exception))
 
     def test_grab_live_refresh_rejection_recommends_fresh_grab(self):
         """Wird der Live-Token abgelehnt, wird KEIN zweiter Kandidat
-        replayt -- der Fehler verweist auf einen erneuten Grab."""
+        replayt – der Fehler verweist auf einen erneuten Grab."""
         from .tolino import grab_live_refresh
         logins = []
 
@@ -1883,7 +1883,7 @@ class LiveGrabTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         message = str(ctx.exception)
-        self.assertIn("erneut starten", message)
+        self.assertIn("Jetzt bei Tolino anmelden", message)
         # Genau ein Login-Versuch: der zweite Kandidat wird bewusst
         # NICHT mehr probiert (kein Replay-Feuerwerk).
         self.assertEqual([fresh], logins)
@@ -1903,7 +1903,7 @@ class LiveGrabTests(unittest.TestCase):
 
     def test_grab_live_refresh_never_retries_a_rejected_candidate(self):
         """Ein am Endpunkt abgelehnter Kandidat wird nie wieder probiert
-        (Keycloak-Reuse-Schutz) -- auch nicht, wenn der Seiten-Speicher
+        (Keycloak-Reuse-Schutz) – auch nicht, wenn der Seiten-Speicher
         dieselbe Kopie erneut liefert. Statt einer erzwungenen Rotation
         wartet das Plugin auf eine NEU geschriebene Kopie; kommt keine,
         endet es mit einer klaren Fehlermeldung.
@@ -2137,7 +2137,7 @@ class LiveGrabTests(unittest.TestCase):
 
     def test_try_live_grab_first_fails_fast_after_rejection(self):
         """Ein abgelehnter Kandidat blockiert den GUI-Thread NICHT mit
-        einer Lauscherphase -- sofortige, klare Fehlermeldung."""
+        einer Lauscherphase – sofortige, klare Fehlermeldung."""
         from .tolino import try_live_grab_first
         fresh = self._jwt(time.time() - 5, "sess-live")
         logins = []
@@ -2194,7 +2194,7 @@ class LiveGrabTests(unittest.TestCase):
         self.assertIn("page blew up", body)
 
     def test_exchange_grabbed_token_prefers_browser_exchange(self):
-        """200er Browser-Tausch schlaegt den Plugin-POST -- kein WAF-403."""
+        """200er Browser-Tausch schlaegt den Plugin-POST – kein WAF-403."""
         from .tolino import _exchange_grabbed_token
         fresh = self._jwt(time.time() - 5, "sess-live")
         logins = []
@@ -2247,7 +2247,7 @@ class LiveGrabTests(unittest.TestCase):
 
     def test_grab_live_refresh_adopts_new_candidate_and_reader_hardware(self):
         """Nach einer Ablehnung uebernimmt das Plugin die NEU geschriebene
-        Kopie des Readers -- und die Hardware-ID der aktuellen Sitzung
+        Kopie des Readers – und die Hardware-ID der aktuellen Sitzung
         gewinnt gegen die konfigurierte (Nutzerfall: gespeichert
         da284d4b..., Reader-Sitzung lief mit eb22e4cf...)."""
         from .tolino import grab_live_refresh
@@ -2294,7 +2294,7 @@ class LiveGrabTests(unittest.TestCase):
 
     def test_exchange_uses_grabbed_hardware_over_configured(self):
         """Die aus dem Reader mitgelesene Hardware-ID wird beim Tausch
-        verwendet -- nicht die alte konfigurierte (Nutzerfall: Plugin
+        verwendet – nicht die alte konfigurierte (Nutzerfall: Plugin
         speicherte da284d4b..., Reader-Sitzung lief mit eb22e4cf...)."""
         from .tolino import _exchange_grabbed_token
         fresh = self._jwt(time.time() - 5, "sess-live")
@@ -2343,12 +2343,12 @@ class LiveGrabTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         message = str(ctx.exception)
-        self.assertIn("weder ein frischer Token", message)
+        self.assertIn("kein frischer Zugang", message)
         self.assertIn("Letzter Fehler", message)
 
     def test_keycloak_assisted_login_propagates_grab_errors(self):
         """Andere Grab-Fehler (Timeout, abgelehnt) werden weitergereicht
-        -- kein stiller Wechsel auf einen anderen Weg."""
+        – kein stiller Wechsel auf einen anderen Weg."""
         from .tolino import _keycloak_assisted_login
         with patch("calibre_plugin.tolino.grab_live_refresh",
                    side_effect=TolinoAuthError(
@@ -2362,7 +2362,7 @@ class LiveGrabTests(unittest.TestCase):
     def test_collect_grab_waits_while_window_is_on_partner_login_page(self):
         """Feldbefund 0.9.27: Waehrend der Anmeldung verlaesst der Tab
         mytolino.com zugunsten der Keycloak-Seite des Partners (andere
-        Domain) -- das darf NIEMALS als "Fenster geschlossen" gemeldet
+        Domain) – das darf NIEMALS als "Fenster geschlossen" gemeldet
         werden, solange der DevTools-Endpunkt antwortet."""
         from . import cdp as cdp_module
         pages = [
@@ -2403,13 +2403,13 @@ class LiveGrabTests(unittest.TestCase):
 
     def test_collect_grab_timeout_without_reader_tab_has_login_hint(self):
         """Bleibt der Tab die ganze Zeit ohne Web-Reader (z. B. Anmeldung
-        nicht abgeschlossen), gibt es einen Timeout-Hinweis -- keine
+        nicht abgeschlossen), gibt es einen Timeout-Hinweis – keine
         geschlossene-Fenster-Meldung."""
         from . import cdp as cdp_module
         with self.assertRaises(TolinoAuthError) as ctx:
             cdp_module.collect_grab(4, 9223, timeout=0)
         message = str(ctx.exception)
-        self.assertIn("Timeout", message)
+        self.assertIn("Zeitüberschreitung", message)
         self.assertIn("nicht abgeschlossen", message)
         self.assertNotIn("wurde geschlossen", message)
 
@@ -2417,7 +2417,7 @@ class LiveGrabTests(unittest.TestCase):
         """Minimaler In-Process-WS-Server (Schema der 0.9.19-Tests):
         bindet, meldet den Port via thread_state["ready"] und beantwortet
         bis zu `connections` aufeinanderfolgende Verbindungen per
-        `handler(message, send_raw)` -- jeder CDP-Aufruf oeffnet eine
+        `handler(message, send_raw)` – jeder CDP-Aufruf oeffnet eine
         eigene Verbindung.
         """
         import socket as socket_module
@@ -2501,7 +2501,7 @@ class LiveGrabTests(unittest.TestCase):
 
     def test_evaluate_in_target_parses_json_string_replies(self):
         """Regression 0.9.27: Das Grab-Snippet antwortet mit
-        JSON.stringify(out) -- einem STRING. _evaluate_in_target muss
+        JSON.stringify(out) – einem STRING. _evaluate_in_target muss
         diese Antwort parsten, sonst bleibt jeder Grab leer ("kein
         frischer Token"); frueher antworteten nur die Test-Server mit
         dict, wodurch die Regression unsichtbar blieb.
@@ -2801,7 +2801,9 @@ class TolinoClientFeatureTests(unittest.TestCase):
         calls = []
 
         def fake_request(url, method="GET", data=None, form=False,
-                         authenticated=True, content_type=None, _retry=True):
+                         authenticated=True, content_type=None,
+                         _auth_retry=True, _hw_retry=True,
+                         _waf_rounds=0):
             calls.append({"url": url, "method": method, "data": data})
             return queue.pop(0)
 
@@ -2866,7 +2868,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
 
     def test_mark_read_uses_system_tag(self):
         """Ein Buch: eine System-Marke, geschrieben mit der aktuellen
-        Revision -- Sammlungen und andere Marken bleiben unberührt."""
+        Revision – Sammlungen und andere Marken bleiben unberührt."""
         client, calls = self._patching_client([
             {"revision": 9, "patches": []},
             {"revision": 10},
@@ -2901,7 +2903,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
         """Ungelesen setzen: der Pfad trägt die Marken-ID der Cloud-Marke.
 
         Feldbefund 0.15.3: ohne ID antwortet der Server mit HTTP 400
-        „missing mandatory unitid fragment inside property path for remove“.
+        «missing mandatory unitid fragment inside property path for remove».
         """
         marked = {"op": "add", "path": "/publications/book-1/tags/6438286",
                   "value": {"name": "collection_finished_readings_name",
@@ -2920,8 +2922,8 @@ class TolinoClientFeatureTests(unittest.TestCase):
         self.assertEqual(12, calls[1]["data"]["revision"])
 
     def test_mark_read_many_mixes_add_and_remove_in_one_patch(self):
-        """Zwei Bücher, zwei Richtungen: „gelesen“ ohne ID (der Server
-        vergibt sie), „ungelesen“ mit der ID der vorhandenen Marke."""
+        """Zwei Bücher, zwei Richtungen: «gelesen» ohne ID (der Server
+        vergibt sie), «ungelesen» mit der ID der vorhandenen Marke."""
         marked = {"op": "add", "path": "/publications/book-1/tags/6438286",
                   "value": {"name": "collection_finished_readings_name",
                             "category": "system", "revision": 3,
@@ -2991,7 +2993,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
             client2.update_metadata("b-1", {"title": "x"})
 
     def test_update_metadata_leaves_tags_and_read_state_alone(self):
-        """Titel/Autor/ISBN wandern über /meta -- Sammlungen und die
+        """Titel/Autor/ISBN wandern über /meta – Sammlungen und die
         Lese-Marke in der Cloud werden dabei nicht angefasst."""
         existing = {"metadata": {
             "deliverableId": "b-1", "title": "Alt",
@@ -3012,7 +3014,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
             sent["tags"])
 
     def test_read_ids_reads_the_system_tag(self):
-        """Gelesen-Marken des Kontos -- nur die System-Marke zählt, und eine
+        """Gelesen-Marken des Kontos – nur die System-Marke zählt, und eine
         remove-Marke nimmt das Buch wieder heraus (0.15.0)."""
         patches = [
             {"op": "add", "path": "/publications/b-1/tags",
@@ -3049,7 +3051,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
 
     def test_snapshot_is_dropped_after_a_write(self):
-        """Nach einem Schreibvorgang wird neu gelesen -- keine veraltete
+        """Nach einem Schreibvorgang wird neu gelesen – keine veraltete
         Revision, kein zweiter Schreibversuch auf altem Stand."""
         client, calls = self._patching_client([
             {"revision": 5, "patches": []},   # snapshot
@@ -3323,7 +3325,7 @@ class CurlTransportTests(unittest.TestCase):
 
     def test_token_403_bot_page_falls_through_to_urllib(self):
         """Feldbefund 0.9.38: curl_cffi UND System-curl werden von der
-        Bot-Schutz-Laufzeitbahn mit 403 geblockt -- dann entscheidet
+        Bot-Schutz-Laufzeitbahn mit 403 geblockt – dann entscheidet
         urllib (Browser-Header), statt dass der Aufruch abbricht."""
         import calibre_plugin.tolino as tolino_module
 
@@ -3375,7 +3377,7 @@ class CurlTransportTests(unittest.TestCase):
 
     def test_token_oauth_error_never_falls_through(self):
         """invalid_grant (400) darf nie den naechsten Transport probieren
-        -- ein replizierter Grant koennte Keycloak's Reuse-Schutz
+        – ein replizierter Grant koennte Keycloak's Reuse-Schutz
         ausloesen. Sofortiger Abbruch wie gehabt."""
         import calibre_plugin.tolino as tolino_module
 
@@ -3452,11 +3454,11 @@ class LoginWindowWaitTests(unittest.TestCase):
                                         "hardware": [],
                                         "idb": ["tolino-user"]}):
             state = cdp.describe_grab_state()
-        self.assertIn("1 Refresh-Kandidat", state)
+        self.assertIn("Zugänge: 1", state)
         self.assertIn("tolino-user", state)
 
     def test_grab_live_refresh_keeps_login_page_window_open(self):
-        """Fenster offen, Tab auf der Anmeldeseite: NICHT schließen,
+        """Fenster offen, Tab auf der Anmeldeseite: NICHT schliessen,
         zur Neu-Anmeldung vor Ort auffordern und LÄNGER warten."""
         from .tolino import grab_live_refresh
         fresh = self._refresh_jwt(time.time() - 5)
@@ -3487,7 +3489,7 @@ class LoginWindowWaitTests(unittest.TestCase):
         closer.assert_not_called()
         message = str(ctx.exception)
         self.assertIn("noch offen", message)
-        self.assertIn("neu anmelden", message)
+        self.assertIn("im Web Reader anmelden", message)
         self.assertNotIn("wurde geschlossen", message)
         # Auf der Anmeldeseite wird länger gewartet (zusätzliche
         # Versuche), damit die Neu-Anmeldung vor Ort noch ankommen kann.
@@ -3495,7 +3497,7 @@ class LoginWindowWaitTests(unittest.TestCase):
 
     def test_grab_live_refresh_stops_early_when_window_vanished(self):
         """Endpunkt stumm: nach drei Fehlschlägen abbrechen statt 30
-        Wartegängen -- und wie bisher schließen + Neustart-Anweisung."""
+        Wartegängen – und wie bisher schliessen + Neustart-Anweisung."""
         from .tolino import grab_live_refresh
         stale = self._refresh_jwt(time.time() - 7200)
         grabs = []
@@ -3520,11 +3522,11 @@ class LoginWindowWaitTests(unittest.TestCase):
 
     def test_candidate_age_note_describes_undatable_candidate(self):
         """Undatierte Kandidaten werden strukturell beschrieben (Teile,
-        Zeichen, Payload) -- der Wert selbst nie."""
+        Zeichen, Payload) – der Wert selbst nie."""
         from .tolino import _candidate_age_note
         opaque = "opaque-refresh-token-value-without-any-dots"
         note = _candidate_age_note([opaque])
-        self.assertIn("ohne datierbares JWT-alter", note)
+        self.assertIn("Alter des gefundenen Zugangs unbekannt", note)
         self.assertIn("1 Teil", note)
         self.assertIn("Zeichen", note)
         broken = "aaa.bbb.ccc"
@@ -3540,7 +3542,7 @@ class LoginWindowWaitTests(unittest.TestCase):
 
 class WrappedCandidateTests(unittest.TestCase):
     """0.9.33: Der Seiten-Speicher des Readers kann Token-Teile gekodiert
-    ablegen -- Feldbefund der Extrahier-Schaltfläche: genau EIN
+    ablegen – Feldbefund der Extrahier-Schaltfläche: genau EIN
     Refresh-Kandidat, "1 Teil, 920 Zeichen", am Endpunkt abgelehnt
     (invalid_grant) und ohne datierbares JWT-alter. Ein JWT traegt immer
     zwei Punkte; die Hülle muss vor dem Tausch abgezogen werden.
@@ -3576,7 +3578,7 @@ class WrappedCandidateTests(unittest.TestCase):
 
     def test_unwrap_leaves_opaque_and_broken_values_untouched(self):
         """Opake (echt punktlose) Tokens und unlesbare Zeichenketten
-        bleiben unverändert -- nur ein JWT-Treffer gewinnt."""
+        bleiben unverändert – nur ein JWT-Treffer gewinnt."""
         from .tolino import _unwrap_refresh_candidate
         opaque = "a3f9" * 230  # 920 Zeichen wie im Feldbefund
         self.assertEqual(opaque, _unwrap_refresh_candidate(opaque))
@@ -3601,7 +3603,7 @@ class WrappedCandidateTests(unittest.TestCase):
         self.assertIs(plain, _normalize_live_grab(plain))
 
     def test_grab_live_refresh_exchanges_the_unwrapped_jwt(self):
-        """Der Endpunkt sieht das entpackte JWT -- nie die Hülle."""
+        """Der Endpunkt sieht das entpackte JWT – nie die Hülle."""
         from .tolino import grab_live_refresh
         fresh = self._refresh_jwt(time.time() - 5)
         wrapped = base64.urlsafe_b64encode(
@@ -3628,7 +3630,7 @@ class WrappedCandidateTests(unittest.TestCase):
 
     def test_try_live_grab_first_dates_the_unwrapped_candidate(self):
         """Feldmeldung nach dem Fix: das ALTER des Kandidaten statt der
-        Struktur-Notiz -- und nie der Wert selbst."""
+        Struktur-Notiz – und nie der Wert selbst."""
         from .tolino import try_live_grab_first
         fresh = self._refresh_jwt(time.time() - 5)
         wrapped = base64.urlsafe_b64encode(
@@ -3656,7 +3658,7 @@ class WrappedCandidateTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("Letzter Fehler", message)
         self.assertIn("Sekunden alt", message)
-        self.assertNotIn("ohne datierbares JWT-alter", message)
+        self.assertNotIn("Alter des gefundenen Zugangs unbekannt", message)
         self.assertNotIn(wrapped, message)
         self.assertNotIn(fresh, message)
 
@@ -3695,7 +3697,7 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
         return base64.b64encode(b"Salted__" + salt + ct).decode()
 
     def test_unwrap_decrypts_reader_user_token_blob(self):
-        """Der verschluesselte Kandidat wird zum echten JWT -- und ist
+        """Der verschluesselte Kandidat wird zum echten JWT – und ist
         damit datierbar (Altersnotiz statt Struktur-Hinweis)."""
         from .tolino import (_candidate_age_note, _filter_live_candidates,
                              _normalize_live_grab,
@@ -3721,7 +3723,7 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
 
     def test_normalize_extracts_hardware_from_user_infos_blob(self):
         """Die im curl-Export gezeigte Hardware-Id steckt im
-        verschluesselten userInfos -- extrahiert, und niemals als
+        verschluesselten userInfos – extrahiert, und niemals als
         Ciphertext weitergereicht."""
         from .tolino import _normalize_live_grab
         blob = self._encrypt(json.dumps({
@@ -3770,7 +3772,7 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
 
     def test_try_live_grab_first_dates_the_decrypted_stale_blob(self):
         """Verschluesselt + zu alt: der Filter greift, die Meldung
-        nennt das Alter -- kein "ohne datierbares JWT-alter" mehr."""
+        nennt das Alter – kein "ohne datierbares JWT-alter" mehr."""
         from .tolino import try_live_grab_first
         stale = self._refresh_jwt(time.time() - 7200)
         blob = self._encrypt(stale)
@@ -3785,7 +3787,7 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
                 try_live_grab_first(4, "hw")
         message = str(ctx.exception)
         self.assertIn("Sekunden alt", message)
-        self.assertNotIn("ohne datierbares JWT-alter", message)
+        self.assertNotIn("Alter des gefundenen Zugangs unbekannt", message)
         self.assertNotIn(blob, message)
 
 
@@ -3948,7 +3950,7 @@ class InventoryDialogSortTests(unittest.TestCase):
 
     def test_columns_sort_keys_and_technical_columns_stay_in_sync(self):
         """Spaltenzahl, Sortierschlüssel und technische Spalten müssen
-        zusammenpassen -- sonst sortiert ein Klick falsch. Die doppelte
+        zusammenpassen – sonst sortiert ein Klick falsch. Die doppelte
         Statusspalte entfällt, die beiden Orts-Spalten stehen wieder
         einzeln da (0.15.3, Feldbefund)."""
         ui_module = ToolbarIconTests._load_ui_module(
@@ -3975,7 +3977,7 @@ class InventoryDialogSortTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
     def test_note_names_only_the_automatic_actions(self):
-        """Metadaten-Updates sind keine Automatik mehr -- der Hinweis nennt
+        """Metadaten-Updates sind keine Automatik mehr – der Hinweis nennt
         nur, was zusätzlich zur Auswahl passiert."""
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
@@ -3992,7 +3994,7 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertNotIn("gelöscht", note)
             # Ohne automatische Aktionen sagt der Hinweis das ausdrücklich.
             dialog.options = {}
-            self.assertIn("nur, was Sie auswählen",
+            self.assertIn("nur, was Sie ausgewählt haben",
                           dialog._automatic_note())
         finally:
             ui_module._restore_stubs_for_tests()
@@ -4130,7 +4132,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self._text = text
 
             def text(self):
-                """Text des Widgets -- auch wenn er beim Bau kam."""
+                """Text des Widgets – auch wenn er beim Bau kam."""
                 if hasattr(self, "_text"):
                     return self._text
                 return self.args[0] if self.args else ""
@@ -4315,7 +4317,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             self.assertEqual({8: True, 9: True}, dialog.table.hidden)
             self.assertIn("Serien werden in der Tolino Cloud",
                           dialog.note.text())
-            self.assertIn("Lese-Status in der Cloud bleibt",
+            self.assertIn("Gelesen-Status in der Cloud bleibt",
                           dialog.note.text())
             self.assertIn("1 zum Hochladen", dialog.summary.text())
             self.assertIn("0 für Metadaten", dialog.summary.text())
@@ -4354,8 +4356,8 @@ class ComparisonLayoutTests(unittest.TestCase):
     def test_two_location_columns_plus_technical_ones(self):
         """Die zwei Orts-Spalten stehen wieder einzeln da (0.15.3).
 
-        Feldbefund: „Bring mir die zwei Spalten zurück, wo die Bücher
-        sind.“ Die doppelte Statusspalte bleibt entfallen.
+        Feldbefund: «Bring mir die zwei Spalten zurück, wo die Bücher
+        sind.» Die doppelte Statusspalte bleibt entfallen.
         """
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
@@ -4406,11 +4408,11 @@ class ComparisonLayoutTests(unittest.TestCase):
 
 
 class InventoryDialogReadStateTests(unittest.TestCase):
-    """Spalte „Gelesen“ kommt aus der Cloud und lässt sich mehrfach setzen.
+    """Spalte «Gelesen» kommt aus der Cloud und lässt sich mehrfach setzen.
 
-    Feldbefund 0.15.0: „Der Knopf Gelesen soll bereits ausgewählt sein, wenn
-    das Buch in der Cloud als gelesen markiert ist“ und „Jetzt muss ich alle
-    meine 500 Bücher einzeln anklicken“.
+    Feldbefund 0.15.0: «Der Knopf Gelesen soll bereits ausgewählt sein, wenn
+    das Buch in der Cloud als gelesen markiert ist» und «Jetzt muss ich alle
+    meine 500 Bücher einzeln anklicken».
     """
 
     def _ui(self):
@@ -4451,7 +4453,7 @@ class InventoryDialogReadStateTests(unittest.TestCase):
 
     @staticmethod
     def _cells_by_title(dialog):
-        """Zeilen-Widgets, nach Titel -- das Fenster sortiert beim Bau."""
+        """Zeilen-Widgets, nach Titel – das Fenster sortiert beim Bau."""
         cells = {(row, column): widget
                  for row, column, widget in dialog.table.cell_widgets}
         return {row["title"]: cells[(index, 2)]
@@ -4504,7 +4506,7 @@ class InventoryDialogReadStateTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
     def test_recommendation_keeps_the_cloud_read_marks(self):
-        """„Empfehlung auswählen“ hakt nie etwas Neues auf gelesen und
+        """«Empfehlung auswählen» hakt nie etwas Neues auf gelesen und
         nimmt die Cloud-Marken nicht weg."""
         ui_module = self._ui()
         try:
@@ -4522,11 +4524,11 @@ class InventoryDialogReadStateTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
     def test_a_read_book_is_unmarked_with_two_clicks(self):
-        """Feldbefund 0.15.2: „Ein Buch, das in der Cloud als gelesen
-        markiert ist, kann ich nicht mehr auf ungelesen setzen.“
+        """Feldbefund 0.15.2: «Ein Buch, das in der Cloud als gelesen
+        markiert ist, kann ich nicht mehr auf ungelesen setzen.»
 
         Der erste Klick löst nur die Sperre (Häkchen bleibt), der zweite
-        nimmt das Häkchen weg -- so löscht kein versehentlicher Klick eine
+        nimmt das Häkchen weg – so löscht kein versehentlicher Klick eine
         Lese-Marke in der Cloud.
         """
         ui_module = self._ui()
@@ -4559,7 +4561,7 @@ class InventoryDialogReadStateTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
     def test_an_unmarked_book_stays_unmarked_after_sorting(self):
-        """Umsortieren baut die Zeilen neu -- der Wunsch bleibt."""
+        """Umsortieren baut die Zeilen neu – der Wunsch bleibt."""
         ui_module = self._ui()
         try:
             self._with_message_box(ui_module)
@@ -4642,8 +4644,8 @@ class InventoryDialogReadStateTests(unittest.TestCase):
 class CollectionReconcileWorkerTests(unittest.TestCase):
     """Serien → Sammlungen im SyncWorker (0.12.0).
 
-    Feldbefund des Nutzers: „ich habe das Gefühl, es synchronisiert die
-    Ordner automatisch“. Genau das passiert hier -- aber nur, wenn die
+    Feldbefund des Nutzers: «ich habe das Gefühl, es synchronisiert die
+    Ordner automatisch». Genau das passiert hier – aber nur, wenn die
     Sammlungen eingeschaltet sind, und vorhandene Zuordnungen werden
     nicht erneut geschrieben.
     """
@@ -4803,9 +4805,9 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
 class DashboardAccountSwitchTests(unittest.TestCase):
     """Mehrere Konten: Umschalten direkt auf der ersten Seite (0.15.4).
 
-    Feldbefund: „Kann man die Kontoauswahl, sofern mehrere Konten
-    vorhanden, ebenfalls auf die erste Seite bringen?“ Die Zeile erscheint
-    nur bei mehr als einem Konto -- sonst wäre sie nur Ballast.
+    Feldbefund: «Kann man die Kontoauswahl, sofern mehrere Konten
+    vorhanden, ebenfalls auf die erste Seite bringen?» Die Zeile erscheint
+    nur bei mehr als einem Konto – sonst wäre sie nur Ballast.
     """
 
     class Combo:
@@ -4979,13 +4981,13 @@ class DashboardAccountSwitchTests(unittest.TestCase):
 
 
 class DashboardLayoutTests(unittest.TestCase):
-    """Feldbefund: Der Knopf „Diagnose“ wurde im Dashboard gebaut, aber nie
-    in ein Layout gehängt -- er war dadurch ab 0.10.0 unsichtbar, obwohl
+    """Feldbefund: Der Knopf «Diagnose» wurde im Dashboard gebaut, aber nie
+    in ein Layout gehängt – er war dadurch ab 0.10.0 unsichtbar, obwohl
     Code, Tooltip und Funktion vorhanden waren.
 
     Der Test liest den Quelltext (ohne Qt starten zu müssen) und verlangt,
     dass JEDER im Dashboard erzeugte Knopf/Haken einem Layout übergeben
-    wird -- sonst verschwindet er wieder stillschweigend.
+    wird – sonst verschwindet er wieder stillschweigend.
     """
 
     def _source(self):
@@ -5025,7 +5027,7 @@ class DashboardLayoutTests(unittest.TestCase):
 
     def test_the_settings_dialog_holds_the_rare_options(self):
         """Alles Seltene liegt in EINEM Fenster, nicht hinter zwei
-        „… anzeigen“-Häkchen (0.15.2)."""
+        «… anzeigen»-Häkchen (0.15.2)."""
         source = self._source()
         self.assertIn("class SettingsDialog(QDialog):", source)
         settings = source.split("class SettingsDialog(QDialog):", 1)[1].split(
@@ -5040,7 +5042,7 @@ class DashboardLayoutTests(unittest.TestCase):
 
     def test_diagnostics_button_reports_without_network(self):
         """Der Knopf öffnet den Bericht; die Tolino-Anfrage passiert erst
-        im Bericht selbst (Feldbefund: „Diagnose“ führt keine Anmeldung
+        im Bericht selbst (Feldbefund: «Diagnose» führt keine Anmeldung
         und keine Tolino-Anfrage aus)."""
         body = self._dashboard_body()
         self.assertIn("self.debug.clicked.connect(self.debug_diagnose)", body)
@@ -5055,8 +5057,8 @@ class DashboardLayoutTests(unittest.TestCase):
 class DashboardPrimaryActionTests(unittest.TestCase):
     """Hauptknopf und Anmeldeknopf getrennt (0.15.3).
 
-    Feldbefund: „Bring mir den Anmeldeknopf auf die erste Seite zurück.“
-    Vorher war das Anmelden nur ein Zustand des Hauptknopfes -- bei
+    Feldbefund: «Bring mir den Anmeldeknopf auf die erste Seite zurück.»
+    Vorher war das Anmelden nur ein Zustand des Hauptknopfes – bei
     gespeichertem, aber abgelaufenem Zugang war es damit nicht erreichbar.
     """
 
@@ -5152,7 +5154,7 @@ class DashboardPrimaryActionTests(unittest.TestCase):
 
 class ReadStateComparisonTests(unittest.TestCase):
     """Der Bestandsvergleich bekommt die Gelesen-Marken der Cloud und
-    belegt damit die Spalte „Gelesen“ vor (0.15.0)."""
+    belegt damit die Spalte «Gelesen» vor (0.15.0)."""
 
     BOOK = {"uuid": "u1", "title": "Der Fall Collini",
             "authors": "Ferdinand von Schirach", "isbn": "1",
@@ -5195,10 +5197,10 @@ class SyncDataResponseShapeTests(unittest.TestCase):
     """Die sync-data-Antwort des Servers trägt die Marken-ID im Pfad.
 
     Gelesen-Marken und Sammlungen kommen als
-    ``/publications/<Buch-ID>/tags/<Marken-ID>`` zurück -- die Marken-ID
+    ``/publications/<Buch-ID>/tags/<Marken-ID>`` zurück – die Marken-ID
     vergibt der Server. Der Plugin schrieb nur die Form ohne Marken-ID und
     verlangte beim Lesen genau vier Pfadteile: damit war jede Server-Marke
-    unsichtbar. Folge: die Spalte „Gelesen“ blieb leer, obwohl die Cloud die
+    unsichtbar. Folge: die Spalte «Gelesen» blieb leer, obwohl die Cloud die
     Bücher als gelesen führte, und jede Serie schien bei jedem Lauf zu
     fehlen (0.15.1).
     """
@@ -5223,7 +5225,9 @@ class SyncDataResponseShapeTests(unittest.TestCase):
         calls = []
 
         def fake_request(url, method="GET", data=None, form=False,
-                         authenticated=True, content_type=None, _retry=True):
+                         authenticated=True, content_type=None,
+                         _auth_retry=True, _hw_retry=True,
+                         _waf_rounds=0):
             calls.append({"url": url, "method": method, "data": data})
             return {"revision": revision, "patches": list(patches)}
 
@@ -5285,7 +5289,7 @@ class SyncDataResponseShapeTests(unittest.TestCase):
                          calls[1]["data"]["patches"][0]["path"])
 
     def test_cloud_read_state_reaches_the_comparison_rows(self):
-        """Von der Server-Antwort bis zur angehakten Spalte -- der Fall aus
+        """Von der Server-Antwort bis zur angehakten Spalte – der Fall aus
         dem Feldbericht (0.15.1)."""
         client, _ = self._client([self.READ])
         book = {"uuid": "u1", "title": "Feuerprobe", "authors": "Donna Leon",
@@ -5307,8 +5311,8 @@ class SyncDataDiagnosticTests(unittest.TestCase):
     """Der Diagnose-Bericht zeigt, was die sync-data wirklich liefert.
 
     Ohne diesen Block war dem Feldbericht nicht anzusehen, dass der Server
-    Marken mit Marken-ID im Pfad schickt -- und damit auch nicht, warum die
-    Spalte „Gelesen“ leer blieb (0.15.1).
+    Marken mit Marken-ID im Pfad schickt – und damit auch nicht, warum die
+    Spalte «Gelesen» leer blieb (0.15.1).
     """
 
     PUB = "bosh_8_543897185873248682836029182"
@@ -5326,7 +5330,9 @@ class SyncDataDiagnosticTests(unittest.TestCase):
         client = TolinoClient(4, "hardware", "refresh-token")
 
         def fake_request(url, method="GET", data=None, form=False,
-                         authenticated=True, content_type=None, _retry=True):
+                         authenticated=True, content_type=None,
+                         _auth_retry=True, _hw_retry=True,
+                         _waf_rounds=0):
             return {"revision": "42", "patches": list(patches)}
 
         client._request = fake_request
@@ -5405,7 +5411,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
     """0.9.35: Ein authentifizierter BOSH-400 (leeres "{}") loest eine
     Geraete-Recovery aus: das registrierte Geraet des Kontos wird
     uebernommen, sonst wird unsere Hardware-ID per registerhw
-    registriert -- dann genau EIN Retry.
+    registriert – dann genau EIN Retry.
     """
 
     INVENTORY_BODY = b'{"PublicationInventory": {"edata": []}}'
@@ -5441,7 +5447,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         return error
 
     def test_error_text_surfaces_response_info_message(self):
-        """BOSH meldet Fehler als ResponseInfo.message -- ohne diesen
+        """BOSH meldet Fehler als ResponseInfo.message – ohne diesen
         Schluessel zeigte die Meldung nur ein nutzloses "{}"."""
         from .tolino import TolinoApiError
         client = self._client()
@@ -5523,7 +5529,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
 
     def test_registered_current_device_raises_without_extra_calls(self):
         """Ist das konfigurierte Geraet bereits das registrierte, kommt
-        kein Retry und kein registerhw -- der echte Fehler 400 (andere
+        kein Retry und kein registerhw – der echte Fehler 400 (andere
         Ursache) bleibt sichtbar."""
         from .tolino import TolinoApiError
         client = self._client("configured-hw")
@@ -5606,7 +5612,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
 
 class SharedWebreaderPartnerTests(unittest.TestCase):
     """Alle Shops mit dem gemeinsamen Web Reader verhalten sich wie
-    Orell Fuessli -- ein Profil statt pro Partner nachgebauter
+    Orell Fuessli – ein Profil statt pro Partner nachgebauter
     Einzelheiten.
     """
 
@@ -5726,21 +5732,21 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
 
     def test_browser_login_never_falls_back_to_system_browser(self):
         """Shops auf dem gemeinsamen Reader: fehlt Chromium, wird der
-        Fehler sichtbar -- der System-Browser wird NICHT geoeffnet."""
+        Fehler sichtbar – der System-Browser wird NICHT geoeffnet."""
         for pid in (1, 5, 8):
             opened = []
             with patch("calibre_plugin.tolino.webbrowser.open",
                        side_effect=lambda url: opened.append(url) or True):
                 with self.assertRaises(TolinoAuthError) as ctx:
                     browser_login(pid, "test_hardware")
-            self.assertIn("Kein Chromium-Browser gefunden",
+            self.assertIn("kein Chromium-Browser gefunden",
                           str(ctx.exception))
             self.assertEqual([], opened, pid)
 
 
 class AccountStateBindingTests(unittest.TestCase):
     """Das im Dialog angezeigte Konto IST das Konto, dessen State
-    gelesen und geschrieben wird -- nur eine Quelle je Konto, und die
+    gelesen und geschrieben wird – nur eine Quelle je Konto, und die
     Tolino-ID-Spalte folgt EINER Regel (nur bei genau einem Konto)."""
 
     def test_account_by_name_ignores_the_active_account(self):
@@ -5799,7 +5805,7 @@ class AccountStateBindingTests(unittest.TestCase):
 
 
 class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
-    """Feldbefund 0.9.40: Pop!_OS, Calibre über Flathub -- "öffnet sich
+    """Feldbefund 0.9.40: Pop!_OS, Calibre über Flathub – "öffnet sich
     kein browser". In der Flatpak-Sandbox sind die Browser des Rechners
     unsichtbar (kein Browser im PATH, kein flatpak, kein flatpak run);
     die Öffnerkette und die Fehlermeldungen müssen das offenlegen."""
@@ -5829,7 +5835,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
 
     def test_open_system_browser_falls_back_to_flatpak_spawn_host(self):
         """Ohne portal-tauglichen Öffner endet die Kette bei
-        `flatpak-spawn --host xdg-open` (Start außerhalb der Sandbox,
+        `flatpak-spawn --host xdg-open` (Start ausserhalb der Sandbox,
         braucht die talk-name-Freigabe, deren Befehl der Fehler nennt)."""
         from .tolino import open_system_browser
 
@@ -5867,7 +5873,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
             self.assertTrue(open_system_browser(self.URL))
 
     def test_open_system_browser_is_false_when_nothing_opens(self):
-        """Ohne Sandbox und ohne Browser bleibt es False -- die Meldung
+        """Ohne Sandbox und ohne Browser bleibt es False – die Meldung
         kommt wie bisher vom Aufrufer."""
         from .tolino import open_system_browser
 
@@ -5882,7 +5888,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
     def test_open_error_names_flatpak_permission_fix(self):
         """Der Öffner-Fehler nennt in der Sandbox den override-Befehl
         und den manuellen Token-Weg statt nur "konnte nicht geöffnet
-        werden" -- sonst bleibt der Feldbefund ohne Lösung."""
+        werden" – sonst bleibt der Feldbefund ohne Lösung."""
         from .tolino import _system_browser_open_error
 
         with patch("calibre_plugin.tolino.in_flatpak_sandbox",
@@ -5892,7 +5898,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
                       message)
         self.assertIn("flatpak override", message)
         self.assertIn("org.freedesktop.Flatpak", message)
-        self.assertIn("manuell", message)
+        self.assertIn("von Hand eintragen", message)
 
 
     def test_launch_reader_window_names_flatpak_permission(self):
@@ -5910,11 +5916,11 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 cdp_module.launch_reader_window(4)
         message = str(ctx.exception)
-        self.assertIn("Kein Chromium-Browser gefunden", message)
+        self.assertIn("kein Chromium-Browser gefunden", message)
         self.assertIn("flatpak override", message)
 
     def test_launch_reader_window_without_sandbox_has_no_permission_hint(self):
-        """Außerhalb einer Sandbox nennt dieselbe Meldung KEINEN
+        """Ausserhalb einer Sandbox nennt dieselbe Meldung KEINEN
         Flatpak-Befehl (sonst führt sie in die Irre)."""
         from unittest.mock import patch as _patch
         from . import cdp as cdp_module
@@ -5926,7 +5932,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 cdp_module.launch_reader_window(4)
         message = str(ctx.exception)
-        self.assertIn("Kein Chromium-Browser gefunden", message)
+        self.assertIn("kein Chromium-Browser gefunden", message)
         self.assertNotIn("flatpak override", message)
 
     def test_chromium_candidates_probe_host_browser_via_flatpak_spawn(self):
@@ -5979,7 +5985,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         self.assertEqual([], found)
 
     def test_chromium_candidates_never_probe_outside_sandbox(self):
-        """Außerhalb einer Sandbox wird für die Host-Sonde nie ein
+        """Ausserhalb einer Sandbox wird für die Host-Sonde nie ein
         Prozess gestartet."""
         from unittest.mock import patch as _patch
         from . import cdp as cdp_module
@@ -5998,7 +6004,7 @@ class ExtractOpensOwnChromiumWindowTests(unittest.TestCase):
     """Feldbefund 0.9.41: trotz Standardbrowser Firefox soll der
     Extract-Button („Token aus laufendem Web Reader übernehmen") ein
     eigenes Chromium-Fenster öffnen, live lesen wie der Grabber und
-    NUR dieses Fenster schließen -- nie den gesamten Browser."""
+    NUR dieses Fenster schliessen – nie den gesamten Browser."""
 
     def test_chromium_available_tracks_pick_chromium(self):
         from .tolino import chromium_available
@@ -6014,14 +6020,14 @@ class ExtractOpensOwnChromiumWindowTests(unittest.TestCase):
 
 
 class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
-    """Feldbefund 0.9.42: "es öffnet weiterhin den Firefox ... in 0.9.39
+    """Feldbefund 0.9.42: "es öffnet weiterhin den Firefox … in 0.9.39
     funktionierte es mit diesem Chromium browser. Wenn der User eine
     Chromium-Variante installiert hat, soll sich diese öffnen, egal
     welchen Standardbrowser der User hat."""
 
     def test_chromium_candidates_finds_extra_binary_names(self):
         """Auch `chrome`, Beta/Dev-Varianten etc. werden als Befehlsname
-        erkannt -- nicht nur die klassischen zehn."""
+        erkannt – nicht nur die klassischen zehn."""
         from . import cdp as cdp_module
 
         with tempfile.TemporaryDirectory() as home:
@@ -6217,16 +6223,16 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
 
 class FlatpakHostProbeReportTests(unittest.TestCase):
     """Feldbefund 0.9.43: der override-Befehl warerteilt, die Meldung
-    „kein Chromium-Browser ... Freigabe erteilen“ blieb trotzdem. Die
+    «kein Chromium-Browser … Freigabe erteilen» blieb trotzdem. Die
     Host-Sonde wertete den Exit-Code des sh-Skripts aus, dessen letzte
-    flatpak-info-Prüfung auf fast jedem Rechner scheitert -- sie
-    meldete also IMMER „Freigabe fehlt“ und warf die gefundenen
+    flatpak-info-Prüfung auf fast jedem Rechner scheitert – sie
+    meldete also IMMER «Freigabe fehlt» und warf die gefundenen
     Host-Browser weg.
     """
 
     def test_host_probe_keeps_results_when_script_exits_nonzero(self):
         """Ein Fehlercode MIT Ausgabe ist kein Freigabe-Verlust: die
-        NATIVE-Zeilen werden gelesen, der Status wird „ok“."""
+        NATIVE-Zeilen werden gelesen, der Status wird «ok»."""
         from . import cdp as cdp_module
 
         class Proc(object):
@@ -6252,7 +6258,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
                        "/usr/bin/chromium"], argvs)
 
     def test_host_probe_script_forces_exit_zero(self):
-        """Das Sonden-Skript endet mit `exit 0` -- sonst meldet die
+        """Das Sonden-Skript endet mit `exit 0` – sonst meldet die
         Host-Schleife selbst dann einen Fehler, wenn die Freigabe
         erteilt ist (Regressionsschutz für den Feldbefund)."""
         from . import cdp as cdp_module
@@ -6280,7 +6286,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
         self.assertTrue(script.rstrip().endswith("exit 0"), script)
 
     def test_denied_still_reported_without_any_output(self):
-        """Ohne Ausgabe und mit Fehlercode bleibt „denied“ die einzige
+        """Ohne Ausgabe und mit Fehlercode bleibt «denied» die einzige
         plausible Deutung: flatpak-spawn wurde abgewiesen."""
         from . import cdp as cdp_module
 
@@ -6316,14 +6322,14 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 cdp_module.launch_reader_window(4)
         message = str(ctx.exception)
-        self.assertIn("Kein Chromium-Browser gefunden", message)
+        self.assertIn("kein Chromium-Browser gefunden", message)
         self.assertIn("flatpak override --user", message)
         self.assertIn("sudo flatpak override", message)
         self.assertIn("--show-permissions", message)
         self.assertIn("neu starten", message)
 
     def test_launch_names_runtime_update_when_spawn_missing(self):
-        """Ohne flatpak-spawn hilft keine Freigabe -- die Meldung
+        """Ohne flatpak-spawn hilft keine Freigabe – die Meldung
         nennt dann `flatpak update` statt des override-Befehls."""
         from unittest.mock import patch as _patch
         from . import cdp as cdp_module
@@ -6350,7 +6356,443 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
         self.assertIn("flatpak override --user", message)
         self.assertIn("sudo flatpak override", message)
         self.assertIn("--show-permissions", message)
-        self.assertIn("VOLLSTÄNDIG neu starten", message)
+        self.assertIn("vollständig neu starten", message)
+
+
+class SettingsLockTests(unittest.TestCase):
+    """0.15.5: Der Einstellungs-Speicher wird aus zwei Threads benutzt.
+
+    Der Dialog speichert im GUI-Thread, der Keep-alive rotiert den Token im
+    Hintergrund. `save_account` liest UND schreibt den ganzen Konto-Block --
+    ohne Lock kann ein Lesen-Aendern-Schreiben die Rotation des anderen
+    Threads verlieren.
+    """
+
+    def setUp(self):
+        self.original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        config.PREFERENCES.update({
+            "accounts": [{"name": "konto", "partner_id": 4,
+                          "hardware_id": "hw", "refresh_token": "tok",
+                          "username": "", "password": "", "state": {}}],
+            "active_account": "konto",
+        })
+        self.addCleanup(setattr, config, "PREFERENCES", self.original)
+
+    def test_save_account_waits_for_the_settings_lock(self):
+        import threading
+        started = threading.Event()
+        done = threading.Event()
+
+        def worker():
+            started.set()
+            config.save_account("zweites", {"hardware_id": "hw-2"})
+            done.set()
+
+        with config._SETTINGS_LOCK:
+            thread = threading.Thread(target=worker)
+            thread.start()
+            self.assertTrue(started.wait(5))
+            # Solange der Lock haelt, kommt der Hintergrund-Thread nicht durch.
+            self.assertFalse(done.wait(0.3))
+        thread.join(5)
+        # Nach dem Freigeben laeuft er durch.
+        self.assertTrue(done.is_set())
+        self.assertEqual("hw-2",
+                         config.account_by_name("zweites")["hardware_id"])
+
+    def test_settings_lock_is_reentrant(self):
+        """save_account ruft intern settings() und save_account -- ohne
+        Reentranz wuerde das Plugin in einen Deadlock laufen."""
+        lock = config._SETTINGS_LOCK
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            self.assertTrue(lock.acquire(blocking=False))
+            lock.release()
+        finally:
+            lock.release()
+
+    def test_parallel_writes_never_lose_an_account(self):
+        import threading
+        errors = []
+
+        def worker(index):
+            try:
+                name = "konto-%d" % index
+                for _ in range(20):
+                    config.save_account(name, {"hardware_id": "hw-%d" % index})
+            except Exception as exc:  # pragma: no cover - nur Diagnose
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(index,))
+                   for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual([], errors)
+        names = {item["name"] for item in config.settings()["accounts"]}
+        self.assertEqual({"konto"} | {"konto-%d" % index for index in range(8)},
+                         names)
+
+
+class KeepaliveSafetyTests(unittest.TestCase):
+    """0.15.5: Keep-alive und Sync duerfen den Refresh-Token nie gleichzeitig
+    einloesen -- der Reuse-Schutz von Keycloak beendet die Sitzung sonst
+    sofort. Und ein Fehler darf nicht still verschwinden."""
+
+    def test_keepalive_stands_still_while_a_sync_runs(self):
+        from . import tolino as tolino_module
+        self.addCleanup(tolino_module.mark_sync_active, False)
+        tolino_module.mark_sync_active(True)
+        with patch("calibre_plugin.tolino.TolinoClient") as client_mock:
+            result = tolino_module.keepalive_refresh(
+                lambda: {"refresh_token": "tok"}, None)
+        self.assertIsNone(result)
+        client_mock.assert_not_called()
+        # Nach dem Sync rotiert er wieder.
+        tolino_module.mark_sync_active(False)
+        with patch("calibre_plugin.tolino.TolinoClient") as client_mock:
+            client_mock.return_value.refresh = "rotiert"
+            self.assertEqual("rotiert", tolino_module.keepalive_refresh(
+                lambda: {"refresh_token": "tok"}, None))
+        client_mock.assert_called_once()
+
+    def test_keepalive_failure_is_logged_without_the_token(self):
+        from . import tolino as tolino_module
+        logged = []
+
+        class BoomClient(object):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def login(self):
+                raise RuntimeError("kaputt mit sk-geheim-token")
+
+        with patch.object(tolino_module, "log_warning", logged.append), \
+                patch("calibre_plugin.tolino.TolinoClient", BoomClient):
+            result = tolino_module.keepalive_refresh(
+                lambda: {"partner_id": 4, "hardware_id": "hw",
+                         "refresh_token": "sk-geheim-token"}, None)
+        self.assertIsNone(result)
+        self.assertEqual(1, len(logged))
+        self.assertIn("Keep-alive", logged[0])
+        self.assertNotIn("sk-geheim-token", logged[0])
+
+    def test_log_warning_never_raises_without_calibre(self):
+        from .tolino import log_warning
+        log_warning("nur ein Test -- ohne Calibre muss das still bleiben")
+
+
+class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
+    """0.15.5: Der Sync markiert sich als aktiv -- waehrend er laeuft,
+    loest der Keep-alive keinen Token ein (und danach wieder)."""
+
+    def test_worker_marks_the_sync_active_for_its_whole_run(self):
+        from . import tolino as tolino_module
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub={"pyqtSignal":
+                     CollectionReconcileWorkerTests._signal_descriptor()[0]})
+        self.addCleanup(tolino_module.mark_sync_active, False)
+        seen = []
+
+        class FakeClient(object):
+            def __init__(self, *args, **kwargs):
+                self.refresh = "rotated"
+
+            def login(self):
+                # Im laufenden Sync ist der Keep-alive schon gesperrt.
+                seen.append(tolino_module._SYNC_ACTIVE)
+                return "rotated"
+
+            def inventory_ids(self):
+                return set()
+
+        settings = {"partner_id": 4, "hardware_id": "hw",
+                    "refresh_token": "tok", "username": "", "password": "",
+                    "enable_deletions": False, "state": {}}
+        try:
+            with patch("calibre_plugin.ui.TolinoClient", FakeClient):
+                worker = ui_module.SyncWorker(settings, [], [])
+                worker.run()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([True], seen)
+        self.assertFalse(tolino_module._SYNC_ACTIVE)
+
+
+class TokenRotationWriteBackTests(unittest.TestCase):
+    """0.15.5: Der Keep-alive rotiert den gespeicherten Zugang im Hintergrund,
+    das Eingabefeld weiss davon nichts.
+
+    Der Dialog schrieb den alten Token beim Schliessen oder Kontowechsel
+    zurueck -- danach lehnt Tolino ihn als verbraucht ab («invalid_grant» /
+    «reuse exceeded»). Ein UNVERAENDERTES Feld darf die Rotation deshalb nie
+    ueberschreiben; nur eine eigene Eingabe zaehlt.
+    """
+
+    Combo = DashboardAccountSwitchTests.Combo
+
+    def _ui(self, token="alt-token"):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        original = (config.PREFERENCES, ui_module.hardware_id)
+        config.PREFERENCES = config.JSONConfig("test")
+        config.PREFERENCES.update({
+            "accounts": [{"name": "konto", "partner_id": 4,
+                          "hardware_id": "hw-1", "refresh_token": token,
+                          "username": "", "password": "", "state": {}}],
+            "active_account": "konto",
+        })
+        ui_module.hardware_id = lambda: "auto-hw"
+
+        def restore():
+            (config.PREFERENCES, ui_module.hardware_id) = original
+            ui_module._restore_stubs_for_tests()
+
+        self.addCleanup(restore)
+        dashboard = type("Dashboard", (), {})()
+        for name in ("account_select", "account_quick", "partner", "hardware",
+                     "refresh", "formats", "account_quick_label", "status",
+                     "progress", "progress_label", "primary", "covers",
+                     "deletions", "sync_collections", "tolino_column"):
+            setattr(dashboard, name, self.Combo())
+        dashboard.thread = None
+        dashboard.partner.items = [(str(pid), pid)
+                                   for pid in sorted(ui_module.PARTNERS)]
+        # Die ECHTEN Methoden an das gefaelschte Fenster binden.
+        for name in ("load_values", "values", "_selected_account",
+                     "update_status", "set_refresh_token",
+                     "_save_visible_account"):
+            setattr(dashboard, name,
+                    getattr(ui_module.SyncDashboard, name).__get__(dashboard))
+        dashboard.load_values()
+        return ui_module, dashboard
+
+    def _rotate(self, token):
+        config.save_account("konto", {"refresh_token": token}, active="konto")
+
+    def _stored(self, name="konto"):
+        return config.account_by_name(name)["refresh_token"]
+
+    def test_untouched_field_keeps_the_rotated_token(self):
+        _ui_module, dashboard = self._ui("alt-token")
+        self.assertEqual("alt-token", dashboard.refresh.text())
+        self._rotate("rotiert")
+        # Das Feld ist unveraendert -- gerechnet wird mit dem gespeicherten
+        # (frisch rotierten) Zugang, nicht mit der alten Kopie.
+        self.assertEqual("alt-token", dashboard.refresh.text())
+        self.assertEqual("rotiert", dashboard.values()["refresh_token"])
+        # Und das Speichern beim Schliessen verbrennt die Rotation nicht.
+        dashboard._save_visible_account()
+        self.assertEqual("rotiert", self._stored())
+
+    def test_typed_token_wins_over_the_stored_one(self):
+        _ui_module, dashboard = self._ui("alt-token")
+        self._rotate("rotiert")
+        dashboard.refresh.setText("selbst-eingetragen")
+        self.assertEqual("selbst-eingetragen",
+                         dashboard.values()["refresh_token"])
+        dashboard._save_visible_account()
+        self.assertEqual("selbst-eingetragen", self._stored())
+
+    def test_cleared_field_stays_cleared(self):
+        _ui_module, dashboard = self._ui("alt-token")
+        self._rotate("rotiert")
+        dashboard.refresh.setText("")
+        self.assertEqual("", dashboard.values()["refresh_token"])
+        dashboard._save_visible_account()
+        self.assertEqual("", self._stored())
+
+    def test_adopted_token_survives_a_later_rotation(self):
+        """Frisch gelesen heisst gewollt: der Wert steht danach im Feld UND
+        im Speicher (so macht es `persist_refresh_token`). Eine spaetere
+        Rotation im Hintergrund darf auch er nicht ueberschreiben."""
+        _ui_module, dashboard = self._ui("alt-token")
+        dashboard.set_refresh_token("frisch-gelesen")
+        config.save_account("konto",
+                            {"refresh_token": dashboard.refresh.text()},
+                            active="konto")
+        self.assertEqual("frisch-gelesen", dashboard.values()["refresh_token"])
+        self._rotate("rotiert-2")
+        self.assertEqual("rotiert-2", dashboard.values()["refresh_token"])
+        dashboard._save_visible_account()
+        self.assertEqual("rotiert-2", self._stored())
+
+    def test_untouched_hardware_field_keeps_the_adopted_id(self):
+        _ui_module, dashboard = self._ui()
+        config.save_account("konto", {"hardware_id": "adoptiert"},
+                            active="konto")
+        self.assertEqual("adoptiert", dashboard.values()["hardware_id"])
+
+
+class RequestRetryBudgetTests(unittest.TestCase):
+    """0.15.5: Statt des Tri-States True/1/False in `_retry` hat jede der drei
+    Rettungen einen eigenen, sichtbaren Zaehler (Neuanmeldung, Geraete-
+    Recovery, WAF-Warteversuch)."""
+
+    @staticmethod
+    def _bot_error():
+        from urllib.error import HTTPError
+        error = HTTPError("https://example.invalid/token", 403, "Forbidden",
+                          {}, None)
+        error.read = lambda: (b"<!doctype html><title>Zugriff geblockt"
+                              b"</title>")
+        return error
+
+    def test_waf_budget_counts_down_and_then_raises(self):
+        from .tolino import _WAF_RETRY_SECONDS, TolinoAuthError, TolinoClient
+        sleeps = []
+
+        def fake_urlopen(request, timeout=None):
+            raise self._bot_error()
+
+        with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
+                patch("calibre_plugin.tolino._impersonate_session",
+                      return_value=None), \
+                patch("calibre_plugin.tolino.urlopen",
+                      side_effect=fake_urlopen), \
+                patch("calibre_plugin.tolino.time.sleep",
+                      side_effect=sleeps.append):
+            client = TolinoClient(4, "hardware", "old-refresh")
+            with self.assertRaises(TolinoAuthError):
+                client.login()
+        # Genau die zwei Warteversuche der Kaskade, dann der sichtbare Fehler.
+        self.assertEqual(list(_WAF_RETRY_SECONDS), sleeps)
+
+    def test_spent_auth_retry_does_not_block_the_device_recovery(self):
+        """Die Rettungen teilen sich keinen Zaehler mehr: eine bereits
+        verbrauchte Neuanmeldung (_auth_retry=False) darf die Geraete-
+        Recovery nach einem BOSH-400 nicht sperren."""
+        from urllib.error import HTTPError
+
+        from .tolino import TolinoApiError, TolinoClient
+        error = HTTPError("https://bosh.pageplace.de/bosh/rest/x", 400,
+                          "Bad Request", {}, None)
+        error.read = lambda: b"{}"
+        client = TolinoClient(4, "stale-hw", "refresh-token-value")
+        client.access = "access-value"
+        client.expires_at = time.time() + 3600
+
+        def fake_urlopen(request, timeout=None):
+            raise error
+
+        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
+                patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
+                      return_value="registered-hw"), \
+                patch("calibre_plugin.tolino.TolinoClient._register_hardware",
+                      return_value=False):
+            with self.assertRaises(TolinoApiError):
+                client._request("https://bosh.pageplace.de/bosh/rest/x",
+                                _auth_retry=False)
+        # Die Recovery lief trotz verbrauchtem Auth-Retry ...
+        self.assertEqual("registered-hw", client.hardware)
+
+
+
+class PersistCredentialsDedupTests(unittest.TestCase):
+    """0.15.5: Token + Hardware-ID werden an EINER Stelle gespeichert.
+
+    Dialog und Sync-Worker hatten dafuer je ein fast identisches Methodenpaar
+    (`persist_refresh_token`/`persist_hardware`). Beide gehen jetzt durch
+    `config.save_credentials`; in den vier Methoden steht kein eigener
+    `save_account`-Aufruf mehr.
+    """
+
+    @staticmethod
+    def _ui_module():
+        return ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub={"pyqtSignal":
+                     CollectionReconcileWorkerTests._signal_descriptor()[0]})
+
+    def test_save_credentials_writes_token_and_hardware(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_credentials("konto", "tok-1", "hw-1")
+            account = config.account_by_name("konto")
+            self.assertEqual("tok-1", account["refresh_token"])
+            self.assertEqual("hw-1", account["hardware_id"])
+            self.assertEqual("konto", config.settings()["active_account"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_save_credentials_without_a_name_does_nothing(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_credentials("", "tok", "hw")
+            active = config.settings()["active_account"]
+            self.assertEqual("", config.account_by_name(active)["refresh_token"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_sync_worker_persists_through_the_shared_helper(self):
+        ui_module = self._ui_module()
+        saved = []
+        settings = {"account_name": "konto", "hardware_id": "hw-alt",
+                    "refresh_token": "tok-alt"}
+        try:
+            with patch("calibre_plugin.ui.save_credentials",
+                       lambda *args: saved.append(args)):
+                worker = ui_module.SyncWorker(settings, [], [])
+                worker.persist_refresh_token("tok-neu")
+                worker.persist_hardware("hw-neu")
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([("konto", "tok-neu", "hw-alt"),
+                          ("konto", "tok-neu", "hw-neu")], saved)
+
+    def test_dashboard_persists_through_the_shared_helper(self):
+        ui_module = self._ui_module()
+
+        class Field:
+            def __init__(self, value=""):
+                self.value = value
+
+            def text(self):
+                return self.value
+
+            def setText(self, value):
+                self.value = value
+
+        saved = []
+        dashboard = type("Dashboard", (), {})()
+        dashboard.account_name = "konto"
+        dashboard.refresh = Field("alt")
+        dashboard.hardware = Field("hw-alt")
+        dashboard.set_refresh_token = dashboard.refresh.setText
+        try:
+            with patch("calibre_plugin.ui.save_credentials",
+                       lambda *args: saved.append(args)):
+                ui_module.SyncDashboard.persist_refresh_token(
+                    dashboard, "tok-neu")
+                ui_module.SyncDashboard.persist_hardware(dashboard, "hw-neu")
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([("konto", "tok-neu", "hw-alt"),
+                          ("konto", "tok-neu", "hw-neu")], saved)
+        self.assertEqual("hw-neu", dashboard._loaded_hardware)
+
+    def test_all_four_methods_use_the_shared_helper(self):
+        source = (Path(__file__).with_name("ui.py")).read_text(encoding="utf-8")
+        lines = source.splitlines()
+        seen = 0
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.ClassDef) or node.name not in (
+                    "SyncWorker", "SyncDashboard"):
+                continue
+            for func in node.body:
+                if not isinstance(func, ast.FunctionDef) or func.name not in (
+                        "persist_refresh_token", "persist_hardware"):
+                    continue
+                body = "\n".join(lines[func.lineno - 1:func.end_lineno])
+                self.assertIn("save_credentials(", body, func.name)
+                self.assertNotIn("save_account(", body, func.name)
+                seen += 1
+        self.assertEqual(4, seen)
 
 
 if __name__ == "__main__":
