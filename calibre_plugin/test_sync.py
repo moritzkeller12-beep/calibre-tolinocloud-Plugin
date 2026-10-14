@@ -7373,6 +7373,13 @@ class LoginPreflightTests(unittest.TestCase):
             "warning": staticmethod(record),
         })
 
+    def _assert_one_line(self, box, title):
+        """Die neuen Infofenster bleiben EINE Zeile (Feldwunsch 0.15.8)."""
+        self.assertEqual(title, box[1])
+        text = box[2]
+        self.assertNotIn("\n", text)
+        self.assertLessEqual(len(text), 100, text)
+
     def _dashboard(self, ui_module, token="tok-1"):
         dashboard = type("Dashboard", (), {})()
         dashboard.account_name = "konto"
@@ -7450,21 +7457,28 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertTrue(dashboard.primary.enabled)
         self.assertIn("weiterhin", dashboard.status.text())
         self.assertEqual(1, len(boxes))
-        self.assertEqual("Zugang weiterhin gültig", boxes[0][1])
+        self._assert_one_line(boxes[0], "Zugang geprüft")
 
     def test_a_rejected_access_opens_the_login_window(self):
         ui_module = self._ui()
         Thread, CheckWorker, LoginWorker = self._fake_qt(ui_module)
         dashboard = self._dashboard(ui_module)
-        boxes = []
+        boxes, logged = [], []
         self._boxes(ui_module, boxes)
-        dashboard.browser_login()
-        check_thread = dashboard.login_thread
-        self.assertIsInstance(dashboard.login_worker, CheckWorker)
-        dashboard.login_worker.invalid.fire("invalid_grant (ohne Token)")
+        with patch("calibre_plugin.ui.log_warning",
+                   lambda message: logged.append(message)):
+            dashboard.browser_login()
+            check_thread = dashboard.login_thread
+            self.assertIsInstance(dashboard.login_worker, CheckWorker)
+            dashboard.login_worker.invalid.fire("invalid_grant (ohne Token)")
         self.assertEqual(1, len(boxes))
-        self.assertEqual("Zugang abgelehnt", boxes[0][1])
-        self.assertIn("invalid_grant", boxes[0][2])
+        self._assert_one_line(boxes[0], "Zugang abgelehnt")
+        self.assertIn("anmelden", boxes[0][2])
+        # Der technische Grund bleibt aussen vor: eine Zeile im Fenster,
+        # der Rest ins Log (Feldwunsch 0.15.8).
+        self.assertNotIn("invalid_grant", boxes[0][2])
+        self.assertEqual(1, len(logged))
+        self.assertIn("invalid_grant", logged[0])
         # Der neue Anlauf ist ein eigener Thread, nicht der Pruef-Thread:
         # die Ablehnung oeffnet wirklich das Anmeldefenster.
         self.assertIsInstance(dashboard.login_thread, Thread)
@@ -7491,7 +7505,7 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertIsNone(dashboard.login_thread)
         self.assertTrue(dashboard.primary.enabled)
         self.assertEqual(1, len(boxes))
-        self.assertEqual("Zugang wird gerade verwendet", boxes[0][1])
+        self._assert_one_line(boxes[0], "Zugang in Benutzung")
 
     def test_a_second_click_while_checking_is_ignored(self):
         ui_module = self._ui()

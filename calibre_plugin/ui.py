@@ -1568,9 +1568,7 @@ class SyncDashboard(QDialog):
         """Gespeicherten Zugang im Hintergrund prüfen (ein Netz-Roundtrip)."""
         self.primary.setEnabled(False)
         self.scrape_browser.setEnabled(False)
-        self.status.setText(
-            "Der gespeicherte Zugang wird geprüft – ein Anmeldefenster "
-            "öffnet nur, wenn er nicht mehr funktioniert.")
+        self.status.setText("Gespeicherter Zugang wird geprüft …")
         thread = QThread()  # no parent: dialog may close first
         worker = SessionCheckWorker(settings)
         worker.moveToThread(thread)
@@ -1593,47 +1591,41 @@ class SyncDashboard(QDialog):
             self._login_cleanup()
             self.set_refresh_token(refresh)
             self.persist_refresh_token(refresh)
-            self.status.setText(
-                "✓ Gespeicherter Zugang geprüft: er funktioniert weiterhin – "
-                "ein neues Anmelden ist nicht nötig.")
+            self.status.setText("✓ Zugang geprüft – er funktioniert weiterhin.")
             QMessageBox.information(
-                self, "Zugang weiterhin gültig",
-                "Der gespeicherte Zugang funktioniert: Tolino hat ihn "
-                "angenommen, ein Anmeldefenster ist nicht nötig. Der Zugang "
-                "wurde dabei gleich erneuert.\n\n"
-                "Erst wenn Tolino ihn später ablehnt, öffnet der "
-                "Anmeldeknopf wieder das Anmeldefenster.")
+                self, "Zugang geprüft",
+                "Der gespeicherte Zugang funktioniert weiterhin – kein "
+                "Anmelden nötig.")
         except RuntimeError:
             pass  # dialog already destroyed (Calibre shutdown)
 
-    def login_rejected(self, message):
-        """Prüfung fehlgeschlagen: jetzt das Anmeldefenster öffnen."""
+    def login_rejected(self, message=""):
+        """Prüfung fehlgeschlagen: jetzt das Anmeldefenster öffnen.
+
+        Der technische Grund landet im Log statt im Fenster: die Box bleibt
+        eine Zeile, und für die Diagnose steht er weiter bereit (0.15.8).
+        """
         try:
             self._login_cleanup()
             settings = self.values()
         except RuntimeError:
             return  # dialog already destroyed (Calibre shutdown)
+        log_warning("Zugang abgelehnt: " + str(message))
         QMessageBox.warning(
             self, "Zugang abgelehnt",
-            "Der gespeicherte Zugang hat die Prüfung nicht bestanden:\n\n"
-            + message
-            + "\n\nDas Anmeldefenster wird jetzt geöffnet – dort im Web "
-            "Reader anmelden und warten, bis die Bücherliste lädt.")
+            "Der gespeicherte Zugang funktioniert nicht mehr – bitte im "
+            "Fenster neu anmelden.")
         self._start_login_window(settings)
 
     def login_check_busy(self, _reason=""):
         """Der Zugang wird gerade benutzt – jetzt nicht dazwischenfunken."""
         try:
             self._login_cleanup()
-            self.status.setText(
-                "Der Zugang wird gerade verwendet (Synchronisierung oder "
-                "Token-Erneuerung läuft) – bitte danach erneut prüfen.")
+            self.status.setText("Zugang gerade in Benutzung – später erneut.")
             QMessageBox.information(
-                self, "Zugang wird gerade verwendet",
-                "Der gespeicherte Zugang ist gerade in Benutzung: eine "
-                "Synchronisierung oder eine Token-Erneuerung läuft. Er wird "
-                "deshalb jetzt nicht geprüft. Bitte nach deren Ende erneut "
-                "auf «Jetzt bei Tolino anmelden» klicken.")
+                self, "Zugang in Benutzung",
+                "Sync oder Token-Erneuerung läuft – bitte danach erneut "
+                "klicken.")
         except RuntimeError:
             pass  # dialog already destroyed (Calibre shutdown)
 
