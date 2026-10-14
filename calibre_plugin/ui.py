@@ -35,11 +35,12 @@ from .sync import (compare_inventory, format_error_details, iter_book_ids,
                    diagnose_preparation, format_diagnostic_report,
                    metadata_tolino_id,
                    tolino_column_active, update_tolino_ids)
-from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
+from .tolino import (PARTNERS, RELOGIN, TolinoAuthError, TolinoClient, browser_login,
                      check_stored_login, chromium_available, hardware_id,
                      log_warning,
                      mark_sync_active,
-                     normalize_refresh_token, sanitize_error,
+                     normalize_refresh_token, recent_errors, report_error,
+                     sanitize_error,
                      start_token_keepalive, try_live_grab_first)
 
 def _plugin_version():
@@ -119,8 +120,8 @@ class InventoryDialog(QDialog):
 
     # Text der entsperrten Lese-Zelle -- einmal, damit er nicht driftet.
     READ_UNLOCKED_TOOLTIP = (
-        "Als gelesen markiert. Noch einmal anklicken entfernt das Häkchen "
-        "– das Buch wird in der Cloud wieder auf ungelesen gesetzt.")
+        "Als gelesen markiert. Erneut anklicken setzt das Buch in der "
+        "Cloud wieder auf ungelesen.")
 
     # Alle Aktionen, die auf die MARKIERTEN Tabellenzeilen wirken -- eine
     # Stelle statt vier Knöpfe in zwei verschiedenen Ecken (0.15.2).
@@ -207,9 +208,9 @@ class InventoryDialog(QDialog):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "Pro Buch anhaken, was in die Tolino Cloud soll: <b>Hochladen</b> "
-            "(Buchdatei), <b>Metadaten</b> (nur Titel/Autor/ISBN) oder "
-            "<b>Gelesen</b>. Ohne Auswahl passiert nichts.")
+            "Pro Buch anhaken, was in die Cloud soll: <b>Hochladen</b> "
+            "(Buchdatei), <b>Metadaten</b> (Titel, Autor, ISBN) oder "
+            "<b>Gelesen</b>. Ohne Häkchen passiert nichts.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -224,19 +225,19 @@ class InventoryDialog(QDialog):
         helpers = QHBoxLayout()
         self.recommend = QPushButton("Empfehlung auswählen")
         self.recommend.setToolTip(
-            "Neue Bücher zum Hochladen, geänderte Bücher je nach Unterschied "
-            "zum Hochladen oder für den Metadaten-Abgleich auswählen.")
+            "Neue Bücher zum Hochladen, geänderte je nach Unterschied für "
+            "Upload oder Metadaten.")
         self.clear_selection = QPushButton("Auswahl aufheben")
-        self.clear_selection.setToolTip("Hebt die gesamte Auswahl auf.")
+        self.clear_selection.setToolTip("Entfernt alle Häkchen.")
         helpers.addWidget(self.recommend)
         helpers.addWidget(self.clear_selection)
         helpers.addStretch(1)
         self.row_actions = QPushButton("Für markierte Zeilen …")
         self.row_actions.setToolTip(
-            "Wirkt auf die in der Tabelle markierten Zeilen: als gelesen "
-            "markieren, aus der Cloud herunterladen oder einer Sammlung "
-            "zuordnen. Mehrere markieren mit Strg-/Shift-Klick, alle mit "
-            "Strg+A. Geschrieben wird erst mit «Auswahl übernehmen».")
+            "Wirkt auf markierte Zeilen (mehrere: Strg-/Shift-Klick, alle: "
+            "Strg+A): als gelesen markieren, herunterladen oder einer "
+            "Sammlung zuordnen. Geschrieben wird erst mit «Auswahl "
+            "übernehmen».")
         helpers.addWidget(self.row_actions)
         layout.addLayout(helpers)
 
@@ -244,13 +245,13 @@ class InventoryDialog(QDialog):
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         header_tooltips = (
-            "Ausgewählt = Buchdatei in die Tolino Cloud hochladen",
-            "Ausgewählt = nur Titel/Autor(en)/ISBN in der Cloud aktualisieren "
-            "(kein Upload)",
-            "Ausgewählt = im Tolino-Konto als gelesen markieren bzw. wieder "
-            "auf ungelesen setzen (nur Cloud, die Buchdatei bleibt unverändert)",
-            "Buch liegt in Ihrer Calibre-Bibliothek",
-            "Buch liegt in der Tolino Cloud",
+            "Angehakt: Buchdatei in die Cloud hochladen",
+            "Angehakt: Titel, Autor und ISBN in der Cloud aktualisieren "
+            "(ohne Upload)",
+            "Angehakt: in der Cloud als gelesen markieren bzw. wieder auf "
+            "ungelesen setzen",
+            "Buch ist in Calibre",
+            "Buch ist in der Cloud",
             "Buchtitel", "Autor(en)",
             "Was sich zwischen Calibre und Cloud unterscheidet",
             "ISBN (technisch)",
@@ -278,7 +279,7 @@ class InventoryDialog(QDialog):
         self.technical_toggle = QCheckBox(
             "Technische Spalten anzeigen (ISBN, Tolino-ID)")
         self.technical_toggle.setToolTip(
-            "Für den normalen Gebrauch nicht nötig – nur zum Nachschauen.")
+            "Nur zum Nachschauen.")
         self.technical_toggle.toggled.connect(self._toggle_technical_columns)
         layout.addWidget(self.technical_toggle)
         self._apply_technical_visibility()
@@ -286,9 +287,7 @@ class InventoryDialog(QDialog):
         buttons = QHBoxLayout()
         confirm = QPushButton("Auswahl übernehmen")
         confirm.setToolTip(
-            "Führt genau die ausgewählten Aktionen aus: Buchdateien hochladen, "
-            "Metadaten in der Cloud aktualisieren und/oder als gelesen "
-            "markieren.")
+            "Führt genau die angehakten Aktionen aus.")
         cancel = QPushButton("Abbrechen")
         cancel.setToolTip(
             "Schliesst den Vergleich, ohne etwas zu ändern.")
@@ -310,8 +309,7 @@ class InventoryDialog(QDialog):
         """Klartext-Zeile: was über die Auswahl hinaus passiert."""
         parts = []
         if self.options.get("collections"):
-            parts.append("Serien werden in der Tolino Cloud angelegt und "
-                         "bereits zugeordnete Serien gemerkt")
+            parts.append("Serien werden in der Cloud angelegt")
         if self.options.get("deletions"):
             parts.append("Bücher, die nicht mehr in Calibre sind, werden "
                          "aus der Cloud gelöscht")
@@ -319,10 +317,9 @@ class InventoryDialog(QDialog):
             head = ("Zusätzlich automatisch: %s. Abschaltbar unter "
                     "«Einstellungen …»." % "; ".join(parts))
         else:
-            head = ("Geändert wird nur, was Sie ausgewählt haben: "
-                    "Hochladen und Metadaten-Abgleich.")
-        return (head + " Der Gelesen-Status in der Cloud bleibt, wie er ist; "
-                "nur die Spalte «Gelesen» ändert ihn.")
+            head = "Geändert wird nur, was angehakt ist."
+        return (head + " Den Gelesen-Status ändert nur die Spalte "
+                "«Gelesen».")
 
     def _toggle_technical_columns(self, visible):
         self._technical_visible = bool(visible)
@@ -357,8 +354,8 @@ class InventoryDialog(QDialog):
             check.setToolTip(self.READ_UNLOCKED_TOOLTIP)
         else:
             check.setToolTip(
-                "In der Cloud als gelesen markiert. Ein Klick löst die "
-                "Sperre, ein zweiter nimmt das Häkchen weg (ungelesen).")
+                "In der Cloud als gelesen markiert. Ein Klick entsperrt, "
+                "ein zweiter setzt das Buch auf ungelesen.")
 
     def _read_clicked(self, index):
         """Klick auf eine Lese-Marke: erst entsperren, dann umschalten."""
@@ -462,8 +459,8 @@ class InventoryDialog(QDialog):
         if not selected_table_rows(self.table):
             QMessageBox.information(
                 self, "Tolino Cloud Sync",
-                "Bitte zuerst Zeilen in der Tabelle markieren "
-                "(mehrere mit Strg- oder Shift-Klick, alle mit Strg+A).")
+                "Bitte zuerst Zeilen markieren (Strg-/Shift-Klick, alle mit "
+                "Strg+A).")
             return
         labels = [label for label, _key in self.ROW_ACTIONS]
         label, accepted = QInputDialog.getItem(
@@ -490,8 +487,8 @@ class InventoryDialog(QDialog):
         if not marked:
             QMessageBox.information(
                 self, "Tolino Cloud Sync",
-                "Bitte zuerst Zeilen in der Tabelle markieren "
-                "(mehrere mit Strg- oder Shift-Klick, alle mit Strg+A).")
+                "Bitte zuerst Zeilen markieren (Strg-/Shift-Klick, alle mit "
+                "Strg+A).")
             return
         changed = 0
         already = 0
@@ -556,13 +553,13 @@ class InventoryDialog(QDialog):
             in_cloud = bool(row.get("tolino_id"))
             checks = (
                 ("upload", has_book,
-                 "Buchdatei in die Tolino Cloud hochladen (ersetzt dort die "
+                 "Buchdatei in die Cloud hochladen (ersetzt dort die "
                  "vorhandene Kopie).",
                  "Nur in der Cloud – es gibt keine Calibre-Datei zum "
                  "Hochladen."),
                 ("metadata", has_book and in_cloud,
-                 "Nur Titel/Autor(en)/ISBN in der Cloud aktualisieren – die "
-                 "Buchdatei bleibt, wie sie ist.",
+                 "Titel, Autor und ISBN in der Cloud aktualisieren, ohne "
+                 "Upload.",
                  "Nur in Calibre – es gibt in der Cloud nichts zu "
                  "aktualisieren." if has_book else
                  "Kein Calibre-Buch – nichts zu aktualisieren."),
@@ -571,8 +568,7 @@ class InventoryDialog(QDialog):
                 # Schon gelesene Bücher sind zusätzlich gesperrt -- der erste
                 # Klick löst nur die Sperre (0.15.2).
                 ("read", in_cloud,
-                 "Im Tolino-Konto als gelesen markieren – die Buchdatei "
-                 "bleibt unverändert.",
+                 "In der Cloud als gelesen markieren (ohne Upload).",
                  "Geht erst, wenn das Buch in der Cloud liegt."),
             )
             for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
@@ -620,9 +616,9 @@ class InventoryDialog(QDialog):
             summary = getattr(self, "summary", None)
             if summary is not None:
                 summary.setText(
-                    "<b>%d zum Hochladen, %d für Metadaten, %s</b> "
-                    "ausgewählt – nur das Ausgewählte wird in der Tolino Cloud "
-                    "geändert." % (uploads, metadata, read_text))
+                    "<b>%d zum Hochladen, %d für Metadaten, %s</b> – nur das "
+                    "wird in der Cloud geändert." % (uploads, metadata,
+                                                     read_text))
             confirm = getattr(self, "confirm", None)
             if confirm is not None:
                 total = uploads + metadata + marked_read + marked_unread
@@ -656,7 +652,7 @@ class InventoryDialog(QDialog):
             return self.client_factory()
         except Exception as exc:
             error_dialog(self, "Anmeldung fehlgeschlagen",
-                         sanitize_error(exc), show=True)
+                         report_error(exc, "Anmeldung"), show=True)
             return None
 
     def download_selected(self):
@@ -667,8 +663,7 @@ class InventoryDialog(QDialog):
         if not tolino_id:
             QMessageBox.information(
                 self, "Tolino Cloud Sync",
-                "Diese Zeile hat keine Tolino-ID (nur in der Cloud vorhandene "
-                "Bücher können heruntergeladen werden).")
+                "Nur Bücher aus der Cloud lassen sich herunterladen.")
             return
         try:
             client = self._client()
@@ -677,7 +672,7 @@ class InventoryDialog(QDialog):
             content, _metadata = client.download(tolino_id)
         except Exception as exc:
             error_dialog(self, "Download fehlgeschlagen",
-                         sanitize_error(exc), show=True)
+                         report_error(exc, "Download"), show=True)
             return
         suggested = "%s.epub" % (row.get("title") or "tolino-book")
         path, _ = QFileDialog.getSaveFileName(
@@ -697,7 +692,7 @@ class InventoryDialog(QDialog):
         if not tolino_id:
             QMessageBox.information(
                 self, "Tolino Cloud Sync",
-                "Diese Zeile hat keine Tolino-ID.")
+                "Das Buch liegt nicht in der Cloud.")
             return
         name, ok = QInputDialog.getText(
             self, title, "Sammlungsname:")
@@ -710,7 +705,7 @@ class InventoryDialog(QDialog):
             action(client, tolino_id, str(name).strip())
         except Exception as exc:
             error_dialog(self, "Sammlung fehlgeschlagen",
-                         sanitize_error(exc), show=True)
+                         report_error(exc, "Sammlung"), show=True)
             return
         info_dialog(self, "Tolino Cloud Sync",
                     "Sammlung aktualisiert: %s" % name, show_copy_button=False)
@@ -734,10 +729,13 @@ class DiagnosticDialog(QDialog):
         self.setMinimumSize(760, 560)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Die lokale Diagnose führt keinen Login und keine Tolino-Anfrage aus. "
-            "Der Tolino-Test startet Netzwerkzugriff erst nach ausdrücklichem Klick."))
+            "Die Diagnose läuft lokal, ohne Anmeldung und ohne Netz. Der "
+            "Tolino-Test greift erst nach Klick auf das Netz zu."))
         self.output = QTextEdit()
         self.output.setReadOnly(True)
+        errors = recent_errors()
+        if errors:
+            report = "%s\n\nLetzte Fehler:\n%s" % (report, "\n".join(errors))
         self.output.setPlainText(report)
         layout.addWidget(self.output)
         buttons = QHBoxLayout()
@@ -943,7 +941,7 @@ class SyncWorker(QObject):
                 self.progress.emit(done, total, "Als gelesen markieren")
                 client.mark_read_many(self.read_marks)
                 done += 1
-                self.progress.emit(done, total, "Gelesen-Marke gesetzt")
+                self.progress.emit(done, total, "Als gelesen markiert")
             # Umgekehrt: Bücher, die wieder ungelesen sein sollen. Nur die
             # vorhandene Marke wird entfernt, alles andere bleibt (0.15.2).
             if self.read_unmarks:
@@ -974,9 +972,13 @@ class SyncWorker(QObject):
                 self.progress.emit(done, total, "Serien geprüft")
             self.completed.emit(state, client.refresh, updates)
         except Exception as exc:
-            self.failed.emit(sanitize_error(
-                exc, (self.settings["refresh_token"], getattr(client, "access", None))
-            ), client.refresh if client else self.settings["refresh_token"])
+            message = (CANCEL_MESSAGE if str(exc) == CANCEL_MESSAGE
+                       else report_error(exc, "Sync", (
+                           self.settings["refresh_token"],
+                           getattr(client, "access", None))))
+            self.failed.emit(
+                message,
+                client.refresh if client else self.settings["refresh_token"])
 
     def persist_refresh_token(self, refresh):
         """Rotierten Token des laufenden Syncs speichern (0.15.5: an einer Stelle)."""
@@ -1024,8 +1026,7 @@ class BrowserLoginWorker(QObject):
                 self.partner_id, self.hardware,
                 progress=self.progress.emit)
         except Exception as exc:
-            self.failed.emit("%s: %s" % (type(exc).__name__,
-                                         sanitize_error(exc)))
+            self.failed.emit(report_error(exc, "Anmeldefenster"))
             return
         self.completed.emit(refresh, hardware)
 
@@ -1052,8 +1053,8 @@ class SessionCheckWorker(QObject):
                 values["refresh_token"], values.get("username"),
                 values.get("password"), persist=self.persist_refresh_token)
         except Exception as exc:
-            self.invalid.emit(sanitize_error(
-                exc, (values["refresh_token"],)))
+            self.invalid.emit(report_error(
+                exc, "Zugangsprüfung", (values["refresh_token"],)))
             return
         if status == "valid":
             self.valid.emit(detail)
@@ -1123,8 +1124,7 @@ class SyncDashboard(QDialog):
         intro = QLabel(
             "So geht’s: <b>1)</b> anmelden &nbsp;→&nbsp; <b>2)</b> "
             "vergleichen und pro Buch auswählen, was in die Cloud soll. "
-            "Alles Weitere ist optional und standardmässig richtig "
-            "eingestellt.")
+            "Alles Weitere ist optional.")
         intro.setWordWrap(True)
         root.addWidget(intro)
 
@@ -1133,8 +1133,8 @@ class SyncDashboard(QDialog):
         for pid, partner in sorted(PARTNERS.items()):
             self.partner.addItem("%s – %s" % (pid, partner["name"]), pid)
         self.partner.setToolTip(
-            "Ihr Buchhändler bzw. Tolino-Partner. Bestimmt, wohin das "
-            "Plugin sich anmeldet.")
+            "Ihr Buchhändler (Tolino-Partner). Hier meldet sich das "
+            "Plugin an.")
         self.status = QLabel()
         self.status.setWordWrap(True)
         # Kontoauswahl direkt auf der ersten Seite -- aber nur, wenn es
@@ -1142,9 +1142,8 @@ class SyncDashboard(QDialog):
         # Zeile nur Ballast (0.15.4).
         self.account_quick = QComboBox()
         self.account_quick.setToolTip(
-            "Aktives Tolino-Konto. Bestimmt, mit welchem Konto verglichen "
-            "und synchronisiert wird; jedes Konto hat seinen eigenen "
-            "Zugang und eigenen Stand.")
+            "Aktives Tolino-Konto. Jedes Konto hat eigenen Zugang und "
+            "eigenen Stand.")
         self.account_quick.currentIndexChanged.connect(
             self.quick_account_changed)
         self.account_quick_label = QLabel("Konto")
@@ -1153,16 +1152,15 @@ class SyncDashboard(QDialog):
         # braucht man ihn, wenn der Zugang abgelaufen ist (0.15.3).
         self.login_button = QPushButton("Jetzt bei Tolino anmelden")
         self.login_button.setToolTip(
-            "Öffnet das Anmeldefenster: dort im Web Reader einloggen und "
-            "die Bücherliste öffnen – den Zugang holt das Plugin "
-            "automatisch. Auch zum Neuanmelden, wenn der gespeicherte "
-            "Zugang abgelaufen ist.")
+            "Öffnet das Anmeldefenster. Dort im Web Reader anmelden, bis "
+            "die Bücherliste lädt – das Plugin übernimmt den Zugang selbst. "
+            "Auch nötig, wenn der Zugang abgelaufen ist.")
         self.login_button.clicked.connect(self.browser_login)
         self.primary = QPushButton("Vergleichen und übernehmen …")
         self.primary.setToolTip(
-            "Öffnet den Bestandsvergleich: pro Buch Hochladen, Metadaten "
-            "und/oder «Gelesen» auswählen, dann übernehmen. Während "
-            "eines Laufs bricht diese Schaltfläche ab.")
+            "Öffnet den Vergleich: pro Buch Hochladen, Metadaten oder "
+            "«Gelesen» anhaken, dann übernehmen. Während eines Laufs "
+            "bricht diese Schaltfläche ab.")
         self.primary.clicked.connect(self.primary_action)
         self.progress_label = QLabel("Bereit")
         self.progress = QProgressBar()
@@ -1171,8 +1169,8 @@ class SyncDashboard(QDialog):
         self.progress_label.setVisible(False)
         self.settings_button = QPushButton("Einstellungen …")
         self.settings_button.setToolTip(
-            "Übertragung (Formate, Titelbilder, Serien, Löschungen), Konten "
-            "und Diagnose – für den normalen Gebrauch nicht nötig.")
+            "Formate, Titelbilder, Serien, Löschungen, Konten und "
+            "Diagnose. Normalerweise nicht nötig.")
         self.settings_button.clicked.connect(self.open_settings)
 
         action_form = QFormLayout()
@@ -1196,8 +1194,7 @@ class SyncDashboard(QDialog):
             "Standard: EPUB.")
         self.covers = QCheckBox("Titelbild mit hochladen")
         self.covers.setToolTip(
-            "Das Titelbild des Buches (Calibre: «Titelbild») zusätzlich in "
-            "die Cloud laden.")
+            "Lädt das Titelbild mit hoch.")
         self.compare_authors = QCheckBox(
             "Autor(en) beim Vergleich berücksichtigen")
         self.compare_title = QCheckBox("Titel beim Vergleich berücksichtigen")
@@ -1206,16 +1203,14 @@ class SyncDashboard(QDialog):
             field.setChecked(True)
         self.sync_collections = QCheckBox("Serien in der Cloud anlegen")
         self.sync_collections.setToolTip(
-            "Jedes Buch einer Calibre-Serie wird in der Tolino Cloud "
-            "zugeordnet; der Web Reader zeigt das als «Sammlung». "
-            "Standard: aus.")
+            "Bücher einer Calibre-Serie werden in der Cloud als "
+            "«Sammlung» zugeordnet. Standard: aus.")
         self.deletions = QCheckBox("Löschungen aus der Cloud übernehmen")
         self.tolino_column = QCheckBox(
             "Tolino-ID in eigene Spalte schreiben (nur ein Konto)")
         self.tolino_column.setToolTip(
-            "Schreibt die Tolino-IDs in die Calibre-Spalte #tolino_id. "
-            "Nur sinnvoll bei genau einem Konto – bei mehreren Konten "
-            "merkt sich jedes Konto seine IDs selbst.")
+            "Schreibt die Tolino-ID in die Calibre-Spalte #tolino_id. "
+            "Nur bei genau einem Konto sinnvoll.")
         automatic_hint = QLabel("Zusätzlich zu Ihrer Auswahl im Vergleich:")
         automatic_hint.setWordWrap(True)
         transfer.addRow("Bevorzugte Formate", self.formats)
@@ -1257,9 +1252,8 @@ class SyncDashboard(QDialog):
         # unsichtbar -- der Regressionstest prüft das für die ganze Datei.
         self.debug = QPushButton("Diagnose")
         self.debug.setToolTip(
-            "Öffnet den Prüfbericht: Calibre-Datenbank, Formate und "
-            "Titelbilder werden ohne Anmeldung und ohne Tolino-Anfrage "
-            "geprüft. Erst die Schaltfläche im Bericht greift auf das Netz zu.")
+            "Prüft Calibre-Datenbank, Formate und Titelbilder lokal – ohne "
+            "Anmeldung und ohne Netz.")
         self.debug.clicked.connect(self.debug_diagnose)
         self.settings_dialog.diagnostics_form.addRow("", self.debug)
 
@@ -1404,15 +1398,14 @@ class SyncDashboard(QDialog):
         running = self.thread is not None
         if running:
             self.status.setText(
-                "Synchronisierung läuft – «Abbrechen» hält an, was noch "
-                "nicht geschrieben ist.")
+                "Synchronisierung läuft. «Abbrechen» stoppt, was noch nicht "
+                "geschrieben ist.")
         elif logged_in:
             self.status.setText(
-                "✓ Angemeldet – «Vergleichen und übernehmen» ist bereit.")
+                "✓ Angemeldet – bereit zum Vergleichen.")
         else:
             self.status.setText(
-                "● Noch nicht angemeldet – «Jetzt bei Tolino anmelden» "
-                "holt den Zugang für den Vergleich.")
+                "● Noch nicht angemeldet. " + RELOGIN)
         self.progress.setVisible(running)
         self.progress_label.setVisible(running)
         if running:
@@ -1425,10 +1418,9 @@ class SyncDashboard(QDialog):
             # darüber sichtbar.
             self.primary.setEnabled(logged_in)
             self.primary.setToolTip(
-                "Öffnet den Bestandsvergleich: pro Buch Hochladen, "
-                "Metadaten und/oder «Gelesen» auswählen, dann "
-                "übernehmen." if logged_in else
-                "Bitte zuerst oben auf «Jetzt bei Tolino anmelden» klicken.")
+                "Öffnet den Vergleich: pro Buch Hochladen, Metadaten oder "
+                "«Gelesen» anhaken, dann übernehmen." if logged_in else
+                "Noch nicht angemeldet. " + RELOGIN)
 
     def set_refresh_token(self, refresh):
         normalized, _ = normalize_refresh_token(refresh)
@@ -1463,10 +1455,8 @@ class SyncDashboard(QDialog):
                 self.persist_refresh_token(refresh_token)
                 QMessageBox.information(
                     self, "Zugang übernommen",
-                    "Der Zugang wurde aus dem Web Reader übernommen und "
-                    "gespeichert (Hardware-ID: %s). "
-                    "Das Anmeldefenster wurde geschlossen."
-                    % (hardware_id_value or "unver\u00e4ndert"))
+                    "Zugang übernommen und gespeichert. Das Anmeldefenster "
+                    "wurde geschlossen.")
                 return
             # Kein Fenster: selbst das eigene Chromium-Fenster oeffnen und
             # den Token live uebernehmen.
@@ -1475,36 +1465,26 @@ class SyncDashboard(QDialog):
                         and self.login_thread.isRunning()):
                     return  # eine Anmeldung läuft bereits
                 self.status.setText(
-                    "Ein eigenes Chromium-Fenster mit dem Web Reader "
-                    "wird geöffnet: dort anmelden und die Bücherliste "
-                    "laden. Nur dieses Fenster wird danach geschlossen.")
+                    "Anmeldefenster wird geöffnet: dort anmelden, bis die "
+                    "Bücherliste lädt.")
                 # Bewusst OHNE Vorab-Prüfung: diese Schaltfläche holt den
                 # Zugang ausdrücklich aus dem Browser (0.15.7).
                 self._start_login_window(self.values())
                 return
             QMessageBox.information(
                 self, "Kein Chromium-Browser gefunden",
-                "Diese Schaltfläche liest den Zugang aus dem eigenen "
-                "Anmeldefenster und benötigt dafür Chrome, Chromium, "
-                "Brave oder Edge.\n\n"
-                "Entweder einen dieser Browser installieren und danach "
-                "«Jetzt bei Tolino anmelden» erneut klicken.\n\n"
+                "Bitte Chrome, Chromium, Brave oder Edge installieren und "
+                "danach auf «Jetzt bei Tolino anmelden» klicken.\n\n"
                 "Oder den Zugang von Hand eintragen: im Web Reader "
-                "anmelden, F12 → Netzwerk → Aufnahme starten, im "
-                "Netzwerk-Protokoll refresh_token und hardware_id "
-                "kopieren und unter «Einstellungen …» in die "
-                "Felder «Refresh-Token» und «Hardware-ID» einfügen.")
+                "anmelden, F12 → Netzwerk, refresh_token und hardware_id "
+                "kopieren und unter «Einstellungen …» einfügen.")
         except TolinoAuthError as exc:
             QMessageBox.warning(
                 self, "Anmeldung nicht abgeschlossen",
-                "%s\n\nDas Anmeldefenster ist noch offen: dort im Web "
-                "Reader anmelden, bis die Bücherliste lädt, und danach "
-                "erneut auf die Schaltfläche klicken." % sanitize_error(exc))
+                report_error(exc, "Zugang übernehmen"))
         except Exception as exc:
             QMessageBox.critical(
-                self, "Fehler",
-                "Der Zugang konnte nicht übernommen werden: %s" % sanitize_error(exc)
-            )
+                self, "Fehler", report_error(exc, "Zugang übernehmen"))
 
     def _selected_account(self):
         """The account this dialog shows – never a different 'active' one."""
@@ -1591,11 +1571,11 @@ class SyncDashboard(QDialog):
             self._login_cleanup()
             self.set_refresh_token(refresh)
             self.persist_refresh_token(refresh)
-            self.status.setText("✓ Zugang geprüft – er funktioniert weiterhin.")
+            self.status.setText("✓ Angemeldet – Zugang gilt weiterhin.")
             QMessageBox.information(
                 self, "Zugang geprüft",
-                "Der gespeicherte Zugang funktioniert weiterhin – kein "
-                "Anmelden nötig.")
+                "Der gespeicherte Zugang gilt weiterhin – kein Anmelden "
+                "nötig.")
         except RuntimeError:
             pass  # dialog already destroyed (Calibre shutdown)
 
@@ -1613,19 +1593,18 @@ class SyncDashboard(QDialog):
         log_warning("Zugang abgelehnt: " + str(message))
         QMessageBox.warning(
             self, "Zugang abgelehnt",
-            "Der gespeicherte Zugang funktioniert nicht mehr – bitte im "
-            "Fenster neu anmelden.")
+            "Der gespeicherte Zugang gilt nicht mehr. Bitte im "
+            "Anmeldefenster neu anmelden.")
         self._start_login_window(settings)
 
     def login_check_busy(self, _reason=""):
         """Der Zugang wird gerade benutzt – jetzt nicht dazwischenfunken."""
         try:
             self._login_cleanup()
-            self.status.setText("Zugang gerade in Benutzung – später erneut.")
+            self.status.setText("Zugang wird gerade verwendet – bitte später erneut.")
             QMessageBox.information(
                 self, "Zugang in Benutzung",
-                "Sync oder Token-Erneuerung läuft – bitte danach erneut "
-                "klicken.")
+                "Sync oder Erneuerung läuft. Bitte danach erneut klicken.")
         except RuntimeError:
             pass  # dialog already destroyed (Calibre shutdown)
 
@@ -1637,9 +1616,8 @@ class SyncDashboard(QDialog):
         self.primary.setEnabled(False)
         self.scrape_browser.setEnabled(False)
         self.status.setText(
-            "Anmeldung läuft: Bitte im Anmeldefenster im Web Reader "
-            "anmelden und warten, bis die Bücherliste lädt. Das Fenster "
-            "offen lassen – der Zugang wird automatisch übernommen.")
+            "Anmeldung läuft: Bitte im Anmeldefenster anmelden, bis die "
+            "Bücherliste lädt. Fenster offen lassen.")
         thread = QThread()  # no parent: dialog may close first
         worker = BrowserLoginWorker(partner_id, settings["hardware_id"])
         worker.moveToThread(thread)
@@ -1703,8 +1681,8 @@ class SyncDashboard(QDialog):
         """
         settings = self.values()
         if not settings["refresh_token"]:
-            raise TolinoAuthError(
-                "Bitte zuerst anmelden: «Jetzt bei Tolino anmelden».")
+            raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
+                                  code="A03")
         self._save_visible_account()
         client = TolinoClient(
             settings["partner_id"], settings["hardware_id"],
@@ -1714,6 +1692,14 @@ class SyncDashboard(QDialog):
         client.login()
         self.set_refresh_token(client.refresh)
         return client
+
+    def _show_prepare_error(self, exc, settings):
+        """Code und Kurztext zuerst, darunter Traceback für Fehlerberichte."""
+        secrets = (settings.get("refresh_token"),)
+        error_dialog(
+            self, "Vorbereitung fehlgeschlagen",
+            report_error(exc, "Vorbereitung", secrets) + "\n\n"
+            + format_error_details(exc, secrets), show=True)
 
     def start_sync(self):
         """Vergleichen und den Hintergrundlauf starten.
@@ -1739,11 +1725,7 @@ class SyncDashboard(QDialog):
         try:
             preparation = self._prepare_sync(settings)
         except Exception as exc:
-            error_dialog(
-                self, "Vorbereitung fehlgeschlagen",
-                format_error_details(exc, (settings.get("refresh_token"),)),
-                show=True,
-            )
+            self._show_prepare_error(exc, settings)
             return
         if preparation is None:
             # Der Nutzer hat das Bestätigungsfenster abgebrochen.
