@@ -7689,9 +7689,11 @@ class ErrorCodeTests(unittest.TestCase):
     def test_code_without_message_defaults_to_e00(self):
         self.assertEqual("E00", tolino_module.TolinoError("x").code)
 
-    def test_every_code_in_the_source_is_documented_in_the_readme(self):
+    def test_every_code_in_the_source_is_documented_in_the_error_list(self):
+        """Die Code-Liste liegt in docs/fehlercodes.md (aus der README ausgelagert)."""
         base = Path(__file__).resolve().parent
-        readme = (base.parent / "README.md").read_text(encoding="utf-8")
+        error_list = (base.parent / "docs" / "fehlercodes.md").read_text(
+            encoding="utf-8")
         used = set()
         for name in ("tolino.py", "cdp.py", "ui.py"):
             text = (base / name).read_text(encoding="utf-8")
@@ -7699,6 +7701,13 @@ class ErrorCodeTests(unittest.TestCase):
         used.discard("E00")  # Standardwert der Basisklasse, kein Meldungscode
         self.assertTrue(used)
         for code in sorted(used):
-            self.assertIn("| %s |" % code, readme, code)
-        self.assertIn("| E99 |", readme)
+            self.assertIn("| %s |" % code, error_list, code)
+        self.assertIn("| E99 |", error_list)
+
+    def test_the_readme_points_to_the_error_list(self):
+        """Die README bleibt kurz und verweist auf die ausgelagerte Liste."""
+        base = Path(__file__).resolve().parent
+        readme = (base.parent / "README.md").read_text(encoding="utf-8")
+        self.assertIn("docs/fehlercodes.md", readme)
+        self.assertNotIn("| A02 |", readme)
 
