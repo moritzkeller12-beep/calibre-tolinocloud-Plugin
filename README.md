@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.15.11-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.15.12-blue)](__init__.py)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Gleicht die eigene Calibre-Bibliothek mit der **Tolino Cloud** ab: Bücher hoch-

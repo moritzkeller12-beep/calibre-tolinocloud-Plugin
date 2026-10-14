@@ -59,11 +59,6 @@ def update_tolino_ids(database, updates, enabled=True):
     return len(values)
 
 
-def format_error_details(exc, secrets=()):
-    """Render an exception and its traceback without exposing credentials."""
-    return sanitize_error("%s\n\n%s" % (exc, traceback.format_exc()), secrets)
-
-
 def iter_book_ids(database):
     """Yield each existing Calibre book id once, across supported DB APIs."""
     data = getattr(database, "data", None)

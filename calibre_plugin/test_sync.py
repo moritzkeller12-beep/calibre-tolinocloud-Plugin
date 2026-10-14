@@ -24,7 +24,7 @@ from .sync import (compare_inventory, cover_bytes, fingerprint, iter_book_ids,
                    unpack_plan_result, unpack_upload_record,
                    unpack_meta_update_record, redact_sensitive,
                    format_diagnostic_report, diagnose_preparation,
-                   _diagnostic_formats, metadata_by_id, format_error_details,
+                   _diagnostic_formats, metadata_by_id,
                    normalize_title, normalize_inventory_item, custom_column_available,
                    metadata_tolino_id, update_tolino_ids, TOLINO_COLUMN)
 from .tolino import (PARTNERS, TolinoAuthError,
@@ -1036,15 +1036,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("tuple index out of range", report)
         self.assertIn("plan_sync-Ergebnisform", report)
 
-    def test_preparation_error_keeps_traceback_and_redacts_without_dashboard_settings(self):
-        try:
-            raise IndexError("tuple index out of range; refresh-secret")
-        except Exception as exc:
-            rendered = format_error_details(exc, ("refresh-secret",))
-        self.assertIn("IndexError", rendered)
-        self.assertIn("tuple index out of range", rendered)
-        self.assertIn("Traceback", rendered)
-        self.assertNotIn("refresh-secret", rendered)
     def test_first_install_prefers_epub_only(self):
         """Erstinstallation: nur EPUB als bevorzugtes Format (0.15.2)."""
         original = config.PREFERENCES
