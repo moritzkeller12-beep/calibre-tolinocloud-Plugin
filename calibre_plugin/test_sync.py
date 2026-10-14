@@ -4391,22 +4391,38 @@ class ComparisonLayoutTests(unittest.TestCase):
         self.assertIn("self.row_actions.clicked.connect(self.choose_row_action)",
                       body)
 
-    def test_the_menu_offers_exactly_the_four_row_actions(self):
+    def test_the_menu_offers_every_row_action(self):
+        """Die Spalten-Aktionen gelten auch für markierte Zeilen (0.15.11)."""
         ui_module = ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
             actions = ui_module.InventoryDialog.ROW_ACTIONS
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual(["read", "download", "collection_add",
-                          "collection_remove"],
-                         [key for _label, key in actions])
+        keys = [key for _label, key in actions]
+        self.assertEqual(["upload_on", "upload_off", "metadata_on",
+                          "metadata_off", "read", "read_off", "download",
+                          "collection_add", "collection_remove"], keys)
+        labels = [label for label, _key in actions]
+        for wanted in ("Zum Hochladen auswählen", "Hochladen abwählen",
+                       "Für Metadaten auswählen", "Metadaten abwählen",
+                       "Als gelesen markieren", "Als ungelesen markieren",
+                       "Aus der Cloud herunterladen",
+                       "Zu Sammlung hinzufügen …",
+                       "Aus Sammlung entfernen …"):
+            self.assertIn(wanted, labels)
+        # Jeder Menüpunkt steht auch im Verteiler, sonst wäre er tot.
+        dispatch = self._body().split("    def choose_row_action(self):", 1)[1]
+        dispatch = dispatch.split("\n    def ", 1)[0]
+        for key in keys:
+            self.assertIn('"%s"' % key, dispatch, key)
 
     def test_every_row_action_still_has_a_handler(self):
         """Ein Menüpunkt ohne Handler wäre ein toter Eintrag."""
         source = self._body().split("    def choose_row_action(self):", 1)[1]
         source = source.split("\n    def ", 1)[0]
-        handlers = ("mark_read_for_marked_rows", "download_selected",
+        handlers = ("mark_read_for_marked_rows", "clear_read_for_marked_rows",
+                    "set_column_for_marked_rows", "download_selected",
                     "add_selected_to_collection",
                     "remove_selected_from_collection")
         for name in handlers:
@@ -4631,6 +4647,56 @@ class InventoryDialogReadStateTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
 
+    def test_marked_rows_can_be_chosen_for_upload_and_metadata(self):
+        """Hochladen/Metadaten für markierte Zeilen – wie die Kästchen."""
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            dialog.table = self._marked_table(range(len(dialog.rows)))
+            dialog.set_column_for_marked_rows("upload", True, "keine Datei")
+            self.assertEqual({1, 2, 3, 4}, dialog.selected_upload_ids())
+            dialog.set_column_for_marked_rows("metadata", True, "keine Cloud")
+            # «Nur lokal» hat keine Cloud-Kopie – dort geht kein Metadaten-Abgleich.
+            self.assertEqual({1, 2, 3}, dialog.selected_metadata_ids())
+            dialog.set_column_for_marked_rows("upload", False, "keine Datei")
+            self.assertEqual(set(), dialog.selected_upload_ids())
+            dialog.set_column_for_marked_rows("metadata", False, "keine Cloud")
+            self.assertEqual(set(), dialog.selected_metadata_ids())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_marked_rows_can_be_set_back_to_unread(self):
+        """«Als ungelesen markieren» löst die Sperre und zählt als Abwahl."""
+        ui_module = self._ui()
+        try:
+            self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            dialog.table = self._marked_table(range(len(dialog.rows)))
+            dialog.clear_read_for_marked_rows()
+            # Nur das in der Cloud gelesene Buch lässt sich zurücksetzen.
+            self.assertEqual({"t-1"}, set(dialog.selected_read_unmarks()))
+            self.assertEqual([], dialog.selected_read_targets())
+            row = next(item for item in dialog.rows
+                       if item["tolino_id"] == "t-1")
+            self.assertTrue(row["read_unlocked"])
+            self.assertFalse(row["read"])
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_read_mark_on_marked_rows_still_works_after_the_refactor(self):
+        """Die alte Aktion bleibt: ungelesene Cloud-Bücher werden markiert."""
+        ui_module = self._ui()
+        try:
+            calls = self._with_message_box(ui_module)
+            dialog = ui_module.InventoryDialog(self._rows())
+            dialog.table = self._marked_table(range(len(dialog.rows)))
+            dialog.mark_read_for_marked_rows()
+            self.assertEqual({"t-2", "t-3"}, set(dialog.selected_read_targets()))
+            self.assertEqual([], calls)
+        finally:
+            ui_module._restore_stubs_for_tests()
+
     def test_one_button_handles_all_actions_for_marked_rows(self):
         """Alle vier Zeilen-Aktionen liegen hinter EINEM Knopf (0.15.2)."""
         ui_module = self._ui()
@@ -4641,8 +4707,9 @@ class InventoryDialogReadStateTests(unittest.TestCase):
                              dialog.row_actions.text())
             self.assertIn("Strg", dialog.row_actions.tooltip)
             keys = [key for _label, key in dialog.ROW_ACTIONS]
-            self.assertEqual(["read", "download", "collection_add",
-                              "collection_remove"], keys)
+            self.assertEqual(["upload_on", "upload_off", "metadata_on",
+                              "metadata_off", "read", "read_off", "download",
+                              "collection_add", "collection_remove"], keys)
         finally:
             ui_module._restore_stubs_for_tests()
 

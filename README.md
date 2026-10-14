@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.15.10-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.15.11-blue)](__init__.py)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Gleicht die eigene Calibre-Bibliothek mit der **Tolino Cloud** ab: Bücher hoch-
@@ -36,8 +36,10 @@ zusätzlich **Chrome, Chromium, Brave oder Edge**.
 
 **«Empfehlung auswählen»** wählt Hochladen/Metadaten für die passenden Bücher
 aus, **«Auswahl übernehmen»** führt genau diese Aktionen aus – ohne Auswahl
-passiert nichts. Für viele Bücher auf einmal Zeilen markieren (Strg-/Shift-Klick,
-Strg+A) und **«Für markierte Zeilen …»** benutzen. Alles Seltene steht unter
+passiert nichts. Für viele Bücher auf einmal Zeilen markieren
+(Strg-/Shift-Klick, Strg+A) und **«Für markierte Zeilen …»** benutzen: dort
+lassen sich Hochladen, Metadaten und «Gelesen» setzen oder zurücknehmen,
+Bücher herunterladen und Sammlungen pflegen. Alles Seltene steht unter
 **«Einstellungen …»**.
 
 > Standard: **nur EPUB** hochladen, Serien **nicht** in der Cloud anlegen,

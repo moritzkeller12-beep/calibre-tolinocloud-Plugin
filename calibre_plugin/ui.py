@@ -124,9 +124,16 @@ class InventoryDialog(QDialog):
         "ungelesen.")
 
     # Alle Aktionen, die auf die MARKIERTEN Tabellenzeilen wirken -- eine
-    # Stelle statt vier Knöpfe in zwei verschiedenen Ecken (0.15.2).
+    # Stelle statt vier Knöpfe in zwei verschiedenen Ecken (0.15.2). Die
+    # Spalten Hochladen/Metadaten/Gelesen lassen sich hier genauso setzen
+    # und zurücknehmen wie einzeln im Vergleich (0.15.11).
     ROW_ACTIONS = (
+        ("Zum Hochladen auswählen", "upload_on"),
+        ("Hochladen abwählen", "upload_off"),
+        ("Für Metadaten auswählen", "metadata_on"),
+        ("Metadaten abwählen", "metadata_off"),
         ("Als gelesen markieren", "read"),
+        ("Als ungelesen markieren", "read_off"),
         ("Aus der Cloud herunterladen", "download"),
         ("Zu Sammlung hinzufügen …", "collection_add"),
         ("Aus Sammlung entfernen …", "collection_remove"),
@@ -234,9 +241,9 @@ class InventoryDialog(QDialog):
         helpers.addStretch(1)
         self.row_actions = QPushButton("Für markierte Zeilen …")
         self.row_actions.setToolTip(
-            "Wirkt auf markierte Zeilen (mehrere: Strg-/Shift-Klick, alle: "
-            "Strg+A): als gelesen markieren, herunterladen oder einer "
-            "Sammlung zuordnen.")
+            "Für die markierten Zeilen (mehrere: Strg-/Shift-Klick, alle: "
+            "Strg+A): Hochladen, Metadaten oder «Gelesen» auswählen bzw. "
+            "zurücknehmen, herunterladen, Sammlung.")
         helpers.addWidget(self.row_actions)
         layout.addLayout(helpers)
 
@@ -450,8 +457,9 @@ class InventoryDialog(QDialog):
     def choose_row_action(self):
         """Eine Stelle für alle Aktionen auf markierte Zeilen (0.15.2).
 
-        Vorher lagen dieselben vier Aktionen auf vier Knöpfen in zwei
-        verschiedenen Ecken – jetzt ein Knopf, eine Rückfrage.
+        Vorher lagen dieselben Aktionen auf vier Knöpfen in zwei
+        verschiedenen Ecken – jetzt ein Knopf, eine Rückfrage. Seit 0.15.11
+        sind auch die Spalten Hochladen, Metadaten und «Gelesen» dabei.
         """
         if not selected_table_rows(self.table):
             QMessageBox.information(
@@ -467,6 +475,22 @@ class InventoryDialog(QDialog):
         key = dict(self.ROW_ACTIONS).get(str(label))
         if key == "read":
             self.mark_read_for_marked_rows()
+        elif key == "read_off":
+            self.clear_read_for_marked_rows()
+        elif key == "upload_on":
+            self.set_column_for_marked_rows(
+                "upload", True, "haben schon diese Auswahl oder keine Datei")
+        elif key == "upload_off":
+            self.set_column_for_marked_rows(
+                "upload", False, "waren schon abgewählt oder haben keine Datei")
+        elif key == "metadata_on":
+            self.set_column_for_marked_rows(
+                "metadata", True,
+                "haben schon diese Auswahl oder liegen nicht in der Cloud")
+        elif key == "metadata_off":
+            self.set_column_for_marked_rows(
+                "metadata", False,
+                "waren schon abgewählt oder liegen nicht in der Cloud")
         elif key == "download":
             self.download_selected()
         elif key == "collection_add":
@@ -475,10 +499,26 @@ class InventoryDialog(QDialog):
             self.remove_selected_from_collection()
 
     def mark_read_for_marked_rows(self):
-        """Spalte «Gelesen» für alle in der Tabelle markierten Zeilen setzen.
+        """Spalte «Gelesen» für alle markierten Zeilen setzen (0.15.0).
 
-        Feldbefund 0.15.0: Hunderte Bücher einzeln anhaken ist keine
-        Zumutung – deshalb Mehrfachauswahl in der Tabelle plus dieser Knopf.
+        Feldbefund 0.15.0: Hunderte Bücher einzeln auswählen ist keine
+        Zumutung – deshalb Mehrfachauswahl in der Tabelle plus diese Aktion.
+        """
+        self.set_column_for_marked_rows(
+            "read", True, "sind schon gelesen oder liegen nicht in der Cloud")
+
+    def clear_read_for_marked_rows(self):
+        """«Gelesen» für markierte Cloud-Bücher wieder wegnehmen (0.15.11)."""
+        self.set_column_for_marked_rows(
+            "read", False,
+            "lassen sich nicht auf ungelesen setzen (nur Gelesenes)")
+
+    def set_column_for_marked_rows(self, key, value, summary):
+        """Eine Spalte für alle markierten Zeilen setzen (0.15.11).
+
+        Dieselbe Wirkung wie die Auswahl je Zeile, nur für viele auf einmal:
+        passt die Spalte nicht zur Zeile, wird sie gezählt und ausgelassen.
+        Geschrieben wird weiterhin erst mit «Auswahl übernehmen».
         """
         marked = selected_table_rows(self.table)
         if not marked:
@@ -488,31 +528,67 @@ class InventoryDialog(QDialog):
                 "Strg+A).")
             return
         changed = 0
-        already = 0
-        without_cloud = 0
+        skipped = 0
         for index in marked:
-            if index >= len(self.rows):
+            if not 0 <= index < len(self.rows):
                 continue
-            row = self.rows[index]
-            if not row.get("tolino_id"):
-                without_cloud += 1
+            if not self._column_applies(key, self.rows[index]):
+                skipped += 1
                 continue
-            if row.get("read_in_cloud"):
-                already += 1
-                continue
-            row["read"] = True
-            try:
-                self.read_checks[index].setChecked(True)
-            except Exception:
-                pass  # Qt-Stub ohne echtes Signal
-            changed += 1
+            if self._set_row_choice(index, key, bool(value)):
+                changed += 1
+            else:
+                skipped += 1
         self._update_summary()
         if not changed:
             QMessageBox.information(
                 self, "Tolino Cloud Sync",
-                "Nichts zu tun: %d markierte Zeile(n) sind schon gelesen, "
-                "%d liegen nicht in der Cloud."
-                % (already, without_cloud))
+                "Nichts zu tun: %d markierte Zeile(n) %s."
+                % (skipped or len(marked), summary))
+
+    @staticmethod
+    def _column_applies(key, row):
+        """Geht diese Spalte bei dieser Zeile? (wie beim einzelnen Klick)"""
+        if key == "upload":
+            return row.get("book_id") is not None
+        if key == "metadata":
+            return (row.get("book_id") is not None
+                    and bool(row.get("tolino_id")))
+        if key == "read":
+            return bool(row.get("tolino_id"))
+        return False
+
+    def _set_row_choice(self, index, key, value):
+        """Zeile und Auswahlkästchen setzen; False = war schon so (0.15.11).
+
+        «Gelesen» läuft in denselben zwei Schritten wie der Klick: eine in
+        der Cloud gelesene Zeile wird beim Wegnehmen zuerst entsperrt,
+        sonst bliebe der Cloud-Stand stehen und nichts würde übertragen.
+        """
+        row = self.rows[index]
+        if key == "read":
+            check = self.read_checks[index]
+            if value and row.get("read_in_cloud"):
+                return False  # steht in der Cloud schon auf gelesen
+            if not value and not row.get("read_in_cloud"):
+                return False  # nur Gelesenes lässt sich zurücksetzen
+            if bool(row.get("read")) == value and bool(check.isChecked()) == value:
+                return False
+            row["read"] = value
+            if not value:
+                row["read_unlocked"] = True
+            if row.get("read_unlocked"):
+                check.setToolTip(self.READ_UNLOCKED_TOOLTIP)
+        else:
+            check = (self.checks if key == "upload" else self.meta_checks)[index]
+            if bool(row.get(key)) == value and bool(check.isChecked()) == value:
+                return False
+            row[key] = value
+        try:
+            check.setChecked(value)
+        except Exception:
+            pass  # Qt-Stub ohne echtes Signal
+        return True
 
     def _sort_by_column(self, column):
         """Spaltenkopf anklicken: aufsteigend <-> absteigend umschalten."""
