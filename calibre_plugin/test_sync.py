@@ -71,6 +71,12 @@ def tearDownModule():
         _CLOSE_WINDOW_PATCH = None
 
 
+
+def _full(exc):
+    """Nutzertext plus Log-Detail eines TolinoError."""
+    return "%s %s" % (exc, getattr(exc, "detail", ""))
+
+
 class SyncPlanTests(unittest.TestCase):
     def setUp(self):
         self.book = {"uuid": "u1", "title": "A", "formats": ["EPUB"], "last_modified": "1"}
@@ -805,7 +811,7 @@ class SyncPlanTests(unittest.TestCase):
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
                 patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
                         patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
-            with self.assertRaisesRegex(TolinoAuthError, "verbraucht oder widerrufen"):
+            with self.assertRaisesRegex(TolinoAuthError, "Zugang abgelehnt"):
                 TolinoClient(4, "", "old-refresh").login()
         self.assertEqual(1, request.call_count)
 
@@ -818,7 +824,7 @@ class SyncPlanTests(unittest.TestCase):
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
                 patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
                         patch("calibre_plugin.tolino.urlopen", side_effect=error):
-            with self.assertRaisesRegex(TolinoAuthError, "verbraucht oder widerrufen"):
+            with self.assertRaisesRegex(TolinoAuthError, "Zugang abgelehnt"):
                 TolinoClient(4, "", "old-refresh").login()
 
     def test_403_bot_protection_reports_response_detail(self):
@@ -993,7 +999,7 @@ class SyncPlanTests(unittest.TestCase):
         with patch("calibre_plugin.tolino._curl_binary", return_value=None), \
                 patch("calibre_plugin.tolino._impersonate_session", return_value=None), \
                         patch("calibre_plugin.tolino.urlopen", side_effect=error):
-            with self.assertRaisesRegex(TolinoAuthError, "verbraucht oder widerrufen"):
+            with self.assertRaisesRegex(TolinoAuthError, "Zugang abgelehnt"):
                 client.login()
         self.assertIn("invalid_grant", client.last_error_text)
         self.assertIn("error_description", client.last_error_text)
@@ -1315,10 +1321,10 @@ class SyncPlanTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("wurde geschlossen", message)
         self.assertIn("Jetzt bei Tolino anmelden", message)
-        self.assertIn("kein frischer Zugang", message)
-        # Alter des Kandidaten (ohne Token-Wert) ordnet den Fehler ein.
-        self.assertIn("Sekunden alt", message)
-        self.assertNotIn(stale, message)
+        self.assertIn("Zugang verbraucht", message)
+        # Alter des Kandidaten (ohne Token-Wert) steht im Log-Detail.
+        self.assertIn("Sekunden alt", ctx.exception.detail)
+        self.assertNotIn(stale, _full(ctx.exception))
 
     def test_grab_live_refresh_failure_names_the_candidate_age(self):
         """Die Fehlermeldung nennt nur das Alter des geprüften
@@ -1348,7 +1354,7 @@ class SyncPlanTests(unittest.TestCase):
              patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        message = str(ctx.exception)
+        message = _full(ctx.exception)
         self.assertIn("Letzter Fehler", message)
         self.assertIn("Sekunden alt", message)
         self.assertNotIn(fresh, message)
@@ -1852,7 +1858,7 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        self.assertIn("kein frischer Zugang", str(ctx.exception))
+        self.assertIn(ctx.exception.code, ("B01", "B02"))
 
     def test_grab_live_refresh_rejection_recommends_fresh_grab(self):
         """Wird der Live-Token abgelehnt, wird KEIN zweiter Kandidat
@@ -1932,7 +1938,7 @@ class LiveGrabTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual([spent], logins)
-        self.assertIn("Letzter Fehler", str(ctx.exception))
+        self.assertIn("Letzter Fehler", _full(ctx.exception))
 
     def test_ws_recv_json_parses_rfc6455_header_correctly(self):
         """Der minimale WS-Client liest den Länge+MASK-Header korrekt."""
@@ -2062,7 +2068,7 @@ class LiveGrabTests(unittest.TestCase):
                    return_value="0 Refresh-Kandidat(en)"):
             with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
-        self.assertIn("30 Minuten", str(ctx.exception))
+        self.assertIn("kein gültiger Zugang", str(ctx.exception))
 
     def test_exchange_prefers_refresh_typ_over_newer_access_token(self):
         """Access-JWTs (kurzlebig) werden nicht vor dem Refresh-JWT
@@ -2106,7 +2112,7 @@ class LiveGrabTests(unittest.TestCase):
                    return_value="kein Web-Reader-Tab"):
             with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
-        self.assertIn("kein Web-Reader-Tab", str(ctx.exception))
+        self.assertIn("kein Web-Reader-Tab", _full(ctx.exception))
 
     def test_grab_live_refresh_picks_up_token_written_during_wait(self):
         """Leerer erster Grab => das Plugin wartet, bis der Reader selbst
@@ -2161,7 +2167,7 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.tolino.TolinoClient", FailingClient):
             with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
-        self.assertIn("Letzter Fehler", str(ctx.exception))
+        self.assertIn("Letzter Fehler", _full(ctx.exception))
         self.assertEqual([fresh], logins)
 
     def test_exchange_refresh_in_browser_parses_page_reply(self):
@@ -2342,8 +2348,8 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.tolino._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        message = str(ctx.exception)
-        self.assertIn("kein frischer Zugang", message)
+        message = _full(ctx.exception)
+        self.assertIn("Zugang verbraucht", message)
         self.assertIn("Letzter Fehler", message)
 
     def test_keycloak_assisted_login_propagates_grab_errors(self):
@@ -3398,7 +3404,7 @@ class CurlTransportTests(unittest.TestCase):
                              must_not_run), \
                 patch.object(tolino_module, "urlopen", must_not_run):
             with self.assertRaisesRegex(TolinoAuthError,
-                                        "verbraucht oder widerrufen"):
+                                        "Zugang abgelehnt"):
                 self._client().login()
 
     def test_http_post_via_curl_raises_without_binary(self):
@@ -3488,8 +3494,8 @@ class LoginWindowWaitTests(unittest.TestCase):
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         closer.assert_not_called()
         message = str(ctx.exception)
-        self.assertIn("noch offen", message)
-        self.assertIn("im Web Reader anmelden", message)
+        self.assertIn("ist offen", message)
+        self.assertIn("dort anmelden", message)
         self.assertNotIn("wurde geschlossen", message)
         # Auf der Anmeldeseite wird länger gewartet (zusätzliche
         # Versuche), damit die Neu-Anmeldung vor Ort noch ankommen kann.
@@ -3655,7 +3661,7 @@ class WrappedCandidateTests(unittest.TestCase):
              patch("calibre_plugin.tolino.TolinoClient", FailingClient):
             with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
-        message = str(ctx.exception)
+        message = _full(ctx.exception)
         self.assertIn("Letzter Fehler", message)
         self.assertIn("Sekunden alt", message)
         self.assertNotIn("Alter des gefundenen Zugangs unbekannt", message)
@@ -3785,7 +3791,7 @@ class ReaderBlobLiveGrabTests(unittest.TestCase):
                    return_value="1 Refresh-Kandidat(en)"):
             with self.assertRaises(TolinoAuthError) as ctx:
                 try_live_grab_first(4, "hw")
-        message = str(ctx.exception)
+        message = _full(ctx.exception)
         self.assertIn("Sekunden alt", message)
         self.assertNotIn("Alter des gefundenen Zugangs unbekannt", message)
         self.assertNotIn(blob, message)
@@ -3986,15 +3992,15 @@ class InventoryDialogSortTests(unittest.TestCase):
                 ui_module.InventoryDialog)
             dialog.options = {"collections": True, "deletions": True}
             note = dialog._automatic_note()
-            self.assertIn("Serien werden in der Tolino Cloud", note)
+            self.assertIn("Serien werden in der Cloud", note)
             self.assertIn("gelöscht", note)
             dialog.options = {"collections": True}
             note = dialog._automatic_note()
-            self.assertIn("Serien werden in der Tolino Cloud", note)
+            self.assertIn("Serien werden in der Cloud", note)
             self.assertNotIn("gelöscht", note)
             # Ohne automatische Aktionen sagt der Hinweis das ausdrücklich.
             dialog.options = {}
-            self.assertIn("nur, was Sie ausgewählt haben",
+            self.assertIn("nur, was angehakt ist",
                           dialog._automatic_note())
         finally:
             ui_module._restore_stubs_for_tests()
@@ -4315,9 +4321,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertFalse(mark_read.isChecked())
             # Nur die technischen Spalten sind zunächst verborgen.
             self.assertEqual({8: True, 9: True}, dialog.table.hidden)
-            self.assertIn("Serien werden in der Tolino Cloud",
+            self.assertIn("Serien werden in der Cloud",
                           dialog.note.text())
-            self.assertIn("Gelesen-Status in der Cloud bleibt",
+            self.assertIn("Gelesen-Status ändert nur",
                           dialog.note.text())
             self.assertIn("1 zum Hochladen", dialog.summary.text())
             self.assertIn("0 für Metadaten", dialog.summary.text())
@@ -4333,7 +4339,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             self.assertEqual({8: False, 9: False}, dialog.table.hidden)
             dialog._toggle_technical_columns(False)
             self.assertEqual({8: True, 9: True}, dialog.table.hidden)
-            self.assertIn("Serien werden in der Tolino Cloud",
+            self.assertIn("Serien werden in der Cloud",
                           dialog.note.text())
         finally:
             ui_module._restore_stubs_for_tests()
@@ -4484,7 +4490,7 @@ class InventoryDialogReadStateTests(unittest.TestCase):
             # wieder auf ungelesen setzen kann (0.15.2).
             self.assertTrue(read_cell["Gelesen"].isChecked())
             self.assertTrue(read_cell["Gelesen"].enabled)
-            self.assertIn("Ein Klick löst die Sperre",
+            self.assertIn("Ein Klick entsperrt",
                           read_cell["Gelesen"].tooltip)
             # Ungelesen: leer, aber anklickbar.
             self.assertFalse(read_cell["Ungelesen"].isChecked())
@@ -4542,7 +4548,7 @@ class InventoryDialogReadStateTests(unittest.TestCase):
             cell.setChecked(False)
             cell.clicked.emit()
             self.assertTrue(cell.isChecked())
-            self.assertIn("Noch einmal anklicken", cell.tooltip)
+            self.assertIn("Erneut anklicken", cell.tooltip)
             self.assertEqual([], dialog.selected_read_unmarks())
             self.assertEqual([], dialog.selected_read_targets())
             # Zweiter Klick: das Häkchen bleibt weg -> in der Cloud ungelesen.
@@ -4578,7 +4584,7 @@ class InventoryDialogReadStateTests(unittest.TestCase):
             self.assertFalse(rebuilt.isChecked())
             # Die Sperre ist an derselben Zeile weiter aufgehoben: ein Klick
             # hakt sie wieder an.
-            self.assertIn("Noch einmal anklicken", rebuilt.tooltip)
+            self.assertIn("Erneut anklicken", rebuilt.tooltip)
             rebuilt.setChecked(True)
             rebuilt.clicked.emit()
             self.assertEqual([], dialog.selected_read_unmarks())
@@ -5739,7 +5745,7 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                        side_effect=lambda url: opened.append(url) or True):
                 with self.assertRaises(TolinoAuthError) as ctx:
                     browser_login(pid, "test_hardware")
-            self.assertIn("kein Chromium-Browser gefunden",
+            self.assertIn("Kein Chromium-Browser gefunden",
                           str(ctx.exception))
             self.assertEqual([], opened, pid)
 
@@ -5916,7 +5922,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 cdp_module.launch_reader_window(4)
         message = str(ctx.exception)
-        self.assertIn("kein Chromium-Browser gefunden", message)
+        self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertIn("flatpak override", message)
 
     def test_launch_reader_window_without_sandbox_has_no_permission_hint(self):
@@ -5932,7 +5938,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 cdp_module.launch_reader_window(4)
         message = str(ctx.exception)
-        self.assertIn("kein Chromium-Browser gefunden", message)
+        self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertNotIn("flatpak override", message)
 
     def test_chromium_candidates_probe_host_browser_via_flatpak_spawn(self):
@@ -6322,7 +6328,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 cdp_module.launch_reader_window(4)
         message = str(ctx.exception)
-        self.assertIn("kein Chromium-Browser gefunden", message)
+        self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertIn("flatpak override --user", message)
         self.assertIn("sudo flatpak override", message)
         self.assertIn("--show-permissions", message)
@@ -7149,7 +7155,9 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertLessEqual(len(code), 30)
         self.assertIn("self._prepare_sync(settings)", body)
         self.assertIn("self._start_sync_worker(settings, preparation)", body)
-        self.assertIn("Vorbereitung fehlgeschlagen", body)
+        self.assertIn("self._show_prepare_error(exc, settings)", body)
+        self.assertIn("Vorbereitung fehlgeschlagen",
+                      self._method_body("_show_prepare_error"))
         # Die eigentliche Arbeit liegt nicht mehr hier.
         for name in ("compare_inventory(", "plan_sync(", "QThread(",
                      "InventoryDialog(", "safe_format_path("):
@@ -7238,7 +7246,7 @@ class LoginPreflightTests(unittest.TestCase):
         with patch("calibre_plugin.tolino.TolinoClient") as client:
             status, detail = tolino_module.check_stored_login(4, "hw-1", "")
         self.assertEqual("invalid", status)
-        self.assertIn("kein Zugang gespeichert", detail)
+        self.assertIn("Noch nicht angemeldet", detail)
         client.assert_not_called()
 
     def test_a_running_sync_blocks_the_check(self):
@@ -7616,3 +7624,81 @@ class LoginPreflightTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ErrorCodeTests(unittest.TestCase):
+    """Fehlercodes: kurzer Nutzertext, Details nur im Log (0.15.9)."""
+
+    def setUp(self):
+        tolino_module._RECENT_ERRORS.clear()
+
+    def test_message_carries_code_and_details_go_to_the_log(self):
+        exc = tolino_module.TolinoAuthError(
+            "Zugang abgelehnt.", code="A02", detail="HTTP 400: invalid_grant")
+        with patch.object(tolino_module, "log_warning") as log:
+            shown = tolino_module.report_error(exc, "Test")
+        self.assertEqual("Zugang abgelehnt. (Code A02)", shown)
+        logged = log.call_args[0][0]
+        self.assertIn("A02", logged)
+        self.assertIn("invalid_grant", logged)
+        self.assertNotIn("invalid_grant", shown)
+
+    def test_short_text_hides_the_server_body_but_the_log_keeps_it(self):
+        exc = tolino_module.TolinoApiError(
+            "Tolino-Fehler (HTTP 500): <html>boom</html>", code="N03",
+            short="Tolino meldet einen Fehler (HTTP 500).")
+        with patch.object(tolino_module, "log_warning") as log:
+            shown = tolino_module.report_error(exc)
+        self.assertEqual("Tolino meldet einen Fehler (HTTP 500). (Code N03)",
+                         shown)
+        self.assertIn("boom", log.call_args[0][0])
+        self.assertIn("Tolino-Fehler (HTTP 500)", str(exc))
+
+    def test_secrets_never_reach_the_dialog_the_log_or_the_history(self):
+        exc = tolino_module.TolinoAuthError(
+            "Fehler mit geheimwert-123", code="A06",
+            detail="auch hier geheimwert-123")
+        with patch.object(tolino_module, "log_warning") as log:
+            shown = tolino_module.report_error(
+                exc, "Test", ("geheimwert-123",))
+        blob = " ".join([shown, log.call_args[0][0]]
+                        + tolino_module.recent_errors())
+        self.assertNotIn("geheimwert-123", blob)
+
+    def test_unexpected_errors_get_e99_and_a_traceback_in_the_log(self):
+        with patch.object(tolino_module, "log_warning") as log:
+            try:
+                raise ValueError("kaputt")
+            except ValueError as exc:
+                shown = tolino_module.report_error(exc, "Test")
+        self.assertIn("(Code E99)", shown)
+        self.assertIn("kaputt", shown)
+        logged = " ".join(call[0][0] for call in log.call_args_list)
+        self.assertIn("Traceback", logged)
+
+    def test_recent_errors_keep_only_the_last_twenty(self):
+        with patch.object(tolino_module, "log_warning"):
+            for index in range(25):
+                tolino_module.report_error(tolino_module.TolinoError(
+                    "Fehler %d" % index, code="S90"))
+        recent = tolino_module.recent_errors()
+        self.assertEqual(20, len(recent))
+        self.assertIn("Fehler 24", recent[-1])
+        self.assertIn("Fehler 5", recent[0])
+
+    def test_code_without_message_defaults_to_e00(self):
+        self.assertEqual("E00", tolino_module.TolinoError("x").code)
+
+    def test_every_code_in_the_source_is_documented_in_the_readme(self):
+        base = Path(__file__).resolve().parent
+        readme = (base.parent / "README.md").read_text(encoding="utf-8")
+        used = set()
+        for name in ("tolino.py", "cdp.py", "ui.py"):
+            text = (base / name).read_text(encoding="utf-8")
+            used |= set(re.findall(r'code\s*=\s*"([A-Z][0-9]{2})"', text))
+        used.discard("E00")  # Standardwert der Basisklasse, kein Meldungscode
+        self.assertTrue(used)
+        for code in sorted(used):
+            self.assertIn("| %s |" % code, readme, code)
+        self.assertIn("| E99 |", readme)
+
