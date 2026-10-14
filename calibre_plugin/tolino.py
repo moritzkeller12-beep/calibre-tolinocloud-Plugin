@@ -1221,6 +1221,63 @@ def keepalive_refresh(get_credentials, persist):
         _KEEPALIVE_LOCK.release()
 
 
+def check_stored_login(partner_id, hardware, refresh, username=None,
+                       password=None, persist=None, lock_timeout=5):
+    """Einen GESPEICHERTEN Zugang pruefen, ohne ein Anmeldefenster zu oeffnen.
+
+    Der Anmeldeknopf fragt damit zuerst: funktioniert der vorhandene Zugang
+    noch? Nur wenn nicht, geht das Browser-Fenster auf (0.15.7).
+
+    Antwort in drei klar getrennten Faellen, damit der Aufrufer entscheiden
+    kann -- ein reines None/Token waere nicht unterscheidbar:
+
+    ``("valid", token)``   Zugang funktioniert; `token` ist der ggf. rotierte
+                            Refresh-Token (schon gespeichert, wenn `persist`
+                            uebergeben wurde).
+    ``("busy", "")``       Es laeuft gerade ein Sync oder eine andere
+                            Rotation: der Zugang wurde NICHT geprueft.
+    ``("invalid", text)``   Tolino hat den Zugang abgelehnt; `text` ist der
+                            Grund (ohne Token-Inhalt).
+
+    Der Refresh-Token ist single-use. Deshalb laeuft die Pruefung unter
+    demselben Lock wie der Keep-alive, und ein waehrenddessen gestarteter
+    Sync bricht sie ab, statt den Token doppelt einzuloesen.
+    """
+    token = normalize_refresh_token(refresh)[0]
+    if not token:
+        return "invalid", "Es ist kein Zugang gespeichert."
+    if _SYNC_ACTIVE:
+        return "busy", ""
+    acquired = False
+    try:
+        acquired = _KEEPALIVE_LOCK.acquire(timeout=max(0, lock_timeout))
+        if not acquired:
+            return "busy", ""
+        if _SYNC_ACTIVE:
+            # Der Sync hat in der Zwischenzeit begonnen und loest denselben
+            # Token ein -- jetzt nicht auch noch.
+            return "busy", ""
+        last = {"value": token}
+
+        def _persist(value):
+            """Persist rotations once; login may emit the same value twice."""
+            if value and value != last["value"]:
+                last["value"] = value
+                if persist is not None:
+                    persist(value)
+
+        client = TolinoClient(partner_id, hardware, token, username, password,
+                              token_callback=_persist)
+        client.login()
+        _persist(client.refresh)
+        return "valid", client.refresh
+    except Exception as exc:
+        return "invalid", sanitize_error(exc, (token,))
+    finally:
+        if acquired:
+            _KEEPALIVE_LOCK.release()
+
+
 def start_token_keepalive(get_credentials, persist, interval=45 * 60):
     """Rotate the stored refresh token every `interval` seconds."""
     if getattr(start_token_keepalive, "_started", False):

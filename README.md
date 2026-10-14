@@ -1,7 +1,7 @@
 # Tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.15.6-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.15.7-blue)](__init__.py)
 [![Lizenz](https://img.shields.io/badge/Lizenz-GPL--3.0--or--later-blue)](LICENSE)
 
 Gleicht die eigene Calibre-Bibliothek mit der **Tolino Cloud** ab: Bücher hoch-
@@ -22,7 +22,9 @@ zusätzlich **Chrome, Chromium, Brave oder Edge**.
    anmelden“** → im Anmeldefenster im Web Reader einloggen. Der Anmeldeknopf
    bleibt immer sichtbar (auch zum Neuanmelden), darunter wird
    **„Vergleichen und übernehmen …“** aktiv. Bei mehreren Konten steht die
-   Kontoauswahl direkt daneben.
+   Kontoauswahl direkt daneben. Der Knopf prüft **zuerst den gespeicherten
+   Zugang**: funktioniert er noch, wird er still erneuert und es öffnet
+   **kein** Anmeldefenster – das kommt nur, wenn Tolino den Zugang ablehnt.
 2. Im **Bestandsvergleich** je Buch anhaken:
 
 | Spalte | Bedeutung |

@@ -7169,5 +7169,436 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertLessEqual(expected, defined)
 
 
+class LoginPreflightTests(unittest.TestCase):
+    """0.15.7: Der Anmeldeknopf prueft zuerst den GESPEICHERTEN Zugang.
+
+    Feldwunsch: «Zuerst pruefen, ob die aktuellen Logindaten noch
+    funktionieren, bevor ein neuer Loginprozess beginnt.» Die Pruefung
+    laeuft still im Hintergrund; das Browser-Fenster geht nur auf, wenn
+    Tolino den Zugang ablehnt oder er nicht pruefbar war.
+    """
+
+    # --- tolino.check_stored_login --------------------------------------
+
+    @staticmethod
+    def _patch_client(records, error=None, rotate=True):
+        """TolinoClient durch einen Recorder ersetzen (kein Netz)."""
+
+        class FakeClient:
+            def __init__(self, partner, hardware, token, username=None,
+                         password=None, token_callback=None):
+                records.append((partner, hardware, token, username, password))
+                self.token = token
+                self.refresh = token
+                self.token_callback = token_callback
+
+            def login(self):
+                if error is not None:
+                    raise error
+                if rotate:
+                    self.refresh = self.token + "-rotated"
+                    if self.token_callback:
+                        self.token_callback(self.refresh)
+                return self.refresh
+
+        return patch("calibre_plugin.tolino.TolinoClient", FakeClient)
+
+    def test_a_working_access_is_renewed_and_saved(self):
+        records, persisted = [], []
+        with self._patch_client(records):
+            status, detail = tolino_module.check_stored_login(
+                4, "hw-1", "tok-1", "u", "p", persist=persisted.append)
+        self.assertEqual("valid", status)
+        self.assertEqual("tok-1-rotated", detail)
+        # Geprueft wurde der GESPEICHERTE Zugang, nicht ein leerer.
+        self.assertEqual([(4, "hw-1", "tok-1", "u", "p")], records)
+        self.assertEqual(["tok-1-rotated"], persisted)
+
+    def test_an_unchanged_token_is_not_written_again(self):
+        records, persisted = [], []
+        with self._patch_client(records, rotate=False):
+            status, detail = tolino_module.check_stored_login(
+                4, "hw-1", "tok-1", persist=persisted.append)
+        self.assertEqual(("valid", "tok-1"), (status, detail))
+        self.assertEqual([], persisted)
+
+    def test_a_rejected_access_reports_the_reason_without_the_token(self):
+        records = []
+        error = TolinoAuthError(
+            "invalid_grant: refresh_token tok-1 wurde abgelehnt")
+        with self._patch_client(records, error=error):
+            status, detail = tolino_module.check_stored_login(
+                4, "hw-1", "tok-1")
+        self.assertEqual("invalid", status)
+        self.assertNotIn("tok-1", detail)
+        self.assertIn("[REDACTED]", detail)
+        self.assertIn("invalid_grant", detail)
+
+    def test_without_a_stored_token_nothing_is_asked(self):
+        with patch("calibre_plugin.tolino.TolinoClient") as client:
+            status, detail = tolino_module.check_stored_login(4, "hw-1", "")
+        self.assertEqual("invalid", status)
+        self.assertIn("kein Zugang gespeichert", detail)
+        client.assert_not_called()
+
+    def test_a_running_sync_blocks_the_check(self):
+        records = []
+        tolino_module.mark_sync_active(True)
+        self.addCleanup(tolino_module.mark_sync_active, False)
+        with self._patch_client(records):
+            status, detail = tolino_module.check_stored_login(
+                4, "hw-1", "tok-1")
+        # NICHT „invalid": der Zugang ist ungeprueft, nicht abgelehnt.
+        self.assertEqual(("busy", ""), (status, detail))
+        self.assertEqual([], records)
+
+    def test_a_parallel_rotation_blocks_the_check(self):
+        records = []
+        with tolino_module._KEEPALIVE_LOCK, self._patch_client(records):
+            status, detail = tolino_module.check_stored_login(
+                4, "hw-1", "tok-1", lock_timeout=0)
+        self.assertEqual(("busy", ""), (status, detail))
+        self.assertEqual([], records)
+
+    def test_the_rotation_lock_is_released_afterwards(self):
+        with self._patch_client([]):
+            tolino_module.check_stored_login(4, "hw-1", "tok-1")
+        self.assertTrue(tolino_module._KEEPALIVE_LOCK.acquire(blocking=False))
+        tolino_module._KEEPALIVE_LOCK.release()
+
+    # --- Der Anmeldeknopf -----------------------------------------------
+
+    class Field:
+        def __init__(self, value=""):
+            self.value = value
+            self.enabled = True
+
+        def text(self):
+            return self.value
+
+        def setText(self, value):
+            self.value = value
+
+        def setEnabled(self, value):
+            self.enabled = value
+
+        def setToolTip(self, value):
+            self.tooltip = value
+
+    def _ui(self):
+        ui_module = ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        ui_module.hardware_id = lambda: "auto-hw"
+        return ui_module
+
+    @staticmethod
+    def _fake_qt(ui_module):
+        """QThread und beide Worker durch Recorder ersetzen."""
+
+        class Signal:
+            def __init__(self):
+                self.slots = []
+
+            def connect(self, slot):
+                self.slots.append(slot)
+
+            def fire(self, *args):
+                for slot in list(self.slots):
+                    slot(*args)
+
+        class Thread:
+            def __init__(self, parent=None):
+                self.started = Signal()
+                self.finished = Signal()
+                self.starts = 0
+
+            def start(self):
+                self.starts += 1
+                self.started.fire()
+
+            def isRunning(self):
+                return self.starts > 0
+
+            def quit(self, *args):
+                self.quits = getattr(self, "quits", 0) + 1
+
+            def deleteLater(self, *args):
+                self.deleted = True
+
+        class CheckWorker:
+            def __init__(self, settings):
+                self.settings = settings
+                self.valid = Signal()
+                self.invalid = Signal()
+                self.busy = Signal()
+
+            def moveToThread(self, thread):
+                self.moved_to = thread
+
+            def run(self):
+                pass
+
+        class LoginWorker:
+            def __init__(self, partner_id, hardware):
+                self.arguments = (partner_id, hardware)
+                self.progress = Signal()
+                self.completed = Signal()
+                self.failed = Signal()
+
+            def moveToThread(self, thread):
+                self.moved_to = thread
+
+            def run(self):
+                pass
+
+        ui_module.QThread = Thread
+        ui_module.SessionCheckWorker = CheckWorker
+        ui_module.BrowserLoginWorker = LoginWorker
+        return Thread, CheckWorker, LoginWorker
+
+    @staticmethod
+    def _boxes(ui_module, seen):
+        """QMessageBox.information/warning als Recorder.
+
+        Der Aufruf im Dialog beginnt mit `self`, danach folgen Titel und
+        Text -- die Zusicherungen lesen deshalb Index 1 und 2.
+        """
+
+        def record(*args, **kwargs):
+            seen.append(args)
+
+        ui_module.QMessageBox = type("QMessageBox", (), {
+            "information": staticmethod(record),
+            "warning": staticmethod(record),
+        })
+
+    def _dashboard(self, ui_module, token="tok-1"):
+        dashboard = type("Dashboard", (), {})()
+        dashboard.account_name = "konto"
+        dashboard.login_thread = None
+        dashboard.login_worker = None
+        dashboard.refresh = self.Field(token)
+        dashboard.hardware = self.Field("hw-1")
+        dashboard.primary = self.Field()
+        dashboard.scrape_browser = self.Field()
+        dashboard.status = self.Field()
+        dashboard.update_status = lambda: None
+        dashboard.settings_values = {
+            "account_name": "konto", "partner_id": 4,
+            "hardware_id": "hw-1", "refresh_token": token,
+            "username": "", "password": "",
+        }
+        dashboard.values = lambda: dashboard.settings_values
+        # Die beiden Ergebnis-Slots des Anmeldefensters: hier nur Empfaenger.
+        dashboard.login_completed = lambda *args: None
+        dashboard.login_failed = lambda *args: None
+        names = ("browser_login", "_check_stored_login",
+                 "_start_login_window", "_login_running",
+                 "login_still_valid", "login_rejected", "login_check_busy",
+                 "_login_cleanup", "set_refresh_token",
+                 "persist_refresh_token", "_login_progress")
+        for name in names:
+            setattr(dashboard, name,
+                    getattr(ui_module.SyncDashboard, name).__get__(dashboard))
+        return dashboard
+
+    def test_without_a_stored_token_the_window_opens_right_away(self):
+        ui_module = self._ui()
+        self._fake_qt(ui_module)
+        dashboard = self._dashboard(ui_module, token="")
+        opened = []
+        dashboard._start_login_window = lambda values: opened.append(values)
+        dashboard.browser_login()
+        self.assertEqual([""], [values["refresh_token"] for values in opened])
+        self.assertIsNone(dashboard.login_thread)
+
+    def test_with_a_token_the_stored_access_is_checked_first(self):
+        ui_module = self._ui()
+        Thread, CheckWorker, _ = self._fake_qt(ui_module)
+        dashboard = self._dashboard(ui_module)
+        opened = []
+        dashboard._start_login_window = lambda values: opened.append(values)
+        dashboard.browser_login()
+        self.assertEqual([], opened)
+        self.assertIsInstance(dashboard.login_thread, Thread)
+        self.assertIsInstance(dashboard.login_worker, CheckWorker)
+        self.assertEqual(1, dashboard.login_thread.starts)
+        self.assertIs(dashboard.settings_values,
+                      dashboard.login_worker.settings)
+        self.assertIs(dashboard.login_thread,
+                      dashboard.login_worker.moved_to)
+        self.assertIn("geprüft", dashboard.status.text())
+        self.assertFalse(dashboard.primary.enabled)
+
+    def test_a_working_access_skips_the_login_window(self):
+        ui_module = self._ui()
+        self._fake_qt(ui_module)
+        dashboard = self._dashboard(ui_module)
+        opened, saved, boxes = [], [], []
+        dashboard._start_login_window = lambda values: opened.append(values)
+        self._boxes(ui_module, boxes)
+        with patch("calibre_plugin.ui.save_credentials",
+                   lambda *args: saved.append(args)):
+            dashboard.browser_login()
+            dashboard.login_worker.valid.fire("tok-rotated")
+        self.assertEqual([], opened)
+        self.assertEqual([("konto", "tok-rotated", "hw-1")], saved)
+        self.assertEqual("tok-rotated", dashboard.refresh.text())
+        # Knopf und Fenster sind wieder frei, die Pruefung ist beendet.
+        self.assertIsNone(dashboard.login_thread)
+        self.assertTrue(dashboard.primary.enabled)
+        self.assertIn("weiterhin", dashboard.status.text())
+        self.assertEqual(1, len(boxes))
+        self.assertEqual("Zugang weiterhin gültig", boxes[0][1])
+
+    def test_a_rejected_access_opens_the_login_window(self):
+        ui_module = self._ui()
+        Thread, CheckWorker, LoginWorker = self._fake_qt(ui_module)
+        dashboard = self._dashboard(ui_module)
+        boxes = []
+        self._boxes(ui_module, boxes)
+        dashboard.browser_login()
+        check_thread = dashboard.login_thread
+        self.assertIsInstance(dashboard.login_worker, CheckWorker)
+        dashboard.login_worker.invalid.fire("invalid_grant (ohne Token)")
+        self.assertEqual(1, len(boxes))
+        self.assertEqual("Zugang abgelehnt", boxes[0][1])
+        self.assertIn("invalid_grant", boxes[0][2])
+        # Der neue Anlauf ist ein eigener Thread, nicht der Pruef-Thread:
+        # die Ablehnung oeffnet wirklich das Anmeldefenster.
+        self.assertIsInstance(dashboard.login_thread, Thread)
+        self.assertIsNot(check_thread, dashboard.login_thread)
+        self.assertIsInstance(dashboard.login_worker, LoginWorker)
+        self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
+        self.assertEqual(1, dashboard.login_thread.starts)
+        self.assertIn("Anmeldung läuft", dashboard.status.text())
+
+    def test_a_busy_check_opens_nothing_and_keeps_the_token(self):
+        ui_module = self._ui()
+        self._fake_qt(ui_module)
+        dashboard = self._dashboard(ui_module)
+        opened, saved, boxes = [], [], []
+        dashboard._start_login_window = lambda values: opened.append(values)
+        self._boxes(ui_module, boxes)
+        with patch("calibre_plugin.ui.save_credentials",
+                   lambda *args: saved.append(args)):
+            dashboard.browser_login()
+            dashboard.login_worker.busy.fire("")
+        self.assertEqual([], opened)
+        self.assertEqual([], saved)
+        self.assertEqual("tok-1", dashboard.refresh.text())
+        self.assertIsNone(dashboard.login_thread)
+        self.assertTrue(dashboard.primary.enabled)
+        self.assertEqual(1, len(boxes))
+        self.assertEqual("Zugang wird gerade verwendet", boxes[0][1])
+
+    def test_a_second_click_while_checking_is_ignored(self):
+        ui_module = self._ui()
+        check_thread = type("Thread", (), {
+            "isRunning": lambda self: True})()
+        dashboard = self._dashboard(ui_module)
+        dashboard.login_thread = check_thread
+        calls = []
+        dashboard._check_stored_login = lambda values: calls.append(values)
+        dashboard._start_login_window = lambda values: calls.append(values)
+        dashboard.browser_login()
+        self.assertEqual([], calls)
+        self.assertIs(check_thread, dashboard.login_thread)
+
+    def test_the_window_step_starts_its_own_sign_in(self):
+        ui_module = self._ui()
+        Thread, _, LoginWorker = self._fake_qt(ui_module)
+        dashboard = self._dashboard(ui_module)
+        dashboard._start_login_window(dashboard.values())
+        self.assertIsInstance(dashboard.login_thread, Thread)
+        self.assertIsInstance(dashboard.login_worker, LoginWorker)
+        self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
+        self.assertEqual(1, dashboard.login_thread.starts)
+        self.assertFalse(dashboard.primary.enabled)
+        self.assertFalse(dashboard.scrape_browser.enabled)
+        self.assertIn("Anmeldung läuft", dashboard.status.text())
+
+    def _run_check_worker(self, ui_module, result):
+        """`SessionCheckWorker.run()` mit gestubbter Pruefung laufen lassen.
+
+        `result` ist das, was `check_stored_login` liefert -- oder eine
+        Exception, die es stattdessen wirft. Zurueck kommen der Worker, die
+        gemeldeten Signale und die Argumente der Pruefung.
+        """
+
+        def check(*args, **kwargs):
+            calls.append((args, kwargs))
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        def signal(name):
+            return type("Signal", (), {
+                "emit": lambda self, value: emitted.append((name, value))})()
+
+        emitted, calls = [], []
+        settings = {"partner_id": 4, "hardware_id": "hw-1",
+                    "refresh_token": "tok-1", "username": "u",
+                    "password": "p", "account_name": "konto"}
+        worker = ui_module.SessionCheckWorker(settings)
+        worker.valid, worker.invalid, worker.busy = (signal("valid"),
+                                                     signal("invalid"),
+                                                     signal("busy"))
+        ui_module.check_stored_login = check
+        worker.run()
+        return worker, emitted, calls
+
+    def test_the_worker_hands_the_stored_access_to_the_check(self):
+        ui_module = self._ui()
+        worker, emitted, calls = self._run_check_worker(
+            ui_module, ("valid", "tok-2"))
+        args, kwargs = calls[0]
+        self.assertEqual((4, "hw-1", "tok-1", "u", "p"), args)
+        # Der rotierte Token wird aus dem Arbeitsthread heraus gesichert.
+        self.assertEqual(worker.persist_refresh_token, kwargs["persist"])
+        self.assertEqual([("valid", "tok-2")], emitted)
+
+    def test_every_check_result_reaches_the_matching_slot(self):
+        ui_module = self._ui()
+        results = (("valid", "tok-2"), ("invalid", "Grund"), ("busy", ""))
+        reported = [self._run_check_worker(ui_module, result)[1]
+                    for result in results]
+        self.assertEqual([[result] for result in results], reported)
+
+    def test_a_failing_check_is_reported_as_a_rejection(self):
+        ui_module = self._ui()
+        _worker, emitted, _calls = self._run_check_worker(
+            ui_module, RuntimeError("kaputt mit tok-1"))
+        self.assertEqual(1, len(emitted))
+        self.assertEqual("invalid", emitted[0][0])
+        self.assertIn("kaputt", emitted[0][1])
+        # Auch der unerwartete Fehler verraet den Zugang nicht.
+        self.assertNotIn("tok-1", emitted[0][1])
+
+    def test_the_worker_saves_rotations_through_the_shared_helper(self):
+        ui_module = self._ui()
+        saved = []
+        settings = {"account_name": "konto", "hardware_id": "hw-1",
+                    "refresh_token": "tok-1"}
+        worker = ui_module.SessionCheckWorker(settings)
+        with patch("calibre_plugin.ui.save_credentials",
+                   lambda *args: saved.append(args)):
+            worker.persist_refresh_token("tok-2")
+        self.assertEqual([("konto", "tok-2", "hw-1")], saved)
+        self.assertEqual("tok-2", settings["refresh_token"])
+
+    def test_the_button_checks_before_it_opens_a_window(self):
+        """Der Anmeldeweg bleibt EIN Weg: erst pruefen, dann anmelden."""
+        source = (Path(__file__).with_name("ui.py")).read_text(
+            encoding="utf-8")
+        self.assertIn("self.login_button.clicked.connect(self.browser_login)",
+                      source)
+        body = source.split("    def browser_login(self):", 1)[1].split(
+            "\n    def ", 1)[0]
+        self.assertIn("self._check_stored_login(settings)", body)
+        self.assertIn("self._start_login_window(settings)", body)
+        self.assertNotIn("BrowserLoginWorker(", body)
+
 if __name__ == "__main__":
     unittest.main()

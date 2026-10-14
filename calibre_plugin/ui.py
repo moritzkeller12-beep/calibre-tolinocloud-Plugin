@@ -36,7 +36,8 @@ from .sync import (compare_inventory, format_error_details, iter_book_ids,
                    metadata_tolino_id,
                    tolino_column_active, update_tolino_ids)
 from .tolino import (PARTNERS, TolinoAuthError, TolinoClient, browser_login,
-                     chromium_available, hardware_id, log_warning,
+                     check_stored_login, chromium_available, hardware_id,
+                     log_warning,
                      mark_sync_active,
                      normalize_refresh_token, sanitize_error,
                      start_token_keepalive, try_live_grab_first)
@@ -1029,6 +1030,45 @@ class BrowserLoginWorker(QObject):
         self.completed.emit(refresh, hardware)
 
 
+class SessionCheckWorker(QObject):
+    """Prueft den gespeicherten Zugang, bevor ein Anmeldefenster aufgeht.
+
+    Der Test ist ein Netz-Roundtrip und rotiert den Refresh-Token -- im
+    GUI-Thread wuerde Calibre dabei stehen (0.15.7).
+    """
+    valid = pyqtSignal(str)
+    invalid = pyqtSignal(str)
+    busy = pyqtSignal(str)
+
+    def __init__(self, settings):
+        QObject.__init__(self)
+        self.settings = settings
+
+    def run(self):
+        values = self.settings
+        try:
+            status, detail = check_stored_login(
+                values["partner_id"], values["hardware_id"],
+                values["refresh_token"], values.get("username"),
+                values.get("password"), persist=self.persist_refresh_token)
+        except Exception as exc:
+            self.invalid.emit(sanitize_error(
+                exc, (values["refresh_token"],)))
+            return
+        if status == "valid":
+            self.valid.emit(detail)
+        elif status == "busy":
+            self.busy.emit(detail)
+        else:
+            self.invalid.emit(detail)
+
+    def persist_refresh_token(self, refresh):
+        """Rotierten Token sofort sichern -- ohne GUI-Zugriff (Arbeitsthread)."""
+        self.settings["refresh_token"] = refresh
+        save_credentials(self.settings["account_name"], refresh,
+                         self.settings["hardware_id"])
+
+
 class SettingsDialog(QDialog):
     """Alle seltenen Einstellungen an einem Ort (0.15.2).
 
@@ -1438,7 +1478,9 @@ class SyncDashboard(QDialog):
                     "Ein eigenes Chromium-Fenster mit dem Web Reader "
                     "wird geöffnet: dort anmelden und die Bücherliste "
                     "laden. Nur dieses Fenster wird danach geschlossen.")
-                self.browser_login()
+                # Bewusst OHNE Vorab-Prüfung: diese Schaltfläche holt den
+                # Zugang ausdrücklich aus dem Browser (0.15.7).
+                self._start_login_window(self.values())
                 return
             QMessageBox.information(
                 self, "Kein Chromium-Browser gefunden",
@@ -1501,11 +1543,105 @@ class SyncDashboard(QDialog):
                       if isinstance(account.get("state"), dict) else {}),
         }
 
+    def _login_running(self):
+        """Läuft gerade eine Zugangs-Prüfung oder ein Anmeldefenster?"""
+        thread = self.login_thread
+        return thread is not None and thread.isRunning()
+
     def browser_login(self):
-        """Open the private Chromium sign-in window, adopt the fresh token."""
-        if self.login_thread is not None and self.login_thread.isRunning():
+        """Anmeldeknopf: erst den gespeicherten Zugang prüfen, dann anmelden.
+
+        Ein neues Anmeldefenster ist nur nötig, wenn der vorhandene Zugang
+        nicht mehr funktioniert. Deshalb läuft zuerst eine stille Prüfung im
+        Hintergrund; das Fenster geht erst auf, wenn Tolino den Zugang
+        ablehnt (0.15.7). Ohne gespeicherten Zugang gibt es nichts zu prüfen.
+        """
+        if self._login_running():
+            return  # eine Prüfung oder Anmeldung läuft bereits
+        settings = self.values()
+        if settings["refresh_token"]:
+            self._check_stored_login(settings)
+            return
+        self._start_login_window(settings)
+
+    def _check_stored_login(self, settings):
+        """Gespeicherten Zugang im Hintergrund prüfen (ein Netz-Roundtrip)."""
+        self.primary.setEnabled(False)
+        self.scrape_browser.setEnabled(False)
+        self.status.setText(
+            "Der gespeicherte Zugang wird geprüft – ein Anmeldefenster "
+            "öffnet nur, wenn er nicht mehr funktioniert.")
+        thread = QThread()  # no parent: dialog may close first
+        worker = SessionCheckWorker(settings)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        for signal in (worker.valid, worker.invalid, worker.busy):
+            signal.connect(thread.quit)
+        worker.valid.connect(self.login_still_valid)
+        worker.invalid.connect(self.login_rejected)
+        worker.busy.connect(self.login_check_busy)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: _reap_login_thread(thread))
+        _LOGIN_WORKER_THREADS.append(thread)
+        self.login_thread = thread
+        self.login_worker = worker
+        thread.start()
+
+    def login_still_valid(self, refresh):
+        """Prüfung bestanden: kein Anmeldefenster, Zugang bleibt gültig."""
+        try:
+            self._login_cleanup()
+            self.set_refresh_token(refresh)
+            self.persist_refresh_token(refresh)
+            self.status.setText(
+                "✓ Gespeicherter Zugang geprüft: er funktioniert weiterhin – "
+                "ein neues Anmelden ist nicht nötig.")
+            QMessageBox.information(
+                self, "Zugang weiterhin gültig",
+                "Der gespeicherte Zugang funktioniert: Tolino hat ihn "
+                "angenommen, ein Anmeldefenster ist nicht nötig. Der Zugang "
+                "wurde dabei gleich erneuert.\n\n"
+                "Erst wenn Tolino ihn später ablehnt, öffnet der "
+                "Anmeldeknopf wieder das Anmeldefenster.")
+        except RuntimeError:
+            pass  # dialog already destroyed (Calibre shutdown)
+
+    def login_rejected(self, message):
+        """Prüfung fehlgeschlagen: jetzt das Anmeldefenster öffnen."""
+        try:
+            self._login_cleanup()
+            settings = self.values()
+        except RuntimeError:
+            return  # dialog already destroyed (Calibre shutdown)
+        QMessageBox.warning(
+            self, "Zugang abgelehnt",
+            "Der gespeicherte Zugang hat die Prüfung nicht bestanden:\n\n"
+            + message
+            + "\n\nDas Anmeldefenster wird jetzt geöffnet – dort im Web "
+            "Reader anmelden und warten, bis die Bücherliste lädt.")
+        self._start_login_window(settings)
+
+    def login_check_busy(self, _reason=""):
+        """Der Zugang wird gerade benutzt – jetzt nicht dazwischenfunken."""
+        try:
+            self._login_cleanup()
+            self.status.setText(
+                "Der Zugang wird gerade verwendet (Synchronisierung oder "
+                "Token-Erneuerung läuft) – bitte danach erneut prüfen.")
+            QMessageBox.information(
+                self, "Zugang wird gerade verwendet",
+                "Der gespeicherte Zugang ist gerade in Benutzung: eine "
+                "Synchronisierung oder eine Token-Erneuerung läuft. Er wird "
+                "deshalb jetzt nicht geprüft. Bitte nach deren Ende erneut "
+                "auf «Jetzt bei Tolino anmelden» klicken.")
+        except RuntimeError:
+            pass  # dialog already destroyed (Calibre shutdown)
+
+    def _start_login_window(self, settings):
+        """Das eigene Anmeldefenster öffnen und den frischen Zugang übernehmen."""
+        if self._login_running():
             return  # a sign-in attempt is already running
-        partner_id = self.partner.currentData()
+        partner_id = settings["partner_id"]
         self.primary.setEnabled(False)
         self.scrape_browser.setEnabled(False)
         self.status.setText(
@@ -1513,7 +1649,7 @@ class SyncDashboard(QDialog):
             "anmelden und warten, bis die Bücherliste lädt. Das Fenster "
             "offen lassen – der Zugang wird automatisch übernommen.")
         thread = QThread()  # no parent: dialog may close first
-        worker = BrowserLoginWorker(partner_id, self.hardware.text().strip())
+        worker = BrowserLoginWorker(partner_id, settings["hardware_id"])
         worker.moveToThread(thread)
         worker.progress.connect(self._login_progress)
         thread.started.connect(worker.run)
