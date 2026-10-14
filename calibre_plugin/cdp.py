@@ -13,9 +13,11 @@ import tempfile
 import time
 
 try:
-    from .tolino import PARTNERS, TolinoAuthError, in_flatpak_sandbox
+    from .tolino import (PARTNERS, RELOGIN, RELOGIN_THEN, TolinoAuthError,
+                         flatpak_permission_hint, in_flatpak_sandbox)
 except ImportError:  # direkter Import (ausserhalb des Plugin-Pakets)
-    from tolino import PARTNERS, TolinoAuthError, in_flatpak_sandbox
+    from tolino import (PARTNERS, RELOGIN, RELOGIN_THEN, TolinoAuthError,
+                        flatpak_permission_hint, in_flatpak_sandbox)
 
 
 # ---------------------------------------------------------------- Vorbedingungen
@@ -722,43 +724,22 @@ def launch_reader_window(partner_id):
     """
     binary, label = pick_chromium() or (None, None)
     if not binary:
+        code = "B05"
         message = (
-            "Es wurde kein Chromium-Browser gefunden (Chrome, Chromium, "
-            "Brave oder Edge). Die automatische Anmeldung braucht einen "
-            "davon. Alternativ den Zugangsschlüssel (Refresh-Token) in den "
-            "Einstellungen von Hand eintragen (siehe README)."
-        )
-        if _host_probe_status == "empty":
-            message += (
-                " Auch ausserhalb der Sandbox wurde kein Chromium-Browser "
-                "gefunden. Bitte Chrome, Chromium, Brave oder Edge "
-                "installieren; das Anmeldefenster öffnet sich unabhängig "
-                "vom Standardbrowser."
-            )
-        elif in_flatpak_sandbox() and _host_probe_status == "unavailable":
-            message += (
-                " Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt in "
-                "der Sandbox. Bitte einmal «flatpak update» ausführen und "
-                "Calibre danach vollständig neu starten."
-            )
-        elif in_flatpak_sandbox():
-            message += (
-                "\n\nCalibre läuft als Flatpak und darf die Browser des "
-                "Rechners nicht sehen. Einmalig die Freigabe erteilen und "
-                "Calibre danach vollständig neu starten.\n\n"
-                "Benutzer-Installation:\n"
-                "flatpak override --user --talk-name=org.freedesktop."
-                "Flatpak com.calibre_ebook.calibre\n\n"
-                "System-Installation («flatpak info» zeigt "
-                "«Installation: system»):\n"
-                "sudo flatpak override --talk-name=org.freedesktop."
-                "Flatpak com.calibre_ebook.calibre\n\n"
-                "Kontrolle: «flatpak info --show-permissions "
-                "com.calibre_ebook.calibre» muss org.freedesktop.Flatpak "
-                "enthalten. Ohne Freigabe bricht die Anmeldung mit diesem "
-                "Hinweis ab, statt im Standardbrowser zu öffnen."
-            )
-        raise TolinoAuthError(message)
+            "Kein Chromium-Browser gefunden (Chrome, Chromium, Brave oder "
+            "Edge). Bitte einen installieren oder den Zugangsschlüssel in "
+            "den Einstellungen eintragen.")
+        if _host_probe_status == "unavailable" and in_flatpak_sandbox():
+            code = "B06"
+            message = (
+                "Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt. "
+                "Bitte «flatpak update» ausführen und Calibre danach "
+                "vollständig neu starten.")
+        elif in_flatpak_sandbox() and _host_probe_status != "empty":
+            code = "B06"
+            message = message + "\n\n" + flatpak_permission_hint()
+        raise TolinoAuthError(message, code=code,
+                              detail="Host-Sonde: %s" % _host_probe_status)
     port = _start_port()
     # Reuse path: is a grabber window from an earlier attempt still up?
     if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
@@ -800,8 +781,8 @@ def launch_reader_window(partner_id):
                     if cand[0] != binary[0])
     else:
         raise TolinoAuthError(
-            "Chromium konnte nicht gestartet werden (%s): %s"
-            % (last_error[0], last_error[1]))
+            "Chromium konnte nicht gestartet werden.", code="B07",
+            detail="%s: %s" % (last_error[0], last_error[1]))
     # Wait until the DevTools endpoint answers.
     deadline = time.time() + 20
     while time.time() < deadline:
@@ -809,10 +790,8 @@ def launch_reader_window(partner_id):
             return binary, port
         time.sleep(0.5)
     raise TolinoAuthError(
-        "Chromium wurde gestartet, hat aber nicht reagiert (Port %d). "
-        "Vermutlich läuft schon ein Chromium-Fenster ohne Debug-Zugang. "
-        "Bitte alle Chromium-Fenster schliessen und es erneut versuchen."
-        % port)
+        "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
+        "und es erneut versuchen.", code="B07", detail="Port %d" % port)
 
 
 def _idb_expression(db_name):
@@ -966,8 +945,8 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     reason = _oauth_rejection_reason(body) if status in (400, 401, 403) else ""
     if reason:
         raise TolinoAuthError(
-            "Tolino hat den gelesenen Zugang abgelehnt (HTTP %d, %s) – "
-            "er ist bereits verbraucht oder widerrufen." % (status, reason))
+            "Tolino hat den gelesenen Zugang abgelehnt. " + RELOGIN,
+            code="A02", detail="HTTP %d, %s" % (status, reason))
     # Everything else is passed through unchanged for the caller's
     # diagnostics (page failures, WAF HTML pages, unexpected payloads).
     return status, body
@@ -1073,10 +1052,9 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
                 if progress:
                     progress("Anmeldefenster geschlossen – abgebrochen.")
                 raise TolinoAuthError(
-                    "Das Anmeldefenster wurde geschlossen, bevor der Zugang "
-                    "übernommen werden konnte. Bitte erneut versuchen und das "
-                    "Fenster offen lassen, bis die Übernahme abgeschlossen "
-                    "ist.")
+                    "Das Anmeldefenster wurde geschlossen, bevor die "
+                    "Übernahme fertig war. Bitte erneut versuchen und es "
+                    "offen lassen.", code="B03")
             time.sleep(1)
             continue
         endpoint_misses = 0
@@ -1116,12 +1094,11 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
     if saw_reader:
         raise TolinoAuthError(
             "Zeitüberschreitung: Im Anmeldefenster wurde keine Anmeldung "
-            "erkannt. Bitte im Fenster anmelden, bis die Bücherliste "
-            "sichtbar ist, und es danach erneut versuchen.")
+            "erkannt. Bitte dort anmelden, bis die Bücherliste lädt. "
+            + RELOGIN_THEN, code="B04")
     raise TolinoAuthError(
-        "Zeitüberschreitung: Die Anmeldung im Anmeldefenster wurde nicht "
-        "abgeschlossen. Bitte erneut auf «Jetzt bei Tolino anmelden» "
-        "klicken und dort anmelden, bis die Bücherliste lädt.")
+        "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "
+        + RELOGIN, code="B04", detail="kein Web-Reader-Tab")
 
 
 def grab_live_tokens(partner_id, hardware, timeout=300, progress=None):
