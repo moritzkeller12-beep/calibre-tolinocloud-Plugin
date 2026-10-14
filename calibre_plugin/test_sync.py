@@ -4000,7 +4000,7 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertNotIn("gelöscht", note)
             # Ohne automatische Aktionen sagt der Hinweis das ausdrücklich.
             dialog.options = {}
-            self.assertIn("nur, was angehakt ist",
+            self.assertIn("nur die Auswahl",
                           dialog._automatic_note())
         finally:
             ui_module._restore_stubs_for_tests()
@@ -7711,3 +7711,108 @@ class ErrorCodeTests(unittest.TestCase):
         self.assertIn("docs/fehlercodes.md", readme)
         self.assertNotIn("| A02 |", readme)
 
+class UserTextTests(unittest.TestCase):
+    """Einheitliche, kurze Nutzertexte (0.15.10)."""
+
+    WORDS = ("häkchen", "anhaken", "angehakt")
+
+    def _visible_strings(self, path):
+        """Alle String-Konstanten ohne Docstrings (also die sichtbaren Texte)."""
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+                body = getattr(node, "body", None)
+                if body and isinstance(body[0], ast.Expr) and isinstance(
+                        getattr(body[0], "value", None), ast.Constant):
+                    docstrings.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and id(node) not in docstrings):
+                yield node.value
+
+    def test_visible_ui_texts_avoid_the_haekchen_wording(self):
+        """«Auswahl/ausgewählt» statt «Häkchen/anhaken» – überall im Dialog."""
+        base = Path(__file__).resolve().parent
+        offenders = [text.strip()[:60]
+                     for text in self._visible_strings(base / "ui.py")
+                     if any(word in text.casefold() for word in self.WORDS)]
+        self.assertEqual([], offenders)
+
+    def test_docs_avoid_the_haekchen_wording(self):
+        """Auch README und die Fehlerliste sprechen von Auswahl."""
+        base = Path(__file__).resolve().parent.parent
+        for name in ("README.md", "docs/fehlercodes.md"):
+            text = (base / name).read_text(encoding="utf-8").casefold()
+            for word in self.WORDS:
+                self.assertNotIn(word, text, "%s: %s" % (name, word))
+        self.assertIn("auswählen", (base / "README.md").read_text(
+            encoding="utf-8"))
+
+    def test_prepare_error_dialog_shows_only_the_short_message(self):
+        """Feldbefund: Der Dialog zeigte Meldung + Traceback doppelt.
+
+        Die Details (inklusive Traceback unerwarteter Fehler) schreibt
+        report_error() ins Calibre-Log; der Dialog bekommt genau eine Zeile.
+        """
+        base = Path(__file__).resolve().parent
+        source = (base / "ui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        body = None
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == "_show_prepare_error"):
+                body = ast.get_source_segment(source, node) or ""
+        self.assertIsNotNone(body)
+        self.assertIn('report_error(exc, "Vorbereitung", secrets)', body)
+        self.assertNotIn("format_error_details", body)
+        self.assertNotIn("Traceback", body)
+
+    def test_reported_message_is_one_clean_line(self):
+        """Genau «Text (Code A01)» – ohne Zeilenumbruch und ohne Traceback."""
+        exc = tolino_module.TolinoAuthError(
+            "Die Tolino-Sitzung ist beendet. " + tolino_module.RELOGIN,
+            code="A01", detail="HTTP 400: Token is not active")
+        with patch.object(tolino_module, "log_warning") as log:
+            shown = tolino_module.report_error(exc, "Vorbereitung")
+        self.assertEqual(
+            "Die Tolino-Sitzung ist beendet. Bitte auf «Jetzt bei Tolino "
+            "anmelden» klicken. (Code A01)", shown)
+        logged = log.call_args[0][0]
+        self.assertIn("A01", logged)
+        self.assertIn("Token is not active", logged)
+        self.assertNotIn("Traceback", shown)
+
+    def test_auth_errors_keep_their_traceback_chain_in_the_log(self):
+        """A01 und Co.: Dialog eine Zeile, die Kette samt Werten nur im Log."""
+        secret = "geheimwert-77"
+        try:
+            try:
+                raise tolino_module.TolinoApiError("HTTP 400: %s" % secret,
+                                                  code="N03")
+            except tolino_module.TolinoApiError as inner:
+                raise tolino_module.TolinoAuthError(
+                    "Die Tolino-Sitzung ist beendet. " + tolino_module.RELOGIN,
+                    code="A01", detail="HTTP 400") from inner
+        except tolino_module.TolinoAuthError as exc:
+            with patch.object(tolino_module, "log_warning") as log:
+                shown = tolino_module.report_error(
+                    exc, "Vorbereitung", (secret,))
+        calls = [call[0][0] for call in log.call_args_list]
+        self.assertEqual(1, shown.count("\n") + 1)
+        self.assertTrue(shown.endswith("(Code A01)"))
+        self.assertTrue(any(c.startswith("Tolino-Details") for c in calls), calls)
+        blob = " ".join(calls)
+        self.assertIn("Traceback", blob)
+        self.assertIn("direct cause", blob)
+        self.assertNotIn(secret, blob)
+        self.assertNotIn(secret, shown)
+
+    def test_report_error_without_a_traceback_logs_a_single_line(self):
+        """Ohne Traceback (z. B. selbst gebaute Meldung) bleibt es eine Zeile."""
+        exc = tolino_module.TolinoError("Fehler ohne Traceback", code="S90")
+        with patch.object(tolino_module, "log_warning") as log:
+            shown = tolino_module.report_error(exc)
+        self.assertEqual(1, log.call_count)
+        self.assertEqual("Fehler ohne Traceback (Code S90)", shown)

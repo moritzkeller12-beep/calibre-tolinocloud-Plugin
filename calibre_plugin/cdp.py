@@ -726,9 +726,9 @@ def launch_reader_window(partner_id):
     if not binary:
         code = "B05"
         message = (
-            "Kein Chromium-Browser gefunden (Chrome, Chromium, Brave oder "
-            "Edge). Bitte einen installieren oder den Zugangsschlüssel in "
-            "den Einstellungen eintragen.")
+            "Kein Chromium-Browser gefunden. Bitte Chrome, Chromium, Brave oder "
+            "Edge installieren – oder den Zugangsschlüssel in den "
+            "Einstellungen eintragen.")
         if _host_probe_status == "unavailable" and in_flatpak_sandbox():
             code = "B06"
             message = (
@@ -1093,8 +1093,8 @@ def collect_grab(partner_id, port, timeout=180, progress=None):
         time.sleep(2)
     if saw_reader:
         raise TolinoAuthError(
-            "Zeitüberschreitung: Im Anmeldefenster wurde keine Anmeldung "
-            "erkannt. Bitte dort anmelden, bis die Bücherliste lädt. "
+            "Zeitüberschreitung: keine Anmeldung erkannt. Bitte im "
+            "Anmeldefenster anmelden, bis die Bücherliste lädt. "
             + RELOGIN_THEN, code="B04")
     raise TolinoAuthError(
         "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "

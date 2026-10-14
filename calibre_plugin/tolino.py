@@ -53,12 +53,26 @@ _NO_AUTO_LOGIN = (
 _RECENT_ERRORS = collections.deque(maxlen=20)
 
 
+def _trace_text(exc):
+    """Vollständiger Traceback samt Ursachenkette -- "" wenn es keinen gibt.
+
+    Die Exception wird selbst formatiert (nicht sys.exc_info()), damit auch
+    die Kette «Ursache -> Folgefehler» im Log landet und nicht der zufällig
+    gerade behandelte Fehler.
+    """
+    if (exc.__traceback__ is None and exc.__cause__ is None
+            and exc.__context__ is None):
+        return ""
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
+
 def report_error(exc, context="", secrets=()):
     """Loggt Code, Text und Detail (ohne Token); gibt die Nutzermeldung zurück.
 
-    Rückgabe: «Kurztext (Code A02)». Unerwartete Fehler (kein TolinoError)
-    zeigen den (gekürzten) Text; Typ und Traceback stehen im Calibre-Log. Die letzten Fehler merkt sich recent_errors() für die
-    Diagnose.
+    Rückgabe: genau eine Zeile, «Kurztext (Code A02)». Der Dialog bekommt
+    nur diese Zeile; alles Weitere (Serverantwort, Traceback, Ursachenkette)
+    steht im Calibre-Log. Die letzten Zeilen merkt sich recent_errors() für
+    die Diagnose.
     """
     if isinstance(exc, TolinoError):
         code, shown = exc.code, exc.short or str(exc)
@@ -68,9 +82,6 @@ def report_error(exc, context="", secrets=()):
         code = "E99"
         shown = "Unerwarteter Fehler: %s" % str(exc)[:150]
         detail = type(exc).__name__
-        trace = traceback.format_exc()
-        if "NoneType: None" not in trace:
-            log_warning("Tolino-Traceback " + sanitize_error(trace, secrets))
     shown = sanitize_error(shown, secrets)
     line = "[%s] %s" % (code, shown)
     if detail:
@@ -79,6 +90,9 @@ def report_error(exc, context="", secrets=()):
         line += " (%s)" % context
     log_warning("Tolino-Fehler " + line)
     _RECENT_ERRORS.append("%s %s" % (time.strftime("%H:%M:%S"), line))
+    trace = _trace_text(exc)
+    if trace:
+        log_warning("Tolino-Details " + sanitize_error(trace, secrets))
     return "%s (Code %s)" % (shown, code)
 
 
@@ -1006,13 +1020,13 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             break
         if progress:
             if at_login_page:
-                progress("Bitte im Anmeldefenster im Web Reader anmelden, "
-                         "bis die Bücherliste lädt – der Zugang wird dann "
-                         "automatisch übernommen (Versuch %d) …" % attempt)
+                progress("Im Anmeldefenster anmelden, bis die Bücherliste "
+                         "lädt – der Zugang wird automatisch übernommen "
+                         "(Versuch %d) …" % attempt)
             else:
-                progress("Warte auf den frischen Zugang aus dem Web Reader "
-                         "(Versuch %d von %d) – bitte im Fenster angemeldet "
-                         "bleiben …" % (attempt, _NEW_TOKEN_ATTEMPTS))
+                progress("Warte auf den Zugang aus dem Web Reader "
+                         "(Versuch %d von %d) – bitte angemeldet bleiben …"
+                         % (attempt, _NEW_TOKEN_ATTEMPTS))
         time.sleep(_NEW_TOKEN_INTERVAL)
         more = _normalize_live_grab(
             cdp_module.grab_once_from_grabber())
