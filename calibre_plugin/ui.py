@@ -1305,14 +1305,14 @@ class SyncDashboard(QDialog):
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
         self.refresh.setEchoMode(QLineEdit.Password)
-        self.scrape_browser = QPushButton("Zugang aus offenem Browser holen")
-        self.scrape_browser.setToolTip(
+        self.grab_button = QPushButton("Zugang aus offenem Browser holen")
+        self.grab_button.setToolTip(
             "Holt den Zugang aus dem Anmeldefenster (benötigt Chrome, "
             "Chromium, Brave oder Edge).")
-        self.scrape_browser.clicked.connect(self.scrape_browser_tokens)
+        self.grab_button.clicked.connect(self.grab_browser_tokens)
         accounts.addRow("Aktives Konto", self.account_select)
         accounts.addRow("", account_buttons)
-        accounts.addRow("", self.scrape_browser)
+        accounts.addRow("", self.grab_button)
         accounts.addRow("Hardware-ID (automatisch erkannt)", self.hardware)
         accounts.addRow("Zugangsschlüssel (Refresh-Token)", self.refresh)
 
@@ -1509,7 +1509,7 @@ class SyncDashboard(QDialog):
         self._loaded_hardware = self.hardware.text().strip()
         save_credentials(self.account_name, self.refresh.text(), str(hardware))
 
-    def scrape_browser_tokens(self):
+    def grab_browser_tokens(self):
         """Read the current token from the plugin's own sign-in window."""
         try:
             # Ein laufendes Anmeldefenster haelt den AKTUELLEN Token.
@@ -1614,7 +1614,7 @@ class SyncDashboard(QDialog):
     def _check_stored_login(self, settings):
         """Gespeicherten Zugang im Hintergrund prüfen (ein Netz-Roundtrip)."""
         self.primary.setEnabled(False)
-        self.scrape_browser.setEnabled(False)
+        self.grab_button.setEnabled(False)
         self.status.setText("Gespeicherter Zugang wird geprüft …")
         thread = QThread()  # no parent: dialog may close first
         worker = SessionCheckWorker(settings)
@@ -1681,7 +1681,7 @@ class SyncDashboard(QDialog):
             return  # a sign-in attempt is already running
         partner_id = settings["partner_id"]
         self.primary.setEnabled(False)
-        self.scrape_browser.setEnabled(False)
+        self.grab_button.setEnabled(False)
         self.status.setText(
             "Anmeldung läuft: im Anmeldefenster anmelden, bis die "
             "Bücherliste lädt.")
@@ -1735,7 +1735,7 @@ class SyncDashboard(QDialog):
         self.login_worker = None
         try:
             self.primary.setEnabled(True)
-            self.scrape_browser.setEnabled(True)
+            self.grab_button.setEnabled(True)
             self.update_status()
         except RuntimeError:
             pass  # dialog already destroyed

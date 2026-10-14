@@ -975,8 +975,8 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     """Read the Web Reader's CURRENT token via a private CDP window.
 
     Returns (rotated_refresh, hardware_id). Raises TolinoAuthError when
-    no Chromium browser is installed – callers fall back to the
-    historical disk-scrape flow in that case.
+    no Chromium browser is installed – the caller reports that and
+    offers the manual route (access key in the settings) instead.
     """
     from . import cdp as cdp_module
     grabbed = _normalize_live_grab(cdp_module.grab_live_tokens(
@@ -1090,8 +1090,8 @@ def try_live_grab_first(partner_id, hardware, timeout=12):
     page yielded an exchangeable token; the window is closed first --
     the plugin owns the session now, and a reader left running would
     rotate the adopted copy away (reuse protection kills the session).
-    Returns None when no grabber window is running – the caller should
-    then use the historical disk-scrape flow.
+    Returns None when no grabber window is running – the caller then
+    starts the normal sign-in (or asks for the access key by hand).
     """
     from . import cdp as cdp_module
     if not cdp_module.devtools_port_alive():

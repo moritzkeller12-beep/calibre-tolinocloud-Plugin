@@ -413,7 +413,7 @@ def _ws_path_to_host_port(path):
 
 
 # Das Snippet läuft IN der Web-Reader-Seite (Runtime.evaluate) und holt
-# genau die Werte, die auch der Disk-Scrape sucht -- nur eben live:
+# genau die Werte, die der Web Reader dort ablegt:
 #   - Keycloak oidc.user:<issuer>:<client> Blob (refresh_token + sid/exp)
 #   - klassische localStorage/IndexedDB-ähnliche Keys (refresh_token, t_auth)
 _GRAB_SNIPPET = r"""
