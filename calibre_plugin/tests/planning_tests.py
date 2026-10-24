@@ -505,6 +505,41 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("bosh_8_saved", rows[0]["tolino_id"])
         self.assertEqual("stored_id_or_uuid", rows[0]["match_reason"])
 
+    def test_custom_column_availability_accepts_calibre_field_metadata(self):
+        class FieldMetadata:
+            def __contains__(self, key):
+                return key == TOLINO_COLUMN
+
+        class Database:
+            field_metadata = FieldMetadata()
+
+        self.assertNotIsInstance(Database.field_metadata, dict)
+        self.assertTrue(custom_column_available(Database()))
+
+    def test_custom_column_writer_uses_the_calibre_new_api(self):
+        class DatabaseAPI:
+            def __init__(self):
+                self.writes = []
+
+            @staticmethod
+            def has_id(book_id):
+                return book_id == 7
+
+            def set_field(self, field, values):
+                self.writes.append((field, values))
+
+        class LegacyDatabase:
+            field_metadata = {TOLINO_COLUMN: {"datatype": "text"}}
+
+            def __init__(self):
+                self.new_api = DatabaseAPI()
+                self.data = object()
+
+        database = LegacyDatabase()
+        self.assertEqual(1, update_tolino_ids(database, [(7, "bosh_8_new")]))
+        self.assertEqual([(TOLINO_COLUMN, {7: "bosh_8_new"})],
+                         database.new_api.writes)
+
     def test_custom_column_writes_only_when_available_and_enabled(self):
         """Geschrieben wird ueber set_field() -- nur bei vorhandener und
         eingeschalteter Spalte; ohne Spalte gibt es keinen SQL-Ersatzweg."""

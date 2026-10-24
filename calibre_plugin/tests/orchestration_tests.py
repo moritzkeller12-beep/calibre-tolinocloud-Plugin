@@ -135,6 +135,36 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertIs(metadata, seen[1][2])
         self.assertTrue(settings["sync_column_enabled"])
 
+    def test_sync_column_availability_accepts_calibre_field_metadata(self):
+        ui_module = self._ui_module()
+        original_preferences = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.PREFERENCES.update({
+                "accounts": [{"name": "konto", "partner_id": 4,
+                              "hardware_id": "hw", "refresh_token": "token",
+                              "state": {}}],
+                "active_account": "konto",
+                "use_tolino_column": True,
+            })
+
+            class FieldMetadata:
+                def __contains__(self, key):
+                    return key == "#tolino_id"
+
+            settings = self._settings()
+            dashboard = self._dashboard(ui_module, settings)
+            dashboard.gui.current_db = type(
+                "Database", (), {"field_metadata": FieldMetadata()})()
+            dashboard._save_visible_account = lambda _values: None
+            dashboard._local_metadata = lambda: {}
+            dashboard._start_prepare_worker = lambda *_args: None
+            dashboard.start_sync()
+            self.assertTrue(dashboard.sync_column_enabled)
+        finally:
+            config.PREFERENCES = original_preferences
+            ui_module._restore_stubs_for_tests()
+
     def test_sync_column_uses_global_settings_not_visible_values(self):
         ui_module = self._ui_module()
         original_preferences = config.PREFERENCES

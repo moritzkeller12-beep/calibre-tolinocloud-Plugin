@@ -33,9 +33,12 @@ def custom_column_available(database):
     fields = getattr(database, "field_metadata", None)
     if callable(fields):
         fields = fields()
-    if not isinstance(fields, dict):
+    if fields is None:
         return False
-    return TOLINO_COLUMN in fields
+    try:
+        return TOLINO_COLUMN in fields
+    except (TypeError, AttributeError):
+        return False
 
 
 def tolino_column_active(values, database):
@@ -51,12 +54,15 @@ def update_tolino_ids(database, updates, enabled=True):
     """Persist IDs through Calibre's supported set_field API when enabled."""
     if not enabled or not updates or not custom_column_available(database):
         return 0
-    setter = getattr(database, "set_field", None)
+    api = getattr(database, "new_api", database)
+    setter = getattr(api, "set_field", None)
     if not callable(setter):
-        raise AttributeError("Calibre database does not provide set_field().")
+        raise AttributeError("Calibre database API does not provide set_field().")
     values = {book_id: str(tolino_id or "") for book_id, tolino_id in updates
               if book_id is not None}
     data = getattr(database, "data", None)
+    if data is None:
+        data = api
     has_id = getattr(data, "has_id", None)
     if callable(has_id):
         values = {book_id: value for book_id, value in values.items()
