@@ -385,6 +385,52 @@ class TolinoClientFeatureTests(unittest.TestCase):
         self.assertEqual("PATCH", calls[0]["method"])
         self.assertIn("sync-data", calls[0]["url"])
 
+    def test_download_sends_credentials_only_to_pageplace_https_hosts(self):
+        client = self._login_client()
+        captured = []
+
+        class RawResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"content"
+
+        def run_download(url):
+            client._request = lambda *_args, **_kwargs: {
+                "DownloadInfo": {"contentUrl": url}}
+
+            def request(value, timeout):
+                captured.append((value.full_url, value.header_items()))
+                return RawResponse()
+
+            with patch("calibre_plugin.tolino.urlopen", request):
+                return client.download("book-1")
+
+        self.assertEqual(b"content", run_download("https://cdn.pageplace.de/file"))
+        trusted_headers = dict((key.casefold(), value)
+                               for key, value in captured[-1][1])
+        self.assertIn("t_auth_token", trusted_headers)
+        self.assertIn("hardware_id", trusted_headers)
+        self.assertIn("reseller_id", trusted_headers)
+
+        self.assertEqual(b"content", run_download("https://cdn.example/file"))
+        foreign_headers = dict((key.casefold(), value)
+                               for key, value in captured[-1][1])
+        self.assertNotIn("t_auth_token", foreign_headers)
+        self.assertNotIn("hardware_id", foreign_headers)
+        self.assertNotIn("reseller_id", foreign_headers)
+
+        from ..tolino import TolinoApiError
+        with self.assertRaises(TolinoApiError) as caught:
+            run_download("http://cdn.pageplace.de/file")
+        self.assertEqual("N05", caught.exception.code)
+
     def test_download_resolves_content_url_and_returns_bytes(self):
         client, calls = self._patching_client([
             {"DownloadInfo": {"contentUrl": "https://cdn.example/epub"}},

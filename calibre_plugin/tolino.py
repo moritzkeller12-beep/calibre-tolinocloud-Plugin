@@ -8,7 +8,7 @@ import time
 import traceback
 import uuid
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, quote as _url_quote
+from urllib.parse import urlencode, quote as _url_quote, urlsplit
 from urllib.request import Request, urlopen
 
 from .inventory import parse_inventory
@@ -774,12 +774,23 @@ class TolinoClient:
         content_url = (info.get("DownloadInfo") or {}).get("contentUrl")
         if not content_url:
             raise TolinoApiError("Kein Download-Link in der Antwort.", code="N05", short="tolino hat keinen Download-Link geliefert.")
-        request = Request(content_url, headers={
-            "User-Agent": BROWSER_USER_AGENT,
-            "t_auth_token": self.access,
-            "hardware_id": self.hardware,
-            "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
-        })
+        try:
+            parsed_content_url = urlsplit(str(content_url))
+        except (TypeError, ValueError) as exc:
+            raise TolinoApiError("Ungültiger Download-Link.", code="N05",
+                                 short="tolino hat einen ungültigen Download-Link geliefert.") from exc
+        if parsed_content_url.scheme.casefold() != "https" or not parsed_content_url.hostname:
+            raise TolinoApiError("Unsicherer Download-Link.", code="N05",
+                                 short="Der Download-Link verwendet keine sichere HTTPS-Verbindung.")
+        headers = {"User-Agent": BROWSER_USER_AGENT}
+        host = parsed_content_url.hostname.casefold().rstrip(".")
+        if host == "pageplace.de" or host.endswith(".pageplace.de"):
+            headers.update({
+                "t_auth_token": self.access,
+                "hardware_id": self.hardware,
+                "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
+            })
+        request = Request(content_url, headers=headers)
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 content = response.read()
