@@ -1654,6 +1654,7 @@ class BackgroundCallTests(unittest.TestCase):
         self.assertIn("self._download_finished", body)
         self.assertNotIn("lambda result: self._download_finished", body)
         self.assertIn("EPUB (*.epub);;PDF (*.pdf)", body)
+        self.assertIn("result[:4] == b\"%PDF\"", source)
         dialogs = source.split("    def _start_action(", 1)[1].split(
             "\n    def ", 1)[0]
         self.assertIn("start_call", dialogs)
