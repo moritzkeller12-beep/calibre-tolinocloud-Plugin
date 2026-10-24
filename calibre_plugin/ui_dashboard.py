@@ -19,6 +19,7 @@ from .config import (GLOBAL_OPTION_KEYS, CredentialStore, account_by_name,
 from .library import (iter_book_ids, metadata_by_id, safe_format_path,
                       tolino_column_active, update_tolino_ids)
 from .config import load_state
+from .config import settings as _global_settings
 
 from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
@@ -640,7 +641,7 @@ class SyncDashboard(QDialog):
             return
         self._save_visible_account(settings)
         self.sync_column_enabled = tolino_column_active(
-            settings, self.gui.current_db)
+            _global_settings(), self.gui.current_db)
         settings["sync_column_enabled"] = self.sync_column_enabled
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.

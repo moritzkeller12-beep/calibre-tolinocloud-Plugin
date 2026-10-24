@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from . import ui_base_tests
+from .. import config
 from ._support import _ui_source_text, start_cdp_stubs, stop_cdp_stubs
 from unittest.mock import patch
 
@@ -133,6 +134,43 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertIs(settings, seen[1][1])
         self.assertIs(metadata, seen[1][2])
         self.assertTrue(settings["sync_column_enabled"])
+
+    def test_sync_column_uses_global_settings_not_visible_values(self):
+        ui_module = self._ui_module()
+        original_preferences = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.PREFERENCES.update({
+                "accounts": [{"name": "konto", "partner_id": 4,
+                              "hardware_id": "hw", "refresh_token": "token",
+                              "state": {}}],
+                "active_account": "konto",
+                "use_tolino_column": True,
+            })
+            cases = (({"#tolino_id": {}}, 1, True),
+                     ({"#tolino_id": {}}, 2, False),
+                     ({}, 1, False))
+            for fields, account_count, expected in cases:
+                with self.subTest(fields=fields, account_count=account_count):
+                    config.PREFERENCES["accounts"] = [
+                        {"name": "konto-%d" % index, "partner_id": 4,
+                         "hardware_id": "hw", "refresh_token": "token",
+                         "state": {}}
+                        for index in range(account_count)]
+                    config.PREFERENCES["active_account"] = "konto-0"
+                    settings = self._settings()
+                    dashboard = self._dashboard(ui_module, settings)
+                    dashboard.gui.current_db = type(
+                        "Database", (), {"field_metadata": fields})()
+                    dashboard._save_visible_account = lambda _values: None
+                    dashboard._local_metadata = lambda: {}
+                    dashboard._start_prepare_worker = lambda *_args: None
+                    dashboard.start_sync()
+                    self.assertIs(expected, dashboard.sync_column_enabled)
+                    self.assertIs(expected, settings["sync_column_enabled"])
+        finally:
+            config.PREFERENCES = original_preferences
+            ui_module._restore_stubs_for_tests()
 
     def test_without_a_token_it_does_not_start_comparison(self):
         ui_module = self._ui_module()
