@@ -36,13 +36,16 @@ def local_metadata(dialog, iter_books=None, metadata_for=None):
             identifier = (state_key_for(state, book_id)
                           or "calibre-%s" % book_id)
             missing.append(metadata_uuid(item))
+        identifiers = _metadata_value(item, "identifiers", {}) or {}
+        isbn = (_metadata_value(item, "isbn", "")
+                or (identifiers.get("isbn", "")
+                    if isinstance(identifiers, dict) else ""))
         metadata[book_id] = {
             "uuid": identifier,
             "title": _metadata_value(item, "title"),
             "authors": _display_value(_metadata_value(
                 item, "authors", _metadata_value(item, "author"))),
-            "isbn": _display_value(_metadata_value(
-                item, "isbn", _metadata_value(item, "identifiers"))),
+            "isbn": _display_value(isbn),
             "formats": _metadata_value(item, "formats"),
             "last_modified": str(_metadata_value(item, "last_modified")),
             "tolino_id": (metadata_tolino_id(item)

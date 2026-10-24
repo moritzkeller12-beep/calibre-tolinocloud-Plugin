@@ -330,6 +330,34 @@ class SyncPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             safe_format_path(OldDatabase(), 2, "../EPUB")
 
+    def test_local_metadata_reads_isbn_from_calibre_identifiers(self):
+        from ._support import load_ui_module
+        ui_module = load_ui_module(lambda *args, **kwargs: None)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        local_metadata = ui_module.dashboard._dashboard_plan.local_metadata
+
+        class Db:
+            field_metadata = {}
+
+        class Dialog:
+            gui = type("Gui", (), {"current_db": Db()})()
+            sync_column_enabled = False
+
+            @staticmethod
+            def values():
+                return {"state": {}, "preferred_formats": []}
+
+        metadata = type("Metadata", (), {
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "title": "Buch", "authors": ["Autor"],
+            "identifiers": {"isbn": "9783161484100", "amazon": "B00X123"},
+            "formats": [], "last_modified": "now", "series": "",
+        })()
+        result = local_metadata(
+            Dialog(), iter_books=lambda _db: [1],
+            metadata_for=lambda _db, _book_id: metadata)
+        self.assertEqual("9783161484100", result[1]["isbn"])
+
     def test_cover_bytes_handles_bytes_paths_and_unexpected_values(self):
         class Database:
             def __init__(self, value):
