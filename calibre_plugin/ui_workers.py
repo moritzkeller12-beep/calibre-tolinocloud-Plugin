@@ -466,6 +466,12 @@ class SyncWorker(QObject):
             operation["needs_write"] = (tolino_id, series) not in known
             if not operation["needs_write"]:
                 remember_collection(self.state, book_uuid, series)
+                self._finish_operation(operation, OP_SKIPPED,
+                                       reason="schon in der Cloud")
+                self._persist_state()
+                done += 1
+                self._refresh_counts()
+                continue
             if operation["needs_write"]:
                 self.progress.emit(done, total,
                                    "Serie in der Cloud: %s" % series)

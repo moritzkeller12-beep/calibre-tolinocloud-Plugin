@@ -52,7 +52,8 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal": self._signal_descriptor()[0]})
         calls = {"pairs_reads": 0, "added": [], "progress": [],
-                 "completed": None, "failed": None, "read_marks": []}
+                 "completed": None, "failed": None, "read_marks": [],
+                 "worker": None}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -83,6 +84,7 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
             with patch("calibre_plugin.client.TolinoClient", FakeClient):
                 worker = ui_module.workers.SyncWorker(settings, [], [], [], series_map,
                                              read_marks, read_unmarks)
+                calls["worker"] = worker
                 worker.progress.connect(
                     lambda *args: calls["progress"].append(args))
                 worker.completed.connect(
@@ -113,6 +115,10 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
         emitted = calls["completed"][0]
         self.assertEqual(["Adamsberg"], emitted["u1"]["collections"])
         self.assertEqual(["Neu"], emitted["u2"]["collections"])
+        # Nur die neu geschriebene Sammlung zählt im Abschlussbericht;
+        # die bestehende Zuordnung wird als übersprungen ausgewiesen.
+        self.assertEqual(1, calls["worker"].outcome["collections"])
+        self.assertEqual(1, calls["worker"].outcome["skipped"])
 
     def test_remembered_collections_skip_the_cloud_entirely(self):
         """Zweiter Sync mit denselben Serien: nichts zu tun, also auch
