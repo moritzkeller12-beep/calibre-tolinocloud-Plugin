@@ -1242,7 +1242,8 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(
             "calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction",
             plugin.actual_plugin)
-        self.assertEqual("images/tolino_cloud_sync.png", plugin.icon)
+        self.assertFalse(hasattr(plugin, "icon"))
+        self.assertFalse(hasattr(plugin, "has_html"))
         self.assertEqual((5, 0, 0), tuple(plugin.minimum_calibre_version))
         self.assertEqual("InterfaceAction", plugin.type)
 

@@ -332,7 +332,7 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
     berücksichtigt. Bücher, die ohnehin hochgeladen werden, werden NIE
     zusätzlich gepatcht – der Upload trägt die Metadaten mit.
 
-    Returns (kept_uploads, meta_updates).
+    Returns (uploads, meta_updates); uploads are returned unchanged.
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
@@ -362,8 +362,8 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
         selected_format = next((f for f in preferred_formats if f in available), None)
         if not selected_format:
             continue
-        fingerprint = old.get("meta_fp")
-        if fingerprint and fingerprint == metadata_fingerprint(metadata):
+        stored_meta_fp = old.get("meta_fp")
+        if stored_meta_fp and stored_meta_fp == metadata_fingerprint(metadata):
             continue
         fields = metadata_update_fields(metadata)
         if not fields:

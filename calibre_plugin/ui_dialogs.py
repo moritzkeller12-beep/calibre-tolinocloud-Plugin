@@ -1003,10 +1003,6 @@ class InventoryDialog(QDialog):
                 "Es wurde nichts geändert: Die markierten Bücher liegen nicht "
                 "in tolino oder sind bereits zum Löschen markiert.")
             return
-        titles = ["- %s" % (row.get("title") or "ohne Titel")
-                  for row in candidates]
-        if len(titles) > 20:
-            titles = titles[:20] + ["… und %d weitere" % (len(titles) - 20)]
         # Die endgültige Löschliste wird einmalig vor dem Sync bestätigt.
         self._sync_checks_to_rows()
         for row in candidates:
