@@ -9,6 +9,10 @@ from build_plugin import (ICON, MARKER, ROOT, SOURCE, build_plugin,
 
 
 class PluginModuleGraphTests(unittest.TestCase):
+    def test_workflow_is_stored_under_github_actions_directory(self):
+        workflow = ROOT / ".github" / "workflows" / "ci.yml"
+        self.assertTrue(workflow.is_file(), "GitHub Actions workflow path is invalid")
+
     def test_graph_includes_static_and_relative_from_import_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)
