@@ -208,7 +208,7 @@ _IDB_SNIPPET = r"""
       open.onerror = function () { finish(); };
     } catch (e) { finish(); }
   });
-})('%s')
+})(%s)
 """
 
 

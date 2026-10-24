@@ -770,6 +770,12 @@ class LiveGrabTests(unittest.TestCase):
         self.assertEqual([reader_hw], grabbed["hardware"])
         self.assertEqual(["reader-token-db"], grabbed["idb"])
 
+    def test_idb_expression_passes_database_name_as_one_javascript_string(self):
+        from ..cdp_scripts import idb_expression
+        expression = idb_expression("tolino-user")
+        self.assertTrue(expression.rstrip().endswith('})("tolino-user")'))
+        self.assertNotIn("'\"", expression)
+
     def test_grab_snippets_parse_json_blob_store_values(self):
         """Top-Level-Speicher-Werte sind Strings: JSON-Blobs
         (oidc.user:...) muessen geparst werden, sonst ist der aktuelle
