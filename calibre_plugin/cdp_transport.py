@@ -85,10 +85,13 @@ class _Ws:
 
     def recv_json(self, timeout=10):
         deadline = time.time() + max(1, timeout)
+        fragmented = bytearray()
+        fragmented_opcode = None
         while True:
             # RFC-6455-Framekopf: byte 0 = FIN/opcode, byte 1 = MASK bit + Laenge.
             # Byte 1 auszulassen kappte jede CDP-Antwort an falscher Stelle.
             header = self._read_exact(2, deadline)
+            final = bool(header[0] & 0x80)
             opcode = header[0] & 0x0F
             length = header[1]
             masked = length & 0x80
@@ -107,8 +110,24 @@ class _Ws:
             if opcode in (0x9, 0xA):  # ping/pong: ignore
                 continue
             if opcode in (0x1, 0x2):
+                if not final:
+                    fragmented = bytearray(payload)
+                    fragmented_opcode = opcode
+                    continue
+                message = payload
+            elif opcode == 0x0 and fragmented_opcode is not None:
+                fragmented.extend(payload)
+                if not final:
+                    continue
+                message = bytes(fragmented)
+                opcode = fragmented_opcode
+                fragmented = bytearray()
+                fragmented_opcode = None
+            else:
+                continue
+            if opcode == 0x1:
                 try:
-                    return json.loads(payload.decode("utf-8"))
+                    return json.loads(message.decode("utf-8"))
                 except ValueError:
                     continue
 
