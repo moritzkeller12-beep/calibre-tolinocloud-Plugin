@@ -649,7 +649,7 @@ class TolinoClient:
         body, content_type = self._multipart({}, file_path)
         data = self._request(BASE_URL + "/upload", "POST", body,
                              content_type=content_type)
-        deliverable = data.get("metadata", {}).get("deliverableId")
+        deliverable = (data.get("metadata") or {}).get("deliverableId")
         if not deliverable:
             raise TolinoApiError("Upload ohne deliverableId in der Antwort.", code="N04", short="tolino hat den Upload nicht bestätigt.")
         return str(deliverable)

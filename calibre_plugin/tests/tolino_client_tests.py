@@ -1456,6 +1456,15 @@ class DownloadMetadataTests(unittest.TestCase):
                                              "https://example.invalid/book"}})
         return client
 
+    def test_upload_handles_null_metadata_response_as_missing_id(self):
+        client = self._client()
+        client._multipart = lambda *_args, **_kwargs: (b"body", "multipart/form-data")
+        client._request = lambda *_args, **_kwargs: {"metadata": None}
+        from ..tolino import TolinoApiError
+        with self.assertRaises(TolinoApiError) as caught:
+            client.upload("book.epub")
+        self.assertEqual("N04", caught.exception.code)
+
     def test_download_returns_content_without_an_inventory_request(self):
         calls = []
         client = self._client()
