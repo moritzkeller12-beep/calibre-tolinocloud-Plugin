@@ -1,6 +1,7 @@
 """Dialoge: Vergleich, Aktionen und Loeschbestaetigung."""
 
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -1680,4 +1681,18 @@ class BackgroundCallTests(unittest.TestCase):
                 if isinstance(node.args[0], ast.Lambda):
                     violations.append((filename, node.lineno,
                                        function.value.attr))
+        self.assertEqual([], violations)
+
+    def test_no_ui_module_uses_a_lambda_as_worker_signal_receiver(self):
+        source = _ui_source_text()
+        ignored = {"thread.finished.connect(lambda: _discard_item(_CALL_THREADS, thread))",
+                   "thread.finished.connect(\n            lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))"}
+        violations = []
+        for line_number, line in enumerate(source.splitlines(), 1):
+            if "lambda" not in line or not re.search(
+                    r"\b(?:done|failed|valid|invalid|busy|completed|ready)\.connect", line):
+                continue
+            if any(fragment in line for fragment in ignored):
+                continue
+            violations.append((line_number, line.strip()))
         self.assertEqual([], violations)
