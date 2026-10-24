@@ -19,7 +19,9 @@ jobs:
         run: python3 -m pip install --quiet pycryptodome pyflakes
 
       - name: Unit tests
-        run: python3 -m unittest calibre_plugin.test_sync
+        run: |
+          python3 build_plugin.py
+          python3 -m unittest calibre_plugin.test_sync
 
       - name: Lint (unused imports, undefined names)
         run: python3 -m pyflakes calibre_plugin/ __init__.py build_plugin.py
