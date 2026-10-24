@@ -485,6 +485,16 @@ class TolinoClient:
                     # Nur Verbindungsfehler vor dem Senden erlauben einen
                     # anderen Transport. Timeout und Fehler nach dem Versand
                     # könnten den Token bereits verbraucht haben.
+                    if name == "curl_cffi":
+                        try:
+                            from curl_cffi.requests.exceptions import Timeout as CurlTimeout
+                        except ImportError:
+                            CurlTimeout = ()
+                        if CurlTimeout and isinstance(exc, CurlTimeout):
+                            raise TolinoApiError(
+                                "Zeitüberschreitung bei der Verbindung zu tolino.",
+                                code="N01",
+                                short="Zeitüberschreitung bei der Verbindung.") from exc
                     cause = exc
                     if isinstance(exc, subprocess.TimeoutExpired):
                         raise TolinoApiError(
@@ -784,15 +794,27 @@ class TolinoClient:
                                  short="Der Download-Link verwendet keine sichere HTTPS-Verbindung.")
         headers = {"User-Agent": BROWSER_USER_AGENT}
         host = parsed_content_url.hostname.casefold().rstrip(".")
-        if host == "pageplace.de" or host.endswith(".pageplace.de"):
-            headers.update({
-                "t_auth_token": self.access,
-                "hardware_id": self.hardware,
-                "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
-            })
+        authenticated_host = (
+            host == "pageplace.de" or host.endswith(".pageplace.de"))
         request = Request(content_url, headers=headers)
+        if authenticated_host:
+            # urllib forwards regular Request headers over cross-host redirects.
+            # Keep account credentials off redirect requests; a signed HTTPS
+            # redirect to a CDN remains supported without disclosing the token.
+            request.add_unredirected_header("t_auth_token", self.access)
+            request.add_unredirected_header("hardware_id", self.hardware)
+            request.add_unredirected_header(
+                "reseller_id", self.partner.get("reseller_id", str(self.partner_id)))
         try:
             with urlopen(request, timeout=self.timeout) as response:
+                get_final_url = getattr(response, "geturl", None)
+                final_url = urlsplit(get_final_url() if callable(get_final_url)
+                                     else content_url)
+                if final_url.scheme.casefold() != "https" or not final_url.hostname:
+                    raise TolinoApiError(
+                        "Der Download wurde auf eine unsichere URL umgeleitet.",
+                        code="N05",
+                        short="tolino hat einen unsicheren Download-Link geliefert.")
                 content = response.read()
         except (HTTPError, URLError, OSError) as exc:
             raise TolinoApiError("Download von Tolino fehlgeschlagen: %s" %

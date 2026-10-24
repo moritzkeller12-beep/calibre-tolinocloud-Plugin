@@ -395,6 +395,9 @@ class TolinoClientFeatureTests(unittest.TestCase):
             def __enter__(self):
                 return self
 
+            def geturl(self):
+                return "https://example.invalid/book"
+
             def __exit__(self, *args):
                 return False
 
@@ -406,22 +409,26 @@ class TolinoClientFeatureTests(unittest.TestCase):
                 "DownloadInfo": {"contentUrl": url}}
 
             def request(value, timeout):
-                captured.append((value.full_url, value.header_items()))
+                captured.append((value.full_url, dict(value.headers),
+                                 dict(value.unredirected_hdrs)))
                 return RawResponse()
 
             with patch("calibre_plugin.tolino.urlopen", request):
                 return client.download("book-1")
 
         self.assertEqual(b"content", run_download("https://cdn.pageplace.de/file"))
-        trusted_headers = dict((key.casefold(), value)
-                               for key, value in captured[-1][1])
-        self.assertIn("t_auth_token", trusted_headers)
-        self.assertIn("hardware_id", trusted_headers)
-        self.assertIn("reseller_id", trusted_headers)
+        trusted_headers = {key.casefold(): value
+                           for key, value in captured[-1][1].items()}
+        trusted_unredirected = {
+            key.casefold() for key in captured[-1][2]}
+        self.assertNotIn("t_auth_token", trusted_headers)
+        self.assertIn("t_auth_token", trusted_unredirected)
+        self.assertIn("hardware_id", trusted_unredirected)
+        self.assertIn("reseller_id", trusted_unredirected)
 
         self.assertEqual(b"content", run_download("https://cdn.example/file"))
-        foreign_headers = dict((key.casefold(), value)
-                               for key, value in captured[-1][1])
+        foreign_headers = {key.casefold(): value
+                           for key, value in captured[-1][1].items()}
         self.assertNotIn("t_auth_token", foreign_headers)
         self.assertNotIn("hardware_id", foreign_headers)
         self.assertNotIn("reseller_id", foreign_headers)
@@ -430,6 +437,22 @@ class TolinoClientFeatureTests(unittest.TestCase):
         with self.assertRaises(TolinoApiError) as caught:
             run_download("http://cdn.pageplace.de/file")
         self.assertEqual("N05", caught.exception.code)
+
+    def test_download_credentials_are_not_forwarded_across_redirects(self):
+        from urllib.request import HTTPRedirectHandler, Request
+
+        request = Request("https://cdn.pageplace.de/file")
+        request.add_unredirected_header("t_auth_token", "secret-token")
+        request.add_unredirected_header("hardware_id", "device-id")
+        request.add_unredirected_header("reseller_id", "42")
+        redirect = HTTPRedirectHandler().redirect_request(
+            request, None, 302, "Found", {}, "https://attacker.example/collect")
+
+        self.assertIsNotNone(redirect)
+        forwarded = {key.casefold() for key in redirect.header_items()}
+        self.assertNotIn("t_auth_token", forwarded)
+        self.assertNotIn("hardware_id", forwarded)
+        self.assertNotIn("reseller_id", forwarded)
 
     def test_download_resolves_content_url_and_returns_bytes(self):
         client, calls = self._patching_client([
@@ -442,6 +465,9 @@ class TolinoClientFeatureTests(unittest.TestCase):
 
             def __enter__(self):
                 return self
+
+            def geturl(self):
+                return "https://example.invalid/book"
 
             def __exit__(self, *args):
                 return False
@@ -623,20 +649,31 @@ class CurlTransportTests(unittest.TestCase):
     def test_curl_cffi_timeout_does_not_replay_the_single_use_grant(self):
         import calibre_plugin.tolino as tolino_module
 
+        import sys
+
+        CurlTimeout = type("CurlTimeout", (OSError,), {})
+        fake_exceptions = type("Exceptions", (), {"Timeout": CurlTimeout})
+        fake_requests = type("Requests", (), {"exceptions": fake_exceptions})
+        fake_curl_cffi = type("CurlCffi", (), {"requests": fake_requests})
         client = self._client()
         calls = []
 
         class BrokenSession:
             def post(self, *_args, **_kwargs):
                 calls.append("curl_cffi")
-                raise TimeoutError("request timed out")
+                raise CurlTimeout("request timed out")
 
         def must_not_run(*_args, **_kwargs):
             calls.append("curl")
             raise AssertionError("must not replay a possibly consumed grant")
 
-        with patch.object(tolino_module, "_impersonate_session",
-                          return_value=BrokenSession()), \
+        with patch.dict(sys.modules, {
+                    "curl_cffi": fake_curl_cffi,
+                    "curl_cffi.requests": fake_requests,
+                    "curl_cffi.requests.exceptions": fake_exceptions,
+                }), \
+                patch.object(tolino_module, "_impersonate_session",
+                             return_value=BrokenSession()), \
                 patch.object(tolino_module, "_curl_binary",
                              return_value="/usr/bin/curl"), \
                 patch.object(tolino_module, "_http_post_via_curl", must_not_run), \
@@ -1439,6 +1476,10 @@ class DownloadMetadataTests(unittest.TestCase):
         @staticmethod
         def read():
             return b"EPUB-DATA"
+
+        @staticmethod
+        def geturl():
+            return "https://example.invalid/book"
 
         def __enter__(self):
             return self

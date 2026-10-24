@@ -121,14 +121,6 @@ def book_uuid(database, book_id, item=None, sources=None, rejected=None):
     return ""
 
 
-def _book_number(value):
-    """Convert a Calibre book identifier to an integer when possible."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def migrate_state_keys(metadata_by_id, state):
     """Migrate fallback state keys to real UUIDs when the UUID becomes known."""
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):

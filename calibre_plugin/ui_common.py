@@ -39,22 +39,13 @@ __all__ = [
     "QTextEdit", "QThread", "QVBoxLayout", "Qt", "SyncJob",
     "_ORPHANED_THREADS", "_apply_busy", "_dialog_busy",
     "_display_value", "_format_signatures", "_login_failure_guidance",
-    "_metadata_value", "_plugin_version", "_stop_thread", "plural",
+    "_metadata_value", "_stop_thread", "plural",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
     "_discard_item",
     "pyqtSignal", "safe_format_path",
     "sync_result_detail",
     "sync_result_text",
 ]
-
-
-def _plugin_version():
-    """Plugin version string for display; safe outside Calibre."""
-    try:
-        from . import PLUGIN_VERSION
-    except Exception:
-        return "unbekannt"
-    return ".".join(str(part) for part in PLUGIN_VERSION)
 
 
 def _metadata_value(item, name, default=""):

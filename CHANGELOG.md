@@ -6,6 +6,7 @@
 - Buchdownloads laufen im Hintergrund; EPUB und PDF werden passend gespeichert.
 - Der Abschlussbericht zählt nur neu geschriebene Sammlungen.
 - Die GitHub-Tests starten wieder und bauen das Plugin vorab.
+- Download-Zugangsdaten werden bei Weiterleitungen nicht weitergegeben; Refresh-Timeouts lösen Einmal-Tokens nicht erneut ein.
 
 ## 0.1.00
 
