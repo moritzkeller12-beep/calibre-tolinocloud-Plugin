@@ -937,9 +937,10 @@ class InventoryDialog(QDialog):
             self, "Buch speichern", suggested, file_filter)
         if not path:
             return
+        self._download_path = path
         self._start_action(
             lambda: self._download_content(tolino_id),
-            lambda result: self._download_finished(path, result),
+            self._download_finished,
             self._download_failed,
             "Buchdatei wird aus tolino geladen …")
 
@@ -950,7 +951,8 @@ class InventoryDialog(QDialog):
             return None
         return client.download(tolino_id)
 
-    def _download_finished(self, path, result):
+    def _download_finished(self, result):
+        path = self._download_path
         self._end_action()
         if result is None:
             return

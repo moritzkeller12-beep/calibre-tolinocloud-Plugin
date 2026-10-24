@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from . import ui_base_tests
 from ..comparison import compare_inventory
 from ..plan import merge_removals
@@ -1614,6 +1615,31 @@ class BackgroundCallTests(unittest.TestCase):
         body = source.split("    def download_selected(", 1)[1].split(
             "\n    def ", 1)[0]
         self.assertIn("_start_action", body)
+        self.assertIn("self._download_finished", body)
+        self.assertNotIn("lambda result: self._download_finished", body)
         dialogs = source.split("    def _start_action(", 1)[1].split(
             "\n    def ", 1)[0]
         self.assertIn("start_call", dialogs)
+
+    def test_ui_worker_result_signals_never_connect_lambdas(self):
+        """Qt callbacks on worker signals must be bound GUI-object methods."""
+        import ast
+        base = Path(__file__).resolve().parents[1]
+        signal_names = {"done", "failed", "valid", "invalid", "busy",
+                        "completed", "ready"}
+        violations = []
+        for filename in ("ui_dialogs.py", "ui_dashboard.py"):
+            tree = ast.parse((base / filename).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                function = node.func
+                if not (isinstance(function, ast.Attribute)
+                        and function.attr == "connect"
+                        and isinstance(function.value, ast.Attribute)
+                        and function.value.attr in signal_names):
+                    continue
+                if isinstance(node.args[0], ast.Lambda):
+                    violations.append((filename, node.lineno,
+                                       function.value.attr))
+        self.assertEqual([], violations)
