@@ -358,6 +358,38 @@ class SyncPlanTests(unittest.TestCase):
             metadata_for=lambda _db, _book_id: metadata)
         self.assertEqual("9783161484100", result[1]["isbn"])
 
+    def test_upload_job_skips_cover_when_cover_read_raises_os_error(self):
+        from ._support import load_ui_module
+        ui_module = load_ui_module(lambda *args, **kwargs: None)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        dashboard_plan = ui_module.dashboard._dashboard_plan
+        warnings = []
+
+        class Database:
+            @staticmethod
+            def has_id(_book_id):
+                return True
+
+            @staticmethod
+            def format_abspath(_book_id, _format_name, index_is_id=True):
+                return __file__
+
+        dialog = type("Dialog", (), {
+            "gui": type("Gui", (), {"current_db": Database()})(),
+            "temp_files": [],
+        })()
+        with patch.object(dashboard_plan, "cover_bytes",
+                          side_effect=OSError("cover unavailable")):
+            jobs, skipped = dashboard_plan.upload_jobs(
+                dialog, {"upload_covers": True},
+                {1: {"title": "Buch"}}, [(1, "u1", "EPUB", None)],
+                warning=warnings.append)
+        self.assertEqual(1, len(jobs))
+        self.assertIsNone(jobs[0].cover_path)
+        self.assertEqual([], skipped)
+        self.assertTrue(any("cover unavailable" in message
+                            for message in warnings))
+
     def test_cover_bytes_handles_bytes_paths_and_unexpected_values(self):
         class Database:
             def __init__(self, value):

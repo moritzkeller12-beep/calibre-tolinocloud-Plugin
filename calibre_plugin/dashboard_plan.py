@@ -223,7 +223,7 @@ def upload_jobs(dialog, settings, metadata, uploads, warning=None,
         if settings.get("upload_covers"):
             try:
                 cover = cover_bytes(dialog.gui.current_db, book_id)
-            except ValueError as exc:
+            except Exception as exc:
                 warning("Cover für Buch %s nicht verfügbar: %s" % (book_id, exc))
                 cover = None
             suffix = image_suffix(cover)
