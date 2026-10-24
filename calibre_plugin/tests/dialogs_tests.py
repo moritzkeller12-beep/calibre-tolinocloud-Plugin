@@ -1588,6 +1588,36 @@ class BackgroundCallTests(unittest.TestCase):
                 type("Idx", (), {"row": staticmethod(lambda: 0)})()])})()
         return dialog
 
+    def test_pdf_content_changes_the_saved_epub_suffix_to_pdf(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        dialog = self._dialog(ui_module)
+        dialog._download_path = "/tmp/chosen.epub"
+        dialog._end_action = lambda: None
+        written = {}
+
+        class Handle:
+            def __init__(self, path, mode):
+                written["path"] = path
+                written["mode"] = mode
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def write(self, data):
+                written["data"] = data
+
+        ui_module.dialogs.open = Handle
+        ui_module.dialogs.info_dialog = lambda *args, **kwargs: None
+        dialog._download_finished(b"%PDF-1.7 test")
+        self.assertEqual("/tmp/chosen.pdf", written["path"])
+        self.assertEqual(b"%PDF-1.7 test", written["data"])
+
     def test_the_download_leaves_the_gui_thread(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
@@ -1623,6 +1653,7 @@ class BackgroundCallTests(unittest.TestCase):
         self.assertIn("_start_action", body)
         self.assertIn("self._download_finished", body)
         self.assertNotIn("lambda result: self._download_finished", body)
+        self.assertIn("EPUB (*.epub);;PDF (*.pdf)", body)
         dialogs = source.split("    def _start_action(", 1)[1].split(
             "\n    def ", 1)[0]
         self.assertIn("start_call", dialogs)

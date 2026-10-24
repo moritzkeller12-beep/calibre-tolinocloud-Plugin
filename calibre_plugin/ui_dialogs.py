@@ -927,14 +927,11 @@ class InventoryDialog(QDialog):
         # Dateidialog soll keinen Download ausloesen.
         title = str(row.get("title") or "tolino-book")
         title = re.sub(r'[\\/:*?"<>|]', "_", title).strip(" .") or "tolino-book"
-        formats = normalize_formats(row.get("formats") or ("EPUB",))
-        extension = ".pdf" if "PDF" in formats and "EPUB" not in formats else ".epub"
-        if "EPUB" in formats and "PDF" in formats:
-            extension = ".epub"
+        extension = ".epub"
         suggested = title + extension
-        file_filter = "PDF (*.pdf)" if extension == ".pdf" else "EPUB (*.epub)"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Buch speichern", suggested, file_filter)
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Buch speichern", suggested,
+            "EPUB (*.epub);;PDF (*.pdf)")
         if not path:
             return
         self._download_path = path
@@ -956,6 +953,8 @@ class InventoryDialog(QDialog):
         self._end_action()
         if result is None:
             return
+        if result[:4] == b"%PDF" and path.casefold().endswith(".epub"):
+            path = path[:-5] + ".pdf"
         try:
             with open(path, "wb") as handle:
                 handle.write(result)
