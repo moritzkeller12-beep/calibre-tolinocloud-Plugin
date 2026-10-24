@@ -4,7 +4,7 @@ except ImportError:
     InterfaceActionBase = object
 
 
-PLUGIN_VERSION = (0, 1, 0)
+PLUGIN_VERSION = (0, 1, 1)
 
 # GPL-3.0-or-later: siehe LICENSE (kompatibel zu Calibre, das unter GPL-3 steht).
 __license__ = "GPL-3.0-or-later"

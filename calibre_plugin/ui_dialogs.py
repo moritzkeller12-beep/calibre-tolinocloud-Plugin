@@ -7,7 +7,7 @@ from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import (comparison_group, selected_book_ids,
                          sort_comparison_rows)
-from .library import normalize_formats, selected_table_rows
+from .library import selected_table_rows
 from .tolino import report_error
 from . import inventory_selection as _inventory_selection
 from .ui_common import _set_enabled, plural, start_call
@@ -929,7 +929,7 @@ class InventoryDialog(QDialog):
         title = re.sub(r'[\\/:*?"<>|]', "_", title).strip(" .") or "tolino-book"
         extension = ".epub"
         suggested = title + extension
-        path, selected_filter = QFileDialog.getSaveFileName(
+        path, _ = QFileDialog.getSaveFileName(
             self, "Buch speichern", suggested,
             "EPUB (*.epub);;PDF (*.pdf)")
         if not path:

@@ -2523,8 +2523,8 @@ class VersionDocumentationTests(unittest.TestCase):
         base = Path(__file__).resolve().parent.parent.parent
         readme = (base / "README.md").read_text(encoding="utf-8")
         changelog = (base / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn("Version-0.1.00-blue", readme)
-        self.assertTrue(changelog.startswith("# Änderungen\n\n## 0.1.00"))
+        self.assertIn("Version-0.1.01-blue", readme)
+        self.assertTrue(changelog.startswith("# Änderungen\n\n## 0.1.01"))
 
     def test_the_top_changelog_entry_names_the_plugin_version(self):
         """Der oberste CHANGELOG-Eintrag ist die aktuelle Version."""

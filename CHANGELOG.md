@@ -1,5 +1,12 @@
 # Änderungen
 
+## 0.1.01
+
+- Die `#tolino_id`-Spalte wird bei einem einzelnen Konto wieder gelesen und gefüllt.
+- Buchdownloads laufen im Hintergrund; EPUB und PDF werden passend gespeichert.
+- Der Abschlussbericht zählt nur neu geschriebene Sammlungen.
+- Die GitHub-Tests starten wieder und bauen das Plugin vorab.
+
 ## 0.1.00
 
 - Calibre-Bibliotheken mit tolino abgleichen: Bücher und Metadaten übertragen,
