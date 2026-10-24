@@ -175,8 +175,21 @@ def _http_get_json(url, timeout=5):
 
 
 def _ws_path_to_host_port(path):
-    host, _, rest = path.partition(":")
-    port, _, ws_path = rest.partition("/")
+    """Parse a DevTools websocket address, including bracketed IPv6 hosts."""
+    value = str(path)
+    if value.startswith("["):
+        end = value.find("]")
+        if end < 0 or value[end + 1:end + 2] != ":":
+            raise ValueError("invalid bracketed websocket host")
+        host = value[1:end]
+        rest = value[end + 2:]
+    else:
+        host, separator, rest = value.partition(":")
+        if not separator:
+            raise ValueError("websocket host has no port")
+    port, separator, ws_path = rest.partition("/")
+    if not separator:
+        raise ValueError("websocket path is missing")
     return host, int(port), "/" + ws_path
 
 

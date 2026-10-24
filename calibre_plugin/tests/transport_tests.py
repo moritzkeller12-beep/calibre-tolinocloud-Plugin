@@ -8,10 +8,18 @@ import unittest
 from unittest.mock import patch
 
 from .. import transport
-from ..cdp_transport import _Ws
+from ..cdp_transport import _Ws, _ws_path_to_host_port
 
 
 class CurlTransportByteSafetyTests(unittest.TestCase):
+    def test_websocket_path_parser_supports_ipv4_and_ipv6(self):
+        self.assertEqual(("127.0.0.1", 9222, "/devtools/page/abc"),
+                         _ws_path_to_host_port(
+                             "127.0.0.1:9222/devtools/page/abc"))
+        self.assertEqual(("::1", 9222, "/devtools/page/abc"),
+                         _ws_path_to_host_port(
+                             "[::1]:9222/devtools/page/abc"))
+
     def test_recv_json_reassembles_a_two_frame_text_message(self):
         left, right = socket.socketpair()
         left.setblocking(True)
