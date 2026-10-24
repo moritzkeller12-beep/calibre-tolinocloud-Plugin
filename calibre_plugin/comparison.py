@@ -1,0 +1,565 @@
+"""Conservative Calibre-to-tolino inventory comparison and fingerprints."""
+import hashlib
+
+from .inventory import inventory_records, normalize_inventory_record
+from .identifiers import valid_book_uuid
+from .library import metadata_tolino_id, normalize_formats
+from .matching import (author_tokens as _author_tokens,
+                       authors_match as _authors_match,
+                       normalize_isbn as _normalize_isbn,
+                       normalize_match_text, normalize_title,
+                       normalized_authors as _normalized_authors)
+
+
+def selection_drop_reasons(metadata_by_id, state, upload_ids, metadata_ids,
+                           preferred_formats=()):
+    """Warum ausgewaehlte Aktionen nicht in den Plan kommen.
+
+    Die Antwort ohne Lauf nennt bisher nur Zahlen. Diese Auswertung nennt
+    den Grund je Auswahlgruppe, damit ein Feldbefund ohne Log einzuordnen
+    ist. Reine Auswertung ohne Netz und ohne Calibre-Datenbank.
+    """
+    formats = normalize_formats(preferred_formats)
+    books = {}
+    if isinstance(metadata_by_id, dict):
+        for book_id, item in metadata_by_id.items():
+            books[book_id] = item
+            books.setdefault(str(book_id), item)
+    reasons = {"uploads": {}, "metadata": {}}
+
+    def add(group, reason):
+        reasons[group][reason] = reasons[group].get(reason, 0) + 1
+
+    def format_ok(item):
+        available = set(normalize_formats(item.get("formats")))
+        return any(fmt in available for fmt in formats)
+
+    for book_id in upload_ids or ():
+        item = books.get(book_id)
+        if not isinstance(item, dict):
+            add("uploads", "nicht in der Calibre-Bibliothek")
+            continue
+        if not valid_book_uuid(item.get("uuid")):
+            add("uploads", "ohne gültige Calibre-Kennung")
+            continue
+        if not format_ok(item):
+            add("uploads", "ohne bevorzugtes Buchformat")
+            continue
+        add("uploads", "kein Upload nötig")
+    for book_id in metadata_ids or ():
+        item = books.get(book_id)
+        if not isinstance(item, dict):
+            add("metadata", "nicht in der Calibre-Bibliothek")
+            continue
+        book_uuid = valid_book_uuid(item.get("uuid"))
+        if not book_uuid:
+            add("metadata", "ohne gültige Calibre-Kennung")
+            continue
+        entry = state.get(book_uuid) if isinstance(state, dict) else None
+        if not isinstance(entry, dict) or not str(entry.get("tolino_id") or "").strip():
+            add("metadata", "ohne Cloud-Kopie im Zustand")
+            continue
+        if not format_ok(item):
+            add("metadata", "ohne bevorzugtes Buchformat")
+            continue
+        add("metadata", "bereits aktuell")
+    return reasons
+
+
+def is_valid_isbn(value):
+    """True for an ISBN-10/ISBN-13 with a correct check digit.
+
+    Only a valid ISBN may identify a book automatically; arbitrary digits
+    in the ISBN field are not a unique key.
+    """
+    digits = _normalize_isbn(value).upper()
+    if len(digits) == 10:
+        total = 0
+        for index, character in enumerate(digits):
+            if character == "X":
+                if index != 9:
+                    return False
+                digit = 10
+            elif character.isdigit():
+                digit = int(character)
+            else:
+                return False
+            total += digit * (10 - index)
+        return total % 11 == 0
+    if len(digits) == 13 and digits.isdigit():
+        total = sum((1 if index % 2 == 0 else 3) * int(character)
+                    for index, character in enumerate(digits))
+        return total % 10 == 0
+    return False
+
+
+def _metadata_text(metadata, *names):
+    for name in names:
+        value = metadata.get(name, "")
+        if value:
+            return str(value)
+    return ""
+
+
+def _file_changed(metadata, state_entry, format_name):
+    """True, wenn sich die Buchdatei seit dem letzten Sync geändert hat.
+
+    Nur aussagekräftig, wenn beide Seiten einen Content-Fingerabdruck
+    haben; sonst False – die Oberfläche schlägt dann Metadaten statt Upload vor.
+    """
+    if not format_name:
+        return False
+    current = content_fingerprint(metadata, format_name)
+    previous = str(state_entry.get("content_fp") or "")
+    return bool(current and previous and current != previous)
+
+
+def comparison_group(status):
+    """UI-Gruppe einer Vergleichszeile (stabil und ohne Qt)."""
+    if status in ("new_in_calibre", "changed"):
+        return "action"
+    if status in ("review", "duplicate_tolino", "not_matchable"):
+        return "review"
+    if status == "identical":
+        return "unchanged"
+    return "tolino_only"
+
+
+def _row_explanation(status, match_reason, file_changed):
+    """Klartext-Hinweis für eine Bestandszeile."""
+    if match_reason == "cloud_id_missing":
+        return ("In tolino vorhanden, aber nicht ansprechbar (kein Download, "
+                "kein Löschen). Ein Upload würde ein Duplikat erzeugen.")
+    if match_reason == "duplicate_title":
+        return "Titel mehrfach in tolino."
+    if match_reason == "title_only":
+        return ("Nur der Titel stimmt überein. Ein Upload würde vermutlich "
+                "ein Duplikat erzeugen.")
+    if match_reason == "ambiguous":
+        return "Mehrere mögliche Treffer in tolino."
+    if match_reason == "conflict":
+        return "Autor oder ISBN weichen ab."
+    if file_changed:
+        return "Buchdatei unterscheidet sich – Hochladen lädt die neue Datei."
+    if status == "identical":
+        if match_reason == "title_author":
+            return "Titel und Autor stimmen mit tolino überein."
+        return ("In beiden vorhanden, keine Unterschiede in den "
+                "geprüften Angaben gefunden.")
+    if status == "new_in_calibre":
+        return "Noch nicht in tolino – kann hochgeladen werden."
+    return "Nur Metadaten unterscheiden sich – kein erneuter Upload nötig."
+
+
+def _same_comparison_fields(metadata, remote, comparison_fields):
+    """True when every SELECTED comparison field is present and equal.
+
+    The field checkboxes therefore have a real effect: an unchecked field is
+    never compared, and a selected field with a missing local value is not
+    silently treated as a match.
+    """
+    fields = tuple(comparison_fields or ())
+    if not fields:
+        return False
+    title = _metadata_text(metadata, "title")
+    authors = _metadata_text(metadata, "authors", "author")
+    isbn = _metadata_text(metadata, "isbn", "identifiers")
+    values = {"title": title, "authors": authors, "isbn": isbn}
+    compared = False
+    for field in fields:
+        if field not in values:
+            continue
+        local = values[field]
+        if not str(local or "").strip():
+            return False
+        compared = True
+        if field == "isbn":
+            if _normalize_isbn(local) != _normalize_isbn(remote.get(field)):
+                return False
+        elif (normalize_match_text(local) !=
+              normalize_match_text(remote.get(field))):
+            return False
+    return compared
+
+
+def _read_flags(tolino_id, read_known, read_ids):
+    """Die vier zusammengehoerigen Lesestatus-Felder einer Zeile."""
+    is_read = read_known and bool(tolino_id) and str(tolino_id) in read_ids
+    return {
+        "read_known": read_known,
+        "read_status": ("read" if is_read else "unread") if read_known else "unknown",
+        "read_in_cloud": is_read,
+        "read": is_read,
+    }
+
+
+class _RemoteIndex:
+    """Cloud-Zeilen plus Lookup-Indizes -- in derselben Reihenfolge.
+
+    Die Zuordnung suchte frueher fuer JEDES Buch die ganze Cloud-Liste
+    erneut ab (quadratisch). Die Listen in den Indizes enthalten dieselben
+    Zeilen in derselben Reihenfolge; `matched` entscheidet weiterhin, ob
+    eine Zeile noch frei ist.
+    """
+
+    __slots__ = ("rows", "by_tolino_id", "by_uuid", "by_isbn", "by_title",
+                 "by_title_author", "title_counts")
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.by_tolino_id = {}
+        self.by_uuid = {}
+        self.by_isbn = {}
+        self.by_title = {}
+        self.by_title_author = {}
+        self.title_counts = {}
+        for index, row in enumerate(rows):
+            if row["tolino_id"]:
+                self.by_tolino_id.setdefault(row["tolino_id"], []).append(index)
+            if row["uuid"]:
+                self.by_uuid.setdefault(row["uuid"], []).append(index)
+            row_isbn = _normalize_isbn(row["isbn"])
+            if row_isbn and is_valid_isbn(row_isbn):
+                self.by_isbn.setdefault(row_isbn, []).append(index)
+            if not row["normalized_title"]:
+                continue
+            title = row["normalized_title"]
+            self.title_counts[title] = self.title_counts.get(title, 0) + 1
+            self.by_title.setdefault(title, []).append(index)
+            author_key = _normalized_authors(row["authors"])
+            if author_key:
+                self.by_title_author.setdefault((title, author_key), []).append(index)
+
+
+def _remote_rows(inventory, read_known, read_ids):
+    """Cloud-Bestand in die Zeilenform des Vergleichs bringen."""
+    rows = []
+    for item in inventory_records(inventory):
+        record = normalize_inventory_record(item)
+        # Auch Datensätze ohne eindeutige Cloud-ID bleiben sichtbar;
+        # andernfalls erschiene das Buch als neu und könnte ein Duplikat erzeugen.
+        tolino_id = (record["tolino_id"]
+                     if record["has_deliverable_id"] else "")
+        rows.append({
+            "book_id": None,
+            "uuid": valid_book_uuid(record["uuid"]),
+            "title": record["title"],
+            "authors": record["authors"],
+            "isbn": record["isbn"],
+            "tolino_id": tolino_id,
+            "cloud_id_missing": not record["has_deliverable_id"],
+            "status": "only_tolino",
+            "selected": False,
+            "file_changed": False,
+            **_read_flags(tolino_id, read_known, read_ids),
+            "explanation": "Nur in tolino – kann heruntergeladen werden.",
+            "normalized_title": normalize_title(record["title"]),
+        })
+    return rows
+
+
+def _find_remote_match(index, book_uuid, stored_id, local_isbn, title_key,
+                       author_key, compare_isbn, compare_title_author,
+                       matched):
+    """Ersten eindeutigen Treffer in der dokumentierten Reihenfolge finden.
+
+    Rueckgabe ``(row_index, reason, ambiguous, candidates)``. Ein Treffer
+    verbraucht die Zeile erst beim Aufrufer; mehrere freie Treffer auf
+    denselben Schluessel sind ein Prueffall und werden nicht nach
+    Listenposition ausgewaehlt.
+    """
+    attempts = []
+    if stored_id:
+        attempts.append((index.by_tolino_id.get(stored_id, ()),
+                         "stored_id_or_uuid"))
+    if book_uuid:
+        attempts.append((index.by_uuid.get(book_uuid, ()),
+                         "stored_id_or_uuid"))
+    if compare_isbn and is_valid_isbn(local_isbn):
+        attempts.append((index.by_isbn.get(local_isbn, ()), "isbn"))
+    if title_key and author_key and compare_title_author:
+        attempts.append((index.by_title_author.get((title_key, author_key), ()),
+                         "title_author"))
+    for indexes, reason in attempts:
+        free = [item for item in indexes if item not in matched]
+        if len(free) == 1:
+            return free[0], reason, False, []
+        if len(free) > 1:
+            return None, "ambiguous", True, free
+    return None, "", False, []
+
+
+def _metadata_conflict(remote, authors, author_key, local_isbn):
+    """Autor oder ISBN widersprechen sich; die Zuordnung bleibt ungeklärt."""
+    remote_authors = remote["authors"]
+    if (author_key and _author_tokens(remote_authors)
+            and not _authors_match(authors, remote_authors)):
+        return True
+    remote_isbn = _normalize_isbn(remote["isbn"])
+    return (is_valid_isbn(local_isbn) and is_valid_isbn(remote_isbn)
+            and local_isbn != remote_isbn)
+
+
+def _matched_status(metadata, remote, old, comparison_fields,
+                    selected_format, authors, author_key, local_isbn):
+    """Status einer eindeutig zugeordneten Zeile (Dateisignatur zuerst)."""
+    # Die Dateisignatur entscheidet VOR dem Status: gleiche Metadaten
+    # duerfen eine geänderte Buchdatei nicht als «keine Unterschiede»
+    # verdecken.
+    file_changed = _file_changed(metadata, old, selected_format)
+    if not remote["tolino_id"]:
+        # Die Cloud-Kopie ist nicht ansprechbar. Ein Upload könnte ein Duplikat
+        # erzeugen; daher bleibt die Zeile zur Prüfung.
+        return "review", "cloud_id_missing", file_changed
+    if _metadata_conflict(remote, authors, author_key, local_isbn):
+        return "review", "conflict", file_changed
+    same_fields = _same_comparison_fields(metadata, remote, comparison_fields)
+    current_fp = (fingerprint(metadata, selected_format)
+                  if selected_format else "")
+    unchanged = (same_fields or bool(
+        old.get("fingerprint") and old.get("fingerprint") == current_fp
+    )) and not file_changed
+    return ("identical" if unchanged else "changed"), "", file_changed
+
+
+def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
+                          comparison_fields, use_metadata_ids, matched,
+                          disputed, read_known, read_ids):
+    """Eine lokale Vergleichszeile -- inklusive einer bestaetigten Zuordnung."""
+    if not isinstance(metadata, dict):
+        raise ValueError("Preparation returned invalid metadata for book %r."
+                         % (book_id,))
+    book_uuid = valid_book_uuid(metadata.get("uuid"))
+    title = _metadata_text(metadata, "title")
+    authors = _metadata_text(metadata, "authors", "author")
+    isbn = _metadata_text(metadata, "isbn", "identifiers")
+    old = state.get(book_uuid, {}) if book_uuid else {}
+    stored_id = str(old.get("tolino_id") or
+                    (metadata_tolino_id(metadata) if use_metadata_ids else "")
+                    or "").strip()
+    title_key = normalize_title(title)
+    author_key = _normalized_authors(authors)
+    local_formats = normalize_formats(metadata.get("formats"))
+    selected_format = next((fmt for fmt in preferred_formats
+                            if fmt in local_formats), None)
+    local_isbn = _normalize_isbn(isbn)
+    remote_index, match_reason, ambiguous, candidates = _find_remote_match(
+        remote, book_uuid, stored_id, local_isbn, title_key, author_key,
+        "isbn" in comparison_fields,
+        {"title", "authors"} <= comparison_fields, matched)
+    file_changed = False
+    tolino_id = ""
+    status = "new_in_calibre"
+    candidate_indexes = []
+    if remote_index is not None:
+        matched.add(remote_index)
+        remote_row = remote.rows[remote_index]
+        tolino_id = remote_row["tolino_id"]
+        status, override, file_changed = _matched_status(
+            metadata, remote_row, old, comparison_fields, selected_format,
+            authors, author_key, local_isbn)
+        if override:
+            match_reason = override
+        if book_uuid and tolino_id:
+            # Die Calibre-Nummer mitschreiben: sie findet den Eintrag
+            # wieder, falls Calibre spaeter keine lesbare Kennung mehr
+            # liefert. Ohne Kennung wird KEIN Zustand angelegt -- eine
+            # unbestätigte Prueffzeile darf keine Zuordnung vortäuschen.
+            entry = state.setdefault(book_uuid, {})
+            entry["tolino_id"] = tolino_id
+            entry.setdefault("calibre_id", book_id)
+    elif ambiguous:
+        status = "review"
+        disputed.update(candidates)
+        candidate_indexes = candidates
+    else:
+        # A title alone is only a hint. It never consumes a remote row
+        # and never seeds the sync state.
+        title_candidates = (remote.by_title.get(title_key, ())
+                            if title_key and "title" in comparison_fields
+                            else ())
+        free_titles = [item for item in title_candidates
+                       if item not in matched]
+        if free_titles:
+            status = "review"
+            match_reason = "title_only"
+            disputed.update(free_titles)
+            candidate_indexes = free_titles
+            if len(free_titles) > 1:
+                match_reason = "ambiguous"
+        else:
+            status = "new_in_calibre"
+            tolino_id = ""
+
+    return {
+        "book_id": book_id,
+        "uuid": book_uuid or str(metadata.get("uuid") or ""),
+        "title": title,
+        "authors": authors,
+        "isbn": isbn,
+        "tolino_id": tolino_id,
+        "stale_cloud_id": (stored_id if status == "new_in_calibre"
+                            and not tolino_id and stored_id else ""),
+        "status": status,
+        "group": comparison_group(status),
+        "selected": status == "new_in_calibre",
+        "match_reason": match_reason,
+        "candidate_ids": [str(remote.rows[index].get("tolino_id") or "")
+                          for index in candidate_indexes
+                          if remote.rows[index].get("tolino_id")],
+        "duplicate_count": remote.title_counts.get(title_key, 0),
+        "file_changed": file_changed,
+        "has_preferred_format": bool(selected_format),
+        **_read_flags(tolino_id, read_known, read_ids),
+        "explanation": _row_explanation(status, match_reason, file_changed),
+    }
+
+
+def _leftover_remote_row(row, disputed, title_counts, row_index):
+    """Cloud-Zeile, die keine lokale Zeile eindeutig beansprucht hat."""
+    if row_index in disputed:
+        return dict(row, status="review", group="review",
+                    explanation="Möglicher Treffer, nicht eindeutig.")
+    if row.get("cloud_id_missing"):
+        return dict(row, status="review", group="review",
+                    explanation=("In tolino vorhanden, aber nicht ansprechbar "
+                                 "(kein Download, kein Löschen)."))
+    if not row["title"]:
+        return dict(row, status="not_matchable", group="review",
+                    explanation=(
+                        "tolino-Datensatz ohne Titel – nicht zuordenbar."
+                    ))
+    if title_counts.get(row["normalized_title"], 0) > 1:
+        return dict(row, status="duplicate_tolino", group="review",
+                    explanation="Titel mehrfach in tolino – nicht automatisch hochladen.")
+    return row
+
+
+def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
+                      comparison_fields=("authors", "title", "isbn"),
+                      use_metadata_ids=True, read_ids=()):
+    """Return deterministic local/remote rows for the pre-sync confirmation view.
+
+    Matching is deliberately conservative and ordered:
+
+    1. the stored tolino ID (state or ``#tolino_id`` column),
+    2. the Calibre UUID,
+    3. one unique *valid* ISBN,
+    4. one unique normalized title+author pair.
+
+    A title on its own never matches: it produces a ``review`` row for a
+    human decision and leaves the cloud record untouched, so no automatic
+    upload and no ``identical`` can be derived from a title alone. Multiple
+    hits on the same lookup key are marked ``review`` as well; no hit is
+    picked by list position. Conflicting authors or ISBNs also stay
+    ``review`` so that the user confirms the assignment.
+
+    ``comparison_fields`` decides which fields may *match* (ISBN, and the
+    title+author pair) and which fields decide ``identical`` vs ``changed``.
+    With an empty selection no field comparison happens and only the stored
+    fingerprint can mark a row unchanged.
+
+    `read_ids` are tolino IDs already marked as read in the account. They
+    prefill the Lesestatus selection so existing marks are not rewritten.
+    ``None`` bedeutet «Status unbekannt» (Abruf fehlgeschlagen): die Zeilen
+    tragen dann ``read_known=False``, damit die Oberfläche «unbekannt» nicht
+    als «ungelesen» darstellt und nichts zurückschreibt.
+    """
+    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
+        raise ValueError("Preparation requires metadata and sync state mappings.")
+    preferred_formats = normalize_formats(preferred_formats)
+    comparison_fields = set(comparison_fields or ())
+    read_known = read_ids is not None
+    read_ids = ({str(item) for item in read_ids if str(item or "").strip()}
+                if read_known else set())
+    rows = _remote_rows(inventory, read_known, read_ids)
+    remote = _RemoteIndex(rows)
+    matched = set()
+    disputed = set()
+    local_rows = []
+    for book_id, metadata in metadata_by_id.items():
+        local_rows.append(_local_comparison_row(
+            book_id, metadata, remote, state, preferred_formats,
+            comparison_fields, use_metadata_ids, matched, disputed,
+            read_known, read_ids))
+    for index, row in enumerate(remote.rows):
+        if index not in matched:
+            local_rows.append(_leftover_remote_row(
+                row, disputed, remote.title_counts, index))
+    return local_rows
+
+
+def selected_book_ids(comparison_rows):
+    return {
+        row["book_id"] for row in comparison_rows
+        if row.get("selected") and row.get("book_id") is not None
+    }
+
+
+def sort_comparison_rows(comparison_rows):
+    """Bestandsvergleich sortieren: erst ausgewählte Aktionen, dann Titel, Autoren.
+
+    Zeilen mit einer Aktion ("upload"/"metadata") stehen oben. Ältere Zeilen
+    ohne diese Felder fallen auf das frühere "selected" zurück.
+    """
+    def sort_key(row):
+        upload = row.get("upload")
+        if upload is None:
+            upload = bool(row.get("selected"))
+        return (
+            0 if upload else 1,
+            0 if row.get("metadata") else 1,
+            str(row.get("title") or "").casefold(),
+            str(row.get("authors") or "").casefold(),
+            str(row.get("isbn") or ""),
+        )
+    return sorted(comparison_rows, key=sort_key)
+
+
+def fingerprint(metadata, format_name):
+    """Fast change signal: uuid|last_modified|format|title.
+
+    Deliberately NOT a content hash. Calibre updates ``last_modified`` for
+    metadata and file changes, and this fingerprint is computed for every
+    book during planning; streaming every EPUB would make the compare step
+    scale with the library size instead of the metadata count. The FILE
+    itself gets its own cheap size:mtime signature in
+    ``content_fingerprint`` (also not a content hash, for the same reason).
+    A same-size/same-mtime content rewrite is therefore not detected by
+    the fingerprint; the upload decision then relies on the user's
+    selection, and the confirmation view says that the file looks
+    unchanged.
+    """
+    value = "%s|%s|%s|%s" % (
+        metadata.get("uuid", ""),
+        metadata.get("last_modified", ""),
+        format_name,
+        metadata.get("title", ""),
+    )
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def metadata_fingerprint(metadata):
+    """Hash of the fields pushed in place to tolino instead of uploaded."""
+    value = "%s|%s|%s|%s" % (
+        metadata.get("title", ""),
+        metadata.get("authors", ""),
+        metadata.get("isbn", ""),
+        metadata.get("series", ""),
+    )
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def content_fingerprint(metadata, format_name):
+    """Hash of the format FILE itself (uuid|format|size:mtime); '' when the
+    signature was never collected – an unknown file must never be mistaken
+    for an unchanged one, so '' blocks in-place metadata updates."""
+    signatures = metadata.get("format_signatures")
+    signature = (str(signatures.get(format_name) or "")
+                 if isinstance(signatures, dict) else "")
+    if not signature:
+        return ""
+    value = "%s|%s|%s" % (metadata.get("uuid", ""), format_name, signature)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
