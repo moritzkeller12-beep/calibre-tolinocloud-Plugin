@@ -1,0 +1,8 @@
+# Python and plugin build artifacts
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editors and OS metadata
+.idea
+.DS_Store
