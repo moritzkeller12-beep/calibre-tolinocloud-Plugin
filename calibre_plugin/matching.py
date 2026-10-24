@@ -45,7 +45,7 @@ def normalize_isbn(value):
     return _normalize_isbn_text(str(value or "").casefold())
 
 
-_AUTHOR_SEPARATORS = re.compile(r"[^0-9a-z]+")
+_AUTHOR_SEPARATORS = re.compile(r"[\W_]+")
 _AUTHOR_FILLER = {"and", "und", "et", "y", "with", "mit"}
 
 
@@ -54,7 +54,7 @@ def _author_tokens_text(value):
     """Tokenize names ignoring order, accents and punctuation."""
     text = value.casefold()
     for umlaut, plain in (("\u00df", "ss"), ("\u00e4", "a"), ("\u00f6", "o"),
-                          ("\u00fc", "u")):
+                          ("\u00fc", "u"), ("\u0142", "l"), ("\u00f8", "o")):
         text = text.replace(umlaut, plain)
     text = unicodedata.normalize("NFKD", text)
     text = "".join(character for character in text

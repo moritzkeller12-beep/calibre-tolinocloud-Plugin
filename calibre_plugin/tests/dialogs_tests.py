@@ -1414,6 +1414,12 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
         self.assertEqual((False, True),
                          ui_module.dialogs.InventoryDialog.default_actions(row))
 
+    def test_non_latin_and_extended_latin_author_names_match(self):
+        from ..matching import authors_match as _authors_match
+        self.assertTrue(_authors_match("Достоевский Фёдор",
+                                      "Фёдор Достоевский"))
+        self.assertTrue(_authors_match("Bolesław Prus", "Boleslaw Prus"))
+
     def test_accent_and_comma_variants_match(self):
         from ..matching import authors_match as _authors_match
         cases = (
