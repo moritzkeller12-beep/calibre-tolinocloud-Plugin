@@ -105,13 +105,6 @@ class SyncWorker(QObject):
             counts[status] = counts.get(status, 0) + 1
             if status == OP_SUCCEEDED and kind in kinds:
                 kinds[kind] += int(operation.get("count") or 1)
-            if status == OP_FAILED:
-                error = operation.get("exception")
-                if error is not None:
-                    code = str(getattr(error, "code", "") or "")
-                    short = str(getattr(error, "short", "") or error)
-                    operation["error"] = short + (
-                        " (Code %s)" % code if code else "")
         self.outcome.update({
             "uploaded": kinds["upload"],
             "updated": kinds["metadata"] + kinds["read"] + kinds["unread"]
@@ -259,18 +252,6 @@ class SyncWorker(QObject):
             self._finish_operation(
                 operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
                 **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
-            if not deleted:
-                entry = state.get(book_uuid)
-                recorded = (str(entry.get("tolino_id") or "")
-                            if isinstance(entry, dict) else "")
-                if not recorded or recorded == str(tolino_id):
-                    if isinstance(entry, dict) and entry.get("calibre_id") is not None:
-                        self.updates.append((entry.get("calibre_id"), ""))
-                    state.pop(book_uuid, None)
-                self._persist_state()
-                done += 1
-                self._refresh_counts()
-                continue
             entry = state.get(book_uuid)
             recorded = (str(entry.get("tolino_id") or "")
                         if isinstance(entry, dict) else "")
@@ -281,40 +262,35 @@ class SyncWorker(QObject):
             self._persist_state()
             done += 1
             self._refresh_counts()
-            self.progress.emit(done, total,
-                               "Erledigt: %s" % self._label(book_uuid))
+            if deleted:
+                self.progress.emit(done, total,
+                                   "Erledigt: %s" % self._label(book_uuid))
         return done
 
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
                         done, total):
         """Ausgewählten Lesestatus übertragen."""
-        if read_op is not None:
+        actions = (
+            (read_op, self.read_marks, True,
+             "Als gelesen markieren", "Als gelesen markiert"),
+            (unread_op, self.read_unmarks, False,
+             "Als ungelesen markieren", "Als ungelesen markiert"),
+        )
+        for operation, book_ids, finished, start_text, done_text in actions:
+            if operation is None:
+                continue
             checkpoint()
-            self.progress.emit(done, total, "Als gelesen markieren")
+            self.progress.emit(done, total, start_text)
             try:
-                client.mark_read_many(self.read_marks)
+                client.mark_read_many(book_ids, finished=finished)
             except Exception as exc:
-                self._record_failure(read_op, exc, client)
+                self._record_failure(operation, exc, client)
                 if self._fatal_error(exc):
                     raise
             else:
-                self._finish_operation(read_op, OP_SUCCEEDED)
+                self._finish_operation(operation, OP_SUCCEEDED)
                 self._refresh_counts()
-                self.progress.emit(done, total, "Als gelesen markiert")
-            done += 1
-        if unread_op is not None:
-            checkpoint()
-            self.progress.emit(done, total, "Als ungelesen markieren")
-            try:
-                client.mark_read_many(self.read_unmarks, finished=False)
-            except Exception as exc:
-                self._record_failure(unread_op, exc, client)
-                if self._fatal_error(exc):
-                    raise
-            else:
-                self._finish_operation(unread_op, OP_SUCCEEDED)
-                self._refresh_counts()
-                self.progress.emit(done, total, "Als ungelesen markiert")
+                self.progress.emit(done, total, done_text)
             done += 1
         return done
 
@@ -338,8 +314,7 @@ class SyncWorker(QObject):
             if known is None:
                 break
             checkpoint()
-            operation["needs_write"] = (tolino_id, series) not in known
-            if not operation["needs_write"]:
+            if (tolino_id, series) in known:
                 remember_collection(self.state, book_uuid, series)
                 self._finish_operation(operation, OP_SKIPPED,
                                        reason="schon in der Cloud")
@@ -347,24 +322,23 @@ class SyncWorker(QObject):
                 done += 1
                 self._refresh_counts()
                 continue
-            if operation["needs_write"]:
-                self.progress.emit(done, total,
-                                   "Serie in der Cloud: %s" % series)
-                try:
-                    revision = client.add_to_collection(
-                        tolino_id, series, revision=revision)
-                except Exception as exc:
-                    self._record_failure(operation, exc, client)
-                    if self._fatal_error(exc):
-                        raise
-                    # Revision ist nach einem Fehler nicht mehr
-                    # verlaesslich: der naechste Aufruf liest neu.
-                    revision = None
-                    done += 1
-                    continue
-                known.add((tolino_id, series))
-            if operation.get("needs_write"):
-                remember_collection(self.state, book_uuid, series)
+
+            self.progress.emit(done, total,
+                               "Serie in der Cloud: %s" % series)
+            try:
+                revision = client.add_to_collection(
+                    tolino_id, series, revision=revision)
+            except Exception as exc:
+                self._record_failure(operation, exc, client)
+                if self._fatal_error(exc):
+                    raise
+                # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
+                revision = None
+                done += 1
+                continue
+
+            known.add((tolino_id, series))
+            remember_collection(self.state, book_uuid, series)
             self._finish_operation(operation, OP_SUCCEEDED)
             self._persist_state()
             done += 1
