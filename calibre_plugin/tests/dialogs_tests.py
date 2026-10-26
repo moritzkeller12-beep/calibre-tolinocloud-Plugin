@@ -5,7 +5,6 @@ import re
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 from . import ui_base_tests
 from ..comparison import compare_inventory
 from ..plan import merge_removals
@@ -1160,8 +1159,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
 
     @staticmethod
     def _settings():
-        return {"preferred_formats": ("EPUB",),
-                "sync_collections": False, "upload_covers": False}
+        return {"preferred_formats": ("EPUB",)}
 
     @staticmethod
     def _metadata(uuid="u-1", title="Titel"):
@@ -1245,11 +1243,9 @@ class CloudDeletionPlanTests(unittest.TestCase):
 
     def test_merge_ignores_malformed_entries_and_blank_ids(self):
         pairs, titles = merge_removals(
-            [("u-1", "t-1"), ("only-one",)],
             [None, ("u-2", "", "ohne ID"), ("u-2", "t-1", "doppelt"),
              ("u-3", "t-3", "Drei")])
-        self.assertEqual([("u-1", "t-1"), ("u-3", "t-3")], pairs)
-        # Der ausdrücklich markierte Titel gewinnt auch bei doppelter ID.
+        self.assertEqual([("u-2", "t-1"), ("u-3", "t-3")], pairs)
         self.assertEqual({"t-1": "doppelt", "t-3": "Drei"}, titles)
 
 class DialogLayoutTests(unittest.TestCase):
@@ -1659,29 +1655,6 @@ class BackgroundCallTests(unittest.TestCase):
         dialogs = source.split("    def _start_action(", 1)[1].split(
             "\n    def ", 1)[0]
         self.assertIn("start_call", dialogs)
-
-    def test_ui_worker_result_signals_never_connect_lambdas(self):
-        """Qt callbacks on worker signals must be bound GUI-object methods."""
-        import ast
-        base = Path(__file__).resolve().parents[1]
-        signal_names = {"done", "failed", "valid", "invalid", "busy",
-                        "completed", "ready"}
-        violations = []
-        for filename in ("ui_dialogs.py", "ui_dashboard.py"):
-            tree = ast.parse((base / filename).read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call) or not node.args:
-                    continue
-                function = node.func
-                if not (isinstance(function, ast.Attribute)
-                        and function.attr == "connect"
-                        and isinstance(function.value, ast.Attribute)
-                        and function.value.attr in signal_names):
-                    continue
-                if isinstance(node.args[0], ast.Lambda):
-                    violations.append((filename, node.lineno,
-                                       function.value.attr))
-        self.assertEqual([], violations)
 
     def test_no_ui_module_uses_a_lambda_as_worker_signal_receiver(self):
         source = _ui_source_text()

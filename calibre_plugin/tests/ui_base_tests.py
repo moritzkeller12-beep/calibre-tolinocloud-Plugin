@@ -66,7 +66,6 @@ class ToolbarIconTests(unittest.TestCase):
             "calibre_plugin.ui_common",
             "calibre_plugin.ui_dashboard",
             "calibre_plugin.ui_dialogs",
-            "calibre_plugin.inventory_selection",
             "calibre_plugin.ui_workers",
             "calibre_plugin.config",
             "calibre_plugin.sessions",

@@ -11,10 +11,6 @@ from .browser_crypto import cryptojs_decrypt
 TOKEN_VALUE_KEYS = ("refresh_token", "t_auth_token", "refreshToken", "refresh-token")
 HARDWARE_VALUE_KEYS = ("hardware_id", "hardwareId", "device_id", "deviceId")
 
-# Passphrases from VERSION.PHRASE in the reader's src/config.json.
-READER_AES_PHRASES = ("",)
-
-
 def _jwt_payload(token):
     """Decode the unverified payload of a JWT-style token (or None)."""
     try:
@@ -135,16 +131,12 @@ def _decrypt_reader_blob(value):
     if not text or ("Salted__" not in text
                     and not text.lstrip().startswith("U2FsdGVk")):
         return []
-    out = []
-    for phrase in READER_AES_PHRASES:
-        try:
-            plain = cryptojs_decrypt(text, phrase)
-        except Exception:
-            plain = ""
-        plain = (plain or "").strip()
-        if plain and plain not in out:
-            out.append(plain)
-    return out
+    try:
+        plain = cryptojs_decrypt(text, "")
+    except Exception:
+        return []
+    plain = (plain or "").strip()
+    return [plain] if plain else []
 
 
 def _refresh_field_text(json_text):

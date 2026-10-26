@@ -1,31 +1,57 @@
 """Adapters for Calibre library and Qt APIs used by the plugin."""
-import inspect
+import json
 import os
 import re
 from collections.abc import Iterable
-
-try:
-    import shiboken6 as _shiboken
-except Exception:
-    try:
-        import shiboken2 as _shiboken
-    except Exception:
-        _shiboken = None
 
 
 TOLINO_COLUMN = "#tolino_id"
 
 
-def metadata_tolino_id(metadata):
-    """Read the custom column from Calibre metadata without requiring Calibre."""
-    if not isinstance(metadata, dict):
-        value = getattr(metadata, "get", lambda *_args: "")(TOLINO_COLUMN, "")
-        return str(value or "").strip()
-    for key in (TOLINO_COLUMN, "tolino_id"):
-        value = metadata.get(key)
-        if value:
-            return str(value).strip()
+def _column_value(metadata):
+    """Read the raw Calibre custom-column value."""
+    getter = getattr(metadata, "get", None)
+    if callable(getter):
+        return getter(TOLINO_COLUMN, "") or getter("tolino_id", "") or ""
     return ""
+
+
+def _decode_tolino_ids(value):
+    """Return the account map, or None when value is a legacy single ID."""
+    if isinstance(value, dict):
+        decoded = value
+    elif isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    return {str(name): str(book_id).strip()
+            for name, book_id in decoded.items()
+            if name and isinstance(book_id, (str, int)) and str(book_id).strip()}
+
+
+def _encode_tolino_ids(ids):
+    return json.dumps(ids, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")) if ids else ""
+
+
+def legacy_tolino_id(metadata):
+    """Return a pre-account ID so the first active account can adopt it."""
+    value = _column_value(metadata)
+    return "" if _decode_tolino_ids(value) is not None else str(value or "").strip()
+
+
+def metadata_tolino_id(metadata, account_name=None):
+    """Read this account's ID from a legacy value or account-map column."""
+    value = _column_value(metadata)
+    account_ids = _decode_tolino_ids(value)
+    if account_ids is not None:
+        return str(account_ids.get(str(account_name), "") or "").strip()
+    return str(value or "").strip()
 
 
 def custom_column_available(database):
@@ -42,127 +68,56 @@ def custom_column_available(database):
 
 
 def tolino_column_active(values, database):
-    """Read and write the ID column only when enabled for one account."""
-    if not isinstance(values, dict) or not values.get("use_tolino_column"):
-        return False
-    if not custom_column_available(database):
-        return False
-    return len(values.get("accounts") or []) == 1
+    """Read and write account-scoped IDs when the custom column is enabled."""
+    return (isinstance(values, dict)
+            and bool(values.get("use_tolino_column"))
+            and custom_column_available(database))
 
 
-def update_tolino_ids(database, updates, enabled=True):
-    """Persist IDs through Calibre's supported set_field API when enabled."""
+def update_tolino_ids(database, updates, enabled=True, account_name=None):
+    """Merge this account's IDs into the shared Calibre custom column."""
     if not enabled or not updates or not custom_column_available(database):
         return 0
-    api = getattr(database, "new_api", database)
-    setter = getattr(api, "set_field", None)
-    if not callable(setter):
-        raise AttributeError("Calibre database API does not provide set_field().")
-    values = {book_id: str(tolino_id or "") for book_id, tolino_id in updates
-              if book_id is not None}
-    data = getattr(database, "data", None)
-    if data is None:
-        data = api
-    has_id = getattr(data, "has_id", None)
-    if callable(has_id):
-        values = {book_id: value for book_id, value in values.items()
-                  if has_id(book_id)}
+    api = database.new_api
+    account_name = str(account_name or "").strip()
+    values = {}
+    for book_id, tolino_id in updates:
+        if book_id is None or not api.has_id(book_id):
+            continue
+        new_id = str(tolino_id or "").strip()
+        if not account_name:
+            values[book_id] = new_id
+            continue
+        metadata = api.get_metadata(book_id)
+        raw = _column_value(metadata)
+        account_ids = _decode_tolino_ids(raw)
+        if account_ids is None:
+            # Migration from the old one-ID format: attribute it to the
+            # account currently active when the column was first written.
+            legacy = str(raw or "").strip()
+            account_ids = {}
+            if legacy:
+                account_ids[account_name] = legacy
+        if new_id:
+            account_ids[account_name] = new_id
+        else:
+            account_ids.pop(account_name, None)
+        values[book_id] = _encode_tolino_ids(account_ids)
     if not values:
         return 0
-    setter(TOLINO_COLUMN, values)
+    api.set_field(TOLINO_COLUMN, values)
     return len(values)
 
 
-def _row_book_id(row):
-    """Read a book id from Calibre row objects, mappings, or row sequences."""
-    book_id = getattr(row, "book_id", None)
-    if book_id is not None:
-        return book_id
-    if isinstance(row, dict):
-        return row.get("book_id")
-    if isinstance(row, (tuple, list)) and row:
-        candidate = row[0]
-        return candidate if isinstance(candidate, int) and candidate > 0 else None
-    return None
-
-
-def _unique_ids(book_ids):
-    seen = set()
-    for book_id in book_ids:
-        try:
-            duplicate = book_id in seen
-        except TypeError:
-            continue
-        if not duplicate:
-            seen.add(book_id)
-            yield book_id
-
-
 def iter_book_ids(database):
-    """Yield each existing Calibre book id once across supported DB APIs."""
-    data = getattr(database, "data", None)
-    iterall = getattr(data, "iterall", None)
-    if callable(iterall):
-        rows = iterall() or ()
-        book_ids = []
-        for row in rows:
-            book_id = _row_book_id(row)
-            if book_id is not None:
-                book_ids.append(book_id)
-        yield from _unique_ids(book_ids)
-        return
-
-    iterallids = getattr(data, "iterallids", None)
-    if callable(iterallids):
-        yield from _unique_ids(iterallids() or ())
-        return
-
-    all_book_ids = getattr(database, "all_book_ids", None)
-    if callable(all_book_ids):
-        yield from _unique_ids(all_book_ids() or ())
-        return
-
-    all_ids = getattr(database, "all_ids", None)
-    if callable(all_ids):
-        yield from _unique_ids(all_ids() or ())
-
-
-def database_uuid_values(database, book_id):
-    """Yield raw UUID values from Calibre's field, backend, and public APIs."""
-    api = getattr(database, "new_api", None) or database
-    field_for = getattr(api, "field_for", None)
-    if callable(field_for):
-        try:
-            yield "field_for", field_for("uuid", book_id)
-        except Exception:
-            pass
-    backend = getattr(api, "backend", None)
-    execute = getattr(backend, "execute", None)
-    if callable(execute):
-        try:
-            rows = execute("SELECT uuid FROM books WHERE id=?", (int(book_id),))
-            row = next(iter(rows), None)
-            if row:
-                yield "sql", row[0]
-        except Exception:
-            pass
-    getter = getattr(database, "uuid", None)
-    if callable(getter):
-        try:
-            yield "db.uuid", getter(book_id, index_is_id=True)
-        except Exception:
-            pass
+    """Yield book ids from Calibre 5+'s supported database API."""
+    api = database.new_api
+    yield from api.all_book_ids()
 
 
 def metadata_by_id(database, book_id):
     """Read metadata by a real Calibre id, never by a filtered-view index."""
-    has_id = getattr(database, "has_id", None)
-    if callable(has_id) and not has_id(book_id):
-        raise ValueError("Calibre database has no book with id %r." % (book_id,))
-    getter = getattr(database, "get_metadata", None)
-    if not callable(getter):
-        raise AttributeError("Calibre database does not provide get_metadata().")
-    return getter(book_id, index_is_id=True)
+    return database.new_api.get_metadata(book_id)
 
 
 def normalize_formats(value):
@@ -185,27 +140,6 @@ def normalize_formats(value):
     return formats
 
 
-def _id_safe_call(database, method_name, *args, **kwargs):
-    """Call a legacy Calibre DB method with ID semantics, or its new API."""
-    method = getattr(database, method_name, None)
-    if not callable(method):
-        raise ValueError("Calibre database does not provide %s()." % method_name)
-    try:
-        parameters = inspect.signature(method).parameters
-    except (TypeError, ValueError):
-        parameters = None
-    supports_flag = parameters is None or "index_is_id" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in (parameters.values() if parameters is not None else ())
-    )
-    if supports_flag:
-        return method(*args, index_is_id=True, **kwargs)
-    direct_api = getattr(getattr(database, "new_api", None), method_name, None)
-    if not callable(direct_api):
-        raise ValueError("Calibre %s API does not expose an ID-safe resolver."
-                         % method_name)
-    return direct_api(*args, **kwargs)
-
 
 def safe_format_path(database, book_id, format_name):
     """Resolve a real Calibre id without falling back to view-index semantics."""
@@ -216,14 +150,12 @@ def safe_format_path(database, book_id, format_name):
     format_name = format_name.strip().lstrip(".").upper()
     if not format_name or not re.match(r"^[A-Z0-9][A-Z0-9._-]*$", format_name):
         raise ValueError("Invalid format name: %r" % (format_name,))
-    has_id = getattr(database, "has_id", None)
-    if callable(has_id) and not has_id(book_id):
+    api = database.new_api
+    if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
     try:
-        path = _id_safe_call(database, "format_abspath", book_id, format_name)
+        path = api.format_abspath(book_id, format_name)
     except ValueError as exc:
-        if "ID-safe resolver" in str(exc):
-            raise
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name)) from exc
     except (IndexError, KeyError, OSError) as exc:
@@ -243,10 +175,10 @@ def cover_bytes(database, book_id):
     """Normalize cover() results from bytes, paths, or wrapped Calibre values."""
     if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
         raise ValueError("Invalid Calibre book id: %r" % (book_id,))
-    has_id = getattr(database, "has_id", None)
-    if callable(has_id) and not has_id(book_id):
+    api = database.new_api
+    if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
-    cover = _id_safe_call(database, "cover", book_id, as_file=False)
+    cover = api.cover(book_id, as_file=False)
     if isinstance(cover, (bytes, bytearray, memoryview)):
         return bytes(cover)
     if isinstance(cover, (str, os.PathLike)):
@@ -283,23 +215,15 @@ def image_suffix(data):
     return ""
 
 
-def _qt_object_alive(obj):
-    if obj is None:
-        return False
-    if _shiboken is not None:
-        try:
-            return bool(_shiboken.isValid(obj))
-        except Exception:
-            return False
-    return True
-
-
 def selected_table_rows(table):
     """Return valid selected Qt row numbers without assuming QModelIndex shape."""
-    if not _qt_object_alive(table):
+    if table is None:
         return []
-    selection_model = getattr(table, "selectionModel", None)
-    selected = selection_model().selectedRows() if callable(selection_model) else ()
+    try:
+        selection_model = table.selectionModel()
+        selected = selection_model.selectedRows() if selection_model else ()
+    except RuntimeError:
+        return []
     rows = []
     for index in selected or ():
         row_value = getattr(index, "row", None)

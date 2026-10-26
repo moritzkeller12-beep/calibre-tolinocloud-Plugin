@@ -148,48 +148,15 @@ def _is_loopback_url(url):
 
 
 def _http_get_json(url, timeout=5):
-    """Tiny JSON GET used for /json/list (curl_cffi when available).
-
-    Fuer Loopback kommt nur ``urllib`` zum Einsatz: Der Debug-Port laeuft auf
-    demselben Rechner, eine Browser-Impersonation bringt dort nichts und
-    kostet nur Zeit. Umgebungs-Proxies werden fuer Loopback ausdruecklich
-    umgangen, damit kein Proxy den lokalen Aufruf abfaengt.
-    """
-    loopback = _is_loopback_url(url)
-    if not loopback:
-        try:
-            from curl_cffi import requests as cf_requests  # type: ignore
-            response = cf_requests.get(url, timeout=timeout,
-                                       impersonate="chrome")
-            return response.json()
-        except Exception:
-            pass
+    """Fetch a local DevTools JSON endpoint without using environment proxies."""
+    if not _is_loopback_url(url):
+        return None
     try:
-        from urllib.request import ProxyHandler, build_opener, urlopen
-        open_url = (build_opener(ProxyHandler({})).open if loopback
-                    else urlopen)
-        with open_url(url, timeout=timeout) as response:
+        from urllib.request import ProxyHandler, build_opener
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(url, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8", "replace"))
     except Exception:
         return None
-
-
-def _ws_path_to_host_port(path):
-    """Parse a DevTools websocket address, including bracketed IPv6 hosts."""
-    value = str(path)
-    if value.startswith("["):
-        end = value.find("]")
-        if end < 0 or value[end + 1:end + 2] != ":":
-            raise ValueError("invalid bracketed websocket host")
-        host = value[1:end]
-        rest = value[end + 2:]
-    else:
-        host, separator, rest = value.partition(":")
-        if not separator:
-            raise ValueError("websocket host has no port")
-    port, separator, ws_path = rest.partition("/")
-    if not separator:
-        raise ValueError("websocket path is missing")
-    return host, int(port), "/" + ws_path
 
 

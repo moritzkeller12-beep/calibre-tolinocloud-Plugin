@@ -9,7 +9,6 @@ from .comparison import (comparison_group, selected_book_ids,
                          sort_comparison_rows)
 from .library import selected_table_rows
 from .tolino import report_error
-from . import inventory_selection as _inventory_selection
 from .ui_common import _set_enabled, plural, start_call
 
 
@@ -351,7 +350,11 @@ class InventoryDialog(QDialog):
         self._update_summary()
 
     def _sync_checks_to_rows(self):
-        _inventory_selection.sync_checks_to_rows(self)
+        for row, upload, metadata, read in zip(
+                self.rows, self.checks, self.meta_checks, self.read_checks):
+            row["upload"] = bool(upload.isChecked())
+            row["metadata"] = bool(metadata.isChecked())
+            row["read"] = bool(read.isChecked())
 
     @staticmethod
     def _set_checked_quietly(check_widget, value):
@@ -362,7 +365,12 @@ class InventoryDialog(QDialog):
         quadratisch. Die Signale bleiben hier aus; die Zusammenfassung
         schreibt der Aufrufer genau einmal.
         """
-        _inventory_selection.set_checked_quietly(check_widget, value)
+        blocker = getattr(check_widget, "blockSignals", None)
+        if callable(blocker):
+            blocker(True)
+        check_widget.setChecked(value)
+        if callable(blocker):
+            blocker(False)
 
     def _set_selection(self, chooser, clear_deletions=False):
         """Auswahl in einem Schritt setzen (Zeilen und Widgets synchron).
@@ -371,7 +379,34 @@ class InventoryDialog(QDialog):
         markierte Zeilen bleiben unberührt; «Auswahl zurücksetzen» hebt auch
         die Löschmarkierung auf.
         """
-        _inventory_selection.set_selection(self, chooser, clear_deletions)
+        self._sync_checks_to_rows()
+        if clear_deletions:
+            for row, upload, metadata, read in zip(
+                    self.rows, self.checks, self.meta_checks, self.read_checks):
+                row.pop("delete_cloud", None)
+                row["upload"] = row["metadata"] = False
+                row["read"] = bool(row.get("read_in_cloud"))
+                for check, checked in ((upload, False), (metadata, False),
+                                       (read, row["read"])):
+                    self._set_checked_quietly(check, checked)
+            if getattr(self, "table", None) is not None:
+                self._rebuild_table(self.rows)
+            else:
+                self._update_summary()
+            return
+        for row, upload_check, metadata_check, read_check in zip(
+                self.rows, self.checks, self.meta_checks, self.read_checks):
+            if row.get("delete_cloud"):
+                continue
+            wanted = tuple(chooser(row))
+            upload, metadata = bool(wanted[0]), bool(wanted[1])
+            read = bool(row.get("read_in_cloud"))
+            row.update(upload=upload, metadata=metadata, read=read)
+            for check, checked in ((upload_check, upload),
+                                   (metadata_check, metadata),
+                                   (read_check, read)):
+                self._set_checked_quietly(check, checked)
+        self._update_summary()
 
     def apply_recommended(self):
         """Die vorgeschlagenen Aktionen für alle Zeilen auswählen."""
@@ -433,24 +468,34 @@ class InventoryDialog(QDialog):
 
     def selected_cloud_deletions(self):
         """(UUID, tolino-ID, Titel) der zum Löschen markierten Cloud-Kopien."""
-        return _inventory_selection.selected_cloud_deletions(self)
+        return [(str(row.get("uuid") or ""), str(row["tolino_id"]),
+                 str(row.get("title") or ""))
+                for row in self.rows
+                if row.get("delete_cloud") and row.get("tolino_id")]
 
     def selected_upload_ids(self):
         """Bücher, deren Datei hochgeladen werden soll."""
-        return _inventory_selection.selected_upload_ids(
-            self, selected_book_ids)
+        return selected_book_ids([
+            dict(row, selected=check.isChecked())
+            for row, check in zip(self.rows, self.checks)
+        ])
 
     def selected_metadata_ids(self):
         """Bücher, deren Cloud-Metadaten aktualisiert werden sollen."""
-        return _inventory_selection.selected_metadata_ids(
-            self, selected_book_ids)
+        return selected_book_ids([
+            dict(row, selected=check.isChecked())
+            for row, check in zip(self.rows, self.meta_checks)
+        ])
 
     def selected_read_targets(self):
         """tolino-IDs, die jetzt als gelesen markiert werden.
 
         Schon gelesene Bücher fallen heraus; übertragen wird nur eine Änderung.
         """
-        return _inventory_selection.selected_read_targets(self)
+        return [str(row["tolino_id"])
+                for row, check in zip(self.rows, self.read_checks)
+                if check.isChecked() and row.get("tolino_id")
+                and not row.get("delete_cloud") and not row.get("read_in_cloud")]
 
     def selected_read_unmarks(self):
         """tolino-IDs, deren Lesestatus jetzt auf ungelesen gesetzt wird.
@@ -458,12 +503,20 @@ class InventoryDialog(QDialog):
         Nur gelesene Bücher, deren Auswahl entfernt wurde; alle anderen
         behalten ihren Lesestatus.
         """
-        return _inventory_selection.selected_read_unmarks(self)
+        return [str(row["tolino_id"])
+                for row, check in zip(self.rows, self.read_checks)
+                if not check.isChecked() and row.get("tolino_id")
+                and not row.get("delete_cloud") and row.get("read_in_cloud")]
 
     def _marked_row_indexes(self):
         """Markierte Zeilen -- oder ein Hinweis, wenn keine markiert ist."""
-        return _inventory_selection.marked_row_indexes(
-            self, selected_table_rows, QMessageBox)
+        marked = selected_table_rows(self.table)
+        if not marked:
+            QMessageBox.information(
+                self, "Aktionen für markierte Bücher",
+                "Markiere zuerst mindestens ein Buch in der Tabelle. "
+                "Mehrere Bücher wählst du mit Strg-/Shift-Klick aus.")
+        return marked
 
     def choose_row_action(self):
         """Eine Stelle für alle Aktionen auf markierte Zeilen.
@@ -617,15 +670,37 @@ class InventoryDialog(QDialog):
     @staticmethod
     def _column_applies(key, row):
         """Geht diese Spalte bei dieser Zeile? (wie beim einzelnen Klick)"""
-        return _inventory_selection.column_applies(key, row)
+        if row.get("delete_cloud"):
+            return False
+        if key == "upload":
+            return row.get("book_id") is not None
+        if key == "metadata":
+            return row.get("book_id") is not None and bool(row.get("tolino_id"))
+        if key == "read":
+            return bool(row.get("tolino_id"))
+        return False
 
     def _set_row_choice(self, index, key, value):
         """Zeile und Auswahlkästchen setzen; False = war schon so.
 
         Die Auswahl folgt dem Cloud-Lesestatus; übertragen wird sie beim Sync.
         """
-        return _inventory_selection.set_row_choice(
-            self, index, key, value)
+        row = self.rows[index]
+        if row.get("delete_cloud"):
+            return False
+        if key == "read":
+            check = self.read_checks[index]
+            if (row.get("read_known") is False
+                    or (value and row.get("read_in_cloud"))
+                    or (not value and not row.get("read_in_cloud"))):
+                return False
+        else:
+            check = (self.checks if key == "upload" else self.meta_checks)[index]
+        if bool(row.get(key)) == bool(value) and bool(check.isChecked()) == bool(value):
+            return False
+        row[key] = bool(value)
+        self._set_checked_quietly(check, bool(value))
+        return True
 
     def _sort_by_column(self, column):
         """Spaltenkopf anklicken: aufsteigend <-> absteigend umschalten."""
@@ -790,47 +865,37 @@ class InventoryDialog(QDialog):
 
     def _update_summary(self, *_args):
         """Kurzzeile: wie viele Aktionen gerade ausgewählt sind."""
-        try:
-            uploads = len(self.selected_upload_ids())
-            metadata = len(self.selected_metadata_ids())
-            marked_read = len(self.selected_read_targets())
-            marked_unread = len(self.selected_read_unmarks())
-            deletions = len(self.selected_cloud_deletions())
-            changes = marked_read + marked_unread
-            summary = getattr(self, "summary", None)
-            if summary is not None:
-                summary_text = (
-                    "Ausgewählt: %d %s · %d Metadaten · %d Lesestatus"
-                    % (uploads, plural(uploads, "Upload", "Uploads"),
-                       metadata, changes))
-                if changes:
-                    summary_text += (
-                        " (davon %d gelesen, %d ungelesen)"
-                        % (marked_read, marked_unread))
-                if deletions:
-                    count = deletions
-                    summary_text += " · %d %s" % (
-                        count, plural(count, "Löschung", "Löschungen"))
-                undecided = self._undecided_count()
-                if undecided:
-                    # «Zu prüfen» ist nicht vorausgewählt.
-                    summary_text += (
-                        " · %d %s unklar («Zu prüfen», nicht vorausgewählt)"
-                        % (undecided, plural(undecided, "Buch", "Bücher")))
-                summary.setText(summary_text)
-            confirm = getattr(self, "confirm", None)
-            if confirm is not None:
-                total = uploads + metadata + changes + deletions
-                confirm.setText("Synchronisierung starten (%d)" % total
-                                if total else "Synchronisierung starten")
-                # Null Aktionen: ohne Automatiken gibt es nichts zu starten.
-                try:
-                    confirm.setEnabled(total > 0
-                                       or self.automatic_actions_enabled())
-                except Exception:
-                    pass  # Qt-Stub ohne Aktivierung
-        except Exception:
-            return  # Qt-Stub oder noch nicht aufgebaute Oberfläche
+        uploads = len(self.selected_upload_ids())
+        metadata = len(self.selected_metadata_ids())
+        marked_read = len(self.selected_read_targets())
+        marked_unread = len(self.selected_read_unmarks())
+        deletions = len(self.selected_cloud_deletions())
+        changes = marked_read + marked_unread
+        summary = getattr(self, "summary", None)
+        if summary is not None:
+            summary_text = (
+                "Ausgewählt: %d %s · %d Metadaten · %d Lesestatus"
+                % (uploads, plural(uploads, "Upload", "Uploads"),
+                   metadata, changes))
+            if changes:
+                summary_text += (
+                    " (davon %d gelesen, %d ungelesen)"
+                    % (marked_read, marked_unread))
+            if deletions:
+                summary_text += " · %d %s" % (
+                    deletions, plural(deletions, "Löschung", "Löschungen"))
+            undecided = self._undecided_count()
+            if undecided:
+                summary_text += (
+                    " · %d %s unklar («Zu prüfen», nicht vorausgewählt)"
+                    % (undecided, plural(undecided, "Buch", "Bücher")))
+            summary.setText(summary_text)
+        confirm = getattr(self, "confirm", None)
+        if confirm is not None:
+            total = uploads + metadata + changes + deletions
+            confirm.setText("Synchronisierung starten (%d)" % total
+                            if total else "Synchronisierung starten")
+            confirm.setEnabled(total > 0 or self.automatic_actions_enabled())
 
     # --- Cloud actions on the currently selected table row ---------------
 

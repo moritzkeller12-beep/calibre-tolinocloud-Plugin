@@ -2,7 +2,7 @@
 from .ui_common import QObject, pyqtSignal
 from .config import CredentialStore
 from .browser_login import browser_login
-from .sessions import check_stored_login, token_session
+from .token_vault import check_stored_login
 from .tolino import report_error
 
 
@@ -47,9 +47,8 @@ class SessionCheckWorker(QObject):
     def run(self):
         values = self.settings
         try:
-            status, detail = check_stored_login(
-                values["partner_id"], values["hardware_id"],
-                values["refresh_token"], persist=self.persist_refresh_token)
+            store = CredentialStore(values, values.get("account_name"))
+            status, detail = check_stored_login(store)
         except Exception as exc:
             self.invalid.emit(report_error(
                 exc, "Zugangsprüfung", (values["refresh_token"],)))
@@ -61,12 +60,6 @@ class SessionCheckWorker(QObject):
         else:
             self.invalid.emit(detail)
 
-    def persist_refresh_token(self, refresh):
-        """Persist a rotated token from the worker thread."""
-        CredentialStore(self.settings,
-                        self.settings.get("account_name")).save_refresh(refresh)
-
-
 class CallWorker(QObject):
     """Run one value-only callback outside the GUI thread."""
     done = pyqtSignal(object)
@@ -77,10 +70,9 @@ class CallWorker(QObject):
         self.call = call
 
     def run(self):
-        with token_session():
-            try:
-                result = self.call()
-            except Exception as exc:
-                self.failed.emit(exc)
-                return
+        try:
+            result = self.call()
+        except Exception as exc:
+            self.failed.emit(exc)
+            return
         self.done.emit(result)

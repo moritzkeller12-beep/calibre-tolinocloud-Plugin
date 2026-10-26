@@ -22,7 +22,7 @@ except ImportError:
 PREFERENCES = JSONConfig("plugins/Tolino Cloud Sync Lite")
 DEFAULT_ACCOUNT_NAME = "default"
 ACCOUNT_KEYS = ("partner_id", "hardware_id", "refresh_token", "state")
-GLOBAL_OPTION_KEYS = ("preferred_formats",)
+PREFERRED_FORMATS = "preferred_formats"
 DEFAULT_ACCOUNT = {
     "name": DEFAULT_ACCOUNT_NAME,
     "partner_id": 1,
@@ -32,7 +32,7 @@ DEFAULT_ACCOUNT = {
 }
 DEFAULTS = {
     **DEFAULT_ACCOUNT,
-    "preferred_formats": ["EPUB"],
+    PREFERRED_FORMATS: ["EPUB"],
     "accounts": [],
     "active_account": DEFAULT_ACCOUNT_NAME,
 }
@@ -93,11 +93,10 @@ def settings():
         if active not in names:
             active = accounts[0]["name"]
         current = next(item for item in accounts if item["name"] == active)
-        values = {key: _copy(PREFERENCES.get(key, DEFAULTS[key]))
-                  for key in GLOBAL_OPTION_KEYS}
-        values.update({"upload_covers": True, "sync_collections": True,
-                       "use_tolino_column": bool(PREFERENCES.get(
-                           "use_tolino_column", True))})
+        values = {PREFERRED_FORMATS: _copy(PREFERENCES.get(
+            PREFERRED_FORMATS, DEFAULTS[PREFERRED_FORMATS]))}
+        values["use_tolino_column"] = bool(PREFERENCES.get(
+            "use_tolino_column", True))
         values.update({key: _copy(current[key]) for key in ACCOUNT_KEYS})
         values.update({
             "name": current["name"],
@@ -106,10 +105,9 @@ def settings():
         })
         # Persist only the current schema and its explicit defaults.
         changed = False
-        for key in GLOBAL_OPTION_KEYS:
-            if key not in PREFERENCES:
-                PREFERENCES[key] = _copy(values[key])
-                changed = True
+        if PREFERRED_FORMATS not in PREFERENCES:
+            PREFERENCES[PREFERRED_FORMATS] = _copy(values[PREFERRED_FORMATS])
+            changed = True
         if PREFERENCES.get("accounts") != accounts:
             PREFERENCES["accounts"] = accounts
             changed = True
@@ -224,9 +222,8 @@ def save_settings(values):
     """Persist global options and the selected account."""
     with _SETTINGS_LOCK:
         current = settings()
-        for key in GLOBAL_OPTION_KEYS:
-            if key in values:
-                PREFERENCES[key] = values[key]
+        if PREFERRED_FORMATS in values:
+            PREFERENCES[PREFERRED_FORMATS] = values[PREFERRED_FORMATS]
         accounts = values.get("accounts", current["accounts"])
         active = values.get("active_account", current["active_account"])
         if not isinstance(accounts, list):

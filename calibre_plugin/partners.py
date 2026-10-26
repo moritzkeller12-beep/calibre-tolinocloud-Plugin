@@ -5,6 +5,7 @@ WEBREADER_TOKEN_HEADERS = {
     "Origin": "https://webreader.mytolino.com",
     "Referer": "https://webreader.mytolino.com/",
 }
+
 WEBREADER_CLIENT_TYPE = "TOLINO_WEBREADER"
 WEBREADER_CLIENT_VERSION = "5.2.0"
 
@@ -22,20 +23,12 @@ PARTNERS = {
         "token_url": "https://www.thalia.at/auth/oauth2/token",
         "reader_url": WEBREADER_URL,
     },
-    # Buch.de is discontinued; eBook.de is its modern successor.
-    3: {
-        "name": "Buch.de", "reseller_id": "6",
-        "client_id": "webshop01", "scope": "SCOPE_BOSH SCOPE_BUCHDE",
-    },
     4: {
         "name": "Books.ch / orellfuessli.ch",
         "reseller_id": "8", "client_id": "webreader",
         "scope": "SCOPE_BOSH",
         "token_url": "https://www.orellfuessli.ch/auth/oauth2/token",
         "reader_url": WEBREADER_URL,
-        "token_headers": WEBREADER_TOKEN_HEADERS,
-        "client_type": WEBREADER_CLIENT_TYPE,
-        "client_version": WEBREADER_CLIENT_VERSION,
     },
     5: {
         "name": "Hugendubel.de", "reseller_id": "13",
@@ -64,9 +57,3 @@ PARTNERS = {
         "reader_url": WEBREADER_URL,
     },
 }
-
-
-def uses_shared_webreader(partner):
-    """Whether the shop uses Tolino's shared Web Reader."""
-    return (isinstance(partner, dict)
-            and "webreader.mytolino.com" in str(partner.get("reader_url") or ""))

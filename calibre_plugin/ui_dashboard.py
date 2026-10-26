@@ -13,7 +13,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         sync_result_text)
 from calibre.gui2 import error_dialog, info_dialog
 from .client import make_client
-from .config import (GLOBAL_OPTION_KEYS, CredentialStore, account_by_name,
+from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      save_account, save_credentials, save_settings,
                      set_active_account, settings)
 from .library import (iter_book_ids, metadata_by_id, safe_format_path,
@@ -124,9 +124,7 @@ class SyncDashboard(QDialog):
         """Buchhaendler, Anmeldung und der eine Hauptknopf."""
         # --- Ein Ablauf: anmelden, dann vergleichen ------------------------
         self.partner = QComboBox()
-        partners = [(pid, partner) for pid, partner in sorted(PARTNERS.items())
-                    if partner.get("token_url")]
-        for pid, partner in partners:
+        for pid, partner in sorted(PARTNERS.items()):
             self.partner.addItem(partner["name"], pid)
         self.partner.setToolTip(
             "Bei diesem Händler hast du dein tolino-Konto.")
@@ -218,7 +216,7 @@ class SyncDashboard(QDialog):
         if not getattr(self, "account_name", None):
             return
         values = values or self.values()
-        save_settings({key: values[key] for key in GLOBAL_OPTION_KEYS})
+        save_settings({PREFERRED_FORMATS: values[PREFERRED_FORMATS]})
         save_account(self.account_name, values, active=self.account_name)
 
     def account_changed(self, index):
@@ -312,11 +310,7 @@ class SyncDashboard(QDialog):
         if self.partner.findData(partner_id) < 0:
             partner_id = self.partner.itemData(0)
             if partner_id is not None:
-                account = next((item for item in values["accounts"]
-                                if item["name"] == self.account_name), {})
-                if account.get("partner_id") != partner_id:
-                    account["partner_id"] = partner_id
-                    save_account(self.account_name, {"partner_id": partner_id})
+                save_account(self.account_name, {"partner_id": partner_id})
         self.partner.setCurrentIndex(max(0, self.partner.findData(partner_id)))
         self.hardware.setText(values["hardware_id"] or hardware_id())
         self.refresh.setText(values["refresh_token"])
@@ -437,8 +431,6 @@ class SyncDashboard(QDialog):
                     x.strip().upper() for x in self.formats.text().split(",")
                     if x.strip()) if value in ("EPUB", "PDF")
             ] or ["EPUB"]),
-            "upload_covers": True,
-            "sync_collections": True,
             "state": (account.get("state")
                       if isinstance(account.get("state"), dict) else {}),
         }
@@ -934,13 +926,13 @@ class SyncDashboard(QDialog):
         self.progress.setRange(0, total)
         self.progress.setValue(0)
         self.thread = QThread(self)
+        settings["metadata"] = preparation.get("metadata", {})
         self.worker = SyncWorker(settings, jobs, preparation["removals"],
                                  preparation["meta_updates"],
                                  preparation["series_map"],
                                  preparation["selected_read"],
                                  preparation["selected_unread"],
-                                 titles=preparation.get("titles"),
-                                 fingerprints=preparation.get("fingerprints"))
+                                 titles=preparation.get("titles"))
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)
@@ -984,8 +976,9 @@ class SyncDashboard(QDialog):
         outcome = _worker_outcome(self)
         _persist_run(self, state, refresh, updates)
         run_account = _worker_account_name(self)
-        if self.sync_column_enabled and self.account_name == run_account:
-            update_tolino_ids(self.gui.current_db, updates, enabled=True)
+        if self.sync_column_enabled:
+            update_tolino_ids(self.gui.current_db, updates, enabled=True,
+                              account_name=run_account)
         self.finish_thread()
         if outcome.get("cancelled"):
             result = sync_result_text(outcome, "")
@@ -1019,9 +1012,10 @@ class SyncDashboard(QDialog):
         _persist_run(self, getattr(worker, "state", {}), refresh,
                      getattr(worker, "updates", ()), always_refresh=True)
         run_account = _worker_account_name(self)
-        if self.sync_column_enabled and self.account_name == run_account:
+        if self.sync_column_enabled:
             update_tolino_ids(self.gui.current_db,
-                              getattr(worker, "updates", ()), enabled=True)
+                              getattr(worker, "updates", ()), enabled=True,
+                              account_name=run_account)
         self.finish_thread()
         if cancelled:
             result = sync_result_text(outcome, "")
