@@ -43,11 +43,8 @@ def _jwt_shaped(text):
     parts = text.split(".")
     if len(parts) != 3 or len(text) < 80:
         return False
-    try:
-        return all(part and re.fullmatch(r"[A-Za-z0-9_\-]+", part)
-                   for part in parts)
-    except TypeError:
-        return False
+    return all(part and re.fullmatch(r"[A-Za-z0-9_\-]+", part)
+               for part in parts)
 
 
 def _undatable_shape(token):

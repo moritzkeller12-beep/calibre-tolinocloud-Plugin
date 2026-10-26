@@ -32,10 +32,6 @@ from .ui_auth_workers import (BrowserLoginWorker, SessionCheckWorker,
                               _LOGIN_WORKER_THREADS)
 from .ui_settings import SettingsDialog
 
-_PREPARE_FAILED_TEXT = (
-    "Der Vergleich ist fehlgeschlagen. Es wurde nichts geändert.")
-
-
 def _offer_next_step(dialog):
     """Nach der Anmeldung ist der Hauptknopf der naechste Schritt.
 
@@ -681,12 +677,7 @@ class SyncDashboard(QDialog):
         self.progress.setVisible(False)
         self.progress_label.setText("Bereit")
         self.progress_label.setVisible(False)
-        if thread is not None:
-            try:
-                thread.quit()
-                thread.wait(2000)
-            except Exception:
-                pass
+        _stop_thread(thread, timeout_ms=2000)
         _apply_busy(self, False)
         self.update_status()
 
@@ -967,6 +958,16 @@ class SyncDashboard(QDialog):
         self.progress_label.setText("Abbruch angefordert …")
         self.primary.setEnabled(False)
 
+    def _persist_sync_result(self, state, refresh, updates,
+                             always_refresh=False):
+        """Ergebnis speichern und die optionale Calibre-Spalte aktualisieren."""
+        _persist_run(self, state, refresh, updates,
+                     always_refresh=always_refresh)
+        if self.sync_column_enabled:
+            update_tolino_ids(
+                self.gui.current_db, updates, enabled=True,
+                account_name=_worker_account_name(self))
+
     def sync_completed(self, state, refresh, updates):
         """Erfolgreicher Lauf (auch nach regulaerem Abbruch).
 
@@ -974,11 +975,7 @@ class SyncDashboard(QDialog):
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
         outcome = _worker_outcome(self)
-        _persist_run(self, state, refresh, updates)
-        run_account = _worker_account_name(self)
-        if self.sync_column_enabled:
-            update_tolino_ids(self.gui.current_db, updates, enabled=True,
-                              account_name=run_account)
+        self._persist_sync_result(state, refresh, updates)
         self.finish_thread()
         if outcome.get("cancelled"):
             result = sync_result_text(outcome, "")
@@ -1009,13 +1006,9 @@ class SyncDashboard(QDialog):
             str(message) == CANCEL_MESSAGE
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
-        _persist_run(self, getattr(worker, "state", {}), refresh,
-                     getattr(worker, "updates", ()), always_refresh=True)
-        run_account = _worker_account_name(self)
-        if self.sync_column_enabled:
-            update_tolino_ids(self.gui.current_db,
-                              getattr(worker, "updates", ()), enabled=True,
-                              account_name=run_account)
+        self._persist_sync_result(
+            getattr(worker, "state", {}), refresh,
+            getattr(worker, "updates", ()), always_refresh=True)
         self.finish_thread()
         if cancelled:
             result = sync_result_text(outcome, "")
