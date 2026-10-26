@@ -555,6 +555,31 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("only_tolino", rows[1]["status"])
         self.assertFalse(rows[1]["selected"])
 
+    def test_inventory_envelope_metadata_is_not_treated_as_a_cloud_record(self):
+        inventory = {
+            "PublicationInventory": {
+                "edata": [{
+                    "deliverableId": "cloud-book-1",
+                    "epubMetaData": {
+                        "title": "Gemeinsamer Titel",
+                        "author": [{"name": "Eine Autorin"}],
+                        "isbn": "9783161484100",
+                    },
+                }],
+                "ebook": [],
+                "count": 1,
+            }
+        }
+        local = {
+            1: {"uuid": "u1", "title": "Gemeinsamer Titel",
+                "authors": "Eine Autorin", "isbn": "9783161484100",
+                "formats": ["EPUB"]}
+        }
+        rows = compare_inventory(local, {}, inventory, ["EPUB"])
+        self.assertEqual(1, len(rows))
+        self.assertEqual("cloud-book-1", rows[0]["tolino_id"])
+        self.assertEqual("identical", rows[0]["status"])
+
     def test_inventory_shape_uses_nested_metadata_and_keeps_id_technical(self):
         item = {
             "deliverableId": "bosh_8_543897186788677497438396920",
@@ -1475,14 +1500,23 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual([], updates)
 
     def test_selected_metadata_update_does_not_need_the_book_file(self):
-        """Ein reiner Metadaten-Abgleich braucht die Datei nicht – der
-        Nutzer hat ausdrücklich nur die Metadaten ausgewählt."""
+        """Metadaten lassen sich ohne ausgewählte Buchdatei patchen."""
         book = self._book(format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
         kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
                                               only_book_ids={1})
         self.assertEqual([], kept)
         self.assertEqual(1, len(updates))
+
+    def test_metadata_update_does_not_require_a_preferred_upload_format(self):
+        """PDF-only/formatless books still support in-place metadata updates."""
+        book = self._book(formats=["PDF"], format_signatures={})
+        state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
+        kept, updates = plan_metadata_updates(
+            {1: book}, state, [], ["EPUB"], only_book_ids={1})
+        self.assertEqual([], kept)
+        self.assertEqual(1, len(updates))
+        self.assertEqual("d1", updates[0][2])
 
     def test_legacy_state_without_fingerprints_is_updated_when_selected(self):
         """Ohne gespeicherte Fingerabdrücke ist der Cloud-Stand unbekannt --

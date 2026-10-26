@@ -184,10 +184,9 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
                           only_book_ids=None):
     """In-place Metadaten-Updates (/meta) für die ausgewählten Bücher.
 
-    Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat, ein
-    bevorzugtes Format vorliegt und sich Titel/Autor(en)/ISBN/Serie seit
-    dem letzten Sync geändert haben (oder der Zustand noch keinen
-    Metadaten-Fingerabdruck kennt). `only_book_ids` grenzt auf die vom
+    Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat und sich
+    Titel/Autor(en)/ISBN/Serie geändert haben oder der gespeicherte Zustand
+    keinen passenden Metadaten-Fingerabdruck kennt. `only_book_ids` grenzt auf die vom
     Nutzer ausgewählten Bücher ein; ohne Angabe werden alle passenden Bücher
     berücksichtigt. Bücher, die ohnehin hochgeladen werden, werden NIE
     zusätzlich gepatcht – der Upload trägt die Metadaten mit.
@@ -196,7 +195,6 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
-    preferred_formats = normalize_formats(preferred_formats)
     upload_uuids = {str(unpack_upload_record(record)["book_uuid"])
                     for record in uploads}
     requested = None if only_book_ids is None else {str(item) for item in only_book_ids}
@@ -212,10 +210,6 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
         old = state.get(book_uuid) or {}
         tolino_id = str(old.get("tolino_id") or "")
         if not tolino_id:
-            continue
-        available = set(normalize_formats(metadata.get("formats")))
-        selected_format = next((f for f in preferred_formats if f in available), None)
-        if not selected_format:
             continue
         stored_meta_fp = old.get("meta_fp")
         if stored_meta_fp and stored_meta_fp == metadata_fingerprint(metadata):
