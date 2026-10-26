@@ -2,15 +2,8 @@
 
 import json
 
-# ---------------------------------------------------------------- CDP-Griff
 
-# Das Snippet läuft IN der Web-Reader-Seite (Runtime.evaluate) und holt
-# genau die Werte, die der Web Reader dort ablegt:
-#   - Keycloak oidc.user:<issuer>:<client> Blob (refresh_token + sid/exp)
-#   - klassische localStorage/IndexedDB-ähnliche Keys (refresh_token, t_auth)
-_GRAB_SNIPPET = r"""
-(function () {
-  var out = {refresh: [], hardware: [], idb: []};
+_TOKEN_SCAN_HELPERS = r"""
   function push(val, bucket) {
     if (typeof val === 'string' && val.length > 20 &&
         out[bucket].indexOf(val) < 0) {
@@ -23,38 +16,32 @@ _GRAB_SNIPPET = r"""
   function walk(value, depth, seen) {
     if (!value || depth > 6) return;
     if (typeof value === 'string') {
-      // JWT-Form: drei base64url-Teile. Der Refresh-Token ist ein JWT
-      // mit typ "Refresh"; Access-Tokens sind kurzlebiger und werden
-      // vom Grabber spaeter depriorisiert, nicht ausgefiltert.
       if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
         push(value, 'refresh');
         return;
       }
-      // JSON-Blob (oidc.user:...): localStorage/sessionStorage-Werte
-      // sind IMMER Strings -- ohne diesen Parse-Schritt bleiben alle
-      // Tokens unsichtbar, die der Reader als Blob ablegt (Feldbefund
-      // "kein frischer Token" trotz angemeldetem Fenster,
-      // waehlerhaft nur ein alter Blankett-JWT gefunden).
       var topParsed = tryParse(value);
       if (topParsed && typeof topParsed === 'object') {
         walk(topParsed, depth + 1, seen);
       }
       return;
     }
-    if (typeof value !== 'object') return;
-    if (seen.indexOf(value) >= 0) return;
+    if (typeof value !== 'object' || seen.indexOf(value) >= 0) return;
     seen.push(value);
     for (var key in value) {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       var v = value[key];
       if (typeof v === 'string') {
-        if (/refresh/i.test(key)) walk(v, depth + 1, seen);
+        if (/refresh/i.test(key)) {
+          var refreshValue = tryParse(v);
+          if (refreshValue && typeof refreshValue === 'object') {
+            walk(refreshValue, depth + 1, seen);
+          } else {
+            push(v, 'refresh');
+          }
+        }
         if (/hardware|device/i.test(key) &&
             /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
-        // userToken/userInfos liegen CryptoJS-verschluesselt vor;
-        // Python entpackt sie (_normalize_live_grab). Ohne diesen
-        // Push ist der Live-Grab fuer Token und Hardware-Id blind
-        // (Feldbefund: "1 Teil, 920 Zeichen", 0 Hardware).
         if (/usertoken/i.test(key) && v.indexOf('U2FsdGVk') === 0)
             push(v, 'refresh');
         if (/userinfos/i.test(key) && v.indexOf('U2FsdGVk') === 0)
@@ -66,6 +53,13 @@ _GRAB_SNIPPET = r"""
       }
     }
   }
+"""
+
+
+_GRAB_SNIPPET = r"""
+(function () {
+  var out = {refresh: [], hardware: [], idb: []};
+__TOKEN_SCAN_HELPERS__
   function scanStore(store) {
     if (!store) return;
     try {
@@ -77,9 +71,6 @@ _GRAB_SNIPPET = r"""
   }
   scanStore(localStorage);
   scanStore(sessionStorage);
-  // Der keycloak-js/oidc-Client des Readers legt Tokensets haeufig in
-  // IndexedDB ab -- der Inhalt wird per zweitem CDP-Aufruf gelesen,
-  // hier genuegt die Datenbankliste (Promise + awaitPromise=True).
   return new Promise(function (resolve) {
     var settled = false;
     function finish() {
@@ -100,75 +91,14 @@ _GRAB_SNIPPET = r"""
     finish();
   });
 })()
-"""
+""".replace("__TOKEN_SCAN_HELPERS__", _TOKEN_SCAN_HELPERS)
 
 
-# Liest Token-/Hardware-Werte aus allen Object-Stores einer IndexedDB.
-# Der keycloak-js/oidc-Client des Web Readers legt sein Token-Set (mit dem
-# AKTUELLEN Refresh-Token) haeufig hier ab statt im localStorage -- genau
-# deshalb fand der vorherige Grab bei angemeldetem Fenster nichts.
 _IDB_SNIPPET = r"""
 (function (dbname) {
   return new Promise(function (resolve) {
     var out = {refresh: [], hardware: []};
-    function push(val, bucket) {
-      if (typeof val === 'string' && val.length > 20 &&
-          out[bucket].indexOf(val) < 0) {
-        out[bucket].push(val);
-      }
-    }
-    function tryParse(text) {
-      try { return JSON.parse(text); } catch (e) { return null; }
-    }
-    function walk(value, depth, seen) {
-      if (!value || depth > 6) return;
-      if (typeof value === 'string') {
-        if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
-          push(value, 'refresh');
-          return;
-        }
-        // Auch IDB-Eintrage koennen als JSON-Blob-String abliegen --
-        // top-level parsten, sonst ist der aktuelle Token unsichtbar.
-        var topParsed = tryParse(value);
-        if (topParsed && typeof topParsed === 'object') {
-          walk(topParsed, depth + 1, seen);
-        }
-        return;
-      }
-      if (typeof value !== 'object') return;
-      if (seen.indexOf(value) >= 0) return;
-      seen.push(value);
-      for (var key in value) {
-        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
-        var v = value[key];
-        if (typeof v === 'string') {
-          if (/refresh/i.test(key)) {
-            // Ein Blob-Wert unter refresh-achtigem Schluessel wird
-            // geparst statt roh als Kandidat gepusht (roh wuerde die
-            // JSON-Geometrie als Refresh-Token durchgehen).
-            var underRefresh = tryParse(v);
-            if (underRefresh && typeof underRefresh === 'object') {
-              walk(underRefresh, depth + 1, seen);
-            } else {
-              push(v, 'refresh');
-            }
-          }
-          if (/hardware|device/i.test(key) &&
-              /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
-          // userToken/userInfos liegen CryptoJS-verschluesselt vor;
-          // Python entpackt sie (_normalize_live_grab) -- s. Snippet
-          // oben (Feldbefund).
-          if (/usertoken/i.test(key) && v.indexOf('U2FsdGVk') === 0)
-            push(v, 'refresh');
-          if (/userinfos/i.test(key) && v.indexOf('U2FsdGVk') === 0)
-            push(v, 'hardware');
-          var parsed = tryParse(v);
-          if (parsed) walk(parsed, depth + 1, seen);
-        } else if (v && typeof v === 'object') {
-          walk(v, depth + 1, seen);
-        }
-      }
-    }
+__TOKEN_SCAN_HELPERS__
     var settled = false;
     function finish() {
       if (!settled) { settled = true; resolve(JSON.stringify(out)); }
@@ -208,15 +138,10 @@ _IDB_SNIPPET = r"""
       open.onerror = function () { finish(); };
     } catch (e) { finish(); }
   });
-})(%s)
-"""
+})(__DB_NAME__)
+""".replace("__TOKEN_SCAN_HELPERS__", _TOKEN_SCAN_HELPERS)
 
 
-
-# Fuehrt den OAuth-Refresh-Grant IN der Reader-Seite aus: gleiches TLS,
-# gleiche Sec-Fetch-Familie, gleicher Origin-Kontext wie der Web Reader
-# selbst -- der Bot-Schutz vor dem Token-Endpunkt blockt genau diesen
-# Anfragen nicht (der Reader macht sie ja staendig selbst).
 _EXCHANGE_SNIPPET = r"""
 (function (tokenUrl, body) {
   return fetch(tokenUrl, {
@@ -239,7 +164,6 @@ _EXCHANGE_SNIPPET = r"""
 """
 
 
-
 def idb_expression(db_name):
     """Build a scan expression for one IndexedDB database."""
-    return _IDB_SNIPPET % json.dumps(str(db_name))
+    return _IDB_SNIPPET.replace("__DB_NAME__", json.dumps(str(db_name)))

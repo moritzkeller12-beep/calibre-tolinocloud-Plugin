@@ -491,6 +491,42 @@ class CurlTransportTests(unittest.TestCase):
         client.hardware = "hw-curl"
         return client
 
+    def test_curl_connection_failure_may_fall_back_without_replaying_after_send(self):
+        import subprocess
+        import calibre_plugin.tolino as tolino_module
+
+        client = self._client()
+        calls = []
+
+        def curl_connection_failed(*_args, **_kwargs):
+            calls.append("curl")
+            raise subprocess.CalledProcessError(6, ["curl"])
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({"access_token": "a", "refresh_token": "r2"}).encode("utf-8")
+
+        def urllib_post(*_args, **_kwargs):
+            calls.append("urllib")
+            return Response()
+
+        with patch.object(tolino_module, "_impersonate_session", return_value=None), \
+                patch.object(tolino_module, "_curl_binary", return_value="curl"), \
+                patch.object(tolino_module, "_http_post_via_curl",
+                             side_effect=curl_connection_failed), \
+                patch.object(tolino_module, "urlopen", side_effect=urllib_post):
+            client.login()
+        self.assertEqual(["curl", "urllib"], calls)
+        self.assertEqual("r2", client.refresh)
+
     def test_token_post_prefers_curl_transport(self):
         import calibre_plugin.tolino as tolino_module
 
@@ -713,31 +749,31 @@ class CurlTransportTests(unittest.TestCase):
         self.assertEqual(["curl"], calls)
         self.assertEqual("r-1", client.refresh)
 
-    def test_curl_cffi_failure_falls_back_to_curl_binary(self):
+    def test_curl_cffi_unknown_failure_does_not_replay_the_refresh_grant(self):
         import calibre_plugin.tolino as tolino_module
 
         client = self._client()
+        calls = []
 
         class BrokenSession:
             def post(self, *_args, **_kwargs):
-                raise RuntimeError("curl_cffi exploded")
+                calls.append("curl_cffi")
+                raise RuntimeError("curl_cffi failed after request began")
 
-        curl_calls = []
-
-        def fake_curl(url, body, headers, timeout):
-            curl_calls.append(url)
-            return 200, json.dumps({
-                "access_token": "a6", "refresh_token": "r6",
-            }).encode("utf-8")
+        def must_not_run(*_args, **_kwargs):
+            calls.append("other transport")
+            raise AssertionError("unknown failure may have consumed the grant")
 
         with patch.object(tolino_module, "_impersonate_session",
                           return_value=BrokenSession()), \
                 patch.object(tolino_module, "_curl_binary", return_value="/usr/bin/curl"), \
-                patch.object(tolino_module, "_http_post_via_curl", fake_curl):
-            client.login()
+                patch.object(tolino_module, "_http_post_via_curl", must_not_run), \
+                patch.object(tolino_module, "urlopen", must_not_run):
+            with self.assertRaises(TolinoAuthError):
+                client.login()
 
-        self.assertEqual(1, len(curl_calls))
-        self.assertEqual("a6", client.access)
+        self.assertEqual(["curl_cffi"], calls)
+        self.assertEqual("r-1", client.refresh)
 
     def test_token_403_bot_page_falls_through_to_urllib(self):
         """Feldbefund: curl_cffi UND System-curl werden von der
@@ -1421,12 +1457,12 @@ class JsonFetchTests(unittest.TestCase):
                 "curl_cffi.requests": requests_mod}, calls
 
     def test_loopback_is_detected(self):
-        from .. import cdp as cdp_module
-        self.assertTrue(cdp_module._is_loopback_url("http://127.0.0.1:9222/json"))
-        self.assertTrue(cdp_module._is_loopback_url("http://localhost:1/x"))
-        self.assertTrue(cdp_module._is_loopback_url("http://[::1]:9222/x"))
-        self.assertFalse(cdp_module._is_loopback_url("https://example.invalid"))
-        self.assertFalse(cdp_module._is_loopback_url(None))
+        from ..cdp_transport import _is_loopback_url
+        self.assertTrue(_is_loopback_url("http://127.0.0.1:9222/json"))
+        self.assertTrue(_is_loopback_url("http://localhost:1/x"))
+        self.assertTrue(_is_loopback_url("http://[::1]:9222/x"))
+        self.assertFalse(_is_loopback_url("https://example.invalid"))
+        self.assertFalse(_is_loopback_url(None))
 
     def test_loopback_skips_the_impersonating_client_and_proxies(self):
         import sys
