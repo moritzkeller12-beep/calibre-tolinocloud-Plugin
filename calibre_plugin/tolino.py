@@ -566,7 +566,20 @@ class TolinoClient:
         metadata.update(fields)
         self._request(url, "PUT", {"uploadMetaData": metadata},
                       content_type="application/json")
-        return metadata
+        # Tolino kann den PUT mit einer erfolgreichen HTTP-Antwort bestaetigen,
+        # ohne die Aenderung tatsaechlich zu uebernehmen. Erst ein Read-back
+        # bestaetigt, dass die Metadaten im Cloud-Datensatz stehen.
+        verified = self._request(url)
+        verified_metadata = (verified.get("metadata")
+                             if isinstance(verified, dict) else None)
+        if not isinstance(verified_metadata, dict) or any(
+                verified_metadata.get(key) != value
+                for key, value in fields.items()):
+            raise TolinoApiError(
+                "tolino hat das Metadaten-Update nicht bestaetigt.",
+                code="N06",
+                short="tolino hat die Metadaten nicht übernommen.")
+        return verified_metadata
 
     # --- Device list: resolve the real hardware ID ----------------------
 

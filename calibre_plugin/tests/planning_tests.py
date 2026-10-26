@@ -1537,11 +1537,29 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual((1, "u1", "d1"), (updates[0][0], updates[0][1],
                                            updates[0][2]))
 
-    def test_unchanged_metadata_plans_nothing(self):
+    def test_unchanged_metadata_plans_nothing_without_explicit_selection(self):
         book = self._book()
         state = self._state(book)
         kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
         self.assertEqual([], updates)
+
+    def test_comparison_detected_metadata_difference_is_not_filtered_by_fp(self):
+        """Ein Upload kann die Tolino-ID und den lokalen Fingerabdruck bereits
+        gespeichert haben, obwohl die Cloud-Metadaten abweichen. Eine dann
+        explizit gewaehlte Metadatenaktion muss trotzdem eingeplant werden."""
+        book = self._book()
+        state = self._state(book)
+        rows = compare_inventory(
+            {1: book}, state,
+            [{"deliverableId": "d1", "title": "Alter Titel",
+              "authors": "Fred Vargas", "isbn": "123"}],
+            ["EPUB"])
+        self.assertEqual("changed", rows[0]["status"])
+        self.assertFalse(rows[0]["file_changed"])
+        _kept, updates = plan_metadata_updates(
+            {1: book}, state, [], ["EPUB"], only_book_ids={rows[0]["book_id"]})
+        self.assertEqual(1, len(updates))
+        self.assertEqual("d1", updates[0][2])
 
     def test_book_without_cloud_copy_is_skipped(self):
         book = self._book()
@@ -1934,6 +1952,41 @@ class FileChangeIntegrityTests(unittest.TestCase):
         self.assertFalse(row["file_changed"])
         self.assertIn("Nur Metadaten unterscheiden sich", row["explanation"])
 
+    def test_confirmed_metadata_update_is_not_recommended_again(self):
+        metadata = self._metadata(title="Neuer Titel")
+        state = {"u1": {
+            "tolino_id": "t1",
+            "content_fp": content_fingerprint(metadata[1], "EPUB"),
+            "meta_fp": metadata_fingerprint(metadata[1]),
+            "meta_verified_fp": metadata_fingerprint(metadata[1]),
+        }}
+        # Das Inventar liefert noch den alten Titel; ein Read-back nach PUT
+        # hat den neuen Stand jedoch bestaetigt und unterdrueckt die Folgeaktion.
+        row = self._row(metadata, state)
+        self.assertEqual("identical", row["status"])
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            self.assertEqual(
+                (False, False),
+                ui_module.dialogs.InventoryDialog.default_actions(row))
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_remote_title_difference_overrides_unverified_fingerprint(self):
+        metadata = self._metadata(title="Neuer Titel")
+        state = {"u1": {
+            "tolino_id": "t1",
+            "content_fp": content_fingerprint(metadata[1], "EPUB"),
+            "meta_fp": metadata_fingerprint(metadata[1]),
+        }}
+        rows = compare_inventory(
+            metadata, state,
+            [{"deliverableId": "t1", "title": "Alter Titel",
+              "authors": "Autor"}], ["EPUB"])
+        self.assertEqual("changed", rows[0]["status"])
+        self.assertIn("Nur Metadaten unterscheiden sich", rows[0]["explanation"])
+
     def test_missing_previous_file_signature_is_not_a_change_claim(self):
         """Ohne alten Datei-Fingerabdruck gibt es keinen Vergleich -- und
         damit auch keine Behauptung, die Datei habe sich geändert."""
@@ -2306,6 +2359,23 @@ class FingerprintCommitTests(unittest.TestCase):
         uploads = plan_sync(changed, worker.state, ["EPUB"], upload_book_ids={1})
         self.assertEqual([(1, "u1", "EPUB", "t1")], uploads)
 
+    def test_successful_metadata_update_writes_confirmed_id_to_column(self):
+        ui_module = self._ui()
+        previous = self._synced_state(
+            self._metadata("u1", "Alt", "100:1000"))
+        changed = self._metadata("u1", "Neu", "100:1000")
+        settings, preparation = self._prepare(
+            ui_module, changed, previous, self._selection(metadata=[1]))
+        worker, emitted = self._run_worker(
+            ui_module, settings, preparation, self._client())
+        self.assertIsNone(emitted.get("failed"))
+        self.assertIsNotNone(emitted.get("completed"))
+        self.assertEqual([(1, "t1")], worker.updates)
+        self.assertEqual(metadata_fingerprint(changed[1]),
+                         worker.state["u1"]["meta_fp"])
+        self.assertEqual(metadata_fingerprint(changed[1]),
+                         worker.state["u1"]["meta_verified_fp"])
+
     def test_a_failed_metadata_update_keeps_the_old_meta_fingerprint(self):
         ui_module = self._ui()
         previous = self._synced_state(
@@ -2329,6 +2399,8 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual(1, worker.outcome["failed"])
         self.assertEqual(previous["u1"]["meta_fp"],
                          worker.state["u1"]["meta_fp"])
+        self.assertNotIn("meta_verified_fp", worker.state["u1"])
+        self.assertEqual([], worker.updates)
         # Und der naechste Lauf plant das Update erneut.
         _kept, updates = plan_metadata_updates(
             changed, worker.state, [], ["EPUB"], only_book_ids={1})

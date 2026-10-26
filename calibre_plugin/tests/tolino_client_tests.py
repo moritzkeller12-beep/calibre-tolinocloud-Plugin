@@ -255,7 +255,9 @@ class TolinoClientFeatureTests(unittest.TestCase):
     def test_update_metadata_merges_and_puts_upload_metadata(self):
         existing = {"metadata": {"deliverableId": "b-1", "identifier": "b-1",
                                  "title": "Alt"}}
-        client, calls = self._patching_client([existing, {"ok": True}])
+        saved = {"metadata": {"deliverableId": "b-1", "identifier": "b-1",
+                              "title": "Neu", "isbn": "123"}}
+        client, calls = self._patching_client([existing, {"ok": True}, saved])
         result = client.update_metadata("b-1", {"title": "Neu", "isbn": "123"})
         self.assertEqual("Neu", result["title"])
         self.assertEqual("123", result["isbn"])
@@ -267,6 +269,18 @@ class TolinoClientFeatureTests(unittest.TestCase):
         payload = calls[1]["data"]
         self.assertEqual("Neu", payload["uploadMetaData"]["title"])
         self.assertEqual("b-1", payload["uploadMetaData"]["deliverableId"])
+        self.assertEqual("GET", calls[2]["method"])
+
+    def test_update_metadata_fails_if_read_back_keeps_old_title(self):
+        from ..tolino import TolinoApiError
+        existing = {"metadata": {"deliverableId": "b-1", "title": "Alt"}}
+        stale = {"metadata": {"deliverableId": "b-1", "title": "Alt"}}
+        client, calls = self._patching_client([existing, {"ok": True}, stale])
+        with self.assertRaises(TolinoApiError) as caught:
+            client.update_metadata("b-1", {"title": "Neu"})
+        self.assertEqual("N06", caught.exception.code)
+        self.assertEqual(["GET", "PUT", "GET"],
+                         [call["method"] for call in calls])
 
     def test_update_metadata_requires_fields_and_metadata_response(self):
         from ..tolino import TolinoApiError
@@ -285,9 +299,16 @@ class TolinoClientFeatureTests(unittest.TestCase):
             "tags": [{"name": "Adamsberg", "category": "collection"},
                      {"name": "collection_finished_readings_name",
                       "category": "system"}]}}
-        client, calls = self._patching_client([existing, {"ok": True}])
+        updated = {"metadata": {
+            "deliverableId": "b-1", "title": "Neu",
+            "tags": [{"name": "Adamsberg", "category": "collection"},
+                     {"name": "collection_finished_readings_name",
+                      "category": "system"}]}}
+        client, calls = self._patching_client(
+            [existing, {"ok": True}, updated])
         client.update_metadata("b-1", {"title": "Neu"})
-        self.assertEqual(["GET", "PUT"], [call["method"] for call in calls])
+        self.assertEqual(["GET", "PUT", "GET"],
+                         [call["method"] for call in calls])
         self.assertEqual([], [call for call in calls
                               if "sync-data" in call["url"]])
         sent = calls[1]["data"]["uploadMetaData"]

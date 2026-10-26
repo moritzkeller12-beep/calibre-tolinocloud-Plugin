@@ -412,6 +412,11 @@ class SyncWorker(QObject):
                 metadata = self.metadata_by_uuid.get(record["book_uuid"])
                 if isinstance(entry, dict) and metadata:
                     entry["meta_fp"] = metadata_fingerprint(metadata)
+                    entry["meta_verified_fp"] = entry["meta_fp"]
+                # Der Metadaten-Patch bestaetigt ebenfalls die Cloud-ID fuer
+                # die Calibre-Spalte; Uploads fuegen sie an derselben Stelle
+                # ihres Erfolgs hinzu.
+                self.updates.append((record["book_id"], record["tolino_id"]))
                 self._persist_state()
                 done += 1
             for job, operation in upload_ops:
@@ -441,6 +446,7 @@ class SyncWorker(QObject):
                     entry["content_fp"] = content_fingerprint(
                         metadata, job.format_name)
                     entry["meta_fp"] = metadata_fingerprint(metadata)
+                    entry.pop("meta_verified_fp", None)
                 self.updates.append((job.book_id, new_id))
                 self._finish_operation(operation, OP_SUCCEEDED)
                 # SOFORT sichern: Cover, Loeschen oder ein spaeterer Fehler

@@ -261,10 +261,18 @@ def _matched_status(metadata, remote, old, comparison_fields,
     if _metadata_conflict(remote, authors, author_key, local_isbn):
         return "review", "conflict", file_changed
     same_fields = _same_comparison_fields(metadata, remote, comparison_fields)
-    saved_metadata_matches = (
+    current_meta_fp = metadata_fingerprint(metadata)
+    # Nur ein nach PUT per GET bestaetigter Patch darf explizite Inventarwerte
+    # ueberstimmen. Aeltere meta_fp-Werte wurden allein nach HTTP-2xx gesetzt
+    # und beweisen nicht, dass Tolino den Titel tatsaechlich gespeichert hat.
+    verified_metadata_matches = (
+        bool(old.get("meta_verified_fp"))
+        and old.get("meta_verified_fp") == current_meta_fp)
+    legacy_metadata_matches = (
         same_fields is None and bool(old.get("meta_fp"))
-        and old.get("meta_fp") == metadata_fingerprint(metadata))
-    unchanged = (same_fields is True or saved_metadata_matches) and not file_changed
+        and old.get("meta_fp") == current_meta_fp)
+    unchanged = (verified_metadata_matches or same_fields is True
+                 or legacy_metadata_matches) and not file_changed
     return ("identical" if unchanged else "changed"), "", file_changed
 
 
