@@ -1952,6 +1952,24 @@ class FileChangeIntegrityTests(unittest.TestCase):
         self.assertFalse(row["file_changed"])
         self.assertIn("Nur Metadaten unterscheiden sich", row["explanation"])
 
+    def test_confirmed_metadata_update_is_not_recommended_again(self):
+        metadata = self._metadata(title="Neuer Titel")
+        state = {"u1": {
+            "tolino_id": "t1",
+            "content_fp": content_fingerprint(metadata[1], "EPUB"),
+            "meta_fp": metadata_fingerprint(metadata[1]),
+        }}
+        row = self._row(metadata, state)
+        self.assertEqual("identical", row["status"])
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            self.assertEqual(
+                (False, False),
+                ui_module.dialogs.InventoryDialog.default_actions(row))
+        finally:
+            ui_module._restore_stubs_for_tests()
+
     def test_missing_previous_file_signature_is_not_a_change_claim(self):
         """Ohne alten Datei-Fingerabdruck gibt es keinen Vergleich -- und
         damit auch keine Behauptung, die Datei habe sich geändert."""

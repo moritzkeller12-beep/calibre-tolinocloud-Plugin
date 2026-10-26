@@ -261,8 +261,12 @@ def _matched_status(metadata, remote, old, comparison_fields,
     if _metadata_conflict(remote, authors, author_key, local_isbn):
         return "review", "conflict", file_changed
     same_fields = _same_comparison_fields(metadata, remote, comparison_fields)
+    # Ein erfolgreicher Upload/Patch bestaetigt den lokalen Metadatenstand.
+    # Tolinos Inventar kann Felder anders oder verzoegert zurueckliefern;
+    # derselbe bestaetigte Fingerabdruck darf deshalb keine erneute Aktion
+    # ausloesen. Eine geaenderte Buchdatei bleibt davon unberuehrt.
     saved_metadata_matches = (
-        same_fields is None and bool(old.get("meta_fp"))
+        bool(old.get("meta_fp"))
         and old.get("meta_fp") == metadata_fingerprint(metadata))
     unchanged = (same_fields is True or saved_metadata_matches) and not file_changed
     return ("identical" if unchanged else "changed"), "", file_changed
