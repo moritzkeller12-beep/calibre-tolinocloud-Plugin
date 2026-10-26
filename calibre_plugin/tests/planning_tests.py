@@ -1958,7 +1958,10 @@ class FileChangeIntegrityTests(unittest.TestCase):
             "tolino_id": "t1",
             "content_fp": content_fingerprint(metadata[1], "EPUB"),
             "meta_fp": metadata_fingerprint(metadata[1]),
+            "meta_verified_fp": metadata_fingerprint(metadata[1]),
         }}
+        # Das Inventar liefert noch den alten Titel; ein Read-back nach PUT
+        # hat den neuen Stand jedoch bestaetigt und unterdrueckt die Folgeaktion.
         row = self._row(metadata, state)
         self.assertEqual("identical", row["status"])
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -1969,6 +1972,20 @@ class FileChangeIntegrityTests(unittest.TestCase):
                 ui_module.dialogs.InventoryDialog.default_actions(row))
         finally:
             ui_module._restore_stubs_for_tests()
+
+    def test_remote_title_difference_overrides_unverified_fingerprint(self):
+        metadata = self._metadata(title="Neuer Titel")
+        state = {"u1": {
+            "tolino_id": "t1",
+            "content_fp": content_fingerprint(metadata[1], "EPUB"),
+            "meta_fp": metadata_fingerprint(metadata[1]),
+        }}
+        rows = compare_inventory(
+            metadata, state,
+            [{"deliverableId": "t1", "title": "Alter Titel",
+              "authors": "Autor"}], ["EPUB"])
+        self.assertEqual("changed", rows[0]["status"])
+        self.assertIn("Nur Metadaten unterscheiden sich", rows[0]["explanation"])
 
     def test_missing_previous_file_signature_is_not_a_change_claim(self):
         """Ohne alten Datei-Fingerabdruck gibt es keinen Vergleich -- und
@@ -2356,6 +2373,8 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual([(1, "t1")], worker.updates)
         self.assertEqual(metadata_fingerprint(changed[1]),
                          worker.state["u1"]["meta_fp"])
+        self.assertEqual(metadata_fingerprint(changed[1]),
+                         worker.state["u1"]["meta_verified_fp"])
 
     def test_a_failed_metadata_update_keeps_the_old_meta_fingerprint(self):
         ui_module = self._ui()
@@ -2380,6 +2399,7 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual(1, worker.outcome["failed"])
         self.assertEqual(previous["u1"]["meta_fp"],
                          worker.state["u1"]["meta_fp"])
+        self.assertNotIn("meta_verified_fp", worker.state["u1"])
         self.assertEqual([], worker.updates)
         # Und der naechste Lauf plant das Update erneut.
         _kept, updates = plan_metadata_updates(
