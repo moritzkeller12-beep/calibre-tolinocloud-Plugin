@@ -1537,11 +1537,29 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual((1, "u1", "d1"), (updates[0][0], updates[0][1],
                                            updates[0][2]))
 
-    def test_unchanged_metadata_plans_nothing(self):
+    def test_unchanged_metadata_plans_nothing_without_explicit_selection(self):
         book = self._book()
         state = self._state(book)
         kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
         self.assertEqual([], updates)
+
+    def test_comparison_detected_metadata_difference_is_not_filtered_by_fp(self):
+        """Ein Upload kann die Tolino-ID und den lokalen Fingerabdruck bereits
+        gespeichert haben, obwohl die Cloud-Metadaten abweichen. Eine dann
+        explizit gewaehlte Metadatenaktion muss trotzdem eingeplant werden."""
+        book = self._book()
+        state = self._state(book)
+        rows = compare_inventory(
+            {1: book}, state,
+            [{"deliverableId": "d1", "title": "Alter Titel",
+              "authors": "Fred Vargas", "isbn": "123"}],
+            ["EPUB"])
+        self.assertEqual("changed", rows[0]["status"])
+        self.assertFalse(rows[0]["file_changed"])
+        _kept, updates = plan_metadata_updates(
+            {1: book}, state, [], ["EPUB"], only_book_ids={rows[0]["book_id"]})
+        self.assertEqual(1, len(updates))
+        self.assertEqual("d1", updates[0][2])
 
     def test_book_without_cloud_copy_is_skipped(self):
         book = self._book()

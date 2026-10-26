@@ -212,7 +212,11 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
         if not tolino_id:
             continue
         stored_meta_fp = old.get("meta_fp")
-        if stored_meta_fp and stored_meta_fp == metadata_fingerprint(metadata):
+        # Eine ausdruecklich ausgewaehlte Metadatenaktion muss den Cloud-Stand
+        # auch dann korrigieren, wenn der lokale Fingerabdruck bereits bekannt
+        # ist: die Cloud kann nach einem Upload trotzdem abweichen.
+        if (requested is None and stored_meta_fp
+                and stored_meta_fp == metadata_fingerprint(metadata)):
             continue
         fields = metadata_update_fields(metadata)
         if not fields:
