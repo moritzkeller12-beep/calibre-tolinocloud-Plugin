@@ -346,6 +346,7 @@ class TolinoClient:
             raise TolinoAuthError(
                 "Anmeldung bei tolino fehlgeschlagen: %s" % exc, code="A06",
                 short="Die Anmeldung bei tolino ist fehlgeschlagen.")
+
         return self._apply_token_response(data)
 
     def _request(self, url, method="GET", data=None, form=False,
@@ -471,56 +472,52 @@ class TolinoClient:
                     body = json.dumps(data).encode("utf-8")
                     headers["Content-Type"] = content_type or "application/json"
 
+            def transport_error(exc, timed_out=False):
+                if timed_out:
+                    message = "Zeitüberschreitung bei der Verbindung zu tolino."
+                    short = "Zeitüberschreitung bei der Verbindung."
+                else:
+                    message = ("Übertragung an tolino fehlgeschlagen: %s"
+                               % sanitize_error(exc, (self.refresh, self.access)))
+                    short = "Die Verbindung zu tolino ist fehlgeschlagen."
+                raise TolinoApiError(message, code="N01", short=short) from exc
+
+            def classify_transport_error(name, exc):
+                """Fall through only when the error proves no request was sent."""
+                timed_out = isinstance(exc, (TimeoutError,
+                                             subprocess.TimeoutExpired))
+                if name == "curl":
+                    if isinstance(exc, FileNotFoundError):
+                        return fallthrough
+                    if isinstance(exc, subprocess.CalledProcessError):
+                        code = exc.returncode
+                        if code in (5, 6, 7):
+                            return fallthrough
+                        timed_out = timed_out or code == 28
+                elif name == "curl_cffi":
+                    try:
+                        from curl_cffi.requests.exceptions import (
+                            RequestException, Timeout as CurlTimeout)
+                    except ImportError:
+                        RequestException = CurlTimeout = ()
+                    if ("timeout" in exc.__class__.__name__.casefold()
+                            or (isinstance(CurlTimeout, type)
+                                and isinstance(exc, CurlTimeout))):
+                        timed_out = True
+                    if RequestException and isinstance(exc, RequestException):
+                        code = getattr(exc, "code", None)
+                        if code in (5, 6, 7):
+                            return fallthrough
+                        timed_out = timed_out or code == 28
+                transport_error(exc, timed_out=timed_out)
+
             def try_transport(name, post):
                 try:
                     status, raw = post()
-                except FileNotFoundError:
-                    return fallthrough
-                except TimeoutError as exc:
-                    raise TolinoApiError(
-                        "Zeitüberschreitung bei der Verbindung zu tolino: %s"
-                        % sanitize_error(exc, (self.refresh, self.access)),
-                        code="N01", short="Zeitüberschreitung bei der Verbindung.") from exc
                 except Exception as exc:
-                    # Nur Verbindungsfehler vor dem Senden erlauben einen
-                    # anderen Transport. Timeout und Fehler nach dem Versand
-                    # könnten den Token bereits verbraucht haben.
-                    if name == "curl_cffi":
-                        try:
-                            from curl_cffi.requests.exceptions import Timeout as CurlTimeout
-                        except ImportError:
-                            CurlTimeout = ()
-                        if CurlTimeout and isinstance(exc, CurlTimeout):
-                            raise TolinoApiError(
-                                "Zeitüberschreitung bei der Verbindung zu tolino.",
-                                code="N01",
-                                short="Zeitüberschreitung bei der Verbindung.") from exc
-                    cause = exc
-                    if isinstance(exc, subprocess.TimeoutExpired):
-                        raise TolinoApiError(
-                            "Zeitüberschreitung bei der Verbindung zu tolino.",
-                            code="N01",
-                            short="Zeitüberschreitung bei der Verbindung.") from exc
-                    if isinstance(exc, subprocess.CalledProcessError):
-                        if exc.returncode in (6, 7):
-                            return fallthrough
-                        raise TolinoApiError(
-                            "curl konnte die Anfrage nicht sicher abschliessen "
-                            "(Status %s)." % exc.returncode,
-                            code="N01",
-                            short="Die Verbindung zu tolino ist fehlgeschlagen.") from exc
-                    if (isinstance(cause, OSError)
-                            and getattr(cause, "errno", None) in (6, 7)):
-                        return fallthrough
-                    if (isinstance(cause, subprocess.CalledProcessError)
-                            and cause.returncode in (6, 7)):
-                        return fallthrough
-                    if name == "curl_cffi":
-                        return fallthrough
-                    raise TolinoApiError(
-                        "Übertragung an tolino fehlgeschlagen: %s"
-                        % sanitize_error(exc, (self.refresh, self.access)),
-                        code="N01", short="Die Verbindung zu tolino ist fehlgeschlagen.") from exc
+                    # Unknown failures may happen after a single-use refresh
+                    # grant was consumed; never replay them on another client.
+                    return classify_transport_error(name, exc)
                 if status and status < 400:
                     self.last_error_text = None
                     return decode(raw)

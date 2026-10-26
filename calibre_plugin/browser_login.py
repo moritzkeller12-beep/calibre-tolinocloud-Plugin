@@ -7,7 +7,7 @@ from .partners import PARTNERS
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
                      TolinoClient, _NO_AUTO_LOGIN, log_warning,
                      normalize_hardware_id, sanitize_error)
-from .transport import _compact_error_text
+from .transport import _bot_check_detected, _compact_error_text
 from .token_candidates import (
     _candidate_age_note, _filter_live_candidates, _jwt_payload,
     _refresh_token_iat_sort_key, _normalize_live_grab,
@@ -69,12 +69,24 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
             if isinstance(data, dict) and data.get("access_token"):
                 return _exchange_fresh_response(
                     partner_id, hardware_id, candidate, data)
+        # A fetch rejection (status 0), malformed success, OAuth response,
+        # or server error is ambiguous: the server may already have consumed
+        # this single-use grant. Only a positively identified WAF block is a
+        # safe reason to try the legacy transport with the same candidate.
+        if status != 403 or not _bot_check_detected(body):
+            detail = "Browser-Tausch HTTP %s: %s" % (
+                status, _compact_error_text(sanitize_error(body))[:200])
+            raise TolinoAuthError(
+                "Der Zugang konnte nicht sicher geprüft werden. " + RELOGIN,
+                code="A06", detail=detail)
         browser_note = "Browser-Tausch HTTP %s: %s" % (
             status, _compact_error_text(sanitize_error(body))[:200])
     else:
         browser_note = "kein Anmeldefenster offen"
 
-    # Fallback: Plugin-eigener POST (alter Weg, WAF-anfaellig).
+    # Fallback is permitted only when the browser request was never attempted
+    # (no reader websocket) or a recognizable WAF response rejected it before
+    # OAuth. An indeterminate fetch failure must never replay the grant.
     client = TolinoClient(partner_id, hardware_id or "")
     client.refresh = candidate
     try:
