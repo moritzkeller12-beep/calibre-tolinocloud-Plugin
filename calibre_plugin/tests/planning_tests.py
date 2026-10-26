@@ -2324,6 +2324,21 @@ class FingerprintCommitTests(unittest.TestCase):
         uploads = plan_sync(changed, worker.state, ["EPUB"], upload_book_ids={1})
         self.assertEqual([(1, "u1", "EPUB", "t1")], uploads)
 
+    def test_successful_metadata_update_writes_confirmed_id_to_column(self):
+        ui_module = self._ui()
+        previous = self._synced_state(
+            self._metadata("u1", "Alt", "100:1000"))
+        changed = self._metadata("u1", "Neu", "100:1000")
+        settings, preparation = self._prepare(
+            ui_module, changed, previous, self._selection(metadata=[1]))
+        worker, emitted = self._run_worker(
+            ui_module, settings, preparation, self._client())
+        self.assertIsNone(emitted.get("failed"))
+        self.assertIsNotNone(emitted.get("completed"))
+        self.assertEqual([(1, "t1")], worker.updates)
+        self.assertEqual(metadata_fingerprint(changed[1]),
+                         worker.state["u1"]["meta_fp"])
+
     def test_a_failed_metadata_update_keeps_the_old_meta_fingerprint(self):
         ui_module = self._ui()
         previous = self._synced_state(
@@ -2347,6 +2362,7 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual(1, worker.outcome["failed"])
         self.assertEqual(previous["u1"]["meta_fp"],
                          worker.state["u1"]["meta_fp"])
+        self.assertEqual([], worker.updates)
         # Und der naechste Lauf plant das Update erneut.
         _kept, updates = plan_metadata_updates(
             changed, worker.state, [], ["EPUB"], only_book_ids={1})
