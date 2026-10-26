@@ -16,7 +16,7 @@ class TolinoSyncAction(InterfaceAction):
         # The keep-alive rotates the stored token periodically while Calibre
         # runs, so an adopted token survives between syncs.
         try:
-            from .sessions import start_token_keepalive
+            from .token_vault import start_token_keepalive
             start_token_keepalive(self._keepalive_credentials,
                                   self._keepalive_persist)
         except Exception:

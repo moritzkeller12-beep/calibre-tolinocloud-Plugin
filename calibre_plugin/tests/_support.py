@@ -20,7 +20,6 @@ _REAL_CLOSE_WINDOW = cdp_module.close_grabber_window
 # Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
 # der Einstieg; Dialoge, Worker und Dashboard liegen in eigenen Modulen.
 UI_SOURCE_FILES = ("ui.py", "ui_common.py", "ui_dialogs.py",
-                   "inventory_selection.py",
                    "ui_workers.py", "ui_auth_workers.py", "ui_settings.py",
                    "ui_dashboard.py", "dashboard_plan.py")
 
@@ -91,7 +90,6 @@ def load_ui_module(get_icons_result, qt_stub=None):
         sys.modules[name] = module
     for module_name in ("calibre_plugin.ui", "calibre_plugin.ui_common",
                         "calibre_plugin.ui_dialogs",
-                        "calibre_plugin.inventory_selection",
                         "calibre_plugin.dashboard_plan",
                         "calibre_plugin.cdp_transport",
                         "calibre_plugin.browser_crypto",
@@ -106,8 +104,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # Das Paket hält sonst die Referenz auf das zuvor geladene
     # ui-Modul (anderer Qt-Stub) und `from ... import ui` gäbe genau
     # diese alte Fassung zurück.
-    for attribute in ("ui", "ui_common", "ui_dialogs",
-                      "inventory_selection", "cdp_transport",
+    for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
                       "token_candidates", "browser_crypto", "ui_workers",
                       "ui_auth_workers", "ui_settings", "ui_dashboard",
                       "dashboard_plan"):
@@ -121,8 +118,6 @@ def load_ui_module(get_icons_result, qt_stub=None):
     ui_module.common = importlib.import_module("calibre_plugin.ui_common")
     ui_module.dashboard = importlib.import_module("calibre_plugin.ui_dashboard")
     ui_module.dialogs = importlib.import_module("calibre_plugin.ui_dialogs")
-    ui_module.inventory_selection = importlib.import_module(
-        "calibre_plugin.inventory_selection")
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")
     ui_module.settings_dialog = importlib.import_module("calibre_plugin.ui_settings")

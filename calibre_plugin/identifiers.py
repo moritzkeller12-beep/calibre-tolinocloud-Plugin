@@ -1,18 +1,11 @@
 """Book identifier normalization and sync-state key migration."""
 import re
 
-from .library import database_uuid_values
-
-
 _UUID_TEXT = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # Calibre's database path may return 'dummy' when the field is absent.
 _UUID_PLACEHOLDERS = frozenset(("none", "null", "undefined", "dummy"))
-UUID_SOURCE_ORDER = ("metadata", "field_for", "sql", "db.uuid", "fallback",
-                     "ungueltig")
-
-
 def normalize_uuid_text(value):
     """Normalize UUIDs represented as text, bytes, UUID objects, or reprs."""
     if value is None:
@@ -56,14 +49,6 @@ def metadata_uuid(item):
             return None
 
 
-def describe_uuid(value):
-    """Return a short representation of an identifier value for logs."""
-    text = repr(value)
-    if len(text) > 60:
-        text = text[:57] + "..."
-    return "%s (%s)" % (text, type(value).__name__)
-
-
 def display_title(title, number=None):
     """Prefer a human-readable title to an internal identifier in progress."""
     text = str(title or "").strip()
@@ -75,50 +60,10 @@ def display_title(title, number=None):
     return "Buch ohne Titel"
 
 
-def _count_source(sources, name):
-    if isinstance(sources, dict):
-        sources[name] = sources.get(name, 0) + 1
-
-
-def format_uuid_sources(sources):
-    """Format UUID source counts consistently for logs."""
-    if not isinstance(sources, dict):
-        return ""
-    names = [name for name in UUID_SOURCE_ORDER if name in sources]
-    names.extend(sorted(name for name in sources if name not in UUID_SOURCE_ORDER))
-    return ", ".join("%s=%d" % (name, int(sources.get(name) or 0))
-                     for name in names)
-
-
-def book_uuid(database, book_id, item=None, sources=None, rejected=None):
-    """Find a real UUID in metadata or supported Calibre database sources."""
-    invalid = set()
-
-    def check(name, value):
-        text = normalize_uuid_text(value)
-        if not text:
-            return ""
-        if not is_real_uuid(text):
-            invalid.add(text)
-            return ""
-        _count_source(sources, name)
-        return text
-
-    if item is not None:
-        text = check("metadata", metadata_uuid(item))
-        if text:
-            return text
-    for name, value in database_uuid_values(database, book_id):
-        text = check(name, value)
-        if text:
-            return text
-    if invalid:
-        _count_source(sources, "ungueltig")
-        if isinstance(rejected, dict):
-            for text in invalid:
-                rejected[text] = rejected.get(text, 0) + 1
-    _count_source(sources, "fallback")
-    return ""
+def book_uuid(item):
+    """Return a canonical Calibre UUID from Metadata, if present."""
+    value = normalize_uuid_text(metadata_uuid(item))
+    return value if value and is_real_uuid(value) else ""
 
 
 def migrate_state_keys(metadata_by_id, state):

@@ -1,5 +1,12 @@
 # Änderungen
 
+## 0.1.02
+
+- Browser- und Token-Verwaltung vereinfacht, ohne den Schutz gegen Wiederverwendung rotierter Refresh-Tokens aufzugeben.
+- Cloud-Inventar, Sync-Planung und Calibre-Datenbankzugriffe auf die tatsächlichen Produktionspfade reduziert.
+- `#tolino_id` unterstützt mehrere Konten durch kontoabhängige IDs in derselben Spalte.
+- Serien-Sammlungsabgleich bleibt Teil des Syncs; Browser-Login wartet bis zum Timeout auf einen neuen Zugang.
+
 ## 0.1.01
 
 - Die `#tolino_id`-Spalte wird bei einem einzelnen Konto wieder gelesen und gefüllt.

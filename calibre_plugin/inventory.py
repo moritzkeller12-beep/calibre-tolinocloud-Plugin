@@ -7,26 +7,9 @@ _INVENTORY_CONTAINERS = ("edata", "ebook")
 # die Kennung des Deliverables: ``identifier`` aus ``epubMetaData`` ist eine
 # ISBN/Verlagsnummer und taugt nicht fuer /deletecontent und /downloadinfo.
 _INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id", "tolino_id", "id")
-# Ersatzkennung, wenn kein Deliverable-Feld da ist (z. B. ``identifier`` in
-# ``epubMetaData``). Sie belegt nur, dass IRGENDEINE Kopie existiert -- sie
-# taugt weder fuer /deletecontent noch als Beweis, dass eine bestimmte
-# Deliverable-ID verschwunden ist.
-_INVENTORY_ID_FALLBACK_KEYS = ("identifier",)
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
                             "ebook", "edata")
-# Felder, an denen ein Objekt als BUCH-Datensatz erkennbar ist. Ein Dict mit
-# ``edata``/``ebook`` UND einem dieser Felder ist selbst ein Datensatz; nur
-# ein reiner Sammel-Container wird aufgeloest.
-_INVENTORY_RECORD_HINTS = ("deliverableId", "deliverable_id", "identifier",
-                           "title", "bookTitle", "isbn", "epubMetaData",
-                           "authors", "author", "uuid")
-_NORMALIZED_RECORD_KEYS = frozenset({
-    "tolino_id", "has_deliverable_id", "identifier", "title", "authors",
-    "isbn", "uuid",
-})
-
-
 def _nested_inventory_value(value, names, depth=0):
     """Wert in einem Bestands-Datensatz -- auch verschachtelt und in Listen.
 
@@ -90,13 +73,8 @@ def normalize_inventory_record(item):
     ``/deletecontent``. ``has_deliverable_id`` sagt, ob die Kopie fuer
     Loeschungen ueberhaupt ansprechbar ist.
     """
-    # The API client already returns this exact shape. Reuse it when the
-    # planner sees it again; partial records still go through parsing.
-    if (isinstance(item, dict)
-            and _NORMALIZED_RECORD_KEYS <= item.keys()):
-        return item
     deliverable = _inventory_id_in(item, _INVENTORY_ID_KEYS)
-    identifier = _inventory_id_in(item, _INVENTORY_ID_FALLBACK_KEYS)
+    identifier = _inventory_id_in(item, ("identifier",))
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
     isbn = _nested_inventory_value(
@@ -114,13 +92,6 @@ def normalize_inventory_record(item):
     }
 
 
-def _looks_like_inventory_record(value):
-    """True, wenn ein Dict selbst ein Datensatz ist (nicht nur Container)."""
-    if not isinstance(value, dict):
-        return False
-    return any(key in value for key in _INVENTORY_RECORD_HINTS)
-
-
 def _field_names(value):
     """Feldnamen eines Objekts -- nie Werte (fuer Fehlermeldungen)."""
     if not isinstance(value, dict):
@@ -136,12 +107,16 @@ def _collect_inventory(value, records, problems, container=""):
     verloren.
     """
     if isinstance(value, dict):
-        nested = [key for key in _INVENTORY_CONTAINERS if key in value]
-        if nested and not _looks_like_inventory_record(value):
-            for key in nested:
-                _collect_inventory(value[key], records, problems, key)
+        if set(value) <= set(_INVENTORY_CONTAINERS):
+            for key, item in value.items():
+                _collect_inventory(item, records, problems, key)
             return
+        if any(key in value for key in _INVENTORY_CONTAINERS):
+            value = {key: item for key, item in value.items()
+                     if key not in _INVENTORY_CONTAINERS}
         records.append(value)
+        if not _inventory_id_in(value, _INVENTORY_ID_KEYS):
+            problems.append("Datensatz ohne Kennung")
         return
     if isinstance(value, (list, tuple)):
         for entry in value:
@@ -154,24 +129,7 @@ def _collect_inventory(value, records, problems, container=""):
 
 
 def parse_inventory(data):
-    """Inventar-Antwort lesen: ``(records, problems, envelope_ok)``.
-
-    ``envelope_ok`` False heisst: die Antwort hat gar nicht die Form eines
-    Bestands (fehlender Schluessel, falscher Typ, leere Huelle). Das ist
-    NIE ein leerer Bestand und laesst den Vergleich scheitern -- sonst
-    saehe die Cloud leer aus und jede lokale Datei gaelte als neu.
-
-    ``problems`` bei ``envelope_ok`` True heissen: einzelne Datensaetze
-    liessen sich nicht deuten. Die Anzeige nutzt dann die lesbaren; jede
-    Loeschung verweigert ``inventory_ids()`` (N02), weil eine unbekannte
-    Kopie sonst faelschlich als «nicht mehr in der Cloud» gelten koennte.
-    Der Sync-Lauf macht ohne Loeschungen weiter und meldet das.
-
-    Ein Datensatz mit NUR ``identifier`` ist deutbar (kein Problem), traegt
-    aber keine Deliverable-Kennung. Das zaehlt ``inventory_ids_complete``
-    als unvollstaendig: eine nicht gefundene ID darf dann nicht als
-    geloescht gelten.
-    """
+    """Read Tolino's ``PublicationInventory.edata/ebook`` response."""
     if not isinstance(data, dict):
         return [], ["Antwort ist kein Objekt"], False
     if "PublicationInventory" not in data:
@@ -188,21 +146,15 @@ def parse_inventory(data):
     raw, problems = [], []
     _collect_inventory(container, raw, problems)
     records = [normalize_inventory_record(item) for item in raw]
-    unknown = sum(1 for record in records
-                  if not record["tolino_id"] and not record["identifier"])
-    if unknown:
-        problems.append("%d Datensatz/Datensaetze ohne Kennung" % unknown)
     return records, problems, True
 
 
 def inventory_records(value):
-    """Alle Datensaetze einer Bestandsform (Huelle, Liste oder Datensatz).
-
-    Eine Implementierung fuer Client und Vergleich: ``compare_inventory``
-    bekommt damit dieselbe Deutung wie ``parse_inventory``.
-    """
-    records, problems = [], []
-    _collect_inventory(value, records, problems)
+    """Return normalized records from the API envelope or a parsed record list."""
+    if isinstance(value, (list, tuple)):
+        return [normalize_inventory_record(item) for item in value
+                if isinstance(item, dict)]
+    records, _problems, _envelope_ok = parse_inventory(value)
     return records
 
 

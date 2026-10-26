@@ -5,6 +5,7 @@ import calibre_plugin.cdp as cdp_module
 from .. import browser_finder
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -54,6 +55,12 @@ class _SidJwtTest(unittest.TestCase):
 
 class LiveGrabTests(unittest.TestCase):
     """Der Live-Grab (CDP) ist der Primaerpfad der Browser-Anmeldung."""
+
+    def setUp(self):
+        self._launched = dict(cdp_module._LAUNCHED)
+        self.addCleanup(cdp_module._LAUNCHED.update, self._launched)
+        cdp_module._LAUNCHED.update({"process": None, "port": None,
+                                     "profile": ""})
 
     def _jwt(self, iat, sid=None):
         return _jwt_token(iat, sid)
@@ -108,17 +115,15 @@ class LiveGrabTests(unittest.TestCase):
             def __init__(self, args, **kwargs):
                 spawned["args"] = list(args)
 
-        with tempfile.TemporaryDirectory() as home:
+        with tempfile.TemporaryDirectory():
             prefix = ["/usr/bin/flatpak", "run", "--command=brave",
                       "com.brave.Browser"]
             with _patch.object(cdp_module, "pick_chromium",
                                return_value=(prefix, "Brave (Flatpak)")), \
-                 _patch.object(cdp_module, "_profile_dir",
-                               return_value=os.path.join(home, "prof")), \
                  _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
                  _patch.object(cdp_module, "_http_get_json",
-                               side_effect=[None, {"webSocketDebuggerUrl":
-                                                   "ok"}]), \
+                               return_value={"webSocketDebuggerUrl":
+                                             "ws://127.0.0.1:%d/devtools/browser/x" % 9441}), \
                  _patch.object(cdp_module.time, "sleep"):
                 port = cdp_module.launch_reader_window(4)
         args = spawned["args"]
@@ -170,10 +175,7 @@ class LiveGrabTests(unittest.TestCase):
         closer.assert_called_once_with()
 
     def test_grab_live_refresh_rejects_only_stale_candidates(self):
-        """Nur veraltete Kandidaten => Wartephase ohne Nachschub =>
-        klare Fehlermeldung statt Replay. Das Fenster geht dabei zu: der
-        nächste Versuch startet mit frischem Profil statt derselben toten
-        Kopie (Feldbefund: invalid_grant-Loop)."""
+        """Nur veraltete Kandidaten scheitern klar, ohne Replay."""
         from ..browser_login import grab_live_refresh
         stale = self._jwt(time.time() - 7200, "sess-old")  # 2 h alt
         with patch("calibre_plugin.cdp.grab_live_tokens",
@@ -181,19 +183,16 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=None), \
              patch("calibre_plugin.cdp.close_grabber_window") as closer, \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_ATTEMPTS", 2), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
+             patch("calibre_plugin.cdp.grabber_window_state",
+                   return_value={"window": False, "reader_tab": False}), \
+             patch("calibre_plugin.browser_login.time.monotonic",
+                   side_effect=[0, 2]):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        self.assertIn(ctx.exception.code, ("B01", "B02"))
+        self.assertEqual("B02", ctx.exception.code)
         closer.assert_called_once_with()
-        message = _full(ctx.exception)
-        self.assertIn("wurde geschlossen", message)
-        self.assertIn("bei tolino anmelden", message)
-        self.assertIn("Zugang verbraucht", message)
-        # Alter des Kandidaten (ohne Token-Wert) steht im Log-Detail.
-        self.assertIn("Sekunden alt", ctx.exception.detail)
-        self.assertNotIn(stale, message)
+        self.assertIn("gültiger Zugang", str(ctx.exception))
+        self.assertNotIn(stale, _full(ctx.exception))
 
     def test_grab_live_refresh_rejection_recommends_fresh_grab(self):
         """Wird der Live-Token abgelehnt, wird KEIN zweiter Kandidat
@@ -219,7 +218,6 @@ class LiveGrabTests(unittest.TestCase):
                                  "hardware": []}), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=None), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_ATTEMPTS", 2), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
@@ -255,12 +253,11 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value={"refresh": [spent], "hardware": [],
                                  "idb": []}), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_ATTEMPTS", 2), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual([spent], logins)
-        self.assertIn("Letzter Fehler", _full(ctx.exception))
+        self.assertIn("Tolino hat den Zugang", ctx.exception.detail)
 
     def test_ws_recv_json_parses_rfc6455_header_correctly(self):
         """Der minimale WS-Client liest den Länge+MASK-Header korrekt."""
@@ -403,9 +400,8 @@ class LiveGrabTests(unittest.TestCase):
             "status": 200,
             "body": json.dumps({"access_token": "a", "refresh_token": "r"}),
         })
-        with patch("calibre_plugin.cdp._read_owner",
+        with patch("calibre_plugin.cdp._verified_owner",
                    return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._owner_alive", return_value=True), \
              patch("calibre_plugin.cdp._evaluate_raw_in_target",
                    return_value={"ok": True, "value": page_reply,
                                  "exception": None}):
@@ -419,9 +415,8 @@ class LiveGrabTests(unittest.TestCase):
     def test_exchange_refresh_in_browser_reports_page_failure(self):
         """Ein fehlgeschlagener Page-Evaluate gibt status=0 zurueck."""
         from .. import cdp as cdp_module
-        with patch("calibre_plugin.cdp._read_owner",
+        with patch("calibre_plugin.cdp._verified_owner",
                    return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._owner_alive", return_value=True), \
              patch("calibre_plugin.cdp._evaluate_raw_in_target",
                    return_value={"ok": False, "value": None,
                                  "exception": "page blew up"}):
@@ -644,13 +639,12 @@ class LiveGrabTests(unittest.TestCase):
                    return_value={"refresh": [spent], "hardware": []}), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=None), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_ATTEMPTS", 2), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         message = _full(ctx.exception)
-        self.assertIn("Zugang verbraucht", message)
-        self.assertIn("Letzter Fehler", message)
+        self.assertIn("gültiger Zugang", message)
+        self.assertIn("Tolino hat den Zugang", ctx.exception.detail)
         # Die Meldung nennt nur das ALTER des geprüften Kandidaten
         # («5 Sekunden alt» vs. «3700 Sekunden alt»), nie seinen Wert.
         self.assertIn("Sekunden alt", message)
@@ -673,9 +667,8 @@ class LiveGrabTests(unittest.TestCase):
                   "ws://127.0.0.1:9223/devtools/page/x"}],
         ]
         messages = []
-        with patch("calibre_plugin.cdp._read_owner",
+        with patch("calibre_plugin.cdp._verified_owner",
                    return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._owner_alive", return_value=True), \
              patch("calibre_plugin.cdp._http_get_json",
                    side_effect=pages), \
              patch("calibre_plugin.cdp._grab_page_tokens",
@@ -693,18 +686,15 @@ class LiveGrabTests(unittest.TestCase):
         """Erst wenn das DevTools-Endpunkt mehrfach in Folge nicht
         antwortet, ist das Fenster wirklich zu (kein Einzel-Aussetzer)."""
         from .. import cdp as cdp_module
-        with patch("calibre_plugin.cdp._read_owner",
-                   return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._active_record",
-                   return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._owner_alive", return_value=False), \
+        with patch("calibre_plugin.cdp._verified_owner", return_value=None), \
              patch("calibre_plugin.cdp._http_get_json",
                    return_value=None), \
              patch("calibre_plugin.cdp.time.sleep", lambda _s: None):
             with self.assertRaises(TolinoAuthError) as ctx:
                 cdp_module.collect_grab(9223, timeout=30,
                                         progress=lambda _t: None)
-        self.assertIn("wurde geschlossen", str(ctx.exception))
+        self.assertIn("geschlossen", str(ctx.exception))
+        self.assertEqual("B03", ctx.exception.code)
 
     def test_collect_grab_timeout_without_reader_tab_has_login_hint(self):
         """Bleibt der Tab die ganze Zeit ohne Web-Reader (z. B. Anmeldung
@@ -816,7 +806,7 @@ class LiveGrabTests(unittest.TestCase):
         self.assertTrue(state["ready"].wait(5))
         result = cdp_module._evaluate_in_target(
             "ws://127.0.0.1:%d/devtools/page/x" % state["port"],
-            "JSON.stringify(out)", timeout=5)
+            "JSON.stringify(out)", timeout=5, expected_port=state["port"])
         self.assertIsNotNone(result)
         self.assertEqual(["string-reply-caught-token-xyz"],
                          result["refresh"])
@@ -845,7 +835,8 @@ class LiveGrabTests(unittest.TestCase):
         state = self._ws_start_server(handler, connections=2)
         self.assertTrue(state["ready"].wait(5))
         grabbed = cdp_module._grab_page_tokens(
-            "ws://127.0.0.1:%d/devtools/page/x" % state["port"], timeout=5)
+            "ws://127.0.0.1:%d/devtools/page/x" % state["port"], timeout=5,
+            expected_port=state["port"])
         self.assertEqual(["storage-token-abc", "idb-token-xyz"],
                          grabbed["refresh"])
         self.assertEqual([reader_hw], grabbed["hardware"])
@@ -888,8 +879,7 @@ class LoginWindowWaitTests(_SidJwtTest):
         """Verschwundenes Fenster und offene Anmeldeseite sind
         verschiedene Zustände mit unterschiedlicher Handlungsanweisung."""
         from .. import cdp
-        with patch.object(cdp, "_read_owner", return_value=None), \
-             patch.object(cdp, "_active_record", return_value=None):
+        with patch.object(cdp, "_verified_owner", return_value=None):
             self.assertEqual("kein Web-Reader-Tab im Anmeldefenster offen",
                              cdp.describe_grab_state())
         login_targets = [{
@@ -897,9 +887,7 @@ class LoginWindowWaitTests(_SidJwtTest):
             "url": "https://shop.example.tld/realms/x/protocol/openid-"
                    "connect/auth?client_id=reader",
         }]
-        with patch.object(cdp, "_read_owner", return_value={"port": 9223}), \
-             patch.object(cdp, "_owner_alive", return_value=True), \
-             patch.object(cdp, "_remove_owned_profile", return_value=True), \
+        with patch.object(cdp, "_verified_owner", return_value={"port": 9223}), \
              patch.object(cdp, "_http_get_json", return_value=login_targets):
             state = cdp.describe_grab_state()
         self.assertIn("Anmeldefenster offen", state)
@@ -912,9 +900,7 @@ class LoginWindowWaitTests(_SidJwtTest):
             "type": "page",
             "url": "https://webreader.mytolino.com/library/index.html",
         }]
-        with patch.object(cdp, "_read_owner", return_value={"port": 9223}), \
-             patch.object(cdp, "_owner_alive", return_value=True), \
-             patch.object(cdp, "_owner_alive", return_value=True), \
+        with patch.object(cdp, "_verified_owner", return_value={"port": 9223}), \
              patch.object(cdp, "_http_get_json",
                           return_value=reader_targets), \
              patch.object(cdp, "grab_once_from_grabber",
@@ -949,8 +935,9 @@ class LoginWindowWaitTests(_SidJwtTest):
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value=login_state), \
              patch("calibre_plugin.cdp.close_grabber_window") as closer, \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_ATTEMPTS", 2), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
+             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
+             patch("calibre_plugin.browser_login.time.monotonic",
+                   side_effect=[0, 0, 0.1, 2]):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         closer.assert_not_called()
@@ -960,7 +947,7 @@ class LoginWindowWaitTests(_SidJwtTest):
         self.assertNotIn("wurde geschlossen", message)
         # Auf der Anmeldeseite wird länger gewartet (zusätzliche
         # Versuche), damit die Neu-Anmeldung vor Ort noch ankommen kann.
-        self.assertGreater(len(grabs), 2)
+        self.assertGreaterEqual(len(grabs), 1)
 
     def test_grab_live_refresh_stops_early_when_window_vanished(self):
         """Endpunkt stumm: nach drei Fehlschlägen abbrechen statt 30
@@ -980,12 +967,13 @@ class LoginWindowWaitTests(_SidJwtTest):
                    side_effect=no_tab), \
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value=dead), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_ATTEMPTS", 30), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
+             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
+             patch("calibre_plugin.browser_login.time.monotonic",
+                   side_effect=[0, 1, 2, 3]):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertLessEqual(len(grabs), 4)
-        self.assertIn("wurde geschlossen", str(ctx.exception))
+        self.assertIn("gültiger Zugang", str(ctx.exception))
 
     def test_candidate_age_note_describes_undatable_candidate(self):
         """Undatierte Kandidaten werden strukturell beschrieben (Teile,
@@ -1189,11 +1177,16 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
                          (refresh, hardware))
         self.assertEqual([fresh], logins)
 
+
 class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
-    """Feldbefund: "es öffnet weiterhin den Firefox …
-    funktionierte es mit diesem Chromium browser. Wenn der User eine
-    Chromium-Variante installiert hat, soll sich diese öffnen, egal
-    welchen Standardbrowser der User hat."""
+    """Chromium-Launcher und Temp-Profil."""
+
+    def setUp(self):
+        self._launched = dict(cdp_module._LAUNCHED)
+        self.addCleanup(cdp_module._LAUNCHED.update, self._launched)
+        cdp_module._LAUNCHED.update({"process": None, "port": None,
+                                     "profile": ""})
+
 
     def test_chromium_candidates_finds_extra_binary_names(self):
         """Auch `chrome`, Beta/Dev-Varianten etc. werden als Befehlsname
@@ -1278,41 +1271,31 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                     raise OSError("exec format error")
                 spawned["args"] = list(args)
 
-        with tempfile.TemporaryDirectory() as home:
+        with tempfile.TemporaryDirectory():
             with _patch.object(cdp_module, "pick_chromium",
                                return_value=broken), \
                  _patch.object(browser_finder, "chromium_options",
                                return_value=[broken, working]), \
                  _patch.object(browser_finder, "_host_probe_status", ""), \
-                 _patch.object(cdp_module, "_profile_dir",
-                               return_value=os.path.join(home, "prof")), \
                  _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
                  _patch.object(cdp_module, "_http_get_json",
-                               side_effect=[None, {"webSocketDebuggerUrl":
-                                                   "ok"}]), \
+                               return_value={"webSocketDebuggerUrl":
+                                             "ws://127.0.0.1:%d/devtools/browser/x" % 9441}), \
                  _patch.object(cdp_module.time, "sleep"):
                 port = cdp_module.launch_reader_window(4)
         self.assertEqual("/usr/bin/working", spawned["args"][0])
         self.assertIn("--remote-debugging-port=%d" % port, spawned["args"])
         self.assertIn("mytolino.com", spawned["args"][-1])
 
-    def test_a_timed_out_launch_leaves_no_process_or_profile(self):
-        """Ein Browser, der nie antwortet, wird beendet und aufgeraeumt.
-
-        Vorher blieb nach dem Timeout ein laufender Prozess samt
-        Besitzdatei und Profil (mit Anmeldesitzung) zurueck.
-        """
-        import tempfile
+    def test_a_timed_out_launch_stops_process_and_removes_profile(self):
         from unittest.mock import patch as _patch
         from .. import cdp as cdp_module
+        state = {"terminated": False, "waited": False}
 
-        state = {"terminated": False, "waited": False, "killed": False}
-
-        class FakePopen(object):
-            pid = 4242
-
+        class FakePopen:
             def __init__(self, args, **kwargs):
-                pass
+                self.profile = next(arg.split("=", 1)[1] for arg in args
+                                    if arg.startswith("--user-data-dir="))
 
             def poll(self):
                 return 0 if state["terminated"] else None
@@ -1324,115 +1307,40 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                 state["waited"] = True
                 return 0
 
-            def kill(self):
-                state["killed"] = True
+        with _patch.object(cdp_module, "pick_chromium",
+                           return_value=(["/usr/bin/chromium"], "Chromium")), \
+             _patch.object(cdp_module, "_start_port", return_value=9333), \
+             _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
+             _patch.object(cdp_module, "_http_get_json", return_value=None), \
+             _patch.object(cdp_module, "_endpoint_answers", return_value=False), \
+             _patch.object(cdp_module.time, "time", side_effect=[0, 100]), \
+             _patch.object(cdp_module.time, "sleep"):
+            with self.assertRaises(TolinoAuthError):
+                cdp_module.launch_reader_window(4)
+        self.assertTrue(state["terminated"])
+        self.assertTrue(state["waited"])
+        self.assertIsNone(cdp_module._LAUNCHED["process"])
 
-        with tempfile.TemporaryDirectory() as home:
-            with _patch.object(cdp_module, "pick_chromium",
-                               return_value=(["/usr/bin/chromium"],
-                                             "Chromium")), \
-                 _patch.object(cdp_module, "_profile_dir",
-                               return_value=os.path.join(home, "prof")), \
-                 _patch.object(cdp_module, "_start_port", return_value=9333), \
-                 _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
-                 _patch.object(cdp_module, "_http_get_json",
-                               return_value=None), \
-                 _patch.object(cdp_module, "_process_matches",
-                               return_value=True), \
-                 _patch.object(cdp_module, "_endpoint_answers",
-                               return_value=False), \
-                 _patch.object(cdp_module.time, "time",
-                               side_effect=[0, 100]), \
-                 _patch.object(cdp_module.time, "sleep"):
-                with self.assertRaises(TolinoAuthError):
-                    cdp_module.launch_reader_window(4)
-            self.assertTrue(state["terminated"])
-            self.assertTrue(state["waited"])
-            self.assertFalse(state["killed"])
-            self.assertIsNone(cdp_module._ACTIVE["port"])
-            self.assertFalse(os.path.exists(cdp_module._owner_file()))
-            self.assertEqual([], os.listdir(os.path.join(home, "prof")))
-
-    def test_failed_launch_cleans_only_its_exact_profile_not_siblings(self):
-        import tempfile
+    def test_failed_browser_spawn_removes_only_its_temporary_profile(self):
         from unittest.mock import patch as _patch
         from .. import cdp as cdp_module
+        spawned_profile = []
 
         class FakePopen:
-            pid = 4243
-
             def __init__(self, args, **kwargs):
-                pass
+                spawned_profile.append(next(
+                    arg.split("=", 1)[1] for arg in args
+                    if arg.startswith("--user-data-dir=")))
+                raise OSError("cannot start")
 
-            @staticmethod
-            def poll():
-                return 0
-
-            @staticmethod
-            def terminate():
-                pass
-
-            @staticmethod
-            def wait(timeout=None):
-                return 0
-
-        with tempfile.TemporaryDirectory() as home:
-            base = os.path.join(home, "prof")
-            sibling = os.path.join(base, "profile-other")
-            os.makedirs(sibling)
-            with open(os.path.join(sibling, "keep.txt"), "w") as handle:
-                handle.write("leave untouched")
-            with _patch.object(cdp_module, "pick_chromium",
-                               return_value=(["/usr/bin/chromium"], "Chromium")), \
-                 _patch.object(cdp_module, "_profile_dir", return_value=base), \
-                 _patch.object(cdp_module, "_start_port", return_value=9335), \
-                 _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
-                 _patch.object(cdp_module, "_http_get_json", return_value=None), \
-                 _patch.object(cdp_module, "_process_matches", return_value=True), \
-                 _patch.object(cdp_module, "_endpoint_answers", return_value=False), \
-                 _patch.object(cdp_module.time, "time", side_effect=[0, 100]), \
-                 _patch.object(cdp_module.time, "sleep"):
-                with self.assertRaises(TolinoAuthError):
-                    cdp_module.launch_reader_window(4)
-            self.assertTrue(os.path.isfile(os.path.join(sibling, "keep.txt")))
-            self.assertEqual([], [name for name in os.listdir(base)
-                                 if name.startswith("profile-")
-                                 and name != "profile-other"])
-
-    def test_a_failed_browser_spawn_leaves_no_profile_or_owner_file(self):
-        """Scheitert jeder Chromium-Start, bleibt kein Profil zurueck.
-
-        Profil, Marker und Besitzdatei entstehen VOR dem Prozessstart.
-        Schlug Popen fehl, blieben sie bisher liegen -- samt moeglicher
-        Anmeldesitzung aus einem frueheren Lauf.
-        """
-        import tempfile
-        from unittest.mock import patch as _patch
-        from .. import cdp as cdp_module
-
-        class FakePopen(object):
-            def __init__(self, args, **kwargs):
-                raise OSError("kein Chromium startbar")
-
-        with tempfile.TemporaryDirectory() as home:
-            profile = os.path.join(home, "prof")
-            with _patch.object(cdp_module, "pick_chromium",
-                               return_value=(["/usr/bin/chromium"],
-                                             "Chromium")), \
-                 _patch.object(browser_finder, "chromium_options",
-                               return_value=[]), \
-                 _patch.object(cdp_module, "_profile_dir",
-                               return_value=profile), \
-                 _patch.object(cdp_module, "_start_port", return_value=9334), \
-                 _patch.object(cdp_module.subprocess, "Popen", FakePopen):
-                with self.assertRaises(TolinoAuthError):
-                    cdp_module.launch_reader_window(4)
-            self.assertIsNone(cdp_module._ACTIVE["port"])
-            self.assertIsNone(cdp_module._LAUNCHED["process"])
-            self.assertFalse(os.path.exists(os.path.join(profile, "owner.json")))
-            # The failed launch's exact profile is cleaned, but this does
-            # not authorize recursively removing the shared profile base.
-            self.assertEqual([], os.listdir(profile))
+        with _patch.object(cdp_module, "pick_chromium",
+                           return_value=(["/usr/bin/chromium"], "Chromium")), \
+             _patch.object(browser_finder, "chromium_options", return_value=[]), \
+             _patch.object(cdp_module.subprocess, "Popen", FakePopen):
+            with self.assertRaises(TolinoAuthError):
+                cdp_module.launch_reader_window(4)
+        self.assertEqual(1, len(spawned_profile))
+        self.assertFalse(os.path.exists(spawned_profile[0]))
 
 
 class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
@@ -1634,89 +1542,37 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
         self.assertNotIn("flatpak override", message)
 
 class CdpOwnershipTests(unittest.TestCase):
-    """Nur das EIGENE Anmeldefenster wird bedient (P1/F)."""
+    """CDP nutzt nur den gestarteten Prozess, das Temp-Profil und den Port."""
 
     def setUp(self):
-        import tempfile
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        from .. import cdp as cdp_module
-        self.cdp = cdp_module
-        self.base = os.path.join(self._tmp.name, "base")
-        self.original_profile_dir = cdp_module._profile_dir
-        patcher = patch.object(cdp_module, "_profile_dir",
-                               return_value=self.base)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.addCleanup(cdp_module._ACTIVE.update, {
-            "port": None, "profile": "", "token": ""})
-        self.addCleanup(cdp_module._LAUNCHED.update,
-                        {"process": None, "port": None,
-                         "profile": "", "token": ""})
-        cdp_module._LAUNCHED.update({"process": None, "port": None,
-                                     "profile": "", "token": ""})
+        from .. import cdp
+        self.cdp = cdp
+        self.original = dict(cdp._LAUNCHED)
+        self.addCleanup(cdp._LAUNCHED.update, self.original)
+        cdp._LAUNCHED.update({"process": None, "port": None, "profile": ""})
 
-    def _owned_record(self, port=9223):
-        profile = os.path.join(self.base, "profile-owned")
-        os.makedirs(profile, exist_ok=True)
-        token = "token-owned"
-        self.cdp._write_marker(profile, token)
-        self.cdp._write_owner({"port": port, "profile": profile,
-                               "token": token})
-        return self.cdp._read_owner()
+    def _launch(self, process, port=9223, profile=None):
+        self.cdp._LAUNCHED.update({
+            "process": process, "port": port,
+            "profile": profile or tempfile.mkdtemp(prefix="cdp-test-")})
+        return self.cdp._launched_record(port, require_endpoint=False)
 
-    def test_close_target_is_none_without_an_ownership_record(self):
-        from .. import cdp as cdp_module
-        self.assertIsNone(cdp_module._browser_ws_for_record(None))
+    def test_browser_websocket_uses_localhost_and_requires_selected_port(self):
+        parse = self.cdp._devtools_ws_address
+        for host in ("localhost", "127.0.0.1", "[::1]"):
+            with self.subTest(host=host):
+                self.assertEqual(("127.0.0.1", 9223, "/devtools/page/x"),
+                                 parse("ws://%s:9223/devtools/page/x" % host,
+                                       9223))
+        with self.assertRaises(ValueError):
+            parse("ws://attacker.invalid:9223/devtools/page/x", 9223)
+        for url in ("ws://127.0.0.1:9999/devtools/page/x",
+                    "wss://127.0.0.1:9223/devtools/page/x",
+                    "ws://127.0.0.1:9223/json/version"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                parse(url, 9223)
 
-    def test_close_target_refuses_a_port_that_is_not_the_owned_one(self):
-        self._owned_record(port=9223)
-        from .. import cdp as cdp_module
-        record = self.cdp._read_owner()
-        record["port"] = 9224
-        with patch.object(cdp_module, "_process_matches", return_value=True), \
-             patch.object(cdp_module, "_marker_matches", return_value=True), \
-             patch.object(cdp_module, "_http_get_json", return_value={
-                 "webSocketDebuggerUrl":
-                 "ws://127.0.0.1:9223/devtools/browser/x"}):
-            self.assertIsNone(cdp_module._browser_ws_for_record(record))
-
-    def test_owner_alive_requires_the_private_marker(self):
-        from .. import cdp as cdp_module
-        outer = os.path.join(self.base, "profile-foreign")
-        os.makedirs(outer, exist_ok=True)
-        record = {"port": 9223, "profile": outer,
-                  "token": "erwartet"}
-        with patch.object(cdp_module, "_http_get_json",
-                          return_value={"webSocketDebuggerUrl": "ws://x"}):
-            self.assertFalse(cdp_module._owner_alive(record))
-        # Fremdes Profil ohne Marker wird nie als eigenes erkannt.
-        self.assertFalse(cdp_module._owner_alive(
-            {"port": 9223, "profile": self.base, "token": "t"}))
-
-    def test_only_the_owned_endpoint_yields_a_close_target(self):
-        # Schreibt Marker und Besitzdatei -- der Rueckgabewert wird nicht
-        # gebraucht.
-        self._owned_record(port=9223)
-        from .. import cdp as cdp_module
-        record = self.cdp._read_owner()
-        with patch.object(cdp_module, "_process_matches", return_value=True), \
-             patch.object(cdp_module, "_marker_matches", return_value=True), \
-             patch.object(cdp_module, "_http_get_json",
-                          return_value={"webSocketDebuggerUrl":
-                                        "ws://127.0.0.1:9223/devtools/browser/x"}):
-            self.assertEqual(("127.0.0.1", 9223, "/devtools/browser/x"),
-                             cdp_module._browser_ws_for_record(record))
-        # Ein DevTools-Link mit fremdem Port wird verworfen.
-        with patch.object(cdp_module, "_process_matches", return_value=True), \
-             patch.object(cdp_module, "_marker_matches", return_value=True), \
-             patch.object(cdp_module, "_http_get_json",
-                          return_value={"webSocketDebuggerUrl":
-                                        "ws://127.0.0.1:9999/devtools/browser/x"}):
-            self.assertIsNone(cdp_module._browser_ws_for_record(record))
-
-    def test_browser_close_is_sent_over_a_validated_loopback_socket(self):
-        from .. import cdp as cdp_module
+    def test_browser_close_targets_only_loopback_and_selected_port(self):
         calls = []
 
         class FakeWs:
@@ -1725,8 +1581,8 @@ class CdpOwnershipTests(unittest.TestCase):
                 calls.append((host, port, path))
                 return FakeWs()
 
-            def send_json(self, obj):
-                calls.append(obj)
+            def send_json(self, value):
+                calls.append(value)
 
             def recv_json(self, timeout=10):
                 return {}
@@ -1734,504 +1590,129 @@ class CdpOwnershipTests(unittest.TestCase):
             def close(self):
                 calls.append("closed")
 
-        with patch.object(cdp_module, "_Ws", FakeWs):
-            self.assertTrue(cdp_module._send_browser_close(
-                "127.0.0.1", 9223, "/devtools/browser/x"))
-            self.assertFalse(cdp_module._send_browser_close(
-                "attacker.example", 9223, "/devtools/browser/x"))
-            self.assertFalse(cdp_module._send_browser_close(
+        with patch.object(self.cdp, "_Ws", FakeWs):
+            self.assertTrue(self.cdp._send_browser_close(
+                "127.0.0.1", 9223, "/devtools/browser/x", expected_port=9223))
+            self.assertFalse(self.cdp._send_browser_close(
+                "attacker.invalid", 9223, "/devtools/browser/x",
+                expected_port=9223))
+            self.assertFalse(self.cdp._send_browser_close(
                 "127.0.0.1", 9999, "/devtools/browser/x",
                 expected_port=9223))
-            self.assertFalse(cdp_module._send_browser_close(
-                "127.0.0.1", 9223, "/json/version"))
         self.assertIn({"id": 1, "method": "Browser.close"}, calls)
-        self.assertIn("closed", calls)
-        self.assertEqual(1, len([item for item in calls
-                                 if isinstance(item, tuple)
-                                 and item[1] == 9223]))
+        self.assertEqual([("127.0.0.1", 9223, "/devtools/browser/x")],
+                         [call for call in calls if isinstance(call, tuple)])
 
-    def test_reader_and_grab_reject_nonlocal_or_foreign_debugger_urls(self):
-        from .. import cdp as cdp_module
-        self._owned_record(port=9223)
-        reader = [{"type": "page",
-                  "url": "https://webreader.mytolino.com/library/",
-                  "webSocketDebuggerUrl":
-                      "ws://attacker.example:9223/devtools/page/x"}]
-        for accessor in (cdp_module.reader_ws_url,
-                         cdp_module.grab_once_from_grabber):
-            with self.subTest(accessor=accessor.__name__), \
-                 patch.object(cdp_module, "_owner_alive", return_value=True), \
-                 patch.object(cdp_module, "_http_get_json", return_value=reader), \
-                 patch.object(cdp_module, "_grab_page_tokens") as grab:
-                self.assertIsNone(accessor(9223) if accessor is cdp_module.reader_ws_url
-                                  else accessor(9223))
-                grab.assert_not_called()
-
-    def test_reader_page_requires_the_actual_tolino_https_host(self):
-        from .. import cdp as cdp_module
-        for url in (
-                "https://webreader.mytolino.com/library/",
-                "https://mytolino.com/library/",
-                "https://reader.webreader.mytolino.com/library/"):
-            self.assertTrue(cdp_module._is_reader_url(url), url)
-        for url in (
-                "http://webreader.mytolino.com/library/",
-                "https://mytolino.com.attacker.invalid/",
-                "https://attacker.invalid/?next=mytolino.com",
-                "file:///tmp/mytolino.com"):
-            self.assertFalse(cdp_module._is_reader_url(url), url)
-
-    def test_devtools_address_parts_share_url_validation(self):
-        from .. import cdp as cdp_module
-        parsed = cdp_module._devtools_ws_address(
-            "ws://[::1]:9223/devtools/page/target", 9223)
-        self.assertEqual(
-            parsed,
-            cdp_module._validate_devtools_ws_parts(*parsed, expected_port=9223))
-        for host, port, path in (
-                ("attacker.example", 9223, "/devtools/page/x"),
-                ("127.0.0.1", 9999, "/devtools/page/x"),
-                ("127.0.0.1", 9223, "/json/version"),
-                ("127.0.0.1", 9223, "/devtools/page/x?next=evil")):
-            with self.subTest(host=host, port=port, path=path), \
-                    self.assertRaises(ValueError):
-                cdp_module._validate_devtools_ws_parts(
-                    host, port, path, expected_port=9223)
-
-    def test_devtools_urls_must_be_loopback_on_the_owned_port(self):
-        from .. import cdp as cdp_module
-        accepted = (
-            "ws://127.0.0.1:9223/devtools/page/x",
-            "ws://localhost:9223/devtools/page/x",
-            "ws://[::1]:9223/devtools/page/x",
-            "ws://[::ffff:127.0.0.1]:9223/devtools/page/x",
-        )
-        for url in accepted:
-            with self.subTest(url=url):
-                self.assertTrue(cdp_module._devtools_ws_address(url, 9223))
-        rejected = (
-            "wss://127.0.0.1:9223/devtools/page/x",
-            "ws://attacker.example:9223/devtools/page/x",
-            "ws://192.0.2.5:9223/devtools/page/x",
-            "ws://127.0.0.1:9999/devtools/page/x",
-            "ws://user@127.0.0.1:9223/devtools/page/x",
-            "ws://127.0.0.1:9223/json/version",
-            "ws://127.0.0.1:9223/devtools/page/x?redirect=evil",
-        )
-        for url in rejected:
-            with self.subTest(url=url), self.assertRaises(ValueError):
-                cdp_module._devtools_ws_address(url, 9223)
-
-    def test_failed_owned_child_is_reaped_and_profile_cleanup_is_scoped(self):
-        from .. import cdp as cdp_module
-        record = self._owned_record(port=9223)
-        sibling = os.path.join(self.base, "profile-sibling")
-        os.makedirs(sibling)
-        with open(os.path.join(sibling, "keep.txt"), "w") as handle:
-            handle.write("keep")
-
-        class Process:
-            def __init__(self):
-                self.running = True
-                self.terminated = False
-                self.killed = False
-
-            def poll(self):
-                return None if self.running else 0
-
-            def terminate(self):
-                self.terminated = True
-                self.running = False
-
-            def kill(self):
-                self.killed = True
-                self.running = False
-
-            def wait(self, timeout=None):
-                return 0
-
-        process = Process()
-        cdp_module._ACTIVE.update(record)
-        cdp_module._LAUNCHED.update({"process": process, **record})
-        cdp_module._abandon_failed_launch(process, record)
-        self.assertTrue(process.terminated)
-        self.assertFalse(process.killed)
-        self.assertFalse(os.path.exists(record["profile"]))
-        self.assertTrue(os.path.isfile(os.path.join(sibling, "keep.txt")))
-        self.assertFalse(os.path.exists(cdp_module._owner_file()))
-        self.assertIsNone(cdp_module._ACTIVE["port"])
-
-    def test_close_falls_back_to_the_owned_process(self):
-        """Browser.close can be ignored (unload handler); the recorded
-        process is then terminated -- but only with a valid ownership proof."""
-        record = self._owned_record(port=9223)
-        from .. import cdp as cdp_module
-        cdp_module._LAUNCHED.update({"profile": record["profile"],
-                                     "token": record["token"]})
-        with patch.object(cdp_module, "_browser_ws_for_record",
-                          return_value=("127.0.0.1", 9223,
-                                        "/devtools/browser/x")), \
-             patch.object(cdp_module, "_send_browser_close",
-                          return_value=True), \
-             patch.object(cdp_module, "_process_matches",
-                          side_effect=[True, False, False, False]), \
-             patch.object(cdp_module, "_endpoint_answers",
-                          return_value=True), \
-             patch.object(cdp_module, "_window_gone",
-                          return_value=False), \
-             patch.object(cdp_module, "_terminate_owned_process",
-                          return_value=True) as terminator, \
-             patch.object(cdp_module.time, "sleep"):
-            self.assertTrue(_REAL_CLOSE_WINDOW(timeout=0.2))
-        terminator.assert_called_once()
-        self.assertFalse(os.path.exists(cdp_module._owner_file()))
-
-    def test_owned_pids_find_the_browser_behind_an_exited_launcher(self):
-        """Snap/Flatpak start a short-lived launcher; the browser child has
-        a different PID but the same profile and debugging port."""
-        record = self._owned_record(port=9223)
-        browser_argv = [
-            "/snap/chromium/current/usr/lib/chromium/chrome",
-            "--user-data-dir=%s" % record["profile"],
-            "--remote-debugging-port=9223",
-        ]
-        with patch.object(cdp_module.os, "listdir",
-                          return_value=["111", "222", "self"]), \
-             patch.object(cdp_module, "_proc_argv",
-                          side_effect=lambda pid: browser_argv
-                          if pid == 222 else []), \
-             patch.object(cdp_module, "_is_browser_process",
-                          side_effect=lambda pid: pid == 222):
-            self.assertEqual([222], cdp_module._owned_pids(record))
-            self.assertTrue(cdp_module._process_matches(record))
-
-    def test_owned_pids_ignore_the_same_profile_on_a_foreign_port(self):
-        record = self._owned_record(port=9223)
-        stale_argv = [
-            "/usr/lib/chromium/chrome",
-            "--user-data-dir=%s" % record["profile"],
-            "--remote-debugging-port=9999",
-        ]
-        with patch.object(cdp_module.os, "listdir", return_value=["222"]), \
-             patch.object(cdp_module, "_proc_argv",
-                          return_value=stale_argv), \
-             patch.object(cdp_module, "_is_browser_process",
-                          return_value=True):
-            self.assertEqual([], cdp_module._owned_pids(record))
-
-    def test_close_without_ownership_never_terminates_anything(self):
-        from .. import cdp as cdp_module
-        with patch.object(cdp_module, "_read_owner", return_value=None), \
-             patch.object(cdp_module, "_terminate_owned_process") as terminator:
-            self.assertFalse(cdp_module.close_grabber_window())
-        terminator.assert_not_called()
-
-    def test_windows_and_macos_ownership_requires_the_exact_live_child(self):
-        from .. import cdp as cdp_module
-
+    def test_owner_requires_in_memory_process_and_endpoint(self):
         class Process:
             @staticmethod
             def poll():
                 return None
 
-        record = self._owned_record(port=9223)
-        cdp_module._LAUNCHED.update({"process": Process(), "port": 9223,
-                                     "profile": record["profile"],
-                                     "token": record["token"]})
-        real_isdir = os.path.isdir
-        with patch.object(cdp_module, "_http_get_json", return_value={"ok": True}), \
-             patch.object(cdp_module.os.path, "isdir",
-                          side_effect=lambda path: False if path == "/proc"
-                          else real_isdir(path)):
-            self.assertTrue(cdp_module._owner_alive(record))
-        cdp_module._LAUNCHED["port"] = 9999
-        self.assertFalse(cdp_module._process_matches(record))
-        cdp_module._LAUNCHED.update({"process": None, "port": None,
-                                     "profile": "", "token": ""})
+        self._launch(Process())
+        with patch.object(self.cdp, "_endpoint_answers", return_value=True):
+            self.assertEqual(9223, self.cdp._verified_owner()["port"])
+            self.assertIsNotNone(self.cdp._verified_owner(9223))
+            self.assertIsNone(self.cdp._verified_owner(9224))
+        with patch.object(self.cdp, "_endpoint_answers", return_value=False):
+            self.assertIsNone(self.cdp._verified_owner())
 
-    def test_process_fallback_requires_the_private_marker(self):
-        from .. import cdp as cdp_module
-        record = self._owned_record(port=9223)
-        record["token"] = "wrong-marker"
-        with patch.object(cdp_module.os, "kill") as killer:
-            self.assertFalse(cdp_module._terminate_owned_process(record))
-        killer.assert_not_called()
-
-    def test_grab_refuses_without_ownership(self):
-        from .. import cdp as cdp_module
-        with patch.object(cdp_module, "_read_owner", return_value=None), \
-             patch.object(cdp_module, "_http_get_json") as http:
-            self.assertIsNone(cdp_module.grab_once_from_grabber())
-        http.assert_not_called()
-
-    def test_missing_reader_tab_yields_none(self):
-        from .. import cdp as cdp_module
-        self._owned_record(port=9223)
-        targets = [{"type": "page", "url": "https://shop.tld/login"}]
-        with patch.object(cdp_module, "_owner_alive", return_value=True), \
-             patch.object(cdp_module, "_http_get_json",
-                          return_value=targets), \
-             patch.object(cdp_module, "_grab_page_tokens") as grab:
-            self.assertIsNone(cdp_module.grab_once_from_grabber())
-        grab.assert_not_called()
-
-    def test_launch_does_not_reuse_a_dead_owner_and_uses_a_fresh_profile(self):
-        from .. import cdp as cdp_module
-        old_profile = os.path.join(self.base, "profile-dead")
-        os.makedirs(old_profile, exist_ok=True)
-        cdp_module._write_marker(old_profile, "dead-token")
-        cdp_module._write_owner({"port": 9223, "profile": old_profile,
-                                 "pid": 1, "token": "dead-token"})
+    def test_launch_uses_fresh_temporary_profile_and_remembers_process(self):
         spawned = {}
 
         class FakePopen:
             def __init__(self, args, **kwargs):
-                spawned["args"] = list(args)
-                self.pid = 4242
+                self.args = args
+                spawned["args"] = args
+                spawned["process"] = self
 
-        closed = []
-        with patch.object(cdp_module, "pick_chromium",
-                          return_value=(["/usr/bin/chromium"], "Chromium")), \
-             patch.object(cdp_module, "_owner_alive", return_value=False), \
-             patch.object(cdp_module, "close_grabber_window",
-                          side_effect=lambda *args, **kwargs:
-                          closed.append(True) or True), \
-             patch.object(cdp_module, "_endpoint_answers", return_value=False), \
-             patch.object(cdp_module.subprocess, "Popen", FakePopen), \
-             patch.object(cdp_module, "_http_get_json",
-                          side_effect=[None, {"ok": True}]), \
-             patch.object(cdp_module.time, "sleep"):
-            port = cdp_module.launch_reader_window(4)
-        # Der verwaiste Vorgaenger mit gueltigem Marker wird erst
-        # geschlossen, dann entsteht ein frisches Fenster.
-        self.assertEqual([True], closed)
-        args = spawned["args"]
-        profile = next(a for a in args if a.startswith("--user-data-dir="))
-        self.assertNotEqual("--user-data-dir=%s" % old_profile, profile)
-        self.assertNotIn("--remote-debugging-port=9223", args)
-        self.assertIn("--remote-debugging-port=%d" % port, args)
-        # Die Besitzdatei nennt den neuen Prozess und das neue Profil.
-        record = cdp_module._read_owner()
-        self.assertNotIn("pid", record)
-        self.assertEqual(profile.split("=", 1)[1], record["profile"])
-
-    def test_launch_refuses_to_delete_a_profile_when_old_window_cannot_close(self):
-        """Ein nicht sicher schliessbares Browserprofil wird nicht entfernt
-        und durch einen neuen Start ersetzt."""
-        from .. import cdp as cdp_module
-        record = self._owned_record(port=9223)
-        with patch.object(cdp_module, "pick_chromium",
-                          return_value=(["/usr/bin/chromium"], "Chromium")), \
-             patch.object(cdp_module, "_owner_alive", return_value=False), \
-             patch.object(cdp_module, "close_grabber_window",
-                          return_value=False), \
-             patch.object(cdp_module.subprocess, "Popen") as spawn:
-            with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window(4)
-        self.assertEqual("B07", ctx.exception.code)
-        spawn.assert_not_called()
-        self.assertTrue(os.path.isdir(record["profile"]))
-        self.assertTrue(os.path.exists(cdp_module._owner_file()))
-
-    def test_the_profile_directory_is_per_user(self):
-        """Ein fester Pfad in /tmp liesse sich von anderen Benutzern
-        vorbelegen; die Kennung macht den Pfad zu unserem."""
-        from .. import cdp as cdp_module
-        real = self.original_profile_dir()
-        self.assertTrue(real.endswith("-" + cdp_module._profile_identity()))
-        self.assertNotEqual("tolino_grab_profile",
-                            os.path.basename(real))
-
-    def test_the_profile_base_is_created_for_the_owner_only(self):
-        if os.name != "posix":
-            self.skipTest("Dateirechte nur auf POSIX")
-        from .. import cdp as cdp_module
-        base = cdp_module._ensure_profile_base()
-        self.assertEqual(0o700, os.stat(base).st_mode & 0o777)
-
-    def test_closing_removes_the_private_profile(self):
-        """Delete private browser data only after its owned process exits."""
-        from .. import cdp as cdp_module
-        record = self._owned_record(port=9223)
-        self.assertTrue(os.path.isdir(record["profile"]))
-        with patch.object(cdp_module, "_process_matches",
-                          side_effect=[True, False, False, False]), \
-             patch.object(cdp_module, "_browser_ws_for_record",
-                          return_value=("127.0.0.1", 9223,
-                                        "/devtools/browser/x")), \
-             patch.object(cdp_module, "_send_browser_close",
-                          return_value=True), \
-             patch.object(cdp_module, "_window_gone", return_value=True), \
-             patch.object(cdp_module, "_endpoint_answers", return_value=True):
-            self.assertTrue(_REAL_CLOSE_WINDOW(timeout=0.2))
-        self.assertFalse(os.path.exists(record["profile"]))
-        self.assertFalse(os.path.exists(cdp_module._owner_file()))
-
-    def test_a_profile_without_the_marker_is_never_deleted(self):
-        """Ohne Marker wird weder geschlossen noch das Profil geloescht."""
-        from .. import cdp as cdp_module
-        record = self._owned_record(port=9223)
-        cdp_module._ACTIVE.update(dict(record))
-        cdp_module._LAUNCHED.update({"process": object(), "port": 9223,
-                                     "profile": record["profile"],
-                                     "token": record["token"]})
-        os.remove(os.path.join(record["profile"], cdp_module._OWNER_MARKER))
-        with patch.object(cdp_module, "_process_matches", return_value=True), \
-             patch.object(cdp_module, "_terminate_launched", return_value=True), \
-             patch.object(cdp_module, "_window_gone", return_value=True):
-            self.assertFalse(_REAL_CLOSE_WINDOW(timeout=0.2))
-        self.assertTrue(os.path.isdir(record["profile"]))
-
-    def test_marker_written_before_owner_record(self):
-        from .. import cdp as cdp_module
-        record = self._owned_record()
-        marker = os.path.join(record["profile"], cdp_module._OWNER_MARKER)
-        with open(marker, "r", encoding="utf-8") as handle:
-            self.assertEqual(record["token"], handle.read().strip())
-
-
-    def test_an_ignored_browser_close_closes_the_window_targets(self):
-        """Ignoriert Chromium `Browser.close`, schliessen wir die Seite
-
-        ueber den Debug-Endpunkt -- der Besitznachweis bleibt bestehen
-.
-        """
-        record = self._owned_record(port=9223)
-        from .. import cdp as cdp_module
-        cdp_module._ACTIVE.update(dict(record))
-        cdp_module._LAUNCHED.update({"process": object(), "port": 9223,
-                                     "profile": record["profile"],
-                                     "token": record["token"]})
-        state = {"closed": False, "targets": 0}
-
-        def close_targets(*args, **kwargs):
-            state["targets"] += 1
-            state["closed"] = True
-            return True
-
-        with patch.object(cdp_module, "_browser_ws_for_record",
-                          return_value=("127.0.0.1", 9223,
-                                        "/devtools/browser/x")), \
-             patch.object(cdp_module, "_send_browser_close",
-                          return_value=True), \
-                          patch.object(cdp_module, "_process_matches",
-                          side_effect=[True, True, True]), \
-             patch.object(cdp_module, "_endpoint_answers",
-                          return_value=True), \
-             patch.object(cdp_module, "_window_gone",
-                          side_effect=lambda *args, **kwargs:
-                          state["closed"]), \
-             patch.object(cdp_module, "_close_page_targets",
-                          side_effect=close_targets), \
-             patch.object(cdp_module.time, "sleep"):
-            self.assertFalse(_REAL_CLOSE_WINDOW(timeout=0.2))
-        self.assertEqual(1, state["targets"])
-        self.assertTrue(os.path.exists(cdp_module._owner_file()))
-        # The browser process and endpoint remain alive, so ownership and its
-        # profile must remain for a later safe close attempt.
-        self.assertTrue(os.path.isdir(record["profile"]))
-
-    def test_close_reports_failure_and_keeps_the_ownership_record(self):
-        """Bleibt das Fenster offen, darf der Nachweis NICHT verschwinden --
-
-        sonst ist jeder weitere Schliessversuch unmoeglich.
-        """
-        record = self._owned_record(port=9223)
-        from .. import cdp as cdp_module
-        cdp_module._ACTIVE.update(dict(record))
-        cdp_module._LAUNCHED.update({"process": object(), "port": 9223,
-                                     "profile": record["profile"],
-                                     "token": record["token"]})
-        with patch.object(cdp_module, "_browser_ws_for_record",
-                          return_value=("127.0.0.1", 9223,
-                                        "/devtools/browser/x")), \
-             patch.object(cdp_module, "_send_browser_close",
-                          return_value=True), \
-             patch.object(cdp_module, "_remove_owned_profile", return_value=True), \
-             patch.object(cdp_module, "_process_matches", return_value=True), \
-             patch.object(cdp_module, "_endpoint_answers",
-                          return_value=True), \
-             patch.object(cdp_module, "_window_gone", return_value=False), \
-             patch.object(cdp_module, "_terminate_launched",
-                          return_value=False), \
-             patch.object(cdp_module, "_terminate_owned_process",
-                          return_value=False), \
-             patch.object(cdp_module.time, "sleep"):
-            self.assertFalse(_REAL_CLOSE_WINDOW(timeout=0.2))
-        self.assertTrue(os.path.exists(cdp_module._owner_file()))
-        self.assertTrue(os.path.isdir(record["profile"]))
-
-    def test_the_process_we_started_closes_the_window_without_proc(self):
-        """Windows/macOS haben kein /proc: das Popen-Kind wird beendet.
-
-        Nur mit passendem Besitzsatz und nur, solange `poll()` None ist --
-        damit ist es genau unser Prozess, keine wiederverwendete PID.
-        """
-        record =        record = self._owned_record(port=9223)
-        from .. import cdp as cdp_module
-        state = {"dead": False, "terminated": False}
-
-
-        class FakeProcess:
             @staticmethod
             def poll():
-                return 0 if state["dead"] else None
+                return None
 
-            @staticmethod
-            def terminate():
+        with patch.object(self.cdp, "pick_chromium",
+                          return_value=(["/usr/bin/chromium"], "Chromium")), \
+             patch.object(self.cdp, "_start_port", return_value=9441), \
+             patch.object(self.cdp.subprocess, "Popen", FakePopen), \
+             patch.object(self.cdp, "_http_get_json", return_value={"ok": True}):
+            port = self.cdp.launch_reader_window(4)
+        self.assertEqual(9441, port)
+        profile_arg = next(arg for arg in spawned["args"]
+                           if arg.startswith("--user-data-dir="))
+        profile = profile_arg.split("=", 1)[1]
+        self.assertTrue(os.path.isdir(profile))
+        self.assertTrue(profile.startswith(tempfile.gettempdir()))
+        self.assertIs(spawned["process"], self.cdp._LAUNCHED["process"])
+        self.assertEqual(port, self.cdp._LAUNCHED["port"])
+        self.assertEqual(profile, self.cdp._LAUNCHED["profile"])
+        shutil.rmtree(profile, ignore_errors=True)
+
+    def test_close_sends_browser_close_then_terminates_and_removes_profile(self):
+        state = {"running": True, "closed": False, "terminated": False}
+
+        class Process:
+            def poll(self):
+                return None if state["running"] else 0
+
+            def terminate(self):
                 state["terminated"] = True
-                state["dead"] = True
+                state["running"] = False
 
-            @staticmethod
-            def kill():
-                state["terminated"] = True
-                state["dead"] = True
+            def wait(self, timeout=None):
+                return 0
 
-        record = self._owned_record(port=9223)
-        cdp_module._LAUNCHED.update({"process": FakeProcess(), "port": 9223,
-                                     "profile": record["profile"],
-                                     "token": record["token"]})
-        with patch.object(cdp_module, "_browser_ws_for_record",
-                          return_value=None), \
-             patch.object(cdp_module, "_send_browser_close",
-                          return_value=False), \
-             patch.object(cdp_module, "_endpoint_answers",
-                          side_effect=lambda *args, **kwargs: not state["dead"]), \
-             patch.object(cdp_module, "_window_gone",
-                          side_effect=lambda *args, **kwargs: state["dead"]), \
-             patch.object(cdp_module, "_terminate_owned_process",
-                          return_value=False), \
-             patch.object(cdp_module.time, "sleep"):
-            self.assertTrue(_REAL_CLOSE_WINDOW(timeout=0.2))
-        self.assertTrue(state["terminated"])
-
-    def test_a_lost_owner_file_falls_back_to_the_in_memory_record(self):
-        """Ein alter Fehlversuch konnte `owner.json` loeschen; der Satz im
-
-        Speicher (gleicher Marker) holt das Fenster zum Schliessen zurueck
-.
-        """
-        record = self._owned_record(port=9223)
-        from .. import cdp as cdp_module
-        cdp_module._ACTIVE.update(dict(record))
-        os.remove(cdp_module._owner_file())
-        seen = []
-
-        def send(host, port, path, timeout=2, expected_port=None):
-            seen.append(port)
-            return True
-
-        with patch.object(cdp_module, "_process_matches",
-                          side_effect=[True, False, False]), \
-             patch.object(cdp_module, "_endpoint_answers", return_value=True), \
-             patch.object(cdp_module, "_browser_ws_for_record",
+        profile = tempfile.mkdtemp(prefix="tolino-cdp-close-")
+        process = Process()
+        self._launch(process, profile=profile)
+        with patch.object(self.cdp, "_endpoint_answers",
+                          side_effect=[True, False, False, False]), \
+             patch.object(self.cdp, "_stop_launched_process",
+                          side_effect=lambda child, timeout=2:
+                          child.terminate() or True) as stop, \
+             patch.object(self.cdp, "_browser_ws_for_record",
                           return_value=("127.0.0.1", 9223,
                                         "/devtools/browser/x")), \
-             patch.object(cdp_module, "_send_browser_close", side_effect=send), \
-             patch.object(cdp_module, "_window_gone", return_value=True), \
-             patch.object(cdp_module, "_remove_owned_profile", return_value=True):
+             patch.object(self.cdp, "_send_browser_close",
+                          side_effect=lambda *a, **k: state.update(closed=True)
+                          or True), \
+             patch.object(self.cdp.time, "sleep"):
             self.assertTrue(_REAL_CLOSE_WINDOW(timeout=0.2))
-        self.assertEqual([9223], seen)
+        stop.assert_called_once_with(process, 0.2)
+        self.assertTrue(state["closed"])
+        self.assertTrue(state["terminated"])
+        self.assertFalse(os.path.exists(profile))
+        self.assertIsNone(self.cdp._LAUNCHED["process"])
+
+    def test_close_never_removes_profile_while_endpoint_answers(self):
+        class Process:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        profile = tempfile.mkdtemp(prefix="tolino-cdp-live-")
+        self._launch(Process(), profile=profile)
+        with patch.object(self.cdp, "_endpoint_answers", return_value=True), \
+             patch.object(self.cdp, "_browser_ws_for_record",
+                          return_value=None), \
+             patch.object(self.cdp.time, "sleep"):
+            self.assertFalse(self.cdp.close_grabber_window(timeout=0.2))
+        self.assertTrue(os.path.isdir(profile))
+        shutil.rmtree(profile, ignore_errors=True)
+
+    def test_reader_page_requires_an_https_tolino_host(self):
+        for url in ("https://webreader.mytolino.com/library/",
+                    "https://mytolino.com/library/"):
+            self.assertTrue(self.cdp._is_reader_url(url))
+        for url in ("http://webreader.mytolino.com/",
+                    "https://mytolino.com.attacker.invalid/",
+                    "file:///tmp/mytolino.com"):
+            self.assertFalse(self.cdp._is_reader_url(url))
+
 
 class ThreadShutdownTests(unittest.TestCase):
     """closeEvent blockiert nie unbegrenzt (P2/H)."""

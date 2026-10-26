@@ -1,7 +1,8 @@
-"""Conservative Calibre-to-tolino inventory comparison and fingerprints."""
+"""Conservative Calibre-to-tolino inventory comparison and sync signatures."""
 import hashlib
 
-from .inventory import inventory_records, normalize_inventory_record
+from .inventory import inventory_records
+
 from .identifiers import valid_book_uuid
 from .library import metadata_tolino_id, normalize_formats
 from .matching import (author_tokens as _author_tokens,
@@ -9,61 +10,6 @@ from .matching import (author_tokens as _author_tokens,
                        normalize_isbn as _normalize_isbn,
                        normalize_match_text, normalize_title,
                        normalized_authors as _normalized_authors)
-
-
-def selection_drop_reasons(metadata_by_id, state, upload_ids, metadata_ids,
-                           preferred_formats=()):
-    """Warum ausgewaehlte Aktionen nicht in den Plan kommen.
-
-    Die Antwort ohne Lauf nennt bisher nur Zahlen. Diese Auswertung nennt
-    den Grund je Auswahlgruppe, damit ein Feldbefund ohne Log einzuordnen
-    ist. Reine Auswertung ohne Netz und ohne Calibre-Datenbank.
-    """
-    formats = normalize_formats(preferred_formats)
-    books = {}
-    if isinstance(metadata_by_id, dict):
-        for book_id, item in metadata_by_id.items():
-            books[book_id] = item
-            books.setdefault(str(book_id), item)
-    reasons = {"uploads": {}, "metadata": {}}
-
-    def add(group, reason):
-        reasons[group][reason] = reasons[group].get(reason, 0) + 1
-
-    def format_ok(item):
-        available = set(normalize_formats(item.get("formats")))
-        return any(fmt in available for fmt in formats)
-
-    for book_id in upload_ids or ():
-        item = books.get(book_id)
-        if not isinstance(item, dict):
-            add("uploads", "nicht in der Calibre-Bibliothek")
-            continue
-        if not valid_book_uuid(item.get("uuid")):
-            add("uploads", "ohne gültige Calibre-Kennung")
-            continue
-        if not format_ok(item):
-            add("uploads", "ohne bevorzugtes Buchformat")
-            continue
-        add("uploads", "kein Upload nötig")
-    for book_id in metadata_ids or ():
-        item = books.get(book_id)
-        if not isinstance(item, dict):
-            add("metadata", "nicht in der Calibre-Bibliothek")
-            continue
-        book_uuid = valid_book_uuid(item.get("uuid"))
-        if not book_uuid:
-            add("metadata", "ohne gültige Calibre-Kennung")
-            continue
-        entry = state.get(book_uuid) if isinstance(state, dict) else None
-        if not isinstance(entry, dict) or not str(entry.get("tolino_id") or "").strip():
-            add("metadata", "ohne Cloud-Kopie im Zustand")
-            continue
-        if not format_ok(item):
-            add("metadata", "ohne bevorzugtes Buchformat")
-            continue
-        add("metadata", "bereits aktuell")
-    return reasons
 
 
 def is_valid_isbn(value):
@@ -166,20 +112,22 @@ def _same_comparison_fields(metadata, remote, comparison_fields):
     isbn = _metadata_text(metadata, "isbn", "identifiers")
     values = {"title": title, "authors": authors, "isbn": isbn}
     compared = False
+    incomplete = False
     for field in fields:
         if field not in values:
             continue
         local = values[field]
-        if not str(local or "").strip():
-            return False
+        remote_value = remote.get(field)
+        if not str(local or "").strip() or not str(remote_value or "").strip():
+            incomplete = True
+            continue
         compared = True
         if field == "isbn":
-            if _normalize_isbn(local) != _normalize_isbn(remote.get(field)):
+            if _normalize_isbn(local) != _normalize_isbn(remote_value):
                 return False
-        elif (normalize_match_text(local) !=
-              normalize_match_text(remote.get(field))):
+        elif normalize_match_text(local) != normalize_match_text(remote_value):
             return False
-    return compared
+    return None if incomplete or not compared else True
 
 
 def _read_flags(tolino_id, read_known, read_ids):
@@ -234,8 +182,7 @@ class _RemoteIndex:
 def _remote_rows(inventory, read_known, read_ids):
     """Cloud-Bestand in die Zeilenform des Vergleichs bringen."""
     rows = []
-    for item in inventory_records(inventory):
-        record = normalize_inventory_record(item)
+    for record in inventory_records(inventory):
         # Auch Datensätze ohne eindeutige Cloud-ID bleiben sichtbar;
         # andernfalls erschiene das Buch als neu und könnte ein Duplikat erzeugen.
         tolino_id = (record["tolino_id"]
@@ -251,8 +198,8 @@ def _remote_rows(inventory, read_known, read_ids):
             "status": "only_tolino",
             "selected": False,
             "file_changed": False,
-            **_read_flags(tolino_id, read_known, read_ids),
-            "explanation": "Nur in tolino – kann heruntergeladen werden.",
+        **_read_flags(tolino_id, read_known, read_ids),
+        "explanation": "Nur in tolino – kann heruntergeladen werden.",
             "normalized_title": normalize_title(record["title"]),
         })
     return rows
@@ -314,11 +261,10 @@ def _matched_status(metadata, remote, old, comparison_fields,
     if _metadata_conflict(remote, authors, author_key, local_isbn):
         return "review", "conflict", file_changed
     same_fields = _same_comparison_fields(metadata, remote, comparison_fields)
-    current_fp = (fingerprint(metadata, selected_format)
-                  if selected_format else "")
-    unchanged = (same_fields or bool(
-        old.get("fingerprint") and old.get("fingerprint") == current_fp
-    )) and not file_changed
+    saved_metadata_matches = (
+        same_fields is None and bool(old.get("meta_fp"))
+        and old.get("meta_fp") == metadata_fingerprint(metadata))
+    unchanged = (same_fields is True or saved_metadata_matches) and not file_changed
     return ("identical" if unchanged else "changed"), "", file_changed
 
 
@@ -456,8 +402,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
 
     ``comparison_fields`` decides which fields may *match* (ISBN, and the
     title+author pair) and which fields decide ``identical`` vs ``changed``.
-    With an empty selection no field comparison happens and only the stored
-    fingerprint can mark a row unchanged.
+    With an empty selection no field comparison happens; a matching saved
+    metadata signature can still confirm that the checked fields are unchanged.
 
     `read_ids` are tolino IDs already marked as read in the account. They
     prefill the Lesestatus selection so existing marks are not rewritten.
@@ -514,29 +460,6 @@ def sort_comparison_rows(comparison_rows):
             str(row.get("isbn") or ""),
         )
     return sorted(comparison_rows, key=sort_key)
-
-
-def fingerprint(metadata, format_name):
-    """Fast change signal: uuid|last_modified|format|title.
-
-    Deliberately NOT a content hash. Calibre updates ``last_modified`` for
-    metadata and file changes, and this fingerprint is computed for every
-    book during planning; streaming every EPUB would make the compare step
-    scale with the library size instead of the metadata count. The FILE
-    itself gets its own cheap size:mtime signature in
-    ``content_fingerprint`` (also not a content hash, for the same reason).
-    A same-size/same-mtime content rewrite is therefore not detected by
-    the fingerprint; the upload decision then relies on the user's
-    selection, and the confirmation view says that the file looks
-    unchanged.
-    """
-    value = "%s|%s|%s|%s" % (
-        metadata.get("uuid", ""),
-        metadata.get("last_modified", ""),
-        format_name,
-        metadata.get("title", ""),
-    )
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def metadata_fingerprint(metadata):

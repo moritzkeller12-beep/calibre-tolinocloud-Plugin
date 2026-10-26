@@ -1,7 +1,7 @@
 """Hintergrundarbeit: Sync, Bestand und Keep-alive."""
 
 import calibre_plugin.tolino as tolino_module
-import calibre_plugin.sessions as session_module
+import calibre_plugin.token_vault as vault_module
 import calibre_plugin.client as client_module
 import unittest
 from . import ui_base_tests, worker_base_tests
@@ -18,7 +18,7 @@ setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
 class CloudDeletionWorkerTests(unittest.TestCase):
-    """Der Worker prüft ausdrücklich markierte Löschungen im Cloud-Bestand."""
+    """Der Worker führt ausdrücklich markierte Cloud-Löschungen direkt aus."""
 
     Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
 
@@ -36,10 +36,6 @@ class CloudDeletionWorkerTests(unittest.TestCase):
 
             def login(self):
                 return self.refresh
-
-            def inventory_ids(self):
-                calls.append("inventory")
-                return {"t-1"}
 
             def delete(self, tolino_id):
                 calls.append(("delete", tolino_id))
@@ -62,8 +58,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
                 worker.run()
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual("inventory", calls[0])
-        self.assertIn(("delete", "t-1"), calls)
+        self.assertEqual([("delete", "t-1")], calls)
         self.assertNotIn("u-1", worker.state)
         # Die Calibre-Spalte zeigt danach nicht mehr auf die tote Kopie.
         self.assertEqual([(7, "")], worker.updates)
@@ -120,7 +115,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_first_upload_survives_a_failing_second_upload(self):
         ui_module = self._ui()
-        state = {}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -136,10 +130,9 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                 return "new-1"
 
         metadata = {1: self._metadata("u1"), 2: self._metadata("u2", "B")}
-        # Plan-Zustand mit Fingerabdruecken, damit ein Folgelauf nicht
-        # erneut hochlaedt.
-        _uploads, _removals, state = plan_sync(metadata, {}, ["EPUB"])
-        settings = self._settings(state)
+        # Der Worker setzt den bestätigten Zustand nach erfolgreichem Upload.
+        settings = self._settings({"u2": {"tolino_id": None}})
+        settings["metadata"] = metadata
         try:
             worker, emitted, saved, _credentials = self._run(
                 ui_module, settings,
@@ -159,14 +152,14 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertTrue(any(name == "A" and "u1" in values.get("state", {})
                             for name, values in saved))
         # Folgelauf: u1 ist erledigt, u2 bleibt offen -> kein Duplikat.
-        uploads, _removals, _current = plan_sync(
-            metadata, worker.state, ["EPUB"])
+        uploads = plan_sync(
+            metadata, worker.state, ["EPUB"], upload_book_ids={2})
         self.assertEqual([(2, "u2", "EPUB", None)], uploads)
+        self.assertIsNone(worker.state["u2"]["tolino_id"])
 
     def test_failed_cover_keeps_the_uploaded_id(self):
         ui_module = self._ui()
-        _uploads, _removals, state = plan_sync(
-            {1: self._metadata("u1")}, {}, ["EPUB"])
+        state = {}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -201,7 +194,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         ui_module = self._ui()
         metadata = {1: self._metadata("u1"), 2: self._metadata("u2", "B"),
                     3: self._metadata("u3", "C")}
-        _uploads, _removals, state = plan_sync(metadata, {}, ["EPUB"])
+        state = {"u2": {"tolino_id": None}}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -218,9 +211,11 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                 self.sent.append(path)
                 return "new-%d" % len(self.sent)
 
+        settings = self._settings(state)
+        settings["metadata"] = metadata
         try:
             worker, emitted, _saved, _credentials = self._run(
-                ui_module, self._settings(state),
+                ui_module, settings,
                 [self._job(ui_module, 1, "u1"), self._job(ui_module, 2, "u2"),
                  self._job(ui_module, 3, "u3")], FakeClient)
         finally:
@@ -236,8 +231,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_a_failed_cover_does_not_stop_the_next_book(self):
         ui_module = self._ui()
-        metadata = {1: self._metadata("u1"), 2: self._metadata("u2", "B")}
-        _uploads, _removals, state = plan_sync(metadata, {}, ["EPUB"])
+        state = {}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -282,9 +276,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             def login(self):
                 return self.refresh
 
-            def inventory_ids(self):
-                return {"t-1", "t-2"}
-
             def delete(self, tolino_id):
                 if tolino_id == "t-1":
                     raise RuntimeError("Cloud sagt nein")
@@ -306,8 +297,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_a_failed_metadata_update_does_not_stop_the_uploads(self):
         ui_module = self._ui()
-        _uploads, _removals, state = plan_sync(
-            {2: self._metadata("u2", "B")}, {}, ["EPUB"])
+        state = {}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -404,8 +394,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
     def test_an_auth_error_still_stops_the_run(self):
         """Anmeldeprobleme bleiben fatal -- jeder weitere Aufruf scheiterte."""
         ui_module = self._ui()
-        metadata = {1: self._metadata("u1"), 2: self._metadata("u2", "B")}
-        _uploads, _removals, state = plan_sync(metadata, {}, ["EPUB"])
+        state = {}
         attempts = []
 
         class FakeClient:
@@ -436,8 +425,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
     def test_progress_and_report_name_the_title_not_the_uuid(self):
         """«Lade hoch: 8f3c…» sagt niemandem etwas."""
         ui_module = self._ui()
-        metadata = {1: self._metadata("u1", "Der Schwarm")}
-        _uploads, _removals, state = plan_sync(metadata, {}, ["EPUB"])
+        state = {}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -529,9 +517,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_cancel_finishes_gracefully_and_marks_remaining_as_not_started(self):
         ui_module = self._ui()
-        _uploads, _removals, state = plan_sync(
-            {1: self._metadata("u1"), 2: self._metadata("u2", "B")},
-            {}, ["EPUB"])
+        state = {}
         emitted = {"completed": None, "failed": None}
         saved = []
 
@@ -575,8 +561,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_later_read_failure_keeps_the_upload_and_counts_both(self):
         ui_module = self._ui()
-        _uploads, _removals, state = plan_sync(
-            {1: self._metadata("u1")}, {}, ["EPUB"])
+        state = {}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -614,8 +599,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         config.settings()
         config.save_account("A", {"refresh_token": "tok-A"}, active="A")
         config.save_account("B", {"refresh_token": "tok-B"}, active="B")
-        _uploads, _removals, state = plan_sync(
-            {1: self._metadata("u1")}, {}, ["EPUB"])
+        state = {}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -690,7 +674,8 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         ui_module._restore_stubs_for_tests()
         self.assertEqual({"A"}, {name for name, _values in saved})
         self.assertEqual({"A"}, {args[0] for args in credentials})
-        self.assertEqual([], column_writes)  # B wird nicht angefasst
+        self.assertEqual(1, len(column_writes))
+        self.assertEqual("A", column_writes[0][1]["account_name"])
         self.assertEqual("tok-B", dashboard.refresh.text())  # Feld bleibt B
         self.assertEqual(1, len(boxes))
         self.assertIn("1 hochgeladen", boxes[0][2])
@@ -745,7 +730,7 @@ class PrepareWorkerTests(unittest.TestCase):
 
         class FakeClient:
             def __init__(self, partner_id, hardware, refresh, token_callback=None,
-                         hardware_callback=None, refresh_provider=None):
+                         hardware_callback=None):
                 self.refresh = "rot-A"
                 self.hardware = hardware
                 self.token_callback = token_callback
@@ -766,6 +751,7 @@ class PrepareWorkerTests(unittest.TestCase):
                     "sync_column_enabled": False}
         payloads = []
         with patch("calibre_plugin.client.TolinoClient", FakeClient), \
+             patch("calibre_plugin.config.account_by_name", lambda _name: None), \
              patch("calibre_plugin.config.save_credentials",
                    lambda *args: credentials.append(args)), \
              patch("calibre_plugin.ui_workers.compare_inventory",
@@ -820,15 +806,10 @@ class PrepareWorkerTests(unittest.TestCase):
         ui_module._restore_stubs_for_tests()
         self.assertEqual([ui_module.common.CANCEL_MESSAGE], messages)
         # Auch der Abbruch gibt den Keep-alive wieder frei.
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_an_unreadable_inventory_names_the_seen_fields(self):
-        """N02 allein sagt nichts; die Meldung nennt jetzt die Antwortform.
-
-        Ohne diese Angabe war nicht zu unterscheiden, ob die Cloud gar
-        keinen Bestand liefert oder das Plugin die Form nicht kennt
-.
-        """
+        """N02 ergänzt den Nutzertext mit der erkannten Antwortform."""
         ui_module = self._ui()
         messages = []
 
@@ -836,9 +817,7 @@ class PrepareWorkerTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot"
                 self.hardware = "hw"
-                self.inventory_envelope_ok = False
-                self.inventory_problems = [
-                    "PublicationInventory fehlt (Felder: message, status)"]
+                self.inventory_ok = False
 
             def login(self):
                 return "rot"
@@ -856,18 +835,16 @@ class PrepareWorkerTests(unittest.TestCase):
             worker.run()
         ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(messages))
-        self.assertIn("PublicationInventory fehlt", messages[0])
-        self.assertIn("message, status", messages[0])
+        self.assertIn("enthält kein PublicationInventory", messages[0])
         self.assertIn("N02", messages[0])
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_complete_inventory_clears_stale_cloud_id_in_worker_state(self):
         ui_module = self._ui()
         payloads = []
 
         class FakeClient:
-            inventory_ids_complete = True
-            inventory_problems = []
+            inventory_ok = True
             refresh = "rot"
             hardware = "hw"
 
@@ -897,13 +874,12 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertEqual(1, len(payloads))
         self.assertNotIn("tolino_id", payloads[0]["state"]["u-stale"])
 
-    def test_incomplete_inventory_keeps_stale_cloud_id_in_worker_state(self):
+    def test_complete_inventory_clears_stale_cloud_id_even_with_review_records(self):
         ui_module = self._ui()
         payloads = []
 
         class FakeClient:
-            inventory_ids_complete = False
-            inventory_problems = ["Datensatz ohne Kennung"]
+            inventory_ok = True
             refresh = "rot"
             hardware = "hw"
 
@@ -914,7 +890,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return self.refresh
 
             def inventory(self):
-                return []
+                return [{"has_deliverable_id": False}]
 
             def read_ids(self):
                 return set()
@@ -930,15 +906,10 @@ class PrepareWorkerTests(unittest.TestCase):
             worker.ready.connect(payloads.append)
             worker.run()
         ui_module._restore_stubs_for_tests()
-        self.assertEqual("gone", payloads[0]["state"]["u-stale"]["tolino_id"])
+        self.assertNotIn("tolino_id", payloads[0]["state"]["u-stale"])
 
     def test_a_partly_readable_inventory_still_compares(self):
-        """Ein undeutbarer Datensatz darf den Vergleich nicht verhindern.
-
-        Der Vergleich bekommt die lesbaren Datensaetze; Loeschungen
-        verweigert spaeter `inventory_ids()` und der SyncWorker meldet sie
-        als Fehler.
-        """
+        """Einzelne nicht zuordenbare Cloud-Datensätze verhindern den Vergleich nicht."""
         ui_module = self._ui()
         payloads, compared = [], []
 
@@ -946,9 +917,7 @@ class PrepareWorkerTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot"
                 self.hardware = "hw"
-                self.inventory_envelope_ok = True
-                self.inventory_problems = [
-                    "1 Datensatz/Datensaetze ohne Kennung"]
+                self.inventory_ok = True
 
             def login(self):
                 return "rot"
@@ -973,7 +942,7 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertEqual(1, len(payloads))
         self.assertIsInstance(payloads[0], dict)
         self.assertEqual([[{"deliverableId": "d1"}]], compared)
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_login_failure_is_reported_without_starting_a_sync(self):
         ui_module = self._ui()
@@ -999,7 +968,7 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertIn("Netz weg", messages[0])
         self.assertNotIn("tok", messages[0])
         # Auch der Fehlerpfad gibt den Keep-alive wieder frei.
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_a_running_rotation_is_waited_for_and_reported(self):
         """Laeuft gerade eine Keep-alive-Rotation, wird NICHT eingeloest.
@@ -1010,7 +979,7 @@ class PrepareWorkerTests(unittest.TestCase):
         """
         ui_module = self._ui()
         messages = []
-        with session_module._KEEPALIVE_LOCK:
+        with vault_module.TOKEN_VAULT._lock:
             worker = ui_module.workers.PrepareWorker(
                 {"account_name": "A", "partner_id": 4, "hardware_id": "hw",
                  "refresh_token": "tok",
@@ -1023,7 +992,7 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertIn("S91", messages[0])
         self.assertIn("kurz warten", messages[0])
         self.assertNotIn("tok", messages[0])
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_a_rotated_stored_token_wins_before_the_login(self):
         """Was der Keep-alive inzwischen gespeichert hat, ist neuer als der
@@ -1061,7 +1030,7 @@ class PrepareWorkerTests(unittest.TestCase):
         # weitergibt (der Aufrufer liest vor dem Sync erneut).
         self.assertEqual("neu-token", worker.settings["refresh_token"])
         self.assertEqual("hw-neu", worker.settings["hardware_id"])
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_client_factory_keeps_rotated_token_for_the_sync_worker(self):
         ui_module = self._ui()
@@ -1071,11 +1040,10 @@ class PrepareWorkerTests(unittest.TestCase):
 
         class FakeClient:
             def __init__(self, partner_id, hardware, refresh, token_callback=None,
-                         hardware_callback=None, refresh_provider=None):
+                         hardware_callback=None):
                 self.refresh = refresh
                 self.hardware = hardware
                 self.token_callback = token_callback
-                self.refresh_provider = refresh_provider
 
             def login(self):
                 self.refresh = "rot-A"
@@ -1114,12 +1082,9 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
                 self.refresh = "rotated"
 
             def login(self):
-                # Sync-Sitzung plus die verschachtelte Client-Login-Sitzung.
-                seen.append(session_module.sessions_active())
+                # Der einmalige Login läuft innerhalb des Vault-Locks.
+                seen.append(int(vault_module.TOKEN_VAULT._lock.locked()))
                 return "rotated"
-
-            def inventory_ids(self):
-                return set()
 
         settings = {"partner_id": 4, "hardware_id": "hw",
                     "refresh_token": "tok",
@@ -1130,8 +1095,8 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
                 worker.run()
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual([2], seen)
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual([1], seen)
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_a_cancelled_run_also_releases_the_keepalive(self):
         """Ein Abbruch verlaesst `run` ueber eine Ausnahme -- der Zaehler
@@ -1151,9 +1116,6 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
             def login(self):
                 return "rotated"
 
-            def inventory_ids(self):
-                return set()
-
         settings = {"partner_id": 4, "hardware_id": "hw",
                     "refresh_token": "tok",
                     "state": {}}
@@ -1168,50 +1130,46 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual([True], completed)
-        self.assertEqual(0, session_module.sessions_active())
+        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
 class KeepaliveSafetyTests(unittest.TestCase):
     """Keep-alive und Sync duerfen den Refresh-Token nie gleichzeitig
     einloesen -- der Reuse-Schutz von Keycloak beendet die Sitzung sonst
     sofort. Und ein Fehler darf nicht still verschwinden."""
 
-    def test_keepalive_stands_still_while_a_session_is_open(self):
-        with patch("calibre_plugin.sessions.TolinoClient") as client_mock:
-            with session_module.token_session():
-                self.assertEqual(1, session_module.sessions_active())
-                result = session_module.keepalive_refresh(
+    def test_keepalive_skips_while_a_refresh_is_locked(self):
+        with patch("calibre_plugin.token_vault.TolinoClient") as client_mock:
+            with vault_module.TOKEN_VAULT._lock:
+                result = vault_module.TOKEN_VAULT.keepalive_refresh(
                     lambda: {"refresh_token": "tok"}, None)
             self.assertIsNone(result)
             client_mock.assert_not_called()
-            # Nach dem Austritt rotiert er wieder.
             client_mock.return_value.refresh = "rotiert"
-            self.assertEqual("rotiert", session_module.keepalive_refresh(
+            self.assertEqual("rotiert", vault_module.TOKEN_VAULT.keepalive_refresh(
                 lambda: {"refresh_token": "tok"}, None))
         client_mock.assert_called_once()
 
-    def test_nested_sessions_release_the_keepalive_only_at_the_end(self):
-        """Vorbereitung und Sync koennen sich ueberlappen; erst der LETZTE
-        Austritt gibt den Keep-alive wieder frei."""
-        with session_module.token_session():
-            with session_module.token_session():
-                self.assertEqual(2, session_module.sessions_active())
-                with patch("calibre_plugin.sessions.TolinoClient") as client:
-                    self.assertIsNone(session_module.keepalive_refresh(
-                        lambda: {"refresh_token": "tok"}, None))
-                client.assert_not_called()
-            self.assertEqual(1, session_module.sessions_active())
-            with patch("calibre_plugin.sessions.TolinoClient") as client:
-                self.assertIsNone(session_module.keepalive_refresh(
-                    lambda: {"refresh_token": "tok"}, None))
-            client.assert_not_called()
-        self.assertEqual(0, session_module.sessions_active())
+    def test_token_vault_serializes_refreshes_and_releases_on_failure(self):
+        from ..token_vault import TOKEN_VAULT
+        store = config.CredentialStore(
+            {"account_name": "A", "partner_id": 4,
+             "hardware_id": "hw", "refresh_token": "tok"}, "A")
+        with TOKEN_VAULT._lock:
+            with self.assertRaises(TolinoAuthError) as caught:
+                client_module.make_client(store, lock_timeout=0)
+        self.assertEqual("S91", caught.exception.code)
 
-    def test_a_failing_session_still_releases_the_keepalive(self):
-        """Jeder Abbruchpfad gibt den Zaehler frei -- auch eine Ausnahme."""
-        with self.assertRaises(RuntimeError):
-            with session_module.token_session():
+        class FailingClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def login(self):
                 raise RuntimeError("kaputt")
-        self.assertEqual(0, session_module.sessions_active())
+
+        with patch("calibre_plugin.client.TolinoClient", FailingClient):
+            with self.assertRaises(RuntimeError):
+                client_module.make_client(store)
+        self.assertFalse(TOKEN_VAULT._lock.locked())
 
     def test_a_successful_rotation_is_logged(self):
         """Ohne Erfolgszeile ist im Log nicht zu sehen, ob er laeuft."""
@@ -1224,9 +1182,9 @@ class KeepaliveSafetyTests(unittest.TestCase):
             def login(self):
                 return self.refresh
 
-        with patch.object(session_module, "log_info", logged.append), \
-                patch("calibre_plugin.sessions.TolinoClient", FakeClient):
-            result = session_module.keepalive_refresh(
+        with patch("calibre_plugin.token_vault.log_info", logged.append), \
+                patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
+            result = vault_module.TOKEN_VAULT.keepalive_refresh(
                 lambda: {"partner_id": 4, "hardware_id": "hw",
                          "refresh_token": "alt"}, None)
         self.assertEqual("neu", result)
@@ -1242,9 +1200,9 @@ class KeepaliveSafetyTests(unittest.TestCase):
             def login(self):
                 raise RuntimeError("kaputt mit sk-geheim-token")
 
-        with patch.object(session_module, "log_warning", logged.append), \
-                patch("calibre_plugin.sessions.TolinoClient", BoomClient):
-            result = session_module.keepalive_refresh(
+        with patch("calibre_plugin.token_vault.log_warning", logged.append), \
+                patch("calibre_plugin.token_vault.TolinoClient", BoomClient):
+            result = vault_module.TOKEN_VAULT.keepalive_refresh(
                 lambda: {"partner_id": 4, "hardware_id": "hw",
                          "refresh_token": "sk-geheim-token"}, None)
         self.assertIsNone(result)
@@ -1252,215 +1210,28 @@ class KeepaliveSafetyTests(unittest.TestCase):
         self.assertIn("Keep-alive", logged[0])
         self.assertNotIn("sk-geheim-token", logged[0])
 
-    def test_a_type_error_from_persist_is_not_swallowed_or_retried(self):
-        """Der Aufruf wird geprueft, nicht per TypeError geraten.
-
-        Frueher rief ein TypeError aus `persist` den Ein-Argument-Aufruf
-        erneut auf: die Ursache verschwand, und es wurde doppelt gespeichert.
-        """
-        calls = []
-
-        class FakeClient(object):
-            def __init__(self, *args, **kwargs):
-                self.token_callback = kwargs.get("token_callback")
-
-            def login(self):
-                self.token_callback("neu")
-                raise TypeError("echter Fehler im Speichern")
-
-        def persist(*args):
-            calls.append(args)
-            raise TypeError("echter Fehler im Speichern")
-
-        with patch.object(session_module, "log_warning", lambda _msg: None), \
-                patch("calibre_plugin.sessions.TolinoClient", FakeClient):
-            result = session_module.keepalive_refresh(
-                lambda: {"partner_id": 4, "hardware_id": "hw",
-                         "refresh_token": "alt"}, persist)
-        self.assertIsNone(result)
-        self.assertEqual([("neu", "")], calls)
-
     def test_log_warning_never_raises_without_calibre(self):
         from ..tolino import log_warning
         log_warning("nur ein Test -- ohne Calibre muss das still bleiben")
 
 class BackgroundCallTokenTests(unittest.TestCase):
-    """Einzelaufrufe und zwischengespeicherte Clients und Tokens."""
+    """Einzelaufrufe laufen ohne globalen Refresh-Token-Zähler."""
 
     Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
 
-    def test_the_factory_refuses_while_a_rotation_is_running(self):
-        """S91 statt doppeltem Einloesen: kein Client, keine Sitzung."""
-        self._ui()
-        made = []
-
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                made.append(args)
-
-        store = config.CredentialStore(
-            {"partner_id": 4, "refresh_token": "alt"}, "A")
-        with patch("calibre_plugin.client.TolinoClient", FakeClient), \
-                patch("calibre_plugin.client.lock_keepalive",
-                      lambda timeout=5: False):
-            with self.assertRaises(tolino_module.TolinoAuthError) as caught:
-                client_module.make_client(store)
-        self.assertEqual("S91", caught.exception.code)
-        self.assertEqual([], made)
-        self.assertEqual(0, session_module.sessions_active())
-
     def test_the_factory_refuses_without_a_stored_token(self):
         """A03 vor jedem Netzaufruf -- wie die Dialogpruefung."""
+        from ..token_vault import TOKEN_VAULT
         self._ui()
         store = config.CredentialStore(
-            {"partner_id": 4, "refresh_token": ""}, "A")
+            {"partner_id": 4, "refresh_token": ""})
         with self.assertRaises(tolino_module.TolinoAuthError) as caught:
-            client_module.make_client(store)
+            with TOKEN_VAULT.login(store):
+                pass
         self.assertEqual("A03", caught.exception.code)
-
-    def test_the_call_holds_a_token_session_for_its_whole_duration(self):
-        ui_module = self._ui()
-        seen = []
-
-        def call():
-            seen.append(session_module.sessions_active())
-            seen.append(session_module.keepalive_refresh(
-                lambda: {"refresh_token": "tok"}, None))
-
-        ui_module.auth_workers.CallWorker(call).run()
-        # Waehrend des Aufrufs: genau eine Sitzung, der Keep-alive still.
-        self.assertEqual([1, None], seen)
-        self.assertEqual(0, session_module.sessions_active())
-
-    def test_the_session_is_released_when_the_call_fails(self):
-        ui_module = self._ui()
-        errors = []
-
-        def call():
-            raise RuntimeError("Netz weg")
-
-        worker = ui_module.auth_workers.CallWorker(call)
-        worker.failed.connect(errors.append)
-        worker.run()
-        self.assertEqual(1, len(errors))
-        self.assertEqual(0, session_module.sessions_active())
-
-    def test_a_reused_client_renews_with_the_freshest_stored_token(self):
-        client = TolinoClient(
-            4, "hw-old", "old-token",
-            refresh_provider=lambda: {"refresh_token": "new-token",
-                                      "hardware_id": "hw-new"})
-        seen = {}
-
-        def request(url, method="GET", data=None, **kwargs):
-            seen["grant"] = (data or {}).get("refresh_token")
-            seen["hardware"] = client.hardware
-            return {"access_token": "a1", "refresh_token": "rot-2",
-                    "expires_in": 3600}
-
-        client._request = request
-        client.login()
-        self.assertEqual("new-token", seen["grant"])
-        self.assertEqual("hw-new", seen["hardware"])
-        self.assertEqual("rot-2", client.refresh)
-
-    def test_the_background_client_gets_a_provider_for_the_stored_token(self):
-        ui_module = self._ui()
-        settings = {"account_name": "A", "partner_id": 4,
-                    "hardware_id": "hw-A", "refresh_token": "alt",}
-        captured = {}
-
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                captured.update(kwargs)
-
-            def login(self):
-                return "alt"
-
-        with patch("calibre_plugin.client.TolinoClient", FakeClient), \
-             patch("calibre_plugin.config.account_by_name",
-                   lambda name: {"refresh_token": "neu"}), \
-             patch("calibre_plugin.config.save_credentials",
-                   lambda *args, **kwargs: None), \
-             patch("calibre_plugin.client.lock_keepalive",
-                   lambda timeout=5: True), \
-             patch("calibre_plugin.client.unlock_keepalive",
-                   lambda: None):
-            ui_module.dashboard.SyncDashboard._worker_client(settings)
-        provider = captured["refresh_provider"]
-        self.assertIsNotNone(provider)
-        self.assertEqual("neu", settings["refresh_token"])
-        self.assertEqual("neu", provider()["refresh_token"])
-
-    def test_the_comparison_client_waits_for_a_running_rotation(self):
-        """`_client_for` sperrt wie Sync und `_worker_client`."""
-        ui_module = self._ui()
-        settings = {"account_name": "A", "partner_id": 4,
-                    "hardware_id": "hw-A", "refresh_token": "alt",}
-        seen = []
-
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                self.refresh = kwargs.get("refresh")
-                self.hardware = kwargs.get("hardware")
-
-            def login(self):
-                seen.append(("login", session_module.sessions_active()))
-                return self.refresh
-
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(
-            ui_module.dashboard.SyncDashboard)
-        dashboard.account_name = "A"
-        real_lock = client_module.lock_keepalive
-
-        def lock(timeout=5):
-            seen.append(("lock", timeout))
-            return real_lock(timeout=timeout)
-
-        with patch("calibre_plugin.client.TolinoClient", FakeClient), \
-                patch("calibre_plugin.config.account_by_name",
-                      lambda name: {}), \
-                patch("calibre_plugin.config.save_credentials",
-                      lambda *args, **kwargs: None), \
-                patch("calibre_plugin.client.lock_keepalive", lock):
-            dashboard._worker_client(settings)
-        self.assertEqual("lock", seen[0][0])
-        # Der Login laeuft innerhalb einer Token-Sitzung -- und danach ist
-        # die Sperre wieder frei.
-        self.assertEqual(("login", 1), seen[1])
-        self.assertEqual(0, session_module.sessions_active())
-
-    def test_the_comparison_client_also_gets_the_provider(self):
-        ui_module = self._ui()
-        settings = {"account_name": "A", "partner_id": 4,
-                    "hardware_id": "hw-A", "refresh_token": "alt",}
-        captured = {}
-
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                captured.update(kwargs)
-                self.refresh = kwargs.get("refresh")
-                self.hardware = kwargs.get("hardware")
-
-            def login(self):
-                return self.refresh
-
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(
-            ui_module.dashboard.SyncDashboard)
-        dashboard.account_name = "A"
-        with patch("calibre_plugin.client.TolinoClient", FakeClient), \
-             patch("calibre_plugin.config.account_by_name",
-                   lambda name: {"refresh_token": "neu"}), \
-             patch("calibre_plugin.config.save_credentials",
-                   lambda *args, **kwargs: None):
-            dashboard._worker_client(settings)
-            provider = captured["refresh_provider"]
-            self.assertIsNotNone(provider)
-            self.assertEqual("neu", settings["refresh_token"])
-            self.assertEqual("neu", provider()["refresh_token"])
 
 class InventoryFailureDeletionTests(unittest.TestCase):
     """Ein nicht deutbarer Bestand loescht nichts.
@@ -1484,10 +1255,9 @@ class InventoryFailureDeletionTests(unittest.TestCase):
             def login(self):
                 return self.refresh
 
-            def inventory_ids(self):
-                raise TolinoApiError("kaputt", code="N02")
-
             def delete(self, tolino_id):
+                if getattr(self, "fail_delete", False):
+                    raise TolinoApiError("kaputt", code="N02")
                 deleted.append(tolino_id)
 
             def upload(self, path):
@@ -1518,11 +1288,11 @@ class InventoryFailureDeletionTests(unittest.TestCase):
     def test_an_inventory_error_deletes_nothing_and_keeps_the_state(self):
         ui_module = self._ui()
         deleted = []
-        state = {"u1": {"tolino_id": "t1", "calibre_id": 1, "title": "T",
-                        "fingerprint": "f", "content_fp": "c",
-                        "meta_fp": "m"}}
+        state = {"u1": {"tolino_id": "t1", "calibre_id": 1, "title": "T"}}
+        client = self._client(deleted)
+        client.fail_delete = True
         worker, emitted, _saved = self._run(
-            ui_module, self._settings(state), [], self._client(deleted))
+            ui_module, self._settings(state), [], client)
         self.assertEqual([], deleted)
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
@@ -1531,7 +1301,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         reasons = [item for item in worker.operations
                    if item["kind"] == "delete"]
         self.assertEqual(1, len(reasons))
-        self.assertIn("nicht", reasons[0]["error"])
+        self.assertIn("kaputt", reasons[0]["error"])
 
     def test_a_replacement_upload_still_runs_without_deleting_the_old_copy(
             self):
@@ -1544,89 +1314,81 @@ class InventoryFailureDeletionTests(unittest.TestCase):
             ui_module, self._settings(state), [job], self._client(deleted))
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
-        # Der Upload selbst gelingt; nur das Aufraeumen der alten Kopie nicht.
+        # Ersatz und markierte Löschung werden explizit direkt ausgeführt.
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertEqual([], deleted)
+        self.assertEqual(["t-alt", "t1"], deleted)
         kinds = {item["kind"]: item["status"] for item in worker.operations}
         self.assertEqual("succeeded", kinds["upload"])
 
-    def test_a_replacement_whose_old_copy_is_really_gone_reports_no_error(
-            self):
-        """Fehlt die alte Kopie wirklich, ist das kein Fehler.
-
-        Die Meldung gilt nur, wenn der Bestand NICHT lesbar war -- sonst
-        staende bei jedem aufgeraeumten Ersatz faelschlich ein Fehler im
-        Bericht.
-        """
+    def test_a_replacement_with_an_already_missing_old_copy_is_skipped(self):
+        """HTTP 404 beim Aufräumen ist ein übersprungener, kein fehlgeschlagener Schritt."""
         ui_module = self._ui()
         deleted = []
         job = ui_module.common.SyncJob(1, "u1", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
         state = {"u1": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
         client = self._client(deleted)
-        client.inventory_ids = lambda: {"andere"}
+        def delete_old_only(tolino_id):
+            if tolino_id == "t-alt":
+                raise TolinoApiError("tolino-Fehler (HTTP 404)", code="N03")
+            deleted.append(tolino_id)
+        client.delete = delete_old_only
         worker, emitted, _saved = self._run(
             ui_module, self._settings(state), [job], client)
         self.assertIsNone(emitted.get("failed"))
         self.assertEqual(0, worker.outcome["failed"])
-        self.assertEqual([], deleted)
+        self.assertEqual(1, worker.outcome["skipped"])
+        self.assertEqual(["t1"], deleted)
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
 
 
-    def test_a_marked_deletion_stays_when_the_inventory_is_incomplete(self):
-        """«Nicht gefunden» ist ohne Deliverable-Kennung kein Beweis.
-
-        Frueher raeumte der Lauf Zustand und Calibre-Spalte auf, obwohl die
-        Kopie (nur unter ``identifier`` lesbar) weiter in der Cloud stand.
-        """
+    def test_a_marked_deletion_already_missing_is_skipped_and_state_cleared(self):
+        """Ein bestätigtes HTTP 404 bedeutet, dass die Kopie bereits fehlt."""
         ui_module = self._ui()
         deleted = []
         client = self._client(deleted)
-        client.inventory_ids = lambda: {"andere"}
-        client.inventory_ids_complete = False
-        client.inventory_unidentified = 1
+        client.delete = lambda _tolino_id: (_ for _ in ()).throw(
+            TolinoApiError("tolino-Fehler (HTTP 404)", code="N03"))
         state = {"u1": {"tolino_id": "t1", "calibre_id": 1, "title": "T"}}
         worker, emitted, _saved = self._run(
             ui_module, self._settings(state), [], client)
         self.assertEqual([], deleted)
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
-        self.assertEqual(state, worker.state)
-        self.assertEqual([], worker.updates)
-        self.assertEqual(1, worker.outcome["failed"])
+        self.assertNotIn("u1", worker.state)
+        self.assertEqual([(1, "")], worker.updates)
+        self.assertEqual(1, worker.outcome["skipped"])
         delete_ops = [item for item in worker.operations
                       if item["kind"] == "delete"]
         self.assertEqual(1, len(delete_ops))
-        self.assertIn("Cloud-Bestand", delete_ops[0]["error"])
-        self.assertIn("nicht gelöscht", delete_ops[0]["error"])
+        self.assertEqual("skipped", delete_ops[0]["status"])
 
-    def test_a_replacement_keeps_the_old_copy_when_the_inventory_is_incomplete(
-            self):
-        """Der Upload laeuft, das Aufraeumen nicht -- und wird gemeldet."""
+    def test_a_failed_replacement_cleanup_is_counted_as_failed(self):
+        """Ein Fehler beim direkten Löschaufruf wird im Bericht gezählt."""
         ui_module = self._ui()
         deleted = []
         job = ui_module.common.SyncJob(1, "u1", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
         client = self._client(deleted)
-        client.inventory_ids = lambda: {"andere"}
-        client.inventory_ids_complete = False
-        client.inventory_unidentified = 1
+        def fail_old_delete(tolino_id):
+            if tolino_id == "t-alt":
+                raise TolinoApiError("Netzfehler beim Löschen", code="N01")
+            deleted.append(tolino_id)
+        client.delete = fail_old_delete
         state = {"u1": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
         worker, emitted, _saved = self._run(
             ui_module, self._settings(state), [job], client)
         self.assertIsNone(emitted.get("failed"))
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertEqual([], deleted)
+        self.assertEqual(["t1"], deleted)
         kinds = {item["kind"]: item["status"] for item in worker.operations}
         self.assertEqual("succeeded", kinds["upload"])
         self.assertEqual("failed", kinds["delete"])
-        # Der Testhelfer meldet zusaetzlich eine ausdrueckliche Loeschung
-        # (t1) an -- auch sie bleibt ohne Beweis stehen und wird gemeldet.
         delete_ops = [item for item in worker.operations
                       if item["kind"] == "delete"]
         self.assertTrue(any("Alte Kopie" in item["label"]
                             for item in delete_ops))
-        self.assertEqual(len(delete_ops), worker.outcome["failed"])
+        self.assertEqual(1, worker.outcome["failed"])
 
 class InventorySchemaTests(unittest.TestCase):
     """Eine unbekannte Bestandsantwort ist nie ein leerer Bestand.
@@ -1645,18 +1407,19 @@ class InventorySchemaTests(unittest.TestCase):
     def test_a_confirmed_empty_inventory_is_empty(self):
         client = self._client({"PublicationInventory": {"edata": [],
                                                          "ebook": []}})
-        self.assertEqual([], client.inventory())
-        self.assertTrue(client.inventory_envelope_ok)
-        self.assertEqual([], client.inventory_problems)
-        self.assertEqual(set(), client.inventory_ids())
+        records = client.inventory()
+        self.assertEqual([], records)
+        self.assertTrue(client.inventory_ok)
 
     def test_confirmed_records_are_extracted(self):
         data = {"PublicationInventory": {
             "edata": [{"deliverableId": "d1"}],
             "ebook": [{"ebook": {"deliverableId": "d2"}}]}}
         client = self._client(data)
-        self.assertEqual(2, len(client.inventory()))
-        self.assertEqual({"d1", "d2"}, client.inventory_ids())
+        records = client.inventory()
+        self.assertEqual(2, len(records))
+        self.assertEqual({"d1", "d2"},
+                         {record["tolino_id"] for record in records})
 
     def test_an_id_is_found_in_nested_lists_and_meta_data(self):
         """``epubMetaData.deliverable`` ist eine Liste -- und ein Kauf-Ebook
@@ -1667,16 +1430,16 @@ class InventorySchemaTests(unittest.TestCase):
         client = self._client({"PublicationInventory": {"ebook": [
             {"epubMetaData": {"title": "T",
                               "deliverable": [{"deliverableId": "d5"}]}}]}})
-        self.assertEqual({"d5"}, client.inventory_ids())
-        self.assertEqual([], client.inventory_problems)
+        self.assertEqual(["d5"], [record["tolino_id"]
+                                   for record in client.inventory()])
         # Nur ``identifier``: lesbar, aber keine Loesch-/Download-Grundlage.
         bought = self._client({"PublicationInventory": {"ebook": [
             {"resellerId": 3,
              "epubMetaData": {"identifier": "978-3-16-148410-0",
                               "title": "Gekauft"}}]}})
-        self.assertEqual(set(), bought.inventory_ids())
-        self.assertFalse(bought.inventory_ids_complete)
-        self.assertEqual([], bought.inventory_problems)
+        bought_records = bought.inventory()
+        self.assertEqual("", bought_records[0]["tolino_id"])
+        self.assertFalse(bought_records[0]["has_deliverable_id"])
 
     def test_an_unreadable_envelope_never_looks_like_an_empty_library(self):
         for data in ({}, {"unexpected": "shape"},
@@ -1687,24 +1450,22 @@ class InventorySchemaTests(unittest.TestCase):
             with self.subTest(data=data):
                 client = self._client(data)
                 self.assertEqual([], client.inventory())
-                self.assertFalse(client.inventory_envelope_ok)
-                with self.assertRaises(TolinoApiError) as caught:
-                    client.inventory_ids()
-                self.assertEqual("N02", caught.exception.code)
+                self.assertFalse(client.inventory_ok)
         # Der Grund nennt die gesehenen Felder -- nie deren Werte.
         client = self._client({"unexpected": "shape"})
         client.inventory()
-        self.assertIn("unexpected", client.inventory_problems[0])
+        self.assertFalse(client.inventory_ok)
 
     def test_a_record_without_any_id_blocks_only_the_deletion(self):
         client = self._client({"PublicationInventory": {"edata": [
             {"deliverableId": "d1"},
             {"etwas": "anderes"}]}})
         self.assertEqual(2, len(client.inventory()))
-        self.assertEqual(1, len(client.inventory_problems))
-        self.assertIn("ohne Kennung", client.inventory_problems[0])
-        with self.assertRaises(TolinoApiError):
-            client.inventory_ids()
+        self.assertEqual(1, sum(not record["has_deliverable_id"]
+                                for record in client.inventory()))
+        self.assertEqual({"d1"}, {record["tolino_id"]
+                                   for record in client.inventory()
+                                   if record["tolino_id"]})
 
     def test_a_record_with_its_own_ebook_key_is_not_a_container(self):
         """Ein Datensatz mit ``ebook``/``edata`` behaelt seine Felder."""
@@ -1715,8 +1476,7 @@ class InventorySchemaTests(unittest.TestCase):
         self.assertEqual(1, len(records))
         self.assertEqual("Titel", records[0]["title"])
         self.assertTrue(records[0]["has_deliverable_id"])
-        self.assertEqual({"d7"}, client.inventory_ids())
-        self.assertTrue(client.inventory_ids_complete)
+        self.assertEqual("d7", client.inventory()[0]["tolino_id"])
 
     def test_the_client_returns_normalised_records_only(self):
         """EINE Form fuer Vergleich und sichere Loeschlogik."""
@@ -1745,10 +1505,9 @@ class InventorySchemaTests(unittest.TestCase):
         client = self._client({"PublicationInventory": {"ebook": [
             {"epubMetaData": {"identifier": "978-3-16-148410-0",
                               "title": "Gekauft"}}]}})
-        self.assertEqual([], client.inventory_problems)
-        self.assertEqual(set(), client.inventory_ids())
-        self.assertFalse(client.inventory_ids_complete)
-        self.assertEqual(1, client.inventory_unidentified)
+        records = client.inventory()
+        self.assertEqual("", records[0]["tolino_id"])
+        self.assertFalse(records[0]["has_deliverable_id"])
 
 class ReadStatusUnknownTests(unittest.TestCase):
     """P2: «unbekannt» ist weder gelesen noch ungelesen."""

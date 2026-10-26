@@ -62,9 +62,6 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
             def login(self):
                 return "rotated-refresh"
 
-            def inventory_ids(self):
-                return set()
-
             def collection_pairs(self):
                 calls["pairs_reads"] += 1
                 return set(known_pairs)

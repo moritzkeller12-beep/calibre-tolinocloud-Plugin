@@ -2,7 +2,6 @@ import json
 import mimetypes
 import os
 import re
-import subprocess
 import threading
 import time
 import traceback
@@ -13,13 +12,8 @@ from urllib.request import Request, urlopen
 
 from .inventory import parse_inventory
 from .partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
-                       WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS,
-                       uses_shared_webreader)
-from .transport import (BROWSER_USER_AGENT, _browser_sec_headers,
-                        _bot_check_detected, _compact_error_text,
-                        _curl_binary, _http_post_via_curl,
-                        _http_post_via_curl_cffi, _impersonate_session,
-                        _waf_block_response)
+                       WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS)
+from .transport import BROWSER_USER_AGENT, _browser_sec_headers
 from . import sync_data as _sync_data
 
 
@@ -138,52 +132,40 @@ _REGISTER_SETTLE_SECONDS = 1.5
 # die Bot-Schutz-Laufzeitbahn (403 + HTML-Fehlerseite), jeder spaetere Klick
 # lief durch -- zwei Warteversuche, bevor der Fehler sichtbar wird.
 _WAF_RETRY_SECONDS = (2.0, 5.0)
-_SAFE_CONNECT_ERRORS = (5, 6, 7)
-_CURL_TIMEOUT_ERROR = 28
+_BOT_CHECK_MARKERS = (
+    "zugriff geblockt", "access denied", "captcha", "cloudfront",
+    "request blocked", "<!doctype html",
+)
+
+
+def _bot_check_detected(detail):
+    """Distinguish bot-protection responses from OAuth rejection bodies."""
+    return any(marker in str(detail or "").casefold()
+               for marker in _BOT_CHECK_MARKERS)
+
+
+def _compact_error_text(detail):
+    """Collapse HTML bot-check pages to readable text."""
+    text = re.sub(r"<[^>]+>", " ", detail or "")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _is_timeout(exc):
     """Recognize stdlib timeouts, including urllib's wrapped reason."""
-    return (isinstance(exc, (TimeoutError, subprocess.TimeoutExpired))
+    return (isinstance(exc, TimeoutError)
             or isinstance(getattr(exc, "reason", None), TimeoutError))
 
 
-def _raise_transport_error(exc, secrets, timed_out=False):
-    """Raise a credential-safe, user-facing transport error."""
-    if timed_out:
-        message = "Zeitüberschreitung bei der Verbindung zu tolino."
-        short = "Zeitüberschreitung bei der Verbindung."
-    else:
-        message = ("Übertragung an tolino fehlgeschlagen: %s"
-                   % sanitize_error(exc, secrets))
-        short = "Die Verbindung zu tolino ist fehlgeschlagen."
-    raise TolinoApiError(message, code="N01", short=short) from exc
-
-
-def _classify_transport_error(name, exc):
-    """Return (safe_to_fall_through, timed_out) for one transport failure."""
-    safe_fallthrough = False
-    timed_out = _is_timeout(exc)
-    if name == "curl":
-        if isinstance(exc, FileNotFoundError):
-            safe_fallthrough = True
-        elif isinstance(exc, subprocess.CalledProcessError):
-            safe_fallthrough = exc.returncode in _SAFE_CONNECT_ERRORS
-            timed_out = timed_out or exc.returncode == _CURL_TIMEOUT_ERROR
-    elif name == "curl_cffi":
-        try:
-            from curl_cffi.requests.exceptions import RequestException
-        except ImportError:
-            RequestException = ()
-        safe_fallthrough = (isinstance(exc, RequestException)
-                            and getattr(exc, "code", None)
-                            in _SAFE_CONNECT_ERRORS)
-        # curl_cffi's timeout types are optional; class name and libcurl code
-        # still identify timeout failures without importing that type.
-        timed_out = (timed_out
-                     or "timeout" in exc.__class__.__name__.casefold()
-                     or getattr(exc, "code", None) == _CURL_TIMEOUT_ERROR)
-    return safe_fallthrough, timed_out
+def _raise_transport_error(exc, secrets):
+    """Raise a credential-safe error for the sole urllib transport."""
+    if _is_timeout(exc):
+        raise TolinoApiError(
+            "Zeitüberschreitung bei der Verbindung zu tolino.", code="N01",
+            short="Zeitüberschreitung bei der Verbindung.") from exc
+    raise TolinoApiError(
+        "Übertragung an tolino fehlgeschlagen: %s"
+        % sanitize_error(exc, secrets), code="N01",
+        short="Die Verbindung zu tolino ist fehlgeschlagen.") from exc
 
 
 _JWT_PATTERN = re.compile(
@@ -270,8 +252,9 @@ class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
     def __init__(self, partner_id, hardware, refresh=None, timeout=45,
-                 token_callback=None,
-                 hardware_callback=None, refresh_provider=None):
+                 token_callback=None, hardware_callback=None, token_lock=None,
+                 token_lock_timeout=5, token_vault=None,
+                 credential_store=None):
         try:
             partner_id = int(partner_id)
         except (TypeError, ValueError):
@@ -288,25 +271,18 @@ class TolinoClient:
         self.last_error_text = None
         self.token_callback = token_callback
         self.hardware_callback = hardware_callback
-        # Liefert den FRISCHESTEN gespeicherten Zugang. Ein langlebiger
-        # Client (Vergleichsfenster) kann einen Token halten, den der
-        # Keep-alive inzwischen rotiert hat; vor dem Einloesen gilt der
-        # gespeicherte Stand.
-        self.refresh_provider = refresh_provider
+        self.token_lock = token_lock
+        self.token_lock_timeout = token_lock_timeout
+        self.token_lock_held = False
+        self.token_vault = token_vault
+        self.credential_store = credential_store
         self._in_device_recovery = False
         self._hw_registered_now = False
         self._login_lock = threading.Lock()
         # Ein Lesevorgang der sync-data reicht, bis etwas geschrieben wird:
         # Lese-Status und Sammlungen brauchen dieselben Daten.
         self._sync_cache = None
-        # Ergebnis der Inventar-Deutung: nichts geraten; unbekannte
-        # Datensaetze verhindern riskante Loeschungen.
-        self.inventory_problems = []
-        self.inventory_envelope_ok = True
-        # Kopien ohne Deliverable-Kennung: lesbar, aber fuer Loeschungen
-        # kein Beweis.
-        self.inventory_unidentified = 0
-        self.inventory_ids_complete = True
+        self.inventory_ok = True
 
     def login(self):
         # A valid access token avoids spending the rotating refresh token twice.
@@ -315,7 +291,17 @@ class TolinoClient:
         with self._login_lock:
             if self.access and time.time() < self.expires_at:
                 return self.refresh
-            return self._login()
+            if self.token_lock is None or self.token_lock_held:
+                return self._login()
+            if getattr(self, "token_vault", None) is not None:
+                return self.token_vault.relogin(self)
+            if not self.token_lock.acquire(
+                    timeout=max(0, self.token_lock_timeout)):
+                raise TolinoAuthError(BUSY_MESSAGE, code="S91")
+            try:
+                return self._login()
+            finally:
+                self.token_lock.release()
 
     def _apply_token_response(self, data):
         """Store the token endpoint response; returns the rotated refresh."""
@@ -334,31 +320,8 @@ class TolinoClient:
         self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
         return self.refresh
 
-    def _adopt_fresh_credentials(self):
-        """Gespeicherten Zugang uebernehmen, bevor der Token eingeloest wird.
-
-        Ein zwischengespeicherter Client darf nie mit einem bereits
-        rotierten Refresh-Token erneut anmelden -- sonst beendet der
-        Reuse-Schutz die Sitzung (A02). Was gespeichert ist, gewinnt.
-        """
-        if self.refresh_provider is None:
-            return
-        try:
-            fresh = self.refresh_provider() or {}
-        except Exception:
-            return  # kein Zugang lesbar: mit dem eigenen Stand weiter
-        token = str(fresh.get("refresh_token") or "").strip()
-        if token and token != self.refresh:
-            self.refresh = normalize_refresh_token(token)
-        hardware = str(fresh.get("hardware_id") or "").strip()
-        if hardware and hardware != self.hardware:
-            self.hardware = hardware
-
     def _login(self):
-        self._adopt_fresh_credentials()
         if self.refresh:
-            if not self.partner.get("token_url"):
-                raise TolinoAuthError(_NO_AUTO_LOGIN, code="A05", detail="token_url fehlt")
             payload = {
                 "client_id": self.partner["client_id"],
                 "grant_type": "refresh_token",
@@ -399,7 +362,6 @@ class TolinoClient:
                  authenticated=True, content_type=None, _extra_headers=None):
         retry = {"auth": True, "hardware": True, "waf": 0}
         retry_request = object()
-        fallthrough = object()
 
         def decode(raw):
             if not raw:
@@ -462,7 +424,10 @@ class TolinoClient:
                     exc.code == 403
                     and url == self.partner.get("token_url")
                     and retry["waf"] < len(_WAF_RETRY_SECONDS)
-                    and _bot_check_detected(self.last_error_text))
+                    and any(marker in self.last_error_text.casefold()
+                            for marker in ("zugriff geblockt", "access denied",
+                                           "captcha", "cloudfront",
+                                           "request blocked", "<!doctype html")))
                 if is_waf_retry:
                     time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
                     retry["waf"] += 1
@@ -493,16 +458,10 @@ class TolinoClient:
                 })
                 for key, shared in (("client_type", WEBREADER_CLIENT_TYPE),
                                     ("client_version", WEBREADER_CLIENT_VERSION)):
-                    value = self.partner.get(key) or (
-                        shared if uses_shared_webreader(self.partner) else None)
-                    if value:
-                        headers[key] = value
+                    headers[key] = shared
             elif url == self.partner.get("token_url"):
                 headers.update(_browser_sec_headers())
-                headers.update(self.partner.get("token_headers")
-                               or (WEBREADER_TOKEN_HEADERS
-                                   if uses_shared_webreader(self.partner)
-                                   else {}))
+                headers.update(WEBREADER_TOKEN_HEADERS)
             if _extra_headers:
                 headers.update(_extra_headers)
 
@@ -518,46 +477,6 @@ class TolinoClient:
                     body = json.dumps(data).encode("utf-8")
                     headers["Content-Type"] = content_type or "application/json"
 
-            def try_transport(name, post):
-                try:
-                    status, raw = post()
-                except Exception as exc:
-                    # Unknown failures may happen after a single-use refresh
-                    # grant was consumed; never replay them on another client.
-                    can_fall_through, timed_out = _classify_transport_error(
-                        name, exc)
-                    if can_fall_through:
-                        return fallthrough
-                    _raise_transport_error(
-                        exc, (self.refresh, self.access), timed_out=timed_out)
-                if status and status < 400:
-                    self.last_error_text = None
-                    return decode(raw)
-                if _waf_block_response(status, raw):
-                    return fallthrough
-                error = HTTPError(url, status or 400,
-                                  "HTTP Error %s" % (status or "?"), {}, None)
-                return handle_error(error, (raw or b"").decode("utf-8", "replace"))
-
-            if data is not None and url == self.partner.get("token_url"):
-                session = _impersonate_session()
-                transports = []
-                if session is not None:
-                    transports.append(("curl_cffi", lambda: _http_post_via_curl_cffi(
-                        session, url, body or b"", headers, self.timeout)))
-                if _curl_binary() is not None:
-                    transports.append(("curl", lambda: _http_post_via_curl(
-                        url, body or b"", headers, self.timeout)))
-                outcome = fallthrough
-                for name, post in transports:
-                    outcome = try_transport(name, post)
-                    if outcome is retry_request:
-                        break
-                    if outcome is not fallthrough:
-                        return outcome
-                if outcome is retry_request:
-                    continue
-
             request = Request(url, data=body, headers=headers, method=method)
             try:
                 with urlopen(request, timeout=self.timeout) as response:
@@ -569,65 +488,16 @@ class TolinoClient:
                     continue
                 return outcome
             except (URLError, OSError, TimeoutError) as exc:
-                _raise_transport_error(
-                    exc, (self.refresh, self.access),
-                    timed_out=_is_timeout(exc))
+                _raise_transport_error(exc, (self.refresh, self.access))
             return decode(raw)
 
     def inventory(self):
-        """Cloud-Bestand lesen -- als normalisierte Datensaetze.
-
-        Eine leere Bibliothek und eine unbekannte Antwort sind NICHT
-        dasselbe. Die Antwort wird deshalb gedeutet statt geraten:
-        ``inventory_envelope_ok`` False heisst «gar kein Bestand in der
-        Antwort» (der Vergleich scheitert), ``inventory_problems`` nennt
-        einzelne und deutbare Datensaetze -- die sperren jede Loeschung.
-
-        Jeder Datensatz hat die Form aus :func:`inventory.normalize_inventory_record`.
-        """
-        data = self._request(BASE_URL + "/inventory/delta?strip=true")
-        records, problems, envelope_ok = parse_inventory(data)
-        self.inventory_problems = list(problems)
-        self.inventory_envelope_ok = bool(envelope_ok)
-        # Datensaetze ohne Deliverable-Kennung: lesbar, aber fuer
-        # Loeschentzcheidungen kein Beweis.
-        self.inventory_unidentified = sum(
-            1 for record in records if not record["has_deliverable_id"])
-        self.inventory_ids_complete = not self.inventory_unidentified
+        """Read the PublicationInventory form used by Tolino's API."""
+        records, problems, self.inventory_ok = parse_inventory(
+            self._request(BASE_URL + "/inventory/delta?strip=true"))
         if problems:
-            log_warning("Cloud-Bestand nur teilweise lesbar: %s"
-                        % "; ".join(problems[:5]))
+            log_warning("Tolino-Inventar: %s" % "; ".join(problems))
         return records
-
-    def inventory_ids(self):
-        """Deliverable-Kennungen des Bestands.
-
-        Nur sie taugen fuer /deletecontent und /downloadinfo. Eine
-        Ersatzkennung (``identifier``) wird bewusst NICHT zurueckgegeben:
-        sie belegt keine bestimmte Kopie und wuerde eine Zuordnung sonst
-        faelschlich als «noch vorhanden» oder «geloescht» erscheinen lassen.
-        Ob der Bestand dafuer vollstaendig genug war, sagt
-        ``inventory_ids_complete`` -- der SyncWorker raeumt bei False keine
-        nicht gefundene Zuordnung auf.
-
-        Undeutbare Datensaetze verweigern die Auskunft ganz (N02): eine
-        unbekannte Kopie koennte sonst als «nicht mehr in der Cloud» gelten
-.
-        """
-        records = self.inventory()
-        problems = list(getattr(self, "inventory_problems", ()) or ())
-        if problems:
-            raise TolinoApiError(
-                "Unerwartete Antwort der tolino-Cloud: %s."
-                % "; ".join(problems[:3]),
-                code="N02",
-                short="Der Cloud-Bestand liess sich nicht vollständig lesen. "
-                "Es wurde nichts gelöscht oder geändert.")
-        ids = set()
-        for record in records:
-            if record["has_deliverable_id"] and record["tolino_id"]:
-                ids.add(record["tolino_id"])
-        return ids
 
     @staticmethod
     def _multipart(fields, file_path, field="file"):

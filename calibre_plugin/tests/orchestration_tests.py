@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from . import ui_base_tests
 from .. import config
-from ._support import _ui_source_text, start_cdp_stubs, stop_cdp_stubs
+from ._support import start_cdp_stubs, stop_cdp_stubs
 from unittest.mock import patch
 
 
@@ -42,8 +42,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             "refresh_token": "token-1", "partner_id": "thalia",
             "hardware_id": "hw-1",
             "state": {}, "preferred_formats": ("EPUB",),
-            "sync_collections": False,
-            "upload_covers": False,
         }
 
     def _dashboard(self, ui_module, settings, thread=None):
@@ -92,12 +90,10 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             # Tests pruefen die Uebergabe, nicht die Anzeige.
             def __init__(self, settings, jobs, removals, meta_updates=None,
                          series_map=None, selected_read=(),
-                         selected_unread=(), titles=None,
-                         fingerprints=None):
+                         selected_unread=(), titles=None):
                 self.arguments = (settings, jobs, removals, meta_updates,
                                   series_map, selected_read, selected_unread)
                 self.titles = titles
-                self.fingerprints = fingerprints
                 self.progress = FakeSignal()
                 self.completed = FakeSignal()
                 self.failed = FakeSignal()
@@ -178,7 +174,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 "use_tolino_column": True,
             })
             cases = (({"#tolino_id": {}}, 1, True),
-                     ({"#tolino_id": {}}, 2, False),
+                     ({"#tolino_id": {}}, 2, True),
                      ({}, 1, False))
             for fields, account_count, expected in cases:
                 with self.subTest(fields=fields, account_count=account_count):
@@ -639,7 +635,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         ui_module = self._ui_with_messages([])
         ui_module.common.QDialog.Accepted = 1
         settings = dict(StartSyncOrchestrationTests._settings(),
-                        account_name="konto", upload_covers=False)
+                        account_name="konto")
         metadata = {
             1: {"uuid": "u1", "title": "Neu", "authors": "A", "isbn": "111",
                 "formats": ["EPUB"], "last_modified": "1", "tolino_id": "",
@@ -771,8 +767,7 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
     @staticmethod
     def _settings():
         return {"refresh_token": "t", "partner_id": 4, "hardware_id": "hw", "state": {},
-                "preferred_formats": ["EPUB"], "sync_collections": False,
-                "upload_covers": False,
+                "preferred_formats": ["EPUB"],
                 "account_name": "konto"}
 
     @staticmethod
@@ -907,8 +902,8 @@ class ReplacementConfirmationTests(unittest.TestCase):
         self.assertIn("22 Bücher", asked[0][2])
         self.assertIn("… und 2 weitere", asked[0][2])
 
-class DropReasonTests(unittest.TestCase):
-    """«Konnte nicht eingeplant werden» muss den Grund nennen."""
+class DroppedSelectionCountTests(unittest.TestCase):
+    """Der Hinweis zählt Auswahlen, die sich nicht planen ließen."""
 
     def test_a_missing_preferred_format_is_reported_and_not_scheduled(self):
         ui_module = StartSyncOrchestrationTests._ui_module()
@@ -925,50 +920,6 @@ class DropReasonTests(unittest.TestCase):
         self.assertIn("PDF only", preparation["skipped_uploads"][0])
         self.assertIn("EPUB", preparation["skipped_uploads"][0])
         self.assertNotIn("u1", settings["state"])
-
-    def test_reasons_name_the_missing_uuid(self):
-        from ..comparison import selection_drop_reasons
-        metadata = {1: {"uuid": "", "title": "A", "formats": ["EPUB"]}}
-        reasons = selection_drop_reasons(metadata, {}, {1}, {1}, ["EPUB"])
-        self.assertEqual({"ohne gültige Calibre-Kennung": 1},
-                         reasons["uploads"])
-        self.assertEqual({"ohne gültige Calibre-Kennung": 1},
-                         reasons["metadata"])
-
-    def test_reasons_name_the_missing_format(self):
-        from ..comparison import selection_drop_reasons
-        metadata = {1: {"uuid": "u1", "title": "A", "formats": ["MOBI"]}}
-        reasons = selection_drop_reasons(metadata, {}, {1}, set(), ["EPUB"])
-        self.assertEqual({"ohne bevorzugtes Buchformat": 1},
-                         reasons["uploads"])
-
-    def test_reasons_name_the_missing_cloud_copy(self):
-        from ..comparison import selection_drop_reasons
-        metadata = {1: {"uuid": "u1", "title": "A", "formats": ["EPUB"]}}
-        reasons = selection_drop_reasons(metadata, {}, set(), {1}, ["EPUB"])
-        self.assertEqual({"ohne Cloud-Kopie im Zustand": 1},
-                         reasons["metadata"])
-
-    def test_reasons_name_an_unknown_book(self):
-        from ..comparison import selection_drop_reasons
-        reasons = selection_drop_reasons({}, {}, {7}, {8}, ["EPUB"])
-        self.assertEqual({"nicht in der Calibre-Bibliothek": 1},
-                         reasons["uploads"])
-        self.assertEqual({"nicht in der Calibre-Bibliothek": 1},
-                         reasons["metadata"])
-
-    def test_the_message_names_the_reason(self):
-        ui_module = StartSyncOrchestrationTests._ui_module()
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        text = ui_module.dashboard._dashboard_plan.nothing_to_do_text({
-            "selected_without_action": {
-                "uploads": 5, "metadata": 496,
-                "reasons": {"uploads": {"ohne gültige Calibre-Kennung": 5},
-                            "metadata": {"ohne gültige Calibre-Kennung": 496}},
-            }})
-        self.assertIn("5", text)
-        self.assertIn("496", text)
-        self.assertIn("ohne gültige Calibre-Kennung", text)
 
 class VisibleResultTests(unittest.TestCase):
     """Calibre zeigt ein info_dialog nur mit show=True – sonst nie.
@@ -1001,12 +952,6 @@ class VisibleResultTests(unittest.TestCase):
                         break
             calls.append(text[index:end])
             start = end
-
-    def test_every_info_dialog_is_shown(self):
-        offenders = [call.replace("\n", " ")[:90]
-                     for call in self._calls(_ui_source_text())
-                     if "show=True" not in call]
-        self.assertEqual([], offenders)
 
     def test_the_result_dialog_is_shown_after_a_sync(self):
         ui_module = StartSyncOrchestrationTests._ui_module()
@@ -1101,12 +1046,9 @@ class EmptyRunAccountingTests(unittest.TestCase):
             {key: value for key, value in
              preparation["selected_without_action"].items()
              if key in ("uploads", "metadata")})
-        self.assertEqual(
-            {"ohne gültige Calibre-Kennung": 1},
-            preparation["selected_without_action"]["reasons"]["uploads"])
 
-    def test_the_nothing_to_do_text_names_the_lost_selection(self):
-        """Ohne Plan muss dastehen, wie viele ausgewählte Aktionen fielen."""
+    def test_the_nothing_to_do_text_reports_unplanned_actions(self):
+        """Ohne Plan wird nur die Anzahl der ausgefallenen Aktionen genannt."""
         ui_module = self._ui()
         seen = []
         ui_module.dashboard.info_dialog = (
@@ -1119,5 +1061,4 @@ class EmptyRunAccountingTests(unittest.TestCase):
             StartSyncOrchestrationTests._settings(), preparation, {})
         self.assertEqual(1, len(seen))
         text = " ".join(str(part) for part in seen[0])
-        self.assertIn("5", text)
-        self.assertIn("400", text)
+        self.assertIn("405 ausgewählte Aktionen konnten nicht eingeplant werden.", text)

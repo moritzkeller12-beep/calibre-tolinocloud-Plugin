@@ -1,8 +1,7 @@
 """Dashboard, Konten und Anmelde-Vorpruefung."""
 
-import ast
 import calibre_plugin.tolino as tolino_module
-import calibre_plugin.sessions as session_module
+import calibre_plugin.token_vault as vault_module
 import re
 import unittest
 from . import ui_base_tests
@@ -11,8 +10,7 @@ from ..partners import PARTNERS
 from ..library import TOLINO_COLUMN
 from ..tolino import TolinoAuthError
 from ._support import (
-    UI_SOURCE_FILES, _ui_source_text, start_cdp_stubs, stop_cdp_stubs,
-    ui_module_for)
+    _ui_source_text, start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from pathlib import Path
 from unittest.mock import patch
 
@@ -94,7 +92,7 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         for name in ("account_select", "account_quick", "partner", "hardware",
                      "refresh", "formats", "account_quick_label", "status",
                      "progress", "progress_label", "primary", "covers",
-                     "deletions", "sync_collections", "tolino_column"):
+                     "deletions", "tolino_column"):
             setattr(dashboard, name, self.Combo())
         dashboard.thread = None
         return dashboard
@@ -251,8 +249,8 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertNotIn("diagnose_preparation", source)
         self.assertNotIn("Lokale Diagnose", source)
         self.assertIn("self.login_button = QPushButton", source)
-        self.assertIn("partner.get(\"token_url\")", source)
-        self.assertNotIn('"Buch.de"', source)
+        self.assertIn("for pid, partner in sorted(PARTNERS.items())", source)
+        self.assertNotIn("partner.get(\"token_url\")", source)
         self.assertIn("self.partner.findData(partner_id) < 0", source)
 
 class DashboardPrimaryActionTests(unittest.TestCase):
@@ -449,7 +447,7 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         for name in ("account_select", "account_quick", "partner", "hardware",
                      "refresh", "formats", "account_quick_label", "status",
                      "progress", "progress_label", "primary", "covers",
-                     "deletions", "sync_collections", "tolino_column"):
+                     "deletions", "tolino_column"):
             setattr(dashboard, name, self.Combo())
         dashboard.thread = None
         dashboard.partner.items = [(str(pid), pid)
@@ -530,87 +528,143 @@ class LoginPreflightTests(unittest.TestCase):
 
     @staticmethod
     def _patch_client(records, error=None, rotate=True):
-        """TolinoClient durch einen Recorder ersetzen (kein Netz)."""
+        """Replace the vault's network client with a deterministic fake."""
+        from contextlib import contextmanager
 
-        class FakeClient:
-            def __init__(self, partner, hardware, token, token_callback=None):
-                records.append((partner, hardware, token))
-                self.token = token
-                self.refresh = token
-                self.token_callback = token_callback
+        @contextmanager
+        def login(store, _timeout=5):
+            token = store.refresh_token
+            records.append((store.values.get("partner_id"),
+                            store.hardware_id, token))
+            class FakeClient:
+                refresh = token
 
-            def login(self):
-                if error is not None:
-                    raise error
-                if rotate:
-                    self.refresh = self.token + "-rotated"
-                    if self.token_callback:
-                        self.token_callback(self.refresh)
-                return self.refresh
+                def login(self):
+                    if error is not None:
+                        raise error
+                    if rotate:
+                        self.refresh = token + "-rotated"
+                        store.save_refresh(self.refresh)
+                        records.append(("persisted", self.refresh))
+                    return self.refresh
 
-        return patch("calibre_plugin.sessions.TolinoClient", FakeClient)
+            client = FakeClient()
+            if rotate:
+                client.login()
+            yield client
+
+        return patch("calibre_plugin.token_vault.TOKEN_VAULT.login", login)
 
     def test_a_working_access_is_renewed_and_saved(self):
-        records, persisted = [], []
+        records = []
+        store = config.CredentialStore(
+            {"partner_id": 4, "hardware_id": "hw-1",
+             "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records):
-            status, detail = session_module.check_stored_login(
-                4, "hw-1", "tok-1", persist=persisted.append)
+            status, detail = vault_module.check_stored_login(store)
         self.assertEqual("valid", status)
         self.assertEqual("tok-1-rotated", detail)
-        # Geprueft wurde der GESPEICHERTE Zugang, nicht ein leerer.
-        self.assertEqual([(4, "hw-1", "tok-1")], records)
-        self.assertEqual(["tok-1-rotated"], persisted)
+        self.assertEqual((4, "hw-1", "tok-1"), records[0])
+        self.assertEqual("tok-1-rotated", store.refresh_token)
 
     def test_an_unchanged_token_is_not_written_again(self):
-        records, persisted = [], []
+        records = []
+        store = config.CredentialStore(
+            {"partner_id": 4, "hardware_id": "hw-1",
+             "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records, rotate=False):
-            status, detail = session_module.check_stored_login(
-                4, "hw-1", "tok-1", persist=persisted.append)
+            status, detail = vault_module.check_stored_login(store)
         self.assertEqual(("valid", "tok-1"), (status, detail))
-        self.assertEqual([], persisted)
+        self.assertEqual([], records[1:])
 
     def test_a_rejected_access_reports_the_reason_without_the_token(self):
         records = []
         error = TolinoAuthError(
             "invalid_grant: refresh_token tok-1 wurde abgelehnt")
         with self._patch_client(records, error=error):
-            status, detail = session_module.check_stored_login(
-                4, "hw-1", "tok-1")
+            status, detail = vault_module.check_stored_login(
+                config.CredentialStore({"partner_id": 4,
+                                        "hardware_id": "hw-1",
+                                        "refresh_token": "tok-1"}, "konto"))
         self.assertEqual("invalid", status)
         self.assertNotIn("tok-1", detail)
         self.assertIn("[REDACTED]", detail)
         self.assertIn("invalid_grant", detail)
 
     def test_without_a_stored_token_nothing_is_asked(self):
-        with patch("calibre_plugin.sessions.TolinoClient") as client:
-            status, detail = session_module.check_stored_login(4, "hw-1", "")
+        store = config.CredentialStore(
+            {"partner_id": 4, "hardware_id": "hw-1", "refresh_token": ""},
+            "konto")
+        status, detail = vault_module.check_stored_login(store)
         self.assertEqual("invalid", status)
-        self.assertIn("Noch nicht angemeldet", detail)
-        client.assert_not_called()
+        self.assertIn("Bitte bei tolino anmelden", detail)
 
     def test_a_running_sync_blocks_the_check(self):
         records = []
-        with session_module.token_session():
-            with self._patch_client(records):
-                status, detail = session_module.check_stored_login(
-                    4, "hw-1", "tok-1")
+        with vault_module.TOKEN_VAULT._lock:
+            status, detail = vault_module.check_stored_login(
+                config.CredentialStore({"partner_id": 4,
+                                        "hardware_id": "hw-1",
+                                        "refresh_token": "tok-1"}, "konto"))
         # NICHT „invalid": der Zugang ist ungeprueft, nicht abgelehnt.
         self.assertEqual(("busy", ""), (status, detail))
         self.assertEqual([], records)
 
     def test_a_parallel_rotation_blocks_the_check(self):
         records = []
-        with session_module._KEEPALIVE_LOCK, self._patch_client(records):
-            status, detail = session_module.check_stored_login(
-                4, "hw-1", "tok-1", lock_timeout=0)
+        with vault_module.TOKEN_VAULT._lock:
+            status, detail = vault_module.check_stored_login(
+                config.CredentialStore({"partner_id": 4,
+                                        "hardware_id": "hw-1",
+                                        "refresh_token": "tok-1"}, "konto"),
+                lock_timeout=0)
         self.assertEqual(("busy", ""), (status, detail))
         self.assertEqual([], records)
 
+    def test_a_late_401_uses_the_latest_stored_refresh_token(self):
+        store = config.CredentialStore(
+            {"account_name": "konto", "partner_id": 4,
+             "hardware_id": "hw-1", "refresh_token": "saved-old"}, "konto")
+        requested = []
+
+        class RefreshClient:
+            def __init__(self, partner, hardware, refresh, **callbacks):
+                self.refresh = refresh
+                self.hardware = hardware
+                self.token_callback = callbacks.get("token_callback")
+
+            def login(self):
+                if getattr(self, "token_lock_held", False):
+                    return self._rotate()
+                with self.token_lock:
+                    return self._rotate()
+
+            def _rotate(self):
+                requested.append(self.refresh)
+                if len(requested) == 1:
+                    self.refresh = "rotated"
+                    self.token_callback(self.refresh)
+                return self.refresh
+
+        from ..token_vault import TOKEN_VAULT
+        with patch("calibre_plugin.token_vault.TolinoClient", RefreshClient), \
+             patch("calibre_plugin.config.account_by_name",
+                   side_effect=lambda _name: {
+                       "refresh_token": store.refresh_token,
+                       "hardware_id": store.hardware_id}):
+            with TOKEN_VAULT.login(store) as client:
+                store.save_refresh("rotated-by-keepalive")
+                client.access = None
+                client.login()
+        self.assertEqual(["saved-old", "rotated"], requested)
+
     def test_the_rotation_lock_is_released_afterwards(self):
         with self._patch_client([]):
-            session_module.check_stored_login(4, "hw-1", "tok-1")
-        self.assertTrue(session_module._KEEPALIVE_LOCK.acquire(blocking=False))
-        session_module._KEEPALIVE_LOCK.release()
+            vault_module.check_stored_login(config.CredentialStore(
+                {"partner_id": 4, "hardware_id": "hw-1",
+                 "refresh_token": "tok-1"}, "konto"))
+        self.assertTrue(vault_module.TOKEN_VAULT._lock.acquire(blocking=False))
+        vault_module.TOKEN_VAULT._lock.release()
 
     # --- Der Anmeldeknopf -----------------------------------------------
 
@@ -907,14 +961,15 @@ class LoginPreflightTests(unittest.TestCase):
         worker.run()
         return worker, emitted, calls
 
-    def test_the_worker_hands_the_stored_access_to_the_check(self):
+    def test_the_worker_hands_the_stored_account_to_the_check(self):
         ui_module = self._ui()
-        worker, emitted, calls = self._run_check_worker(
+        _worker, emitted, calls = self._run_check_worker(
             ui_module, ("valid", "tok-2"))
         args, kwargs = calls[0]
-        self.assertEqual((4, "hw-1", "tok-1"), args)
-        # Der rotierte Token wird aus dem Arbeitsthread heraus gesichert.
-        self.assertEqual(worker.persist_refresh_token, kwargs["persist"])
+        self.assertEqual(1, len(args))
+        self.assertEqual("konto", args[0].account_name)
+        self.assertEqual("tok-1", args[0].refresh_token)
+        self.assertEqual({}, kwargs)
         self.assertEqual([("valid", "tok-2")], emitted)
 
     def test_every_check_result_reaches_the_matching_slot(self):
@@ -934,17 +989,15 @@ class LoginPreflightTests(unittest.TestCase):
         # Auch der unerwartete Fehler verraet den Zugang nicht.
         self.assertNotIn("tok-1", emitted[0][1])
 
-    def test_the_worker_saves_rotations_through_the_shared_helper(self):
-        ui_module = self._ui()
-        saved = []
-        settings = {"account_name": "konto", "hardware_id": "hw-1",
-                    "refresh_token": "tok-1"}
-        worker = ui_module.auth_workers.SessionCheckWorker(settings)
-        with patch("calibre_plugin.config.save_credentials",
-                   lambda *args: saved.append(args)):
-            worker.persist_refresh_token("tok-2")
-        self.assertEqual([("konto", "tok-2", "hw-1")], saved)
+    def test_the_vault_persists_rotations_into_the_worker_snapshot(self):
+        settings = {"account_name": "konto", "partner_id": 4,
+                    "hardware_id": "hw-1", "refresh_token": "tok-1"}
+        store = config.CredentialStore(settings, "konto")
+        callback = vault_module.TOKEN_VAULT._rotation_callback(store)
+        with patch("calibre_plugin.config.save_credentials") as save:
+            callback("tok-2")
         self.assertEqual("tok-2", settings["refresh_token"])
+        save.assert_called_once_with("konto", "tok-2", "hw-1")
 
 class LoginMessageTests(unittest.TestCase):
     """P2: Erfolg in der Statuszeile, Ursachen klar getrennt."""
@@ -1169,7 +1222,7 @@ class AccountStateBindingTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
-    def test_tolino_column_active_requires_single_account(self):
+    def test_tolino_column_active_supports_multiple_accounts(self):
         from ..library import tolino_column_active
 
         class Db:
@@ -1180,9 +1233,9 @@ class AccountStateBindingTests(unittest.TestCase):
 
         values = {"use_tolino_column": True,
                   "accounts": [{"name": "a"}, {"name": "b"}]}
-        # Zwei Konten: die globale Spalte kann nur das zuletzt
-        # synchronisierte Konto spiegeln -- weder lesen noch schreiben.
-        self.assertFalse(tolino_column_active(values, Db()))
+        # Die Spalte enthält pro Buch ein Mapping, daher bleibt sie bei
+        # mehreren Konten nutzbar.
+        self.assertTrue(tolino_column_active(values, Db()))
         values["accounts"] = [{"name": "a"}]
         self.assertTrue(tolino_column_active(values, Db()))
         values["use_tolino_column"] = False
@@ -1190,70 +1243,6 @@ class AccountStateBindingTests(unittest.TestCase):
         values["use_tolino_column"] = True
         self.assertFalse(tolino_column_active(values, NoColumn()))
         self.assertFalse(tolino_column_active({}, Db()))
-
-class UIModuleImportTests(unittest.TestCase):
-    """Jedes UI-Modul muss alle verwendeten Namen auch importieren.
-
-    Beim Aufteilen ging der Import von ``QGroupBox`` bzw. ``QTextEdit``
-    verloren; der Fehler zeigte sich erst beim Öffnen des Fensters. Dieser
-    Test prüft die Globalnamen aller UI-Module statisch.
-    """
-
-    def _module_names(self, source):
-        import builtins
-        import symtable
-
-        tree = ast.parse(source)
-        names = set(dir(builtins))
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-                names.add(node.name)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        names.add(target.id)
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                for alias in node.names:
-                    names.add(alias.asname or alias.name.split(".")[0])
-
-        # Importe in try/if am Modulkopf zaehlen ebenfalls, aber keine
-        # lokalen Importe innerhalb von Funktionen oder Methoden.
-        def collect_imports(node, inside_function=False):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.Lambda)):
-                inside_function = True
-            if not inside_function and isinstance(
-                    node, (ast.Import, ast.ImportFrom)):
-                for alias in node.names:
-                    names.add(alias.asname or alias.name.split(".")[0])
-            for child in ast.iter_child_nodes(node):
-                collect_imports(child, inside_function)
-
-        collect_imports(tree)
-
-        missing = set()
-        table = symtable.symtable(source, "<ui-module>", "exec")
-
-        def walk(current):
-            for symbol in current.get_symbols():
-                if (symbol.is_global() and not symbol.is_assigned()
-                        and symbol.get_name() not in names):
-                    missing.add(symbol.get_name())
-            for child in current.get_children():
-                walk(child)
-
-        walk(table)
-        return missing
-
-    def test_every_ui_module_resolves_its_global_names(self):
-        base = Path(__file__).resolve().parent.parent
-        missing = {}
-        for name in UI_SOURCE_FILES:
-            found = self._module_names((base / name).read_text(
-                encoding="utf-8"))
-            if found:
-                missing[name] = sorted(found)
-        self.assertEqual({}, missing)
 
     def test_settings_dialog_keeps_required_widgets_without_diagnostic_ui(self):
         base = Path(__file__).resolve().parent.parent

@@ -1,17 +1,13 @@
 """Live-Token-Grab ueber das Chrome DevTools Protocol."""
 
-import ipaddress
 import json
 import os
-import re
-import secrets
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
 import time
-from urllib.parse import quote as _url_quote, urlsplit
+from urllib.parse import urlsplit
 
 from .partners import PARTNERS
 from .tolino import RELOGIN, RELOGIN_THEN, TolinoAuthError
@@ -34,270 +30,33 @@ def _start_port():
         return int(sock.getsockname()[1])
 
 
-def _profile_identity():
-    """Kennung des aktuellen Benutzers fuer den Profilpfad.
-
-    Auf einem geteilten Rechner kann sonst ein anderer Benutzer den festen
-    Pfad in /tmp vorbelegen (Symlink oder fremdes Profil). Die Kennung ist
-    die Benutzer-ID -- bei Windows der Benutzername, entschaerft.
-    """
-    if os.name == "nt":
-        name = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
-        return "".join(ch if (ch.isalnum() or ch in "._-") else "_"
-                       for ch in name) or "user"
-    getuid = getattr(os, "getuid", None)
-    if getuid is not None:
-        return str(getuid())
-    return "user"
+# Ownership is deliberately process-local: this module records only the
+# ephemeral profile, loopback port and Popen handle created by this plugin.
+_LAUNCHED = {"process": None, "port": None, "profile": ""}
 
 
-def _profile_dir():
-    """Private BASE directory for grabber profiles and the ownership record."""
-    return os.path.join(tempfile.gettempdir(),
-                        "tolino_grab_profile-%s" % _profile_identity())
-
-
-def _ensure_profile_base():
-    """Basisverzeichnis anlegen -- nur fuer den eigenen Benutzer lesbar."""
-    base = _profile_dir()
-    os.makedirs(base, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(base, 0o700)
-    except OSError:
-        pass
-    return base
-
-
-# ---------------------------------------------------------- Besitz-Nachweis
-#
-# Ein Anmeldefenster gehoert nur dann dem Plugin, wenn ALLE drei Punkte
-# zusammenpassen: eindeutiges Profil mit geheimem Marker, passender laufender
-# Prozess (Linux /proc) und ein DevTools-Endpunkt genau dieses Prozesses.
-# Ohne diesen Nachweis werden weder Tokens gelesen noch Browser.close gesendet.
-_ACTIVE = {"port": None, "profile": "", "token": ""}
-_LAUNCHED = {"process": None, "port": None,
-             "profile": "", "token": ""}
-_OWNER_MARKER = ".tolino-grab-owner"
-
-
-def _owner_file():
-    return os.path.join(_profile_dir(), "owner.json")
-
-
-def _write_owner(record):
-    _ensure_profile_base()
-    path = _owner_file()
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(record, handle, sort_keys=True)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
-
-
-def _read_owner():
-    try:
-        with open(_owner_file(), "r", encoding="utf-8") as handle:
-            record = json.load(handle)
-    except (OSError, ValueError):
+def _launched_record(port=None, require_endpoint=True):
+    process = _LAUNCHED["process"]
+    actual_port = _LAUNCHED["port"]
+    profile = _LAUNCHED["profile"]
+    if process is None or not actual_port or not profile:
         return None
-    if not isinstance(record, dict):
+    if port is not None and int(port) != int(actual_port):
         return None
-    try:
-        port = int(record.get("port") or 0)
-    except (TypeError, ValueError):
-        return None
-    profile = str(record.get("profile") or "")
-    token = str(record.get("token") or "")
-    if port <= 0 or not profile or not token:
-        return None
-    return {"port": port, "profile": profile, "token": token}
-
-
-def _profile_is_owned_child(record):
-    """Accept only a real profile directory directly below our private base."""
-    try:
-        profile = os.path.abspath(str(record["profile"]))
-        base = os.path.abspath(_profile_dir())
-        return (not os.path.islink(base)
-                and os.path.dirname(profile) == base
-                and os.path.basename(profile).startswith("profile-")
-                and not os.path.islink(profile)
-                and os.path.realpath(os.path.dirname(profile))
-                == os.path.realpath(base))
-    except (KeyError, OSError, TypeError, ValueError):
-        return False
-
-
-def _remove_owned_profile(record, process_stopped=False):
-    """Remove only the marked direct-child profile after its process exits."""
-    if not _marker_matches(record):
-        return False
-    if not process_stopped and _process_matches(record):
-        return False
-    profile = os.path.abspath(str(record["profile"]))
-    if os.path.islink(profile) or os.path.realpath(profile) != profile:
-        return False
-    shutil.rmtree(profile, ignore_errors=True)
-    return not os.path.lexists(profile)
-
-
-def _same_record(left, right):
-    """Whether two persisted/in-memory ownership records identify one launch."""
-    return bool(left and right
-                and left.get("port") == right.get("port")
-                and left.get("profile") == right.get("profile")
-                and left.get("token") == right.get("token"))
-
-
-def _clear_launch_state(record):
-    """Forget only in-memory state belonging to a launch just cleaned up."""
-    if _same_record(_ACTIVE, record):
-        _ACTIVE.update({"port": None, "profile": "", "token": ""})
-    if _same_record(_LAUNCHED, record):
-        _LAUNCHED.update({"process": None, "port": None,
-                          "profile": "", "token": ""})
-
-
-def _marker_matches(record):
-    if (not isinstance(record, dict) or not _profile_is_owned_child(record)
-            or not os.path.isdir(record["profile"])):
-        return False
-    try:
-        with open(os.path.join(record["profile"], _OWNER_MARKER),
-                  "r", encoding="utf-8") as handle:
-            return handle.read().strip() == record["token"]
-    except OSError:
-        return False
-
-
-# Browser main processes carry these names in /proc/<pid>/exe. A short-lived
-# launcher (snap, flatpak, flatpak-spawn) may exit while its browser child
-# keeps running with the same profile and debugging port.
-_BROWSER_EXE_HINTS = ("chrome", "chromium", "brave", "edge", "vivaldi",
-                      "opera", "headless_shell")
-
-
-def _proc_argv(pid):
-    """Command line of a Linux process, or an empty list."""
-    try:
-        with open("/proc/%d/cmdline" % pid, "rb") as handle:
-            return handle.read().decode("utf-8", "replace").split("\0")
-    except OSError:
-        return []
-
-
-def _is_browser_process(pid):
-    """True when /proc proves that `pid` is a Chromium-family browser."""
-    try:
-        exe = os.path.basename(os.readlink("/proc/%d/exe" % pid)).lower()
-    except OSError:
-        return False
-    return any(hint in exe for hint in _BROWSER_EXE_HINTS)
-
-
-def _owned_pids(record):
-    """PIDs that provably run OUR profile on OUR debugging port.
-
-    Launchers (snap/flatpak) may have exited and handed the profile to a
-    child with a different PID. The unique profile path plus the debugging
-    port in the same command line identify the real browser without
-    trusting a port number alone.
-    """
-    if (not isinstance(record, dict) or not _marker_matches(record)
-            or not os.path.isdir("/proc")):
-        return []
-    try:
-        port = int(record.get("port") or 0)
-    except (TypeError, ValueError):
-        return []
-    profile = os.path.abspath(str(record.get("profile") or ""))
-    if port <= 0 or not profile or not _profile_is_owned_child(record):
-        return []
-    flag = "--remote-debugging-port=%d" % port
-    pids = []
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return []
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        if pid == os.getpid():
-            continue
-        argv = _proc_argv(pid)
-        profile_flag = "--user-data-dir=%s" % profile
-        if (argv and profile_flag in argv and flag in argv
-                and _is_browser_process(pid)):
-            pids.append(pid)
-    return pids
-
-
-def _process_matches(record):
-    """Require live process evidence for the recorded profile and port.
-
-    Linux can verify Chromium's command line. Elsewhere, only the exact live
-    Popen child from this process is authoritative; a marker and a listening
-    port alone never prove that an endpoint belongs to this plugin.
-    """
-    process = _LAUNCHED.get("process")
-    try:
-        if (process is not None
-                and int(_LAUNCHED.get("port") or 0)
-                == int((record or {}).get("port") or 0)
-                and _LAUNCHED.get("profile") == (record or {}).get("profile")
-                and _LAUNCHED.get("token") == (record or {}).get("token")
-                and process.poll() is None):
-            return True
-    except (AttributeError, TypeError, ValueError):
-        pass
-    if os.path.isdir("/proc"):
-        return bool(_owned_pids(record))
-    return False
-
-
-def _owner_alive(record):
-    if not isinstance(record, dict):
-        return False
-    port = record.get("port")
-    if (isinstance(port, bool) or not isinstance(port, int)
-            or not 0 < port < 65536):
-        return False
-    if not _process_matches(record) or not _marker_matches(record):
-        return False
-    return bool(_http_get_json(
-        "http://127.0.0.1:%d/json/version" % port, 2))
-
-
-def _verified_owner(port=None):
-    """Return the live owned-window record, optionally for one port."""
-    record = _read_owner() or _active_record(port)
-    if not record or not _owner_alive(record):
-        return None
-    try:
-        owner_port = int(record["port"])
-        if port is not None and owner_port != int(port):
-            return None
-    except (KeyError, TypeError, ValueError):
+    record = {"process": process, "port": int(actual_port),
+              "profile": profile}
+    if require_endpoint and not _endpoint_answers(record):
         return None
     return record
 
 
+def _verified_owner(port=None):
+    """Return this process's browser only while its chosen port answers."""
+    return _launched_record(port)
+
+
 def _new_profile_dir():
-    return tempfile.mkdtemp(prefix="profile-", dir=_ensure_profile_base())
-
-
-def _write_marker(profile, token):
-    path = os.path.join(profile, _OWNER_MARKER)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(token)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    return tempfile.mkdtemp(prefix="tolino-grab-")
 
 
 def _reader_url(partner_id):
@@ -307,55 +66,21 @@ def _reader_url(partner_id):
 
 
 def devtools_port_alive():
-    """True when OUR grabber window's DevTools endpoint answers right now."""
+    """Whether the browser launched by this plugin still answers."""
     return _verified_owner() is not None
 
 
-def _loopback_host(host):
-    host = str(host or "").casefold()
-    if host == "localhost":
-        return "127.0.0.1"
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError as exc:
-        raise ValueError("DevTools websocket host is not loopback") from exc
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    if not address.is_loopback:
-        raise ValueError("DevTools websocket host is not loopback")
-    return str(address)
-
-
-_DEVTOOLS_PATH = re.compile(
-    r"/devtools/(?:page|browser)/[A-Za-z0-9._:-]+$")
-
-
-def _validate_devtools_ws_parts(host, port, path, expected_port=None):
-    """Validate an already-parsed DevTools address before connecting."""
-    host = _loopback_host(host)
-    try:
-        port = int(port)
-        expected_port = (None if expected_port is None
-                         else int(expected_port))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid DevTools websocket port") from exc
-    path = str(path)
-    if (not 0 < port <= 65535
-            or (expected_port is not None and port != expected_port)
-            or not _DEVTOOLS_PATH.fullmatch(path)):
-        raise ValueError("invalid DevTools websocket address")
-    return host, port, path
-
-
-def _devtools_ws_address(ws_url, expected_port=None):
-    """Parse only a loopback DevTools WebSocket on the verified browser port."""
+def _devtools_ws_address(ws_url, expected_port):
+    """Use the launched loopback port; never connect to a URL-supplied host."""
     try:
         parsed = urlsplit(str(ws_url or ""))
-        if (parsed.scheme != "ws" or parsed.username is not None
-                or parsed.password is not None or parsed.query or parsed.fragment):
-            raise ValueError("invalid DevTools websocket URL")
-        return _validate_devtools_ws_parts(
-            parsed.hostname, parsed.port, parsed.path, expected_port)
+        port = parsed.port
+        if (parsed.scheme != "ws"
+                or parsed.hostname not in ("127.0.0.1", "localhost", "::1")
+                or expected_port is None or port != int(expected_port)
+                or not parsed.path.startswith("/devtools/")):
+            raise ValueError("DevTools URL does not match the launched browser")
+        return "127.0.0.1", port, parsed.path
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid DevTools websocket URL") from exc
 
@@ -433,65 +158,33 @@ def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False,
 # ---------------------------------------------------------------- Fenster-Flow
 
 def launch_reader_window(partner_id):
-    """Open a dedicated grabber Chromium window on the Web Reader page.
-
-    Returns the DevTools port or raises TolinoAuthError when no Chromium
-    browser is installed. A leftover grabber window from an earlier
-    attempt is reused when its DevTools endpoint still answers (the user
-    may have kept the sign-in window open across retries).
-    """
+    """Start Chromium with an isolated temporary profile and random port."""
     binary, label = pick_chromium() or (None, None)
     if not binary:
         message, code, status = browser_finder.missing_browser_error()
         raise TolinoAuthError(message, code=code,
                               detail="Host-Sonde: %s" % status)
-    # Reuse ONLY our own window: ownership record + private marker + live
-    # process evidence must match. A foreign listener is never selected.
-    # owner.json may have been lost after an earlier failed close; the
-    # in-memory proof still identifies this process's own window/profile.
-    previous = _read_owner() or _active_record()
-    if previous and _owner_alive(previous):
-        _ACTIVE.update(previous)
-        return int(previous["port"])
-    # Do not remove a profile while its browser may still be running. On an
-    # unprovable or failed close, stop here and preserve the ownership record
-    # so a later attempt can retry safely.
-    if previous and (_marker_matches(previous) or _process_matches(previous)):
-        if not _marker_matches(previous) or not close_grabber_window():
+    previous = _verified_owner()
+    if previous:
+        return previous["port"]
+    if _LAUNCHED["process"] is not None:
+        close_grabber_window()
+        if _LAUNCHED["process"] is not None:
             raise TolinoAuthError(
                 "Das vorherige Anmeldefenster konnte nicht sicher "
                 "geschlossen werden. Bitte schliessen Sie es und versuchen "
-                "Sie es erneut.", code="B07",
-                detail="Vorheriger Browser ist nicht sicher beendet.")
-        if _endpoint_answers(previous, 0.2):
-            raise TolinoAuthError(
-                "Das vorherige Anmeldefenster wird noch beendet. "
-                "Bitte warten Sie kurz und versuchen Sie es erneut.",
-                code="B07", detail="Vorheriger DevTools-Endpunkt antwortet noch.")
-    # Never recursively clean the shared private base here: a stale or
-    # malformed owner record is not proof that every profile is unused.
-    # The verified close path removes the profile it can prove it owns.
+                "Sie es erneut.", code="B07")
+
     port = _start_port()
     profile = _new_profile_dir()
-    token = secrets.token_hex(16)
-    _write_marker(profile, token)
-    record = {"port": port, "profile": profile, "token": token}
-    _write_owner(record)
     flags = [
         "--user-data-dir=%s" % profile,
         "--remote-debugging-port=%d" % port,
         "--no-first-run", "--no-default-browser-check",
-        "--disable-session-crashed-bubble",
-        "--disable-infobars",
-        "--window-size=1280,900",
-        "--new-window",
-        _reader_url(partner_id),
+        "--disable-session-crashed-bubble", "--disable-infobars",
+        "--window-size=1280,900", "--new-window", _reader_url(partner_id),
     ]
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = 0x00000008  # DETACHED_PROCESS: Calibre bleibt bedienbar
-    # Kandidaten nacheinander versuchen: ein defekter erster Eintrag
-    # darf die Anmeldung nicht in den System-Browser-Fallback schicken.
+    creationflags = 0x00000008 if os.name == "nt" else 0
     attempts = [(list(binary), label)]
     last_error = None
     process = None
@@ -507,72 +200,62 @@ def launch_reader_window(partner_id):
         except OSError as exc:
             last_error = (candidate_label, exc)
             if index == 1:
-                # Erst beim ersten Fehlschlag die übrigen Kandidaten
-                # ermitteln (die Host-Sonde kostet einen Prozessstart).
                 attempts.extend(
-                    cand for cand in browser_finder.chromium_options()
-                    if cand[0] != binary)
+                    candidate for candidate in browser_finder.chromium_options()
+                    if candidate[0] != binary)
     else:
-        # Auch ohne Prozess wurden bereits Profil, Marker und Besitzdatei
-        # angelegt. Ein fehlgeschlagener Start darf sie nicht liegen lassen.
-        _abandon_failed_launch(None, record)
+        shutil.rmtree(profile, ignore_errors=True)
         raise TolinoAuthError(
             "Chromium konnte nicht gestartet werden.", code="B07",
-            detail="%s: %s" % (last_error[0], last_error[1]))
-    _write_owner(record)
-    _ACTIVE.update(record)
-    # Fuer den spaeteren Close: das Popen-Objekt beweist, dass es unser
-    # Kind ist -- auch auf Windows/macOS ohne /proc.
-    _LAUNCHED.update({"process": process, "port": port,
-                      "profile": profile, "token": token})
-    # Wait until the DevTools endpoint answers.
+            detail="%s: %s" % last_error)
+
+    _LAUNCHED.update({"process": process, "port": port, "profile": profile})
     deadline = time.time() + 20
     while time.time() < deadline:
         if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
             return port
         time.sleep(0.5)
-    # Do not leave an orphan instance, profile or ownership record behind
-    # on a failed start.
-    _abandon_failed_launch(process, record)
+    _abandon_failed_launch(process, {"profile": profile})
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
         "und es erneut versuchen.", code="B07", detail="Port %d" % port)
 
 
 def _stop_launched_process(process, timeout=2):
-    """Stop our child and report whether the process is proven to have exited."""
     if process is None:
         return True
     try:
-        if process.poll() is not None:
-            return True
-        process.terminate()
-        process.wait(timeout=max(0.2, timeout))
-    except Exception:
-        try:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=1)
-        except Exception:
-            return False
-    try:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=max(0.2, timeout))
         return process.poll() is not None
     except Exception:
         return False
 
 
 def _abandon_failed_launch(process, record):
-    """Clean only this marked profile after the attempted child exits."""
+    """Close the launched browser before removing its temporary profile."""
+    port = _LAUNCHED["port"]
+    if port:
+        live = {"process": process, "port": int(port),
+                "profile": record["profile"]}
+        target = _browser_ws_for_record(live)
+        if target:
+            _send_browser_close(*target, expected_port=port)
     if not _stop_launched_process(process):
-        return
-    if not _remove_owned_profile(record, process_stopped=True):
-        return
-    if _same_record(_read_owner(), record):
-        try:
-            os.remove(_owner_file())
-        except OSError:
-            pass
-    _clear_launch_state(record)
+        return False
+    if port and _endpoint_answers({"port": port}, 0.2):
+        deadline = time.time() + 2
+        while _endpoint_answers({"port": port}, 0.2) and time.time() < deadline:
+            time.sleep(0.1)
+        if _endpoint_answers({"port": port}, 0.2):
+            return False
+    shutil.rmtree(record["profile"], ignore_errors=True)
+    if os.path.exists(record["profile"]):
+        return False
+    if _LAUNCHED["process"] is process:
+        _LAUNCHED.update({"process": None, "port": None, "profile": ""})
+    return True
 
 
 def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
@@ -749,33 +432,28 @@ def reader_ws_url(port=None):
 
 
 def _browser_ws_for_record(record, timeout=2):
-    """Return the CDP address only when marker, process and endpoint agree."""
+    """Return the browser's CDP address, limited to its chosen port."""
+    port = int(record.get("port") or 0)
+    version = _http_get_json(
+        "http://127.0.0.1:%d/json/version" % port, timeout)
+    ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
     try:
-        port = int(record.get("port") or 0)
-        if (not 0 < port < 65536 or not _process_matches(record)
-                or not _marker_matches(record)):
-            return None
-        version = _http_get_json(
-            "http://127.0.0.1:%d/json/version" % port, timeout)
-        ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
         return _devtools_ws_address(ws_url, port)
-    except (AttributeError, TypeError, ValueError):
+    except ValueError:
         return None
 
 
 def _send_browser_close(host, port, path, timeout=2, expected_port=None):
-    """Send Browser.close over a validated loopback DevTools WebSocket."""
+    """Send Browser.close to a loopback DevTools endpoint on our port."""
+    expected_port = port if expected_port is None else expected_port
     try:
-        if expected_port is None:
-            expected_port = port
-        host, port, path = _validate_devtools_ws_parts(
-            host, port, path, expected_port=expected_port)
+        host_literal = "[%s]" % host if ":" in host else host
+        host, port, path = _devtools_ws_address(
+            "ws://%s:%s%s" % (host_literal, port, path), expected_port)
         ws = _Ws.connect(host, port, path, timeout=timeout)
         try:
             ws.send_json({"id": 1, "method": "Browser.close"})
             try:
-                # Die Antwort darf fehlen -- der Browser fährt ja ohnehin
-                # herunter und meldet sich danach nicht mehr.
                 ws.recv_json(timeout=timeout)
             except OSError:
                 pass
@@ -786,240 +464,40 @@ def _send_browser_close(host, port, path, timeout=2, expected_port=None):
         return False
 
 
-def _close_log(message):
-    """Ein Satz ins Calibre-Log -- ohne Pfade und Tokens."""
-    try:
-        from .tolino import log_warning
-        log_warning("Anmeldefenster: " + str(message))
-    except Exception:
-        pass  # ohne Calibre-Log bleibt der Close trotzdem wirksam
-
-
-def _page_targets(record, timeout=0.5):
-    """Offene Seiten-Targets des eigenen Fensters (None: nicht lesbar)."""
-    try:
-        port = int(record.get("port") or 0)
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if port <= 0:
-        return None
-    targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
-    if not isinstance(targets, list):
-        return None
-    return [target for target in targets
-            if isinstance(target, dict) and target.get("type") == "page"]
-
-
-def _window_gone(record, timeout=0.4):
-    """True, wenn der Debug-Endpunkt weg ist oder kein Fenster mehr offen ist.
-
-    `Browser.close` schliesst den Browser, der Endpunkt kann aber kurz
-    nachleben; umgekehrt bleibt nach einem blockierten Entladen manchmal
-    nur die Seite haengen. Beides gilt hier als «Fenster zu».
-    """
-    if not _endpoint_answers(record, timeout):
-        return True
-    targets = _page_targets(record, timeout)
-    return targets == []
-
-
-def _http_get_status(url, timeout=2):
-    """Status einer lokalen Debug-Abfrage (0 = keine Antwort)."""
-    try:
-        from urllib.request import ProxyHandler, build_opener
-        with build_opener(ProxyHandler({})).open(url, timeout=timeout) as response:
-            return int(getattr(response, "status", 200) or 200)
-    except Exception:
-        return 0
-
-
-def _close_page_targets(record, timeout=2):
-    """Fenster ueber den Debug-Endpunkt schliessen, wenn `Browser.close`
-    ignoriert wurde (z. B. wegen eines haengenden Entlade-Handlers).
-
-    Nur mit bestandenem Besitznachweis: Profilmarker, Prozess und Endpunkt.
-    """
-    if (not _marker_matches(record) or not _process_matches(record)
-            or not _endpoint_answers(record, timeout)):
-        return False
-    targets = _page_targets(record, timeout)
-    if not targets:
-        return False
-    try:
-        port = int(record["port"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    closed = False
-    for target in targets:
-        if not isinstance(target, dict):
-            continue
-        target_id = str(target.get("id") or "").strip()
-        if not target_id:
-            continue
-        status = _http_get_status(
-            "http://127.0.0.1:%d/json/close/%s"
-            % (port, _url_quote(target_id, safe="")), timeout)
-        if 0 < status < 400:
-            closed = True
-    return closed
-
-
-def _terminate_launched(record, timeout=2):
-    """Stop the exact Popen child and verify that it exited."""
-    process = _LAUNCHED.get("process")
-    if process is None:
-        return False
-    if not _same_record(_LAUNCHED, record):
-        return False
-    return _stop_launched_process(process, timeout)
-
-
-def _active_record(port=None):
-    """Besitzsatz aus dem Speicher, wenn `owner.json` fehlt.
-
-    Ein frueherer Schliessversuch konnte die Datei entfernen, obwohl das
-    Fenster noch lebt; ohne diesen Satz waere es danach unerreichbar
-.
-    """
-    if not _ACTIVE.get("port") or not _ACTIVE.get("profile") or not _ACTIVE.get("token"):
-        return None
-    try:
-        active_port = int(_ACTIVE["port"])
-    except (TypeError, ValueError):
-        return None
-    if port is not None and active_port != int(port):
-        return None
-    return {"port": active_port, "profile": _ACTIVE["profile"],
-            "token": _ACTIVE["token"]}
-
-
 def _endpoint_answers(record, timeout=0.5):
-    """True while the recorded loopback DevTools port still answers."""
-    if not isinstance(record, dict):
-        return False
-    try:
-        port = int(record.get("port") or 0)
-    except (TypeError, ValueError):
-        return False
-    if port <= 0 or port >= 65536:
-        return False
-    return bool(_http_get_json(
-        "http://127.0.0.1:%d/json/version" % port, timeout))
-
-
-def _terminate_owned_process(record, timeout=2):
-    """Last-resort close for OUR window when Browser.close is ignored.
-
-    Only on Linux, where ``/proc`` proves that the running browser owns
-    exactly this profile and port. A recycled PID on Windows/macOS is never
-    killed; there the graceful Browser.close remains the only mechanism.
-    """
-    if not isinstance(record, dict) or not os.path.isdir("/proc"):
-        return False
-    if not _marker_matches(record):
-        return False
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        pids = _owned_pids(record)
-        if not pids:
-            return (not _process_matches(record)
-                    and not _endpoint_answers(record, 0.4))
-        for pid in pids:
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                pass
-        deadline = time.time() + max(0.2, timeout / 2.0)
-        while time.time() < deadline:
-            if not _endpoint_answers(record, 0.4):
-                return True
-            time.sleep(0.1)
-    return not _endpoint_answers(record, 0.4)
+    """True while the selected loopback DevTools port answers."""
+    port = int(record.get("port") or 0)
+    return (0 < port < 65536 and bool(_http_get_json(
+        "http://127.0.0.1:%d/json/version" % port, timeout)))
 
 
 def close_grabber_window(timeout=2, port=None):
-    """Close OUR private sign-in window; never another browser.
-
-    Without a matching ownership record (private profile marker + process +
-    endpoint) no ``Browser.close`` is sent at all. If Chromium ignores
-    ``Browser.close`` (for example because the page blocks unload), the
-    window is closed through the debug endpoint and only then the recorded
-    process is terminated -- auf Linux ueber /proc, sonst ueber genau den
-    Prozess, den wir gestartet haben.
-
-    Der Besitznachweis (owner.json, Profil mit Marker) wird erst entfernt,
-    wenn das Fenster wirklich zu ist. Frueher galt «Browser.close gesendet»
-    schon als Erfolg: blieb das Fenster dann offen, war der einzige Weg zu
-    seiner Identitaet geloescht und jeder weitere Versuch aussichtslos.
-    """
-    record = _read_owner() or _active_record(port)
-    if port is not None and (not record
-                             or int(record.get("port") or 0) != int(port)):
-        record = None
+    """Close only the browser started by this module, then remove its profile."""
+    record = _launched_record(port, require_endpoint=False)
     if record is None:
         return False
-    if not _process_matches(record):
+    if _endpoint_answers(record, timeout):
+        target = _browser_ws_for_record(record, timeout)
+        if target:
+            _send_browser_close(*target, timeout=timeout,
+                                expected_port=record["port"])
+        deadline = time.time() + max(0.2, timeout)
+        while _endpoint_answers(record, 0.2) and time.time() < deadline:
+            time.sleep(0.1)
+    if not _stop_launched_process(record["process"], timeout):
         return False
-    # A false marker only prohibits cleanup; the trusted process+loopback
-    # evidence still establishes the CDP endpoint for graceful shutdown.
-    if _marker_matches(record) and not _endpoint_answers(record, timeout):
-        return False
-    if not _marker_matches(record):
-        if os.path.isdir("/proc"):
-            return False
-        # Without the marker, never infer that the listening endpoint is ours.
-        # Keep the ownership state unless the exact child was stopped AND the
-        # endpoint is gone; otherwise a later close attempt still has context.
-        if not _terminate_launched(record, timeout):
-            return False
-        if not _window_gone(record, timeout):
-            return False
-        _clear_launch_state(record)
-        return True
-    target = _browser_ws_for_record(record, timeout)
-    expected_port = int(record["port"])
-    closed = bool(target and target[1] == expected_port and _send_browser_close(
-        target[0], target[1], target[2], timeout,
-        expected_port=expected_port))
-    if not closed:
-        _close_log("Browser.close konnte nicht gesendet werden.")
-    if _endpoint_answers(record, 0.4):
-        # Chromium hat Browser.close (noch) nicht befolgt: die offenen
-        # Fenster direkt ueber den Debug-Endpunkt schliessen.
-        _close_page_targets(record, timeout)
-    terminated = False
     deadline = time.time() + max(0.2, timeout)
-    while time.time() < deadline:
-        if _window_gone(record, 0.4):
-            break
+    while _endpoint_answers(record, 0.2) and time.time() < deadline:
         time.sleep(0.1)
-    if not _window_gone(record, 0.4):
-        # Letzter Ausweg: genau unser eigener Startprozess (Popen,
-        # alle Plattformen), danach der /proc-Nachweis (Linux).
-        terminated = (_terminate_launched(record, timeout)
-                      or _terminate_owned_process(record, timeout))
-    gone = terminated or _window_gone(record, 0.4)
-    if not gone or _process_matches(record):
-        _close_log("Fenster oder Browserprozess liess sich nicht sicher "
-                   "beenden; Besitznachweis bleibt fuer einen weiteren "
-                   "Versuch erhalten.")
+    if _endpoint_answers(record, 0.2):
+        # A wrapper may have exited before its browser child; never delete
+        # a profile while DevTools can still be using it.
         return False
-    if not _remove_owned_profile(record):
-        _close_log("Das private Browserprofil konnte nicht sicher entfernt "
-                   "werden; Besitznachweis bleibt erhalten.")
+    shutil.rmtree(record["profile"], ignore_errors=True)
+    if os.path.exists(record["profile"]):
         return False
-
-    owner = _read_owner()
-    if owner is not None and not _same_record(owner, record):
-        return False
-
-    # owner.json is shared by launches in this process. Remove it only if it
-    # still names the window just closed; a concurrent newer launch owns it.
-    if owner is not None:
-        try:
-            os.remove(_owner_file())
-        except OSError:
-            pass
-    _clear_launch_state(record)
+    if _LAUNCHED["process"] is record["process"]:
+        _LAUNCHED.update({"process": None, "port": None, "profile": ""})
     return True
 
 

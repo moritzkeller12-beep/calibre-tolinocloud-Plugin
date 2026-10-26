@@ -22,15 +22,6 @@ def _aes_init_tables():
         a <<= 1
         return ((a ^ 0x1B) & 0xFF) if a & 0x100 else a
 
-    def mul(a, b):
-        result = 0
-        while b:
-            if b & 1:
-                result ^= a
-            a = xtime(a)
-            b >>= 1
-        return result & 0xFF
-
     # S-box: multiplicative inverse in GF(2^8) + affine transform.
     sbox = [0] * 256
     inverse_sbox = [0] * 256

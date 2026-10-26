@@ -5,9 +5,9 @@ from urllib.parse import urlencode
 
 from .partners import PARTNERS
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
-                     TolinoClient, _NO_AUTO_LOGIN, log_warning,
+                     TolinoClient, _NO_AUTO_LOGIN, _bot_check_detected,
+                     _compact_error_text, log_info, log_warning,
                      normalize_hardware_id, sanitize_error)
-from .transport import _bot_check_detected, _compact_error_text
 from .token_candidates import (
     _candidate_age_note, _filter_live_candidates, _jwt_payload,
     _refresh_token_iat_sort_key, _normalize_live_grab,
@@ -67,6 +67,7 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
             except ValueError:
                 data = {}
             if isinstance(data, dict) and data.get("access_token"):
+                log_info("Tolino-Token-Tausch: Browser-Reader (in-page fetch).")
                 return _exchange_fresh_response(
                     partner_id, hardware_id, candidate, data)
         # A fetch rejection (status 0), malformed success, OAuth response,
@@ -79,9 +80,13 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
             raise TolinoAuthError(
                 "Der Zugang konnte nicht sicher geprüft werden. " + RELOGIN,
                 code="A06", detail=detail)
+        log_info("Tolino-Token-Tausch: Browser-Reader durch WAF geblockt; "
+                 "HTTP-Fallback folgt.")
         browser_note = "Browser-Tausch HTTP %s: %s" % (
             status, _compact_error_text(sanitize_error(body))[:200])
     else:
+        log_info("Tolino-Token-Tausch: kein Reader-WebSocket; "
+                 "HTTP-Fallback folgt.")
         browser_note = "kein Anmeldefenster offen"
 
     # Fallback is permitted only when the browser request was never attempted
@@ -100,18 +105,9 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     return client.refresh or candidate, client.hardware or hardware_id
 
 
-# Nach Ablehnung wird auf eine NEU geschriebene Kopie gewartet: der Reader
-# rotiert selbst alle 40-60 s. Lesen, was der Reader schreibt -- kein
-# erzwungener Reload, keine Netzwerk-Interception.
-_NEW_TOKEN_ATTEMPTS = 30
+# The reader rotates tokens on its own; poll without replaying a rejected grant.
 _NEW_TOKEN_INTERVAL = 3
-# Wartezeit richtet sich nach dem Fensterzustand:
-# * Endpunkt stumm: nach _WINDOW_MISSES_BEFORE_QUIT abbrechen;
-# * Fenster offen ohne Reader-Tab (Sitzung tot):
-#   _LOGIN_PAGE_EXTRA_ATTEMPTS weitere Versuche -- dort kann neu
-#   angemeldet und das Fenster wiederverwendet werden.
-_LOGIN_PAGE_EXTRA_ATTEMPTS = 30
-_WINDOW_MISSES_BEFORE_QUIT = 3
+_CLOSED_WINDOW_MISSES = 3
 
 
 def _close_window_after_grab(progress=None):
@@ -146,17 +142,19 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     offers the manual route (access key in the settings) instead.
     """
     from . import cdp as cdp_module
+    grabber_window_state = cdp_module.grabber_window_state
     grabbed = _normalize_live_grab(cdp_module.grab_live_tokens(
         partner_id, timeout=timeout, progress=progress))
-    tried = set()
-    first_error = ""
-    attempt = 0
+    deadline = time.monotonic() + max(0, timeout)
+    rejected = set()
+    last_error = ""
+    window = None
     endpoint_misses = 0
-    at_login_page = False
+    last_window_check = -5.0
+
     while True:
-        attempt += 1
         fresh = [token for token in _filter_live_candidates(
-            (grabbed or {}).get("refresh") or ()) if token not in tried]
+            (grabbed or {}).get("refresh") or ()) if token not in rejected]
         if fresh:
             if progress:
                 progress("Prüfe den gelesenen Zugang bei Tolino …")
@@ -164,90 +162,73 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                 result = _exchange_grabbed_token(partner_id, hardware,
                                                  grabbed, fresh)
             except TolinoAuthError as exc:
-                # Endgueltige Ablehnung: diese Kopie und ihre Geschwister
-                # derselben Sitzung sind verbraucht und werden nie wieder
-                # probiert (Reuse-Schutz) -- stattdessen wird unten auf
-                # eine NEU geschriebene Kopie gewartet.
-                first_error = str(exc)
-                tried.update((grabbed or {}).get("refresh") or ())
+                # A rejected single-use grant and its session siblings are spent.
+                rejected.update((grabbed or {}).get("refresh") or ())
+                last_error = str(exc)
                 if progress:
                     progress("Zugang abgelehnt – warte auf einen frischen "
                              "Zugang aus dem Web Reader …")
             else:
-                # Der Token gehoert ab jetzt Calibre: ein offener Reader rotiert weiter
-                # und wuerde die uebernommene Kopie verbrennen (Reuse-Schutz).
                 if progress:
                     progress("Zugang übernommen – das Anmeldefenster "
                              "wird geschlossen.")
                 _close_window_after_grab(progress)
                 return result
-        limit = _NEW_TOKEN_ATTEMPTS + (
-            _LOGIN_PAGE_EXTRA_ATTEMPTS if at_login_page else 0)
-        if attempt >= limit:
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             break
-        if progress:
-            if at_login_page:
-                progress("Im Anmeldefenster anmelden, bis die Bücherliste "
-                         "lädt – der Zugang wird automatisch übernommen "
-                         "(Versuch %d) …" % attempt)
-            else:
-                progress("Warte auf den Zugang aus dem Web Reader "
-                         "(Versuch %d von %d) – bitte angemeldet bleiben …"
-                         % (attempt, _NEW_TOKEN_ATTEMPTS))
-        time.sleep(_NEW_TOKEN_INTERVAL)
-        more = _normalize_live_grab(
-            cdp_module.grab_once_from_grabber())
+        if progress and window and not window.get("reader_tab"):
+            progress("Im Anmeldefenster anmelden, bis die Bücherliste "
+                     "lädt – der Zugang wird automatisch übernommen …")
+        time.sleep(min(_NEW_TOKEN_INTERVAL, remaining))
+        more = _normalize_live_grab(cdp_module.grab_once_from_grabber())
         if more and more.get("refresh"):
             grabbed = more
+            endpoint_misses = 0
             continue
-        # Nichts lesbar -- WARUM? Fenster weg (Endpunkt stumm, nach drei
-        # Fehlschlaegen abbrechen) vs. Fenster offen ohne Reader-Tab (Sitzung
-        # tot: weiter warten und Neu-Anmeldung vor Ort anfordern).
+
+        now = time.monotonic()
+        if now - last_window_check >= 5:
+            last_window_check = now
+            try:
+                window = grabber_window_state()
+            except Exception:
+                window = None
+            if window is None:
+                continue
+            if window.get("window"):
+                endpoint_misses = 0
+            else:
+                endpoint_misses += 1
+                if endpoint_misses >= _CLOSED_WINDOW_MISSES:
+                    break
+
+    if not window:
         try:
-            window = cdp_module.grabber_window_state()
+            window = grabber_window_state()
         except Exception:
             window = None
-        if window is None:
-            continue
-        if window.get("window"):
-            endpoint_misses = 0
-            at_login_page = not window.get("reader_tab")
-            continue
-        endpoint_misses += 1
-        if endpoint_misses >= _WINDOW_MISSES_BEFORE_QUIT:
-            break
-    try:
-        state = cdp_module.describe_grab_state()
-    except Exception:
-        state = "Zustand der Seite nicht lesbar"
-    try:
-        window = cdp_module.grabber_window_state()
-    except Exception:
-        window = {"window": False, "reader_tab": False}
-    if window.get("window") and not window.get("reader_tab"):
-        # Fenster auf der Anmeldeseite: NICHT schliessen -- dort kann neu
-        # angemeldet werden; launch_reader_window wiederverwendet es.
-        code = "B01"
-        action = ("Das Anmeldefenster ist offen, aber nicht angemeldet. "
-                  "Bitte dort anmelden, bis die Bücherliste lädt. "
-                  + RELOGIN_THEN)
-    else:
-        # Nichts Tauschbares im Fenster: offen zu lassen wuerde den
-        # naechsten Versuch wieder zum Loop machen (dieselbe tote Kopie,
-        # dieselbe Ablehnung). Schliessen -> naechster Start mit frischem
-        # Profil und echter Anmeldeseite statt gecachter Buecherliste.
-        cdp_module.close_grabber_window()
-        code = "B02"
-        action = ("Das Anmeldefenster wurde geschlossen, weil der Zugang "
-                  "verbraucht war. " + RELOGIN)
-    age_note = _candidate_age_note(
-        tried or (grabbed or {}).get("refresh") or ())
+    if window and window.get("window") and not window.get("reader_tab"):
+        # Leave the partner login page open so the user can finish signing in.
+        raise TolinoAuthError(
+            "Das Anmeldefenster ist offen, aber noch nicht angemeldet. "
+            "Bitte dort anmelden, bis die Bücherliste lädt. " + RELOGIN_THEN,
+            code="B01", detail=last_error)
+
+    cdp_module.close_grabber_window()
+    details = []
+    if last_error:
+        details.append("Letzter Fehler: " + sanitize_error(last_error))
+    candidates = rejected or (grabbed or {}).get("refresh") or ()
+    age_note = _candidate_age_note(candidates)
+    if age_note:
+        details.append(age_note)
+    detail = "; ".join(details)
     raise TolinoAuthError(
-        action, code=code,
-        detail="Seite: %s%s%s" % (
-            state,
-            "; Letzter Fehler: %s" % first_error if first_error else "",
-            "; %s" % age_note if age_note else ""))
+        "Das Anmeldefenster wurde geschlossen, weil kein gültiger Zugang "
+        "gelesen werden konnte. " + RELOGIN,
+        code="B02", detail=detail)
 
 
 def browser_login(partner_id, hardware, timeout=LOGIN_TIMEOUT,
@@ -255,8 +236,8 @@ def browser_login(partner_id, hardware, timeout=LOGIN_TIMEOUT,
     """Sign in via the partner's OAuth authorization endpoint."""
     partner = PARTNERS.get(int(partner_id))
 
-    if not partner or not partner.get("token_url"):
-        raise TolinoAuthError(_NO_AUTO_LOGIN, code="A05", detail="token_url fehlt")
+    if not partner:
+        raise TolinoAuthError(_NO_AUTO_LOGIN, code="A05")
 
     # Die OAuth-Seite speichert den Token im gemeinsamen Web Reader. Lies
     # ihn aus dem Plugin-Browser; ein lokaler Callback funktioniert hier nicht.

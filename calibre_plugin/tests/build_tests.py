@@ -55,23 +55,13 @@ class PluginModuleGraphTests(unittest.TestCase):
                                         "cannot resolve dynamic relative import"):
                 plugin_modules(source)
 
-    def test_build_includes_every_reachable_module_and_excludes_unused_modules(self):
-        self.assertEqual(tuple(sorted(name + ".py" for name in
-                                      ("ui", "ui_common", "ui_dialogs",
-                                       "ui_workers", "ui_dashboard",
-                                       "ui_auth_workers", "ui_settings",
-                                       "dashboard_plan", "config", "identifiers",
-                                       "comparison", "sync_data", "plan",
-                                       "matching", "library", "inventory",
-                                       "partners", "client", "transport",
-                                       "tolino", "sessions", "browser_crypto",
-                                       "token_candidates", "browser_login",
-                                       "browser_finder", "cdp_scripts",
-                                       "cdp_transport", "cdp", "icons",
-                                       "inventory_selection"))),
-                         plugin_modules())
+    def test_build_includes_reachable_modules_and_excludes_unused_modules(self):
+        modules = plugin_modules()
+        self.assertIn("token_vault.py", modules)
+        self.assertIn("plan.py", modules)
         self.assertNotIn("sync.py", plugin_modules())
         self.assertNotIn("state_store.py", plugin_modules())
+        self.assertNotIn("inventory_selection.py", plugin_modules())
 
         with tempfile.TemporaryDirectory() as directory:
             archive_path = Path(directory) / "plugin.zip"
