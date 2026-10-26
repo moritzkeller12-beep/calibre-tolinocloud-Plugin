@@ -138,6 +138,52 @@ _REGISTER_SETTLE_SECONDS = 1.5
 # die Bot-Schutz-Laufzeitbahn (403 + HTML-Fehlerseite), jeder spaetere Klick
 # lief durch -- zwei Warteversuche, bevor der Fehler sichtbar wird.
 _WAF_RETRY_SECONDS = (2.0, 5.0)
+_SAFE_CONNECT_ERRORS = (5, 6, 7)
+_CURL_TIMEOUT_ERROR = 28
+
+
+def _is_timeout(exc):
+    """Recognize stdlib timeouts, including urllib's wrapped reason."""
+    return (isinstance(exc, (TimeoutError, subprocess.TimeoutExpired))
+            or isinstance(getattr(exc, "reason", None), TimeoutError))
+
+
+def _raise_transport_error(exc, secrets, timed_out=False):
+    """Raise a credential-safe, user-facing transport error."""
+    if timed_out:
+        message = "Zeitüberschreitung bei der Verbindung zu tolino."
+        short = "Zeitüberschreitung bei der Verbindung."
+    else:
+        message = ("Übertragung an tolino fehlgeschlagen: %s"
+                   % sanitize_error(exc, secrets))
+        short = "Die Verbindung zu tolino ist fehlgeschlagen."
+    raise TolinoApiError(message, code="N01", short=short) from exc
+
+
+def _classify_transport_error(name, exc):
+    """Return (safe_to_fall_through, timed_out) for one transport failure."""
+    safe_fallthrough = False
+    timed_out = _is_timeout(exc)
+    if name == "curl":
+        if isinstance(exc, FileNotFoundError):
+            safe_fallthrough = True
+        elif isinstance(exc, subprocess.CalledProcessError):
+            safe_fallthrough = exc.returncode in _SAFE_CONNECT_ERRORS
+            timed_out = timed_out or exc.returncode == _CURL_TIMEOUT_ERROR
+    elif name == "curl_cffi":
+        try:
+            from curl_cffi.requests.exceptions import RequestException
+        except ImportError:
+            RequestException = ()
+        safe_fallthrough = (isinstance(exc, RequestException)
+                            and getattr(exc, "code", None)
+                            in _SAFE_CONNECT_ERRORS)
+        # curl_cffi's timeout types are optional; class name and libcurl code
+        # still identify timeout failures without importing that type.
+        timed_out = (timed_out
+                     or "timeout" in exc.__class__.__name__.casefold()
+                     or getattr(exc, "code", None) == _CURL_TIMEOUT_ERROR)
+    return safe_fallthrough, timed_out
 
 
 _JWT_PATTERN = re.compile(
@@ -472,52 +518,18 @@ class TolinoClient:
                     body = json.dumps(data).encode("utf-8")
                     headers["Content-Type"] = content_type or "application/json"
 
-            def transport_error(exc, timed_out=False):
-                if timed_out:
-                    message = "Zeitüberschreitung bei der Verbindung zu tolino."
-                    short = "Zeitüberschreitung bei der Verbindung."
-                else:
-                    message = ("Übertragung an tolino fehlgeschlagen: %s"
-                               % sanitize_error(exc, (self.refresh, self.access)))
-                    short = "Die Verbindung zu tolino ist fehlgeschlagen."
-                raise TolinoApiError(message, code="N01", short=short) from exc
-
-            def classify_transport_error(name, exc):
-                """Fall through only when the error proves no request was sent."""
-                timed_out = isinstance(exc, (TimeoutError,
-                                             subprocess.TimeoutExpired))
-                if name == "curl":
-                    if isinstance(exc, FileNotFoundError):
-                        return fallthrough
-                    if isinstance(exc, subprocess.CalledProcessError):
-                        code = exc.returncode
-                        if code in (5, 6, 7):
-                            return fallthrough
-                        timed_out = timed_out or code == 28
-                elif name == "curl_cffi":
-                    try:
-                        from curl_cffi.requests.exceptions import (
-                            RequestException, Timeout as CurlTimeout)
-                    except ImportError:
-                        RequestException = CurlTimeout = ()
-                    if ("timeout" in exc.__class__.__name__.casefold()
-                            or (isinstance(CurlTimeout, type)
-                                and isinstance(exc, CurlTimeout))):
-                        timed_out = True
-                    if RequestException and isinstance(exc, RequestException):
-                        code = getattr(exc, "code", None)
-                        if code in (5, 6, 7):
-                            return fallthrough
-                        timed_out = timed_out or code == 28
-                transport_error(exc, timed_out=timed_out)
-
             def try_transport(name, post):
                 try:
                     status, raw = post()
                 except Exception as exc:
                     # Unknown failures may happen after a single-use refresh
                     # grant was consumed; never replay them on another client.
-                    return classify_transport_error(name, exc)
+                    can_fall_through, timed_out = _classify_transport_error(
+                        name, exc)
+                    if can_fall_through:
+                        return fallthrough
+                    _raise_transport_error(
+                        exc, (self.refresh, self.access), timed_out=timed_out)
                 if status and status < 400:
                     self.last_error_text = None
                     return decode(raw)
@@ -557,15 +569,9 @@ class TolinoClient:
                     continue
                 return outcome
             except (URLError, OSError, TimeoutError) as exc:
-                timeout = (isinstance(exc, TimeoutError)
-                           or isinstance(getattr(exc, "reason", None), TimeoutError))
-                detail = ("Zeitüberschreitung bei der Verbindung zu tolino."
-                          if timeout else
-                          "Verbindung zu tolino fehlgeschlagen: %s" %
-                          sanitize_error(exc, (self.refresh, self.access)))
-                short = ("Zeitüberschreitung bei der Verbindung."
-                         if timeout else "Keine Verbindung zu tolino.")
-                raise TolinoApiError(detail, code="N01", short=short) from exc
+                _raise_transport_error(
+                    exc, (self.refresh, self.access),
+                    timed_out=_is_timeout(exc))
             return decode(raw)
 
     def inventory(self):
@@ -861,8 +867,6 @@ class TolinoClient:
         """
         _revision, patches = self.sync_snapshot()
         return _sync_data.read_ids(patches)
-
-    READ_TAG = _sync_data.READ_TAG
 
     def _current_revision(self, revision):
         """Revision fuer einen Schreibvorgang: die aktuelle, nie None.

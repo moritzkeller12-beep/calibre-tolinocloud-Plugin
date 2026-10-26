@@ -1649,7 +1649,7 @@ class CdpOwnershipTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(cdp_module._ACTIVE.update, {
-            "port": None, "profile": "", "pid": None, "token": ""})
+            "port": None, "profile": "", "token": ""})
         self.addCleanup(cdp_module._LAUNCHED.update,
                         {"process": None, "port": None,
                          "profile": "", "token": ""})
@@ -1662,50 +1662,58 @@ class CdpOwnershipTests(unittest.TestCase):
         token = "token-owned"
         self.cdp._write_marker(profile, token)
         self.cdp._write_owner({"port": port, "profile": profile,
-                               "pid": os.getpid(), "token": token})
+                               "token": token})
         return self.cdp._read_owner()
 
     def test_close_target_is_none_without_an_ownership_record(self):
         from .. import cdp as cdp_module
-        with patch.object(cdp_module, "_read_owner", return_value=None):
-            self.assertIsNone(cdp_module._owned_browser_ws())
+        self.assertIsNone(cdp_module._browser_ws_for_record(None))
 
     def test_close_target_refuses_a_port_that_is_not_the_owned_one(self):
         self._owned_record(port=9223)
         from .. import cdp as cdp_module
-        with patch.object(cdp_module, "_owner_alive", return_value=True):
-            self.assertIsNone(cdp_module._owned_browser_ws(port=9224))
+        record = self.cdp._read_owner()
+        record["port"] = 9224
+        with patch.object(cdp_module, "_process_matches", return_value=True), \
+             patch.object(cdp_module, "_marker_matches", return_value=True), \
+             patch.object(cdp_module, "_http_get_json", return_value={
+                 "webSocketDebuggerUrl":
+                 "ws://127.0.0.1:9223/devtools/browser/x"}):
+            self.assertIsNone(cdp_module._browser_ws_for_record(record))
 
     def test_owner_alive_requires_the_private_marker(self):
         from .. import cdp as cdp_module
         outer = os.path.join(self.base, "profile-foreign")
         os.makedirs(outer, exist_ok=True)
-        record = {"port": 9223, "profile": outer, "pid": os.getpid(),
+        record = {"port": 9223, "profile": outer,
                   "token": "erwartet"}
         with patch.object(cdp_module, "_http_get_json",
                           return_value={"webSocketDebuggerUrl": "ws://x"}):
             self.assertFalse(cdp_module._owner_alive(record))
         # Fremdes Profil ohne Marker wird nie als eigenes erkannt.
         self.assertFalse(cdp_module._owner_alive(
-            {"port": 9223, "profile": self.base, "pid": 1, "token": "t"}))
+            {"port": 9223, "profile": self.base, "token": "t"}))
 
     def test_only_the_owned_endpoint_yields_a_close_target(self):
         # Schreibt Marker und Besitzdatei -- der Rueckgabewert wird nicht
         # gebraucht.
         self._owned_record(port=9223)
         from .. import cdp as cdp_module
-        with patch.object(cdp_module, "_owner_alive", return_value=True), \
+        record = self.cdp._read_owner()
+        with patch.object(cdp_module, "_process_matches", return_value=True), \
+             patch.object(cdp_module, "_marker_matches", return_value=True), \
              patch.object(cdp_module, "_http_get_json",
                           return_value={"webSocketDebuggerUrl":
                                         "ws://127.0.0.1:9223/devtools/browser/x"}):
             self.assertEqual(("127.0.0.1", 9223, "/devtools/browser/x"),
-                             cdp_module._owned_browser_ws())
+                             cdp_module._browser_ws_for_record(record))
         # Ein DevTools-Link mit fremdem Port wird verworfen.
-        with patch.object(cdp_module, "_owner_alive", return_value=True), \
+        with patch.object(cdp_module, "_process_matches", return_value=True), \
+             patch.object(cdp_module, "_marker_matches", return_value=True), \
              patch.object(cdp_module, "_http_get_json",
                           return_value={"webSocketDebuggerUrl":
                                         "ws://127.0.0.1:9999/devtools/browser/x"}):
-            self.assertIsNone(cdp_module._owned_browser_ws())
+            self.assertIsNone(cdp_module._browser_ws_for_record(record))
 
     def test_browser_close_is_sent_over_a_validated_loopback_socket(self):
         from .. import cdp as cdp_module
@@ -1773,6 +1781,23 @@ class CdpOwnershipTests(unittest.TestCase):
                 "file:///tmp/mytolino.com"):
             self.assertFalse(cdp_module._is_reader_url(url), url)
 
+    def test_devtools_address_parts_share_url_validation(self):
+        from .. import cdp as cdp_module
+        parsed = cdp_module._devtools_ws_address(
+            "ws://[::1]:9223/devtools/page/target", 9223)
+        self.assertEqual(
+            parsed,
+            cdp_module._validate_devtools_ws_parts(*parsed, expected_port=9223))
+        for host, port, path in (
+                ("attacker.example", 9223, "/devtools/page/x"),
+                ("127.0.0.1", 9999, "/devtools/page/x"),
+                ("127.0.0.1", 9223, "/json/version"),
+                ("127.0.0.1", 9223, "/devtools/page/x?next=evil")):
+            with self.subTest(host=host, port=port, path=path), \
+                    self.assertRaises(ValueError):
+                cdp_module._validate_devtools_ws_parts(
+                    host, port, path, expected_port=9223)
+
     def test_devtools_urls_must_be_loopback_on_the_owned_port(self):
         from .. import cdp as cdp_module
         accepted = (
@@ -1797,6 +1822,45 @@ class CdpOwnershipTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 cdp_module._devtools_ws_address(url, 9223)
 
+    def test_failed_owned_child_is_reaped_and_profile_cleanup_is_scoped(self):
+        from .. import cdp as cdp_module
+        record = self._owned_record(port=9223)
+        sibling = os.path.join(self.base, "profile-sibling")
+        os.makedirs(sibling)
+        with open(os.path.join(sibling, "keep.txt"), "w") as handle:
+            handle.write("keep")
+
+        class Process:
+            def __init__(self):
+                self.running = True
+                self.terminated = False
+                self.killed = False
+
+            def poll(self):
+                return None if self.running else 0
+
+            def terminate(self):
+                self.terminated = True
+                self.running = False
+
+            def kill(self):
+                self.killed = True
+                self.running = False
+
+            def wait(self, timeout=None):
+                return 0
+
+        process = Process()
+        cdp_module._ACTIVE.update(record)
+        cdp_module._LAUNCHED.update({"process": process, **record})
+        cdp_module._abandon_failed_launch(process, record)
+        self.assertTrue(process.terminated)
+        self.assertFalse(process.killed)
+        self.assertFalse(os.path.exists(record["profile"]))
+        self.assertTrue(os.path.isfile(os.path.join(sibling, "keep.txt")))
+        self.assertFalse(os.path.exists(cdp_module._owner_file()))
+        self.assertIsNone(cdp_module._ACTIVE["port"])
+
     def test_close_falls_back_to_the_owned_process(self):
         """Browser.close can be ignored (unload handler); the recorded
         process is then terminated -- but only with a valid ownership proof."""
@@ -1804,7 +1868,7 @@ class CdpOwnershipTests(unittest.TestCase):
         from .. import cdp as cdp_module
         cdp_module._LAUNCHED.update({"profile": record["profile"],
                                      "token": record["token"]})
-        with patch.object(cdp_module, "_owned_browser_ws",
+        with patch.object(cdp_module, "_browser_ws_for_record",
                           return_value=("127.0.0.1", 9223,
                                         "/devtools/browser/x")), \
              patch.object(cdp_module, "_send_browser_close",
@@ -1826,7 +1890,6 @@ class CdpOwnershipTests(unittest.TestCase):
         """Snap/Flatpak start a short-lived launcher; the browser child has
         a different PID but the same profile and debugging port."""
         record = self._owned_record(port=9223)
-        record["pid"] = 1  # launcher has already exited
         browser_argv = [
             "/snap/chromium/current/usr/lib/chromium/chrome",
             "--user-data-dir=%s" % record["profile"],
@@ -1859,7 +1922,6 @@ class CdpOwnershipTests(unittest.TestCase):
     def test_close_without_ownership_never_terminates_anything(self):
         from .. import cdp as cdp_module
         with patch.object(cdp_module, "_read_owner", return_value=None), \
-             patch.object(cdp_module, "_owned_browser_ws", return_value=None), \
              patch.object(cdp_module, "_terminate_owned_process") as terminator:
             self.assertFalse(cdp_module.close_grabber_window())
         terminator.assert_not_called()
@@ -1950,7 +2012,7 @@ class CdpOwnershipTests(unittest.TestCase):
         self.assertIn("--remote-debugging-port=%d" % port, args)
         # Die Besitzdatei nennt den neuen Prozess und das neue Profil.
         record = cdp_module._read_owner()
-        self.assertEqual(4242, record["pid"])
+        self.assertNotIn("pid", record)
         self.assertEqual(profile.split("=", 1)[1], record["profile"])
 
     def test_launch_refuses_to_delete_a_profile_when_old_window_cannot_close(self):
@@ -1994,7 +2056,7 @@ class CdpOwnershipTests(unittest.TestCase):
         self.assertTrue(os.path.isdir(record["profile"]))
         with patch.object(cdp_module, "_process_matches",
                           side_effect=[True, False, False, False]), \
-             patch.object(cdp_module, "_owned_browser_ws",
+             patch.object(cdp_module, "_browser_ws_for_record",
                           return_value=("127.0.0.1", 9223,
                                         "/devtools/browser/x")), \
              patch.object(cdp_module, "_send_browser_close",
@@ -2047,7 +2109,7 @@ class CdpOwnershipTests(unittest.TestCase):
             state["closed"] = True
             return True
 
-        with patch.object(cdp_module, "_owned_browser_ws",
+        with patch.object(cdp_module, "_browser_ws_for_record",
                           return_value=("127.0.0.1", 9223,
                                         "/devtools/browser/x")), \
              patch.object(cdp_module, "_send_browser_close",
@@ -2080,7 +2142,7 @@ class CdpOwnershipTests(unittest.TestCase):
         cdp_module._LAUNCHED.update({"process": object(), "port": 9223,
                                      "profile": record["profile"],
                                      "token": record["token"]})
-        with patch.object(cdp_module, "_owned_browser_ws",
+        with patch.object(cdp_module, "_browser_ws_for_record",
                           return_value=("127.0.0.1", 9223,
                                         "/devtools/browser/x")), \
              patch.object(cdp_module, "_send_browser_close",
@@ -2129,7 +2191,7 @@ class CdpOwnershipTests(unittest.TestCase):
         cdp_module._LAUNCHED.update({"process": FakeProcess(), "port": 9223,
                                      "profile": record["profile"],
                                      "token": record["token"]})
-        with patch.object(cdp_module, "_owned_browser_ws",
+        with patch.object(cdp_module, "_browser_ws_for_record",
                           return_value=None), \
              patch.object(cdp_module, "_send_browser_close",
                           return_value=False), \

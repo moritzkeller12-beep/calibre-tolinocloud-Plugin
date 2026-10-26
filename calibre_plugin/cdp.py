@@ -74,7 +74,7 @@ def _ensure_profile_base():
 # zusammenpassen: eindeutiges Profil mit geheimem Marker, passender laufender
 # Prozess (Linux /proc) und ein DevTools-Endpunkt genau dieses Prozesses.
 # Ohne diesen Nachweis werden weder Tokens gelesen noch Browser.close gesendet.
-_ACTIVE = {"port": None, "profile": "", "pid": None, "token": ""}
+_ACTIVE = {"port": None, "profile": "", "token": ""}
 _LAUNCHED = {"process": None, "port": None,
              "profile": "", "token": ""}
 _OWNER_MARKER = ".tolino-grab-owner"
@@ -113,8 +113,7 @@ def _read_owner():
     token = str(record.get("token") or "")
     if port <= 0 or not profile or not token:
         return None
-    return {"port": port, "profile": profile, "token": token,
-            "pid": record.get("pid")}
+    return {"port": port, "profile": profile, "token": token}
 
 
 def _profile_is_owned_child(record):
@@ -156,7 +155,7 @@ def _same_record(left, right):
 def _clear_launch_state(record):
     """Forget only in-memory state belonging to a launch just cleaned up."""
     if _same_record(_ACTIVE, record):
-        _ACTIVE.update({"port": None, "profile": "", "pid": None, "token": ""})
+        _ACTIVE.update({"port": None, "profile": "", "token": ""})
     if _same_record(_LAUNCHED, record):
         _LAUNCHED.update({"process": None, "port": None,
                           "profile": "", "token": ""})
@@ -174,10 +173,9 @@ def _marker_matches(record):
         return False
 
 
-# Browser main processes carry these names in /proc/<pid>/exe. The
-# recorded PID can be a short-lived launcher (snap, flatpak, flatpak-spawn)
-# that has already exited while the real browser keeps running with the
-# same profile and debugging port.
+# Browser main processes carry these names in /proc/<pid>/exe. A short-lived
+# launcher (snap, flatpak, flatpak-spawn) may exit while its browser child
+# keeps running with the same profile and debugging port.
 _BROWSER_EXE_HINTS = ("chrome", "chromium", "brave", "edge", "vivaldi",
                       "opera", "headless_shell")
 
@@ -271,7 +269,21 @@ def _owner_alive(record):
     if not _process_matches(record) or not _marker_matches(record):
         return False
     return bool(_http_get_json(
-        "http://127.0.0.1:%d/json/version" % record["port"], 2))
+        "http://127.0.0.1:%d/json/version" % port, 2))
+
+
+def _verified_owner(port=None):
+    """Return the live owned-window record, optionally for one port."""
+    record = _read_owner() or _active_record(port)
+    if not record or not _owner_alive(record):
+        return None
+    try:
+        owner_port = int(record["port"])
+        if port is not None and owner_port != int(port):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return record
 
 
 def _new_profile_dir():
@@ -296,8 +308,7 @@ def _reader_url(partner_id):
 
 def devtools_port_alive():
     """True when OUR grabber window's DevTools endpoint answers right now."""
-    record = _read_owner() or _active_record()
-    return bool(record and _owner_alive(record))
+    return _verified_owner() is not None
 
 
 def _loopback_host(host):
@@ -315,38 +326,38 @@ def _loopback_host(host):
     return str(address)
 
 
+_DEVTOOLS_PATH = re.compile(
+    r"/devtools/(?:page|browser)/[A-Za-z0-9._:-]+$")
+
+
+def _validate_devtools_ws_parts(host, port, path, expected_port=None):
+    """Validate an already-parsed DevTools address before connecting."""
+    host = _loopback_host(host)
+    try:
+        port = int(port)
+        expected_port = (None if expected_port is None
+                         else int(expected_port))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid DevTools websocket port") from exc
+    path = str(path)
+    if (not 0 < port <= 65535
+            or (expected_port is not None and port != expected_port)
+            or not _DEVTOOLS_PATH.fullmatch(path)):
+        raise ValueError("invalid DevTools websocket address")
+    return host, port, path
+
+
 def _devtools_ws_address(ws_url, expected_port=None):
     """Parse only a loopback DevTools WebSocket on the verified browser port."""
     try:
         parsed = urlsplit(str(ws_url or ""))
-        host = parsed.hostname
-        port = parsed.port
+        if (parsed.scheme != "ws" or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment):
+            raise ValueError("invalid DevTools websocket URL")
+        return _validate_devtools_ws_parts(
+            parsed.hostname, parsed.port, parsed.path, expected_port)
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid DevTools websocket URL") from exc
-    if (parsed.scheme != "ws" or parsed.username is not None
-            or parsed.password is not None or parsed.query or parsed.fragment
-            or not re.fullmatch(
-                r"/devtools/(?:page|browser)/[A-Za-z0-9._:-]+", parsed.path)):
-        raise ValueError("invalid DevTools websocket URL")
-    host = _loopback_host(host)
-    if not port or (expected_port is not None and port != int(expected_port)):
-        raise ValueError("DevTools websocket port does not match owner")
-    return host, port, parsed.path
-
-
-def _validate_devtools_ws_parts(host, port, path, expected_port=None):
-    host = _loopback_host(host)
-    try:
-        port = int(port)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid DevTools websocket port") from exc
-    path = str(path)
-    if (port <= 0 or port > 65535
-            or (expected_port is not None and port != int(expected_port))
-            or not re.fullmatch(
-                r"/devtools/(?:page|browser)/[A-Za-z0-9._:-]+", path)):
-        raise ValueError("invalid DevTools websocket address")
-    return host, port, str(path)
 
 
 def _evaluate_raw_in_target(ws_url, expression, timeout=10,
@@ -464,8 +475,7 @@ def launch_reader_window(partner_id):
     profile = _new_profile_dir()
     token = secrets.token_hex(16)
     _write_marker(profile, token)
-    record = {"port": port, "profile": profile, "pid": None,
-              "token": token}
+    record = {"port": port, "profile": profile, "token": token}
     _write_owner(record)
     flags = [
         "--user-data-dir=%s" % profile,
@@ -509,7 +519,6 @@ def launch_reader_window(partner_id):
         raise TolinoAuthError(
             "Chromium konnte nicht gestartet werden.", code="B07",
             detail="%s: %s" % (last_error[0], last_error[1]))
-    record["pid"] = getattr(process, "pid", None)
     _write_owner(record)
     _ACTIVE.update(record)
     # Fuer den spaeteren Close: das Popen-Objekt beweist, dass es unser
@@ -645,10 +654,8 @@ def grab_once_from_grabber(port=None, timeout=12):
     waiting for a sign-in that may not happen – the user just clicks the
     button again after signing in.
     """
-    record = _read_owner() or _active_record(port)
-    if not record or not _owner_alive(record):
-        return None
-    if port is not None and int(record["port"]) != int(port):
+    record = _verified_owner(port)
+    if record is None:
         return None
     port = int(record["port"])
     ws_url = _reader_ws_url(
@@ -695,8 +702,8 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     succeed, so the callers fail fast with instructions instead of
     retrying the same token.
     """
-    record = _read_owner() or _active_record()
-    if not record or not _owner_alive(record):
+    record = _verified_owner()
+    if record is None:
         return 0, "browser ownership could not be verified"
     expected_port = int(record["port"])
     try:
@@ -733,54 +740,26 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
 
 def reader_ws_url(port=None):
     """WebSocket-Debugger-URL des ersten mytolino-Reader-Tabs (oder None)."""
-    record = _read_owner() or _active_record(port)
-    if not record or not _owner_alive(record):
-        return None
-    if port is not None and int(record["port"]) != int(port):
+    record = _verified_owner(port)
+    if record is None:
         return None
     port = int(record["port"])
     return _reader_ws_url(
         _http_get_json("http://127.0.0.1:%d/json/list" % port), port)
 
 
-def _owned_browser_ws(port=None, timeout=2):
-    """(host, port, path) of OUR browser endpoint, or None.
-
-    The ownership record must match the requested port, the private profile
-    marker, the recorded process and the DevTools endpoint belong to that
-    same port. A foreign local listener can therefore never be selected by
-    port alone.
-    """
+def _browser_ws_for_record(record, timeout=2):
+    """Return the CDP address only when marker, process and endpoint agree."""
     try:
-        record = _read_owner()
-        if port is not None and (not record
-                                 or int(record.get("port") or 0) != int(port)):
-            return None
-        if not record or not _owner_alive(record):
+        port = int(record.get("port") or 0)
+        if (not 0 < port < 65536 or not _process_matches(record)
+                or not _marker_matches(record)):
             return None
         version = _http_get_json(
-            "http://127.0.0.1:%d/json/version" % record["port"], timeout)
+            "http://127.0.0.1:%d/json/version" % port, timeout)
         ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
-        return _devtools_ws_address(ws_url, int(record["port"]))
-    except Exception:
-        return None
-
-
-def _browser_ws_for_record(record, timeout=2):
-    """Return the owned browser WebSocket even if the owner file was lost."""
-    try:
-        port = int((record or {}).get("port") or 0)
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if (port <= 0 or not _process_matches(record)
-            or not _marker_matches(record)):
-        return None
-    version = _http_get_json(
-        "http://127.0.0.1:%d/json/version" % port, timeout)
-    ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
-    try:
         return _devtools_ws_address(ws_url, port)
-    except ValueError:
+    except (AttributeError, TypeError, ValueError):
         return None
 
 
@@ -805,11 +784,6 @@ def _send_browser_close(host, port, path, timeout=2, expected_port=None):
         return True
     except Exception:
         return False
-
-
-# Der zuletzt von uns gestartete Browser als Popen-Objekt. Solange
-# ``poll()`` None liefert, laeuft genau dieses Kind -- unabhaengig von
-# /proc und ohne PID-Wiederverwendung.
 
 
 def _close_log(message):
@@ -916,7 +890,7 @@ def _active_record(port=None):
     if port is not None and active_port != int(port):
         return None
     return {"port": active_port, "profile": _ACTIVE["profile"],
-            "token": _ACTIVE["token"], "pid": _ACTIVE.get("pid")}
+            "token": _ACTIVE["token"]}
 
 
 def _endpoint_answers(record, timeout=0.5):
@@ -1001,34 +975,29 @@ def close_grabber_window(timeout=2, port=None):
             return False
         _clear_launch_state(record)
         return True
-    target = _owned_browser_ws(port, timeout)
-    if target is None:
-        # Das Fenster ist ueber Profil und Marker belegt, der /proc- oder
-        # Datei-Nachweis fehlt aber (etwa nach einem alten Fehlversuch).
-        target = _browser_ws_for_record(record, timeout)
+    target = _browser_ws_for_record(record, timeout)
     expected_port = int(record["port"])
     closed = bool(target and target[1] == expected_port and _send_browser_close(
         target[0], target[1], target[2], timeout,
         expected_port=expected_port))
     if not closed:
         _close_log("Browser.close konnte nicht gesendet werden.")
-    if record is not None and _endpoint_answers(record, 0.4):
+    if _endpoint_answers(record, 0.4):
         # Chromium hat Browser.close (noch) nicht befolgt: die offenen
         # Fenster direkt ueber den Debug-Endpunkt schliessen.
         _close_page_targets(record, timeout)
     terminated = False
-    if record is not None:
-        deadline = time.time() + max(0.2, timeout)
-        while time.time() < deadline:
-            if _window_gone(record, 0.4):
-                break
-            time.sleep(0.1)
-        if not _window_gone(record, 0.4):
-            # Letzter Ausweg: genau unser eigener Startprozess (Popen,
-            # alle Plattformen), danach der /proc-Nachweis (Linux).
-            terminated = (_terminate_launched(record, timeout)
-                          or _terminate_owned_process(record, timeout))
-    gone = terminated or (record is not None and _window_gone(record, 0.4))
+    deadline = time.time() + max(0.2, timeout)
+    while time.time() < deadline:
+        if _window_gone(record, 0.4):
+            break
+        time.sleep(0.1)
+    if not _window_gone(record, 0.4):
+        # Letzter Ausweg: genau unser eigener Startprozess (Popen,
+        # alle Plattformen), danach der /proc-Nachweis (Linux).
+        terminated = (_terminate_launched(record, timeout)
+                      or _terminate_owned_process(record, timeout))
+    gone = terminated or _window_gone(record, 0.4)
     if not gone or _process_matches(record):
         _close_log("Fenster oder Browserprozess liess sich nicht sicher "
                    "beenden; Besitznachweis bleibt fuer einen weiteren "
@@ -1056,14 +1025,10 @@ def close_grabber_window(timeout=2, port=None):
 
 def grabber_window_state(port=None, timeout=5):
     """Return whether the grabber window and a reader tab are available."""
-    record = _read_owner() or _active_record(port)
-    if not record:
+    record = _verified_owner(port)
+    if record is None:
         return {"window": False, "reader_tab": False}
-    owned_port = int(record["port"])
-    if ((port is not None and int(port) != owned_port)
-            or not _owner_alive(record)):
-        return {"window": False, "reader_tab": False}
-    port = owned_port
+    port = int(record["port"])
     targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
     if not isinstance(targets, list):
         return {"window": False, "reader_tab": False}
@@ -1096,23 +1061,26 @@ def describe_grab_state(port=None, timeout=12):
                 ", ".join(sorted(set(grabbed.get("idb") or []))) or "keine"))
 
 
+def _raise_window_closed(progress):
+    """Stop the wait with the same clear error after repeated endpoint loss."""
+    if progress:
+        progress("Anmeldefenster geschlossen – abgebrochen.")
+    raise TolinoAuthError(
+        "Das Anmeldefenster wurde geschlossen, bevor die Übernahme fertig war. "
+        "Bitte erneut versuchen und es offen lassen.", code="B03")
+
+
 def collect_grab(port, timeout=180, progress=None):
     """Poll the grabber window until the reader exposes the current token."""
     deadline = time.time() + timeout
     endpoint_misses = 0
     saw_reader = False
     while time.time() < deadline:
-        record = _read_owner() or _active_record(port)
-        if (not record or int(record.get("port") or 0) != int(port)
-                or not _owner_alive(record)):
+        record = _verified_owner(port)
+        if record is None:
             endpoint_misses += 1
             if endpoint_misses >= 3:
-                if progress:
-                    progress("Anmeldefenster geschlossen – abgebrochen.")
-                raise TolinoAuthError(
-                    "Das Anmeldefenster wurde geschlossen, bevor die "
-                    "Übernahme fertig war. Bitte erneut versuchen und es "
-                    "offen lassen.", code="B03")
+                _raise_window_closed(progress)
             time.sleep(1)
             continue
         targets = _http_get_json("http://127.0.0.1:%d/json/list" % port)
@@ -1122,12 +1090,7 @@ def collect_grab(port, timeout=180, progress=None):
             # Fenster -- ein einzelner war der False-Positive.
             endpoint_misses += 1
             if endpoint_misses >= 3:
-                if progress:
-                    progress("Anmeldefenster geschlossen – abgebrochen.")
-                raise TolinoAuthError(
-                    "Das Anmeldefenster wurde geschlossen, bevor die "
-                    "Übernahme fertig war. Bitte erneut versuchen und es "
-                    "offen lassen.", code="B03")
+                _raise_window_closed(progress)
             time.sleep(1)
             continue
         endpoint_misses = 0

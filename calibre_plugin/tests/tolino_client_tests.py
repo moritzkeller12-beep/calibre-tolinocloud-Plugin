@@ -14,7 +14,7 @@ from .. import config
 from ..comparison import compare_inventory
 from ..partners import PARTNERS, uses_shared_webreader
 from ..tolino import TolinoAuthError, TolinoClient
-from ..sync_data import tag_id_from_patch, tag_pairs, tag_state
+from ..sync_data import READ_TAG, tag_id_from_patch, tag_pairs, tag_state
 from ..browser_login import browser_login
 from ._support import (
     UI_SOURCE_FILES, _ui_source_text, start_cdp_stubs, stop_cdp_stubs)
@@ -490,6 +490,17 @@ class CurlTransportTests(unittest.TestCase):
         client = TolinoClient(4, "hw-curl", refresh="r-1")
         client.hardware = "hw-curl"
         return client
+
+    def test_transport_errors_distinguish_safe_fallback_from_ambiguous_failure(self):
+        import subprocess
+        import calibre_plugin.tolino as tolino_module
+
+        self.assertEqual((True, False), tolino_module._classify_transport_error(
+            "curl", subprocess.CalledProcessError(6, ["curl"])))
+        self.assertEqual((False, True), tolino_module._classify_transport_error(
+            "curl", subprocess.CalledProcessError(28, ["curl"])))
+        self.assertEqual((False, False), tolino_module._classify_transport_error(
+            "curl_cffi", RuntimeError("unknown transport failure")))
 
     def test_curl_connection_failure_may_fall_back_without_replaying_after_send(self):
         import subprocess
@@ -1749,9 +1760,9 @@ class TagStateReducerTests(unittest.TestCase):
 
     def test_mark_read_does_not_add_an_already_active_tag(self):
         client = TolinoClient(4, "hardware", "refresh-token")
-        patches = [self._patch("add", TolinoClient.READ_TAG),
-                   self._patch("remove", TolinoClient.READ_TAG),
-                   self._patch("add", TolinoClient.READ_TAG, tag_id="3")]
+        patches = [self._patch("add", READ_TAG),
+                   self._patch("remove", READ_TAG),
+                   self._patch("add", READ_TAG, tag_id="3")]
         client.sync_snapshot = lambda: ("rev", patches)
         calls = []
         client._sync_patch = lambda payload: calls.append(payload) or {"revision": "r"}
@@ -1760,9 +1771,9 @@ class TagStateReducerTests(unittest.TestCase):
 
     def test_unmark_removes_only_the_active_tag_id(self):
         client = TolinoClient(4, "hardware", "refresh-token")
-        patches = [self._patch("add", TolinoClient.READ_TAG, tag_id="1"),
-                   self._patch("remove", TolinoClient.READ_TAG, tag_id="1"),
-                   self._patch("add", TolinoClient.READ_TAG, tag_id="7")]
+        patches = [self._patch("add", READ_TAG, tag_id="1"),
+                   self._patch("remove", READ_TAG, tag_id="1"),
+                   self._patch("add", READ_TAG, tag_id="7")]
         client.sync_snapshot = lambda: ("rev", patches)
         calls = []
         client._sync_patch = lambda payload: calls.append(payload) or {"revision": "r"}
