@@ -555,6 +555,31 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("only_tolino", rows[1]["status"])
         self.assertFalse(rows[1]["selected"])
 
+    def test_inventory_envelope_metadata_is_not_treated_as_a_cloud_record(self):
+        inventory = {
+            "PublicationInventory": {
+                "edata": [{
+                    "deliverableId": "cloud-book-1",
+                    "epubMetaData": {
+                        "title": "Gemeinsamer Titel",
+                        "author": [{"name": "Eine Autorin"}],
+                        "isbn": "9783161484100",
+                    },
+                }],
+                "ebook": [],
+                "count": 1,
+            }
+        }
+        local = {
+            1: {"uuid": "u1", "title": "Gemeinsamer Titel",
+                "authors": "Eine Autorin", "isbn": "9783161484100",
+                "formats": ["EPUB"]}
+        }
+        rows = compare_inventory(local, {}, inventory, ["EPUB"])
+        self.assertEqual(1, len(rows))
+        self.assertEqual("cloud-book-1", rows[0]["tolino_id"])
+        self.assertEqual("identical", rows[0]["status"])
+
     def test_inventory_shape_uses_nested_metadata_and_keeps_id_technical(self):
         item = {
             "deliverableId": "bosh_8_543897186788677497438396920",

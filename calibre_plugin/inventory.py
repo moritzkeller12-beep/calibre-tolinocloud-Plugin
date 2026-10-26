@@ -107,11 +107,15 @@ def _collect_inventory(value, records, problems, container=""):
     verloren.
     """
     if isinstance(value, dict):
-        if set(value) <= set(_INVENTORY_CONTAINERS):
-            for key, item in value.items():
-                _collect_inventory(item, records, problems, key)
+        nested = [key for key in _INVENTORY_CONTAINERS if key in value]
+        has_record_id = any(
+            isinstance(value.get(key), (str, int)) and str(value.get(key)).strip()
+            for key in _INVENTORY_ID_KEYS)
+        if nested and not has_record_id:
+            for key in nested:
+                _collect_inventory(value[key], records, problems, key)
             return
-        if any(key in value for key in _INVENTORY_CONTAINERS):
+        if nested:
             value = {key: item for key, item in value.items()
                      if key not in _INVENTORY_CONTAINERS}
         records.append(value)
