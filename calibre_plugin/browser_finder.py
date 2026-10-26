@@ -56,6 +56,28 @@ _EXTRA_BROWSER_PATHS = (
     "/usr/bin/opera", "/usr/bin/opera-stable", "/snap/bin/chromium",
 )
 
+# Executable aliases and display names shared by PATH and Flatpak host probing.
+# The third field preserves the smaller command set previously probed on hosts.
+_BROWSER_COMMANDS = (
+    ("google-chrome", "Google Chrome", True),
+    ("google-chrome-stable", "Google Chrome", True),
+    ("google-chrome-beta", "Google Chrome", True),
+    ("chrome", "Google Chrome", True),
+    ("chromium", "Chromium", True),
+    ("chromium-browser", "Chromium", True),
+    ("brave-browser", "Brave", True),
+    ("brave-browser-stable", "Brave", True),
+    ("microsoft-edge", "Edge", True),
+    ("microsoft-edge-stable", "Edge", True),
+    ("microsoft-edge-beta", "Edge", False),
+    ("microsoft-edge-dev", "Edge", True),
+    ("vivaldi", "Vivaldi", True),
+    ("vivaldi-stable", "Vivaldi", True),
+    ("vivaldi-snapshot", "Vivaldi", False),
+    ("opera", "Opera", True),
+    ("opera-stable", "Opera", False),
+)
+
 # Host-probe state: not run/found, unavailable, denied, empty, or ok.
 _host_probe_status = ""
 
@@ -75,14 +97,8 @@ _FLATPAK_BROWSER_APPS = (
 def _browser_label_for(path):
     """Display name for a browser executable path."""
     name = os.path.basename(str(path))
-    for prefix, label in (("google-chrome", "Google Chrome"),
-                          ("chrome", "Google Chrome"),
-                          ("chromium", "Chromium"),
-                          ("brave", "Brave"),
-                          ("microsoft-edge", "Edge"),
-                          ("vivaldi", "Vivaldi"),
-                          ("opera", "Opera")):
-        if name.startswith(prefix):
+    for command, label, _probe_on_host in _BROWSER_COMMANDS:
+        if name.startswith(command):
             return label
     return name
 
@@ -95,10 +111,7 @@ def _sandbox_host_launchers():
         _host_probe_status = "unavailable"
         return []
     script = (
-        "for b in google-chrome google-chrome-stable google-chrome-beta "
-        "chrome chromium chromium-browser brave-browser "
-        "brave-browser-stable microsoft-edge microsoft-edge-stable "
-        "microsoft-edge-dev vivaldi vivaldi-stable opera; do "
+        "for b in HOST_COMMAND_LIST; do "
         "p=$(command -v \"$b\") && { echo \"NATIVE $p\"; break; }; done; "
         "for a in APP_ID_LIST; do "
         "command -v flatpak >/dev/null 2>&1 && flatpak info \"$a\" "
@@ -106,7 +119,10 @@ def _sandbox_host_launchers():
         "; exit 0"
     ).replace("APP_ID_LIST", " ".join(
         app_id for app_id, _command, _label, _host_label
-        in _FLATPAK_BROWSER_APPS))
+        in _FLATPAK_BROWSER_APPS)).replace(
+            "HOST_COMMAND_LIST", " ".join(
+                name for name, _label, probe_on_host in _BROWSER_COMMANDS
+                if probe_on_host))
     try:
         proc = subprocess.run([spawn, "--host", "sh", "-c", script],
                               stdout=subprocess.PIPE,
@@ -148,27 +164,8 @@ def chromium_candidates(home=None):
     home = home or os.path.expanduser("~")
     flat = os.path.join(home, ".var", "app")
     snap = os.path.join(home, "snap")
-    execs = [
-        ("google-chrome", "Google Chrome"),
-        ("google-chrome-stable", "Google Chrome"),
-        ("google-chrome-beta", "Google Chrome"),
-        ("chrome", "Google Chrome"),
-        ("chromium", "Chromium"),
-        ("chromium-browser", "Chromium"),
-        ("brave-browser", "Brave"),
-        ("brave-browser-stable", "Brave"),
-        ("microsoft-edge", "Edge"),
-        ("microsoft-edge-stable", "Edge"),
-        ("microsoft-edge-beta", "Edge"),
-        ("microsoft-edge-dev", "Edge"),
-        ("vivaldi", "Vivaldi"),
-        ("vivaldi-stable", "Vivaldi"),
-        ("vivaldi-snapshot", "Vivaldi"),
-        ("opera", "Opera"),
-        ("opera-stable", "Opera"),
-    ]
     found = []
-    for exe, label in execs:
+    for exe, label, _probe_on_host in _BROWSER_COMMANDS:
         path = shutil.which(exe)
         if path:
             found.append(([path], label))
@@ -192,52 +189,52 @@ def chromium_candidates(home=None):
     return found
 
 
-def _windows_chrome_paths():
-    program_dirs = [
-        os.environ.get("PROGRAMFILES") or "C:\\Program Files",
-        os.environ.get("PROGRAMFILES(X86)") or "C:\\Program Files (x86)",
-    ]
-    rel_paths = [
-        ("Google\\Chrome\\Application\\chrome.exe", "Google Chrome"),
-        ("Chromium\\Application\\chrome.exe", "Chromium"),
-        ("BraveSoftware\\Brave-Browser\\Application\\brave.exe", "Brave"),
-        ("Microsoft\\Edge\\Application\\msedge.exe", "Edge"),
-    ]
-    found = []
-    for base in program_dirs:
-        for rel, label in rel_paths:
-            path = os.path.join(base, rel)
-            if os.path.isfile(path) and not any(label == f[1] for f in found):
-                found.append(([path], label))
-    return found
+_PLATFORM_BROWSER_INSTALLS = {
+    "win32": (
+        (("env", "PROGRAMFILES", "C:\\Program Files"),
+         ("env", "PROGRAMFILES(X86)", "C:\\Program Files (x86)")),
+        (("Google\\Chrome\\Application\\chrome.exe", "Google Chrome"),
+         ("Chromium\\Application\\chrome.exe", "Chromium"),
+         ("BraveSoftware\\Brave-Browser\\Application\\brave.exe", "Brave"),
+         ("Microsoft\\Edge\\Application\\msedge.exe", "Edge")),
+    ),
+    "darwin": (
+        (("path", "/Applications", ""), ("home", "Applications", "")),
+        (("Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
+         ("Chromium.app/Contents/MacOS/Chromium", "Chromium"),
+         ("Brave Browser.app/Contents/MacOS/Brave Browser", "Brave"),
+         ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Edge")),
+    ),
+}
 
 
-def _macos_chrome_paths():
-    roots = ["/Applications", os.path.join(os.path.expanduser("~"),
-                                           "Applications")]
-    bundles = [
-        ("Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
-        ("Chromium.app/Contents/MacOS/Chromium", "Chromium"),
-        ("Brave Browser.app/Contents/MacOS/Brave Browser", "Brave"),
-        ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Edge"),
-    ]
+def _platform_browser_paths(platform=None):
+    """Find browsers in the platform's standard installation directories."""
+    roots_and_browsers = _PLATFORM_BROWSER_INSTALLS.get(
+        platform or sys.platform)
+    if roots_and_browsers is None:
+        return []
+    roots, browsers = roots_and_browsers
     found = []
-    for base in roots:
-        for rel, label in bundles:
-            path = os.path.join(base, rel)
-            if os.path.isfile(path) and not any(label == f[1] for f in found):
+    for kind, value, fallback in roots:
+        if kind == "env":
+            base = os.environ.get(value) or fallback
+        elif kind == "home":
+            base = os.path.join(os.path.expanduser("~"), value)
+        else:
+            base = value
+        for relative_path, label in browsers:
+            path = os.path.join(base, relative_path)
+            if (os.path.isfile(path)
+                    and not any(existing_label == label
+                                for _argv, existing_label in found)):
                 found.append(([path], label))
     return found
 
 
 def chromium_options():
-    """All candidates, including Windows/macOS installation paths."""
-    found = chromium_candidates()
-    if sys.platform == "win32":
-        found = found + _windows_chrome_paths()
-    elif sys.platform == "darwin":
-        found = found + _macos_chrome_paths()
-    return found
+    """All candidates, including standard Windows/macOS install paths."""
+    return chromium_candidates() + _platform_browser_paths()
 
 
 def pick_chromium():

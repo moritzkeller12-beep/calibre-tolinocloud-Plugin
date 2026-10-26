@@ -993,7 +993,8 @@ class LoginPreflightTests(unittest.TestCase):
         settings = {"account_name": "konto", "partner_id": 4,
                     "hardware_id": "hw-1", "refresh_token": "tok-1"}
         store = config.CredentialStore(settings, "konto")
-        callback = vault_module.TOKEN_VAULT._rotation_callback(store)
+        callback = vault_module.TOKEN_VAULT._callback_for_value(
+            store.refresh_token, store.save_refresh)
         with patch("calibre_plugin.config.save_credentials") as save:
             callback("tok-2")
         self.assertEqual("tok-2", settings["refresh_token"])

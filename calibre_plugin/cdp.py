@@ -520,25 +520,6 @@ def grabber_window_state(port=None, timeout=5):
     return {"window": True, "reader_tab": reader_tab}
 
 
-def describe_grab_state(port=None, timeout=12):
-    """Describe which reader page is open, without returning token values."""
-    state = grabber_window_state(port, timeout)
-    if not state["window"]:
-        return "kein Web-Reader-Tab im Anmeldefenster offen"
-    if not state["reader_tab"]:
-        return ("Anmeldefenster offen, aber ohne Web-Reader-Tab (der Tab "
-                "zeigt gerade die Anmeldeseite des Buchhändlers)")
-    grabbed = grab_once_from_grabber(port, timeout)
-    if grabbed is None:
-        return ("Anmeldefenster offen, aber der Web-Reader-Tab war gerade "
-                "nicht lesbar")
-    return ("In der Seite gefundene Zugänge: %d, Hardware-IDs: %d "
-            "(IndexedDB: %s)" % (
-                len(grabbed.get("refresh") or []),
-                len(grabbed.get("hardware") or []),
-                ", ".join(sorted(set(grabbed.get("idb") or []))) or "keine"))
-
-
 def _raise_window_closed(progress):
     """Stop the wait with the same clear error after repeated endpoint loss."""
     if progress:

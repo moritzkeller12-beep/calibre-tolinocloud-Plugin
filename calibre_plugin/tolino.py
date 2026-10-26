@@ -424,10 +424,7 @@ class TolinoClient:
                     exc.code == 403
                     and url == self.partner.get("token_url")
                     and retry["waf"] < len(_WAF_RETRY_SECONDS)
-                    and any(marker in self.last_error_text.casefold()
-                            for marker in ("zugriff geblockt", "access denied",
-                                           "captcha", "cloudfront",
-                                           "request blocked", "<!doctype html")))
+                    and _bot_check_detected(self.last_error_text))
                 if is_waf_retry:
                     time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
                     retry["waf"] += 1

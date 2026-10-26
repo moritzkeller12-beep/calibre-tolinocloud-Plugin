@@ -24,7 +24,8 @@ class TokenVault:
             if not refresh:
                 raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
                                       code="A03")
-            save_rotation = self._rotation_callback(store)
+            save_rotation = self._callback_for_value(
+                store.refresh_token, store.save_refresh)
             factory = client_factory or TolinoClient
             client = factory(
                 store.values.get("partner_id"), values.get("hardware_id"),
@@ -65,18 +66,6 @@ class TokenVault:
         finally:
             self._lock.release()
 
-    @staticmethod
-    def _rotation_callback(store):
-        last = [store.refresh_token]
-
-        def save(refresh):
-            value = normalize_refresh_token(refresh)
-            if value and value != last[0]:
-                last[0] = value
-                store.save_refresh(value)
-
-        return save
-
     def keepalive_refresh(self, get_credentials, persist):
         """Rotate available saved accounts without replaying a busy token."""
         snapshot = get_credentials() or {}
@@ -99,10 +88,10 @@ class TokenVault:
                     if not token:
                         continue
 
-                    def save(refresh, name=account):
+                    def save(refresh):
                         store.values["refresh_token"] = refresh
                         if persist is not None:
-                            persist(refresh, name)
+                            persist(refresh, account)
 
                     save_rotation = self._callback_for_value(token, save)
                     client = TolinoClient(

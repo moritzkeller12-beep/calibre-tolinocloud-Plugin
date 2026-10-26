@@ -875,42 +875,6 @@ class LoginWindowWaitTests(_SidJwtTest):
 
     SID = "sess-wait"
 
-    def test_describe_grab_state_separates_login_page_from_vanished(self):
-        """Verschwundenes Fenster und offene Anmeldeseite sind
-        verschiedene Zustände mit unterschiedlicher Handlungsanweisung."""
-        from .. import cdp
-        with patch.object(cdp, "_verified_owner", return_value=None):
-            self.assertEqual("kein Web-Reader-Tab im Anmeldefenster offen",
-                             cdp.describe_grab_state())
-        login_targets = [{
-            "type": "page",
-            "url": "https://shop.example.tld/realms/x/protocol/openid-"
-                   "connect/auth?client_id=reader",
-        }]
-        with patch.object(cdp, "_verified_owner", return_value={"port": 9223}), \
-             patch.object(cdp, "_http_get_json", return_value=login_targets):
-            state = cdp.describe_grab_state()
-        self.assertIn("Anmeldefenster offen", state)
-        self.assertIn("Anmeldeseite", state)
-
-    def test_describe_grab_state_reports_counts_with_reader_tab(self):
-        """Mit Reader-Tab bleibt die Zähl-Ausgabe (Kandidaten + IDB)."""
-        from .. import cdp
-        reader_targets = [{
-            "type": "page",
-            "url": "https://webreader.mytolino.com/library/index.html",
-        }]
-        with patch.object(cdp, "_verified_owner", return_value={"port": 9223}), \
-             patch.object(cdp, "_http_get_json",
-                          return_value=reader_targets), \
-             patch.object(cdp, "grab_once_from_grabber",
-                          return_value={"refresh": ["tok-current"],
-                                        "hardware": [],
-                                        "idb": ["tolino-user"]}):
-            state = cdp.describe_grab_state()
-        self.assertIn("Zugänge: 1", state)
-        self.assertIn("tolino-user", state)
-
     def test_grab_live_refresh_keeps_login_page_window_open(self):
         """Fenster offen, Tab auf der Anmeldeseite: NICHT schliessen,
         zur Neu-Anmeldung vor Ort auffordern und LÄNGER warten."""
@@ -1341,6 +1305,56 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                 cdp_module.launch_reader_window(4)
         self.assertEqual(1, len(spawned_profile))
         self.assertFalse(os.path.exists(spawned_profile[0]))
+
+
+class PlatformBrowserPathTests(unittest.TestCase):
+    """Standardinstallationsorte fuer Windows und macOS."""
+
+    def _executable(self, root, relative):
+        path = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write("browser")
+        return path
+
+    def test_windows_roots_share_one_search_and_skip_duplicate_labels(self):
+        program_files = r"C:\Program Files"
+        program_files_x86 = r"C:\Program Files (x86)"
+        chrome = os.path.join(
+            program_files, r"Google\Chrome\Application\chrome.exe")
+        duplicate_chrome = os.path.join(
+            program_files_x86, r"Google\Chrome\Application\chrome.exe")
+        chromium = os.path.join(
+            program_files_x86, r"Chromium\Application\chrome.exe")
+        existing_paths = {chrome, duplicate_chrome, chromium}
+        with patch.dict(os.environ, {
+                "PROGRAMFILES": program_files,
+                "PROGRAMFILES(X86)": program_files_x86}), \
+                patch.object(os.path, "isfile",
+                             side_effect=lambda path: path in existing_paths):
+            found = browser_finder._platform_browser_paths("win32")
+        self.assertEqual([([chrome], "Google Chrome"),
+                          ([chromium], "Chromium")], found)
+
+    def test_macos_checks_system_and_user_application_directories(self):
+        with tempfile.TemporaryDirectory() as home:
+            chrome = self._executable(
+                os.path.join(home, "Applications"),
+                "Google Chrome.app/Contents/MacOS/Google Chrome")
+            edge = self._executable(
+                os.path.join(home, "Applications"),
+                "Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+            real_isfile = os.path.isfile
+
+            def isfile(path):
+                if str(path).startswith("/Applications/"):
+                    return False
+                return real_isfile(path)
+
+            with patch("os.path.expanduser", return_value=home), \
+                    patch.object(os.path, "isfile", side_effect=isfile):
+                found = browser_finder._platform_browser_paths("darwin")
+        self.assertEqual([([chrome], "Google Chrome"), ([edge], "Edge")], found)
 
 
 class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
