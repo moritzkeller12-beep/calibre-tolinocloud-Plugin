@@ -1500,14 +1500,23 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual([], updates)
 
     def test_selected_metadata_update_does_not_need_the_book_file(self):
-        """Ein reiner Metadaten-Abgleich braucht die Datei nicht – der
-        Nutzer hat ausdrücklich nur die Metadaten ausgewählt."""
+        """Metadaten lassen sich ohne ausgewählte Buchdatei patchen."""
         book = self._book(format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
         kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
                                               only_book_ids={1})
         self.assertEqual([], kept)
         self.assertEqual(1, len(updates))
+
+    def test_metadata_update_does_not_require_a_preferred_upload_format(self):
+        """PDF-only/formatless books still support in-place metadata updates."""
+        book = self._book(formats=["PDF"], format_signatures={})
+        state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
+        kept, updates = plan_metadata_updates(
+            {1: book}, state, [], ["EPUB"], only_book_ids={1})
+        self.assertEqual([], kept)
+        self.assertEqual(1, len(updates))
+        self.assertEqual("d1", updates[0][2])
 
     def test_legacy_state_without_fingerprints_is_updated_when_selected(self):
         """Ohne gespeicherte Fingerabdrücke ist der Cloud-Stand unbekannt --
