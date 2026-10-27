@@ -20,7 +20,7 @@ from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
                       create_custom_columns, custom_column_available,
                       ignore_column_available, iter_book_ids, metadata_by_id,
                       read_column_available, safe_format_path,
-                      update_read_column, update_tolino_ids, uuid_coverage)
+                      update_read_column, update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
@@ -245,14 +245,6 @@ class SyncDashboard(QDialog):
             # Nur die erste Zeile traegt die Beschriftung; drei eigene
             # Zeilen sind der klarere Weg als ein Knopf fuer alles.
             transfer.addRow("Calibre-Spalten" if index == 0 else "", button)
-        # Diagnose fuer die offene Frage, ob die Ersatzkennung
-        # ``calibre-<id>`` samt Migration noch gebraucht wird.
-        self.uuid_button = QPushButton("UUID-Abdeckung prüfen …")
-        self.uuid_button.setToolTip(
-            "Zählt, wie viele Bücher eine echte UUID haben und wie viele die "
-            "Ersatzkennung calibre-<Nummer> nutzen.")
-        self.uuid_button.clicked.connect(self.check_uuid_coverage)
-        transfer.addRow("", self.uuid_button)
 
     def _build_account_settings(self):
         """Kontoverwaltung und die beiden technischen Zugangsfelder."""
@@ -313,27 +305,6 @@ class SyncDashboard(QDialog):
             "Bibliothek nutzbar ist." % label,
             show=True, show_copy_button=False)
         self._refresh_column_flags(database)
-
-    def check_uuid_coverage(self):
-        """Zaehlen: echte UUIDs gegen die Ersatzkennung der Zuordnung."""
-        database = getattr(self.gui, "current_db", None)
-        try:
-            total, real, fallback = uuid_coverage(database)
-        except Exception as exc:
-            log_warning("UUID-Abdeckung nicht lesbar: %s"
-                        % sanitize_error(exc))
-            error_dialog(self, "UUID-Abdeckung", str(exc), show=True)
-            return
-        if not total:
-            info_dialog(self, "UUID-Abdeckung",
-                        "Keine Bücher in dieser Bibliothek gefunden.",
-                        show=True, show_copy_button=False)
-            return
-        info_dialog(
-            self, "UUID-Abdeckung",
-            "%d von %d Büchern haben eine echte UUID; bei %d fehlt sie "
-            "(Ersatzkennung calibre-<Nummer>)." % (real, total, fallback),
-            show=True, show_copy_button=False)
 
     def _refresh_column_flags(self, database):
         """Spaltenstatus neu lesen: der naechste Vergleich nutzt sie sofort."""

@@ -463,26 +463,6 @@ class SyncPlanTests(unittest.TestCase):
                           ("tolino_ignore", "Ignoriert (tolino)", "bool")],
                          list(CUSTOM_COLUMNS))
 
-    def test_uuid_coverage_counts_real_uuids_against_the_fallback(self):
-        """Die Diagnose zaehlt echte UUIDs und Ersatzkennungen."""
-        from ..library import uuid_coverage
-
-        books = {1: {"uuid": "0f7a1c62-5f1e-4a3e-9d7c-6b2f0d8a4e51"},
-                 2: {"uuid": "calibre-2"}, 3: {}, 4: {"uuid": ""}}
-
-        self.assertEqual(
-            (4, 1, 3),
-            uuid_coverage(object(), iter_books=lambda _db: [1, 2, 3, 4],
-                          metadata_for=lambda _db, book_id: books[book_id]))
-
-    def test_uuid_coverage_of_an_empty_library_is_zero(self):
-        from ..library import uuid_coverage
-
-        self.assertEqual(
-            (0, 0, 0),
-            uuid_coverage(object(), iter_books=lambda _db: [],
-                          metadata_for=lambda _db, _book_id: {}))
-
     def test_without_the_calibre_api_the_error_names_the_columns(self):
         """Eine alte Calibre-Fassung bekommt eine umsetzbare Meldung."""
         class WithoutColumns:

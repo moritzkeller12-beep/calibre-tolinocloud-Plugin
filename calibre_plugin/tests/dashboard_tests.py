@@ -273,8 +273,7 @@ class ColumnSetupButtonTests(unittest.TestCase):
         dashboard.sync_column_enabled = False
         dashboard.read_column_enabled = False
         dashboard.update_status = lambda: calls.append("status")
-        for name in ("create_columns", "_refresh_column_flags",
-                     "check_uuid_coverage"):
+        for name in ("create_columns", "_refresh_column_flags"):
             setattr(dashboard, name, getattr(cls, name).__get__(dashboard))
         return dashboard
 
@@ -350,48 +349,6 @@ class ColumnSetupButtonTests(unittest.TestCase):
             dashboard.create_columns("tolino_id")
         self.assertIn("create_custom_column", errors[0][2])
         self.assertEqual([], calls)
-
-    def test_the_settings_offer_the_uuid_coverage_check(self):
-        source = _ui_source_text()
-        self.assertIn('self.uuid_button = QPushButton("UUID-Abdeckung prüfen …")',
-                      source)
-        self.assertIn(
-            "self.uuid_button.clicked.connect(self.check_uuid_coverage)",
-            source)
-        self.assertIn('transfer.addRow("", self.uuid_button)', source)
-
-    def test_the_uuid_coverage_check_reports_the_numbers(self):
-        from unittest.mock import patch
-        ui_module = self._ui()
-        calls, boxes = [], []
-        dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard.uuid_coverage",
-                   lambda _db: (10, 7, 3)), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            dashboard.check_uuid_coverage()
-        self.assertIn("7 von 10", boxes[0][2])
-        self.assertIn("bei 3 fehlt", boxes[0][2])
-        self.assertEqual([], calls)
-
-    def test_a_broken_uuid_check_is_reported_instead_of_crashing(self):
-        from unittest.mock import patch
-
-        def boom(_db):
-            raise RuntimeError("kaputt")
-
-        ui_module = self._ui()
-        calls, errors = [], []
-        dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard.uuid_coverage", boom), \
-             patch("calibre_plugin.ui_dashboard.log_warning",
-                   lambda _text: None), \
-             patch("calibre_plugin.ui_dashboard.error_dialog",
-                   lambda *args, **kwargs: errors.append(args)):
-            dashboard.check_uuid_coverage()
-        self.assertIn("kaputt", errors[0][2])
-        self.assertEqual([], calls)
-
 
 class DashboardPrimaryActionTests(unittest.TestCase):
     """Hauptknopf und Anmeldeknopf getrennt.

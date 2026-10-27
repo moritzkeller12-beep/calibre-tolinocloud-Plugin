@@ -37,9 +37,7 @@ nach der Bestätigung vor dem Start gelöscht.
   der Bibliotheksspalte angezeigt. In den Einstellungen legt je Spalte ein
   eigener Knopf (**«#tolino_id anlegen …»**, **«#tolino_read anlegen …»**,
   **«#tolino_ignore anlegen …»**) genau diese Spalte an, falls sie fehlt;
-  danach Calibre neu starten. Mit **«UUID-Abdeckung prüfen …»** zählt
-  dasselbe Fenster, wie viele Bücher eine echte UUID haben und wie viele die
-  Ersatzkennung `calibre-<Nummer>` nutzen.
+  danach Calibre neu starten.
 - Für **gekaufte Bücher, die schon in tolino liegen**: lege zusätzlich eine
   Spalte **`#tolino_ignore`** vom Typ **Ja/Nein** an und setze sie bei diesen
   Büchern auf «Ja». Sie werden nicht hochgeladen und nicht verändert – damit
