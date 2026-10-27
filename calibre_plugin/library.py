@@ -6,8 +6,10 @@ from collections.abc import Iterable
 
 
 TOLINO_COLUMN = "#tolino_id"
-# Optionales Ja/Nein-Feld: solche Buecher nimmt der Abgleich nicht an.
+# Optionale Ja/Nein-Spalten: #tolino_ignore nimmt Buecher vom Abgleich aus,
+# #tolino_read spiegelt den Lesestatus in die Bibliothek.
 TOLINO_IGNORE_COLUMN = "#tolino_ignore"
+TOLINO_READ_COLUMN = "#tolino_read"
 
 # Calibre liefert ein Ja/Nein-Feld je nach Weg als Bool, Text oder Zahl.
 _TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
@@ -125,6 +127,33 @@ def metadata_ignored(metadata):
     aus dem Vergleich.
     """
     return bool_column_value(metadata, TOLINO_IGNORE_COLUMN) is True
+
+
+def read_column_available(database):
+    """True, wenn Calibre die Ja/Nein-Spalte ``#tolino_read`` kennt.
+
+    Eine Spalte mit anderem Typ wird nicht beschrieben: ein Text- oder
+    Zahlenfeld würde ``True``/``False`` als fremden Wert speichern.
+    """
+    return bool_column_available(database, TOLINO_READ_COLUMN)
+
+
+def metadata_read_value(metadata):
+    """Lesestatus aus ``#tolino_read``: True, False oder None (leer)."""
+    return bool_column_value(metadata, TOLINO_READ_COLUMN)
+
+
+def update_read_column(database, updates):
+    """Lesestatus ``(book_id, bool)`` in ``#tolino_read`` schreiben."""
+    if not updates or not read_column_available(database):
+        return 0
+    api = database.new_api
+    values = {book_id: bool(value) for book_id, value in updates
+              if book_id is not None and api.has_id(book_id)}
+    if not values:
+        return 0
+    api.set_field(TOLINO_READ_COLUMN, values)
+    return len(values)
 
 
 def tolino_column_active(values, database):

@@ -1164,6 +1164,9 @@ class CloudDeletionPlanTests(unittest.TestCase):
                 def selected_read_unmarks(self):
                     return []
 
+                def selected_read_sync(self):
+                    return []
+
                 def selected_cloud_deletions(self):
                     return [("u-1", "t-1", "Titel")]
 

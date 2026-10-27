@@ -1,9 +1,12 @@
 # Änderungen
 
-## Unveröffentlicht
+## 0.1.03
 
 - Neue optionale Calibre-Spalte `#tolino_ignore` (Ja/Nein): so markierte Bücher lädt der Abgleich nicht hoch und ändert sie nicht — gekaufte Bücher erzeugen damit keine zweite Kopie in der Cloud. Sie bleiben im Vergleich sichtbar (Gruppe «Ignoriert») und ihre Cloud-Kopie wird weiterhin zugeordnet.
 - Der Vergleich zeigt einen Hinweis, solange die Spalte `#tolino_ignore` fehlt.
+- Lesestatus wird mit der Calibre-Spalte `#tolino_read` (Ja/Nein) in beide Richtungen abgeglichen; widersprüchliche Stände werden im Vergleich zur Entscheidung angezeigt.
+- In Calibre gelesene Bücher werden nach dem Upload in tolino als gelesen markiert; beim Ersetzen einer Cloud-Kopie geht die Gelesen-Markierung auf die neue Kopie über.
+- Tests nach der Vereinfachung des Dashboards repariert; ein reihenfolgeabhängiger Test löst keine echte Anmeldung mehr aus.
 
 ## 0.1.02
 

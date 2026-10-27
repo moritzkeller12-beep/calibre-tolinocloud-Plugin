@@ -595,7 +595,11 @@ class LoginPreflightTests(unittest.TestCase):
         store = config.CredentialStore(
             {"partner_id": 4, "hardware_id": "hw-1", "refresh_token": ""},
             "konto")
-        status, detail = vault_module.check_stored_login(store)
+        # Andere Tests hinterlassen ein gespeichertes Konto «konto» mit Token;
+        # ohne diese Abschirmung loeste der Test einen echten Login aus.
+        with patch("calibre_plugin.config.account_by_name",
+                   lambda *_args, **_kwargs: {}):
+            status, detail = vault_module.check_stored_login(store)
         self.assertEqual("invalid", status)
         self.assertIn("Bitte bei tolino anmelden", detail)
 

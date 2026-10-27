@@ -9,7 +9,7 @@ import unittest
 
 from .tests import (browser_tests, build_tests, dashboard_tests, dialogs_tests,
                     identifiers_tests, orchestration_tests, planning_tests,
-                    tolino_client_tests, transport_tests, ui_base_tests,
+                    read_status_tests, tolino_client_tests, transport_tests, ui_base_tests,
                     worker_base_tests, workers_tests)
 from .tests._support import start_cdp_stubs, stop_cdp_stubs
 
@@ -26,6 +26,7 @@ _MODULES = (
     dashboard_tests,
     workers_tests,
     identifiers_tests,
+    read_status_tests,
 )
 
 

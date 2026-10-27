@@ -90,10 +90,11 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             # Tests pruefen die Uebergabe, nicht die Anzeige.
             def __init__(self, settings, jobs, removals, meta_updates=None,
                          series_map=None, selected_read=(),
-                         selected_unread=(), titles=None):
+                         selected_unread=(), titles=None, read_sync=None):
                 self.arguments = (settings, jobs, removals, meta_updates,
                                   series_map, selected_read, selected_unread)
                 self.titles = titles
+                self.read_sync = read_sync
                 self.progress = FakeSignal()
                 self.completed = FakeSignal()
                 self.failed = FakeSignal()

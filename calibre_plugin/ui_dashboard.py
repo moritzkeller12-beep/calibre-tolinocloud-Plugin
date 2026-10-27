@@ -17,7 +17,8 @@ from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      save_account, save_credentials, save_settings,
                      set_active_account, settings)
 from .library import (ignore_column_available, iter_book_ids, metadata_by_id,
-                      safe_format_path, tolino_column_active,
+                      read_column_available, safe_format_path,
+                      tolino_column_active, update_read_column,
                       update_tolino_ids)
 from .config import load_state
 from .config import settings as _global_settings
@@ -53,13 +54,22 @@ def _offer_next_step(dialog):
 
 def _persist_sync_result(dialog, state, refresh, updates,
                          always_refresh=False):
-    """Ergebnis speichern und die optionale Calibre-Spalte aktualisieren."""
+    """Ergebnis speichern und die optionalen Calibre-Spalten aktualisieren."""
     _persist_run(dialog, state, refresh, updates,
                  always_refresh=always_refresh)
     if dialog.sync_column_enabled:
         update_tolino_ids(
             dialog.gui.current_db, updates, enabled=True,
             account_name=_worker_account_name(dialog))
+    read_updates = list(getattr(dialog.worker, "read_updates", None) or ())
+    if read_updates and getattr(dialog, "read_column_enabled", False):
+        try:
+            update_read_column(dialog.gui.current_db, read_updates)
+        except Exception as exc:
+            # Ein misslungener Spalten-Schreibvorgang darf das Ergebnis des
+            # Laufs nicht verschlucken.
+            log_warning("Lesestatus konnte nicht in #tolino_read "
+                        "geschrieben werden: %s" % sanitize_error(exc))
 
 
 def _persist_run(dialog, state, refresh, updates, always_refresh=False):
@@ -146,6 +156,7 @@ class SyncDashboard(QDialog):
         self.prepare_thread = None
         self.prepare_worker = None
         self.sync_column_enabled = False
+        self.read_column_enabled = False
         self.account_name = ""
         self.temp_files = []
         self.setWindowTitle("tolino Cloud Sync")
@@ -660,6 +671,8 @@ class SyncDashboard(QDialog):
         self.sync_column_enabled = tolino_column_active(
             _global_settings(), self.gui.current_db)
         settings["sync_column_enabled"] = self.sync_column_enabled
+        self.read_column_enabled = read_column_available(self.gui.current_db)
+        settings["read_column_enabled"] = self.read_column_enabled
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
             metadata = self._local_metadata()
@@ -842,6 +855,7 @@ class SyncDashboard(QDialog):
             "metadata": dialog.selected_metadata_ids(),
             "read": dialog.selected_read_targets(),
             "unread": dialog.selected_read_unmarks(),
+            "read_sync": dialog.selected_read_sync(),
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
 
@@ -956,7 +970,8 @@ class SyncDashboard(QDialog):
                                  preparation["series_map"],
                                  preparation["selected_read"],
                                  preparation["selected_unread"],
-                                 titles=preparation.get("titles"))
+                                 titles=preparation.get("titles"),
+                                 read_sync=preparation.get("read_sync"))
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)

@@ -147,6 +147,43 @@ def _read_flags(tolino_id, read_known, read_ids):
     }
 
 
+def merge_read_status(local, cloud, synced):
+    """Lesestatus aus Calibre, tolino und dem letzten Abgleich zusammenführen.
+
+    Rückgabe ``(ziel, quelle, konflikt)``. Hat sich seit dem letzten
+    Abgleich nur eine Seite geändert, gewinnt sie. Eine leere Calibre-Spalte
+    übernimmt den Cloud-Stand. Widersprechen sich beide Seiten ohne
+    eindeutige Änderung, bleibt der Cloud-Stand stehen und die Zeile ist ein
+    Konflikt: entschieden wird erst per Klick.
+    """
+    if local is None or local == cloud:
+        return cloud, ("tolino" if local is None else ""), False
+    if synced is not None:
+        if cloud == synced:
+            return local, "calibre", False
+        if local == synced:
+            return cloud, "tolino", False
+    return cloud, "", True
+
+
+def _column_read_flags(row, metadata, entry):
+    """Lesestatus-Felder fuer den Abgleich mit ``#tolino_read``."""
+    local = metadata.get("calibre_read")
+    local = None if local is None else bool(local)
+    synced = entry.get("read_synced") if isinstance(entry, dict) else None
+    synced = None if synced is None else bool(synced)
+    flags = {"read_column": True, "read_local": local,
+             "read_synced": synced, "read_conflict": False,
+             "read_source": "", "read_sync": False}
+    if not row.get("tolino_id") or not row.get("read_known"):
+        return flags
+    target, source, conflict = merge_read_status(
+        local, bool(row.get("read_in_cloud")), synced)
+    flags.update(read=target, read_source=source, read_conflict=conflict,
+                 read_sync=not conflict)
+    return flags
+
+
 class _RemoteIndex:
     """Cloud-Zeilen plus Lookup-Indizes -- in derselben Reihenfolge.
 
@@ -284,7 +321,7 @@ def _matched_status(metadata, remote, old, comparison_fields,
 
 def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                           comparison_fields, use_metadata_ids, matched,
-                          disputed, read_known, read_ids):
+                          disputed, read_known, read_ids, read_column=False):
     """Eine lokale Vergleichszeile -- inklusive einer bestaetigten Zuordnung."""
     if not isinstance(metadata, dict):
         raise ValueError("Preparation returned invalid metadata for book %r."
@@ -357,7 +394,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
             status = "new_in_calibre"
             tolino_id = ""
 
-    return {
+    row = {
         "book_id": book_id,
         "uuid": book_uuid or str(metadata.get("uuid") or ""),
         "title": title,
@@ -382,6 +419,15 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                         else _row_explanation(status, match_reason,
                                               file_changed)),
     }
+    if read_column:
+        row.update(_column_read_flags(row, metadata, old))
+        if row["read_conflict"]:
+            row["group"] = "review"
+        elif (row["group"] == "unchanged" and row["read_sync"]
+              and (row["read"] != row["read_in_cloud"]
+                   or row["read"] != row["read_local"])):
+            row["group"] = "action"
+    return row
 
 
 def _leftover_remote_row(row, disputed, title_counts, row_index):
@@ -406,7 +452,7 @@ def _leftover_remote_row(row, disputed, title_counts, row_index):
 
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                       comparison_fields=("authors", "title", "isbn"),
-                      use_metadata_ids=True, read_ids=()):
+                      use_metadata_ids=True, read_ids=(), read_column=False):
     """Return deterministic local/remote rows for the pre-sync confirmation view.
 
     Matching is deliberately conservative and ordered:
@@ -433,6 +479,9 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     ``None`` bedeutet «Status unbekannt» (Abruf fehlgeschlagen): die Zeilen
     tragen dann ``read_known=False``, damit die Oberfläche «unbekannt» nicht
     als «ungelesen» darstellt und nichts zurückschreibt.
+
+    ``read_column`` gleicht zusätzlich die Calibre-Spalte ``#tolino_read``
+    ab (``metadata["calibre_read"]``); siehe `merge_read_status`.
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
@@ -450,7 +499,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
         local_rows.append(_local_comparison_row(
             book_id, metadata, remote, state, preferred_formats,
             comparison_fields, use_metadata_ids, matched, disputed,
-            read_known, read_ids))
+            read_known, read_ids, read_column))
     for index, row in enumerate(remote.rows):
         if index not in matched:
             local_rows.append(_leftover_remote_row(

@@ -178,6 +178,10 @@ class InventoryDialog(QDialog):
             # «Synchronisierung starten».
             row.setdefault("read_known", True)
             row.setdefault("read", bool(row.get("read_in_cloud")))
+            # Vorschlag des Abgleichs mit #tolino_read; «Empfohlene
+            # Aktionen» stellt ihn wieder her.
+            row.setdefault("read_default", bool(row["read"]))
+            row.setdefault("read_sync_default", bool(row.get("read_sync")))
             self.rows.append(row)
         # Ausgewählte Aktionen zuerst, dann Titel/Autor(en).
         self.rows = sort_comparison_rows(self.rows)
@@ -248,7 +252,8 @@ class InventoryDialog(QDialog):
         header_tooltips = (
             "Buchdatei in die Cloud hochladen.",
             "Titel, Autor und ISBN ohne Upload aktualisieren.",
-            "Auswahl = gelesen; keine Auswahl = ungelesen.",
+            "Auswahl = gelesen; keine Auswahl = ungelesen. Mit der "
+            "Calibre-Spalte #tolino_read gilt das für beide Seiten.",
             "Buch in Calibre vorhanden.",
             "Buch im ausgewählten tolino-Konto vorhanden.",
             "Buchtitel", "Autor(en)",
@@ -356,6 +361,8 @@ class InventoryDialog(QDialog):
         row = self.rows[index]
         check = self.read_checks[index]
         row["read"] = bool(check.isChecked())
+        # Ein Klick entscheidet auch einen Konflikt mit #tolino_read.
+        row["read_sync"] = True
         self._update_summary()
 
     def _sync_checks_to_rows(self):
@@ -395,6 +402,7 @@ class InventoryDialog(QDialog):
                 row.pop("delete_cloud", None)
                 row["upload"] = row["metadata"] = False
                 row["read"] = bool(row.get("read_in_cloud"))
+                row["read_sync"] = False
                 for check, checked in ((upload, False), (metadata, False),
                                        (read, row["read"])):
                     self._set_checked_quietly(check, checked)
@@ -409,8 +417,9 @@ class InventoryDialog(QDialog):
                 continue
             wanted = tuple(chooser(row))
             upload, metadata = bool(wanted[0]), bool(wanted[1])
-            read = bool(row.get("read_in_cloud"))
-            row.update(upload=upload, metadata=metadata, read=read)
+            read = bool(row.get("read_default", row.get("read_in_cloud")))
+            row.update(upload=upload, metadata=metadata, read=read,
+                       read_sync=bool(row.get("read_sync_default")))
             for check, checked in ((upload_check, upload),
                                    (metadata_check, metadata),
                                    (read_check, read)):
@@ -442,6 +451,7 @@ class InventoryDialog(QDialog):
                 + len(self.selected_metadata_ids())
                 + len(self.selected_read_targets())
                 + len(self.selected_read_unmarks())
+                + len(self.selected_calibre_read_updates())
                 + len(self.selected_cloud_deletions()))
 
     def automatic_actions_enabled(self):
@@ -519,6 +529,35 @@ class InventoryDialog(QDialog):
                 if not check.isChecked() and row.get("tolino_id")
                 and not row.get("delete_cloud") and row.get("read_in_cloud")
                 and not row.get("ignored")]
+
+    def selected_read_sync(self):
+        """Abgleich mit #tolino_read: ein Eintrag je entschiedenem Buch.
+
+        ``value`` ist der Lesestatus, der danach in Calibre UND tolino gilt;
+        ``write_calibre`` sagt, ob die Calibre-Spalte dafür geändert wird.
+        Konflikte ohne Klick und Bücher zum Löschen fallen heraus.
+        """
+        items = []
+        for row, check in zip(self.rows, self.read_checks):
+            if (not row.get("read_column") or not row.get("read_sync")
+                    or row.get("book_id") is None or not row.get("tolino_id")
+                    or row.get("read_known") is False
+                    or row.get("delete_cloud")):
+                continue
+            value = bool(check.isChecked())
+            items.append({
+                "book_id": row["book_id"],
+                "book_uuid": str(row.get("uuid") or ""),
+                "tolino_id": str(row["tolino_id"]),
+                "value": value,
+                "write_calibre": row.get("read_local") is not value,
+            })
+        return items
+
+    def selected_calibre_read_updates(self):
+        """Bücher, deren #tolino_read-Wert sich ändert."""
+        return [item for item in self.selected_read_sync()
+                if item["write_calibre"]]
 
     def _marked_row_indexes(self):
         """Markierte Zeilen -- oder ein Hinweis, wenn keine markiert ist."""
@@ -702,8 +741,22 @@ class InventoryDialog(QDialog):
             return False
         if key == "read":
             check = self.read_checks[index]
-            if (row.get("read_known") is False
-                    or (value and row.get("read_in_cloud"))
+            if row.get("read_known") is False:
+                return False
+            if row.get("read_column"):
+                # Mit #tolino_read zählt auch Calibre: dieselbe Auswahl wie
+                # in tolino kann die Calibre-Spalte noch ändern oder einen
+                # Konflikt entscheiden.
+                if (bool(row.get("read")) == bool(value)
+                        and bool(check.isChecked()) == bool(value)
+                        and row.get("read_sync")
+                        and row.get("read_local") is bool(value)):
+                    return False
+                row["read_sync"] = True
+                row[key] = bool(value)
+                self._set_checked_quietly(check, bool(value))
+                return True
+            if ((value and row.get("read_in_cloud"))
                     or (not value and not row.get("read_in_cloud"))):
                 return False
         else:
@@ -819,6 +872,10 @@ class InventoryDialog(QDialog):
             explanation = str(row.get("explanation", "") or "")
             if in_cloud and not read_known:
                 explanation = (explanation + " Lesestatus unbekannt.").strip()
+            elif in_cloud and has_book and row.get("read_column"):
+                note = self._read_note(row)
+                if note:
+                    explanation = (explanation + " " + note).strip()
             if delete_cloud:
                 explanation = (
                     explanation + " Wird beim Start aus tolino gelöscht."
@@ -846,6 +903,23 @@ class InventoryDialog(QDialog):
             except Exception:
                 pass
         self._update_summary()
+
+    @staticmethod
+    def _read_note(row):
+        """Hinweis zum Abgleich mit #tolino_read (leer = nichts zu sagen)."""
+        def word(value):
+            return {True: "gelesen", False: "ungelesen"}.get(value, "leer")
+        local = row.get("read_local")
+        cloud = bool(row.get("read_in_cloud"))
+        if row.get("read_conflict"):
+            return ("Lesestatus widersprüchlich (Calibre: %s, tolino: %s) "
+                    "– per Klick entscheiden." % (word(local), word(cloud)))
+        source = row.get("read_source")
+        if source == "calibre":
+            return "Lesestatus aus Calibre (%s)." % word(local)
+        if source == "tolino":
+            return "Lesestatus aus tolino (%s)." % word(cloud)
+        return ""
 
     def _size_columns(self):
         """Schmale Standardansicht: Textspalten wachsen, Rest bleibt kompakt.
@@ -890,6 +964,7 @@ class InventoryDialog(QDialog):
         metadata = len(self.selected_metadata_ids())
         marked_read = len(self.selected_read_targets())
         marked_unread = len(self.selected_read_unmarks())
+        calibre_read = len(self.selected_calibre_read_updates())
         deletions = len(self.selected_cloud_deletions())
         changes = marked_read + marked_unread
         summary = getattr(self, "summary", None)
@@ -902,6 +977,8 @@ class InventoryDialog(QDialog):
                 summary_text += (
                     " (davon %d gelesen, %d ungelesen)"
                     % (marked_read, marked_unread))
+            if calibre_read:
+                summary_text += " · %d Lesestatus in Calibre" % calibre_read
             if deletions:
                 summary_text += " · %d %s" % (
                     deletions, plural(deletions, "Löschung", "Löschungen"))
@@ -913,7 +990,7 @@ class InventoryDialog(QDialog):
             summary.setText(summary_text)
         confirm = getattr(self, "confirm", None)
         if confirm is not None:
-            total = uploads + metadata + changes + deletions
+            total = uploads + metadata + changes + calibre_read + deletions
             confirm.setText("Synchronisierung starten (%d)" % total
                             if total else "Synchronisierung starten")
             confirm.setEnabled(total > 0 or self.automatic_actions_enabled())

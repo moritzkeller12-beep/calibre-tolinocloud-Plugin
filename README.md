@@ -1,7 +1,7 @@
 # tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.1.02-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.1.03-blue)](__init__.py)
 
 Gleicht die eigene Calibre-Bibliothek mit der **tolino Cloud** ab: Bücher hoch-
 und herunterladen, gelesen markieren, Titelbilder mitnehmen.
@@ -41,6 +41,13 @@ nach der Bestätigung vor dem Start gelöscht.
   entsteht keine zweite Kopie in der Cloud. Im Vergleich bleiben sie sichtbar
   und stehen dort in der Gruppe **Ignoriert**; ein leeres Feld bedeutet
   «nicht ignoriert».
+- Für den Lesestatus in Calibre lege zusätzlich eine Spalte **`#tolino_read`**
+  vom Typ **Ja/Nein** an. Dann gleicht der Vergleich den Lesestatus in beide
+  Richtungen ab: Hat sich seit dem letzten Sync nur eine Seite geändert, wird
+  sie übernommen; eine leere Spalte übernimmt den Stand aus tolino. Widersprechen
+  sich beide Seiten, steht das Buch unter «Zu prüfen» und wird erst nach einem
+  Klick auf «Gelesen» angeglichen. In Calibre gelesene Bücher werden nach dem
+  ersten Upload auch in tolino als gelesen markiert.
 - Das Plugin verwendet eine **inoffizielle Schnittstelle**. Es gibt keine
   Stabilitäts- oder Verfügbarkeitsgarantie; Endpunkte und Verhalten können
   sich ohne Vorwarnung ändern.
