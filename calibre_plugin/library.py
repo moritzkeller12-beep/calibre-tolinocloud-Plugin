@@ -1,6 +1,5 @@
 """Adapters for Calibre library and Qt APIs used by the plugin."""
 import json
-import os
 import re
 from collections.abc import Iterable
 
@@ -149,20 +148,6 @@ def _column_present(database, label):
     return label in CREATED_COLUMNS or _field_info(database, "#" + label)[0]
 
 
-def selected_columns(labels=None):
-    """Die Plugin-Spalten, eingegrenzt auf ``labels`` (None = alle)."""
-    if labels is None:
-        return list(CUSTOM_COLUMNS)
-    wanted = set(labels)
-    return [spec for spec in CUSTOM_COLUMNS if spec[0] in wanted]
-
-
-def missing_custom_columns(database, labels=None):
-    """Labels der Plugin-Spalten, die in dieser Bibliothek fehlen."""
-    return [label for label, _name, _datatype in selected_columns(labels)
-            if not _column_present(database, label)]
-
-
 def create_custom_columns(database, labels=None):
     """Fehlende Plugin-Spalten anlegen; gibt die angelegten Labels zurueck.
 
@@ -178,7 +163,10 @@ def create_custom_columns(database, labels=None):
     Eine neu angelegte Spalte ist in der laufenden Oberflaeche erst nach
     einem Neustart von Calibre nutzbar.
     """
-    missing = [spec for spec in selected_columns(labels)
+    wanted = None if labels is None else set(labels)
+    selected = (CUSTOM_COLUMNS if wanted is None else
+                tuple(spec for spec in CUSTOM_COLUMNS if spec[0] in wanted))
+    missing = [spec for spec in selected
                if not _column_present(database, spec[0])]
     if not missing:
         return []
@@ -281,9 +269,7 @@ def normalize_formats(value):
     """Return canonical format names from Calibre string or iterable values."""
     if isinstance(value, str):
         values = value.split(",")
-    elif isinstance(value, (bytes, bytearray)):
-        values = [os.fsdecode(value)]
-    elif isinstance(value, Iterable):
+    elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
         values = value
     else:
         return []
@@ -318,14 +304,10 @@ def safe_format_path(database, book_id, format_name):
     except (IndexError, KeyError, OSError) as exc:
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name)) from exc
-    if isinstance(path, (tuple, list)):
-        path = next((item for item in path if isinstance(item, (str, bytes, os.PathLike))), None)
-    if isinstance(path, bytes):
-        path = os.fsdecode(path)
-    if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
+    if not isinstance(path, str) or not path:
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name))
-    return os.fspath(path)
+    return path
 
 
 def cover_bytes(database, book_id):
@@ -336,31 +318,14 @@ def cover_bytes(database, book_id):
     if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
     cover = api.cover(book_id, as_file=False)
-    if isinstance(cover, (bytes, bytearray, memoryview)):
-        return bytes(cover)
-    if isinstance(cover, (str, os.PathLike)):
-        path = os.fspath(cover)
-        if os.path.isfile(path):
-            with open(path, "rb") as cover_file:
-                return cover_file.read()
-        return None
-    if isinstance(cover, (tuple, list)):
-        for value in cover:
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                return bytes(value)
-            if isinstance(value, (str, os.PathLike)):
-                path = os.fspath(value)
-                if os.path.isfile(path):
-                    with open(path, "rb") as cover_file:
-                        return cover_file.read()
-    return None
+    return cover
 
 
 def image_suffix(data):
     """Return a recognized image suffix, or '' for unknown cover bytes."""
-    if not isinstance(data, (bytes, bytearray, memoryview)) or not data:
+    if not isinstance(data, bytes) or not data:
         return ""
-    raw = bytes(data)
+    raw = data
     if raw.startswith(b"\xff\xd8\xff"):
         return ".jpg"
     if raw.startswith(b"\x89PNG\r\n\x1a\n"):

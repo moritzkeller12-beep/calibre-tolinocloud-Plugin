@@ -180,8 +180,7 @@ def unpack_meta_update_record(record):
     }
 
 
-def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
-                          only_book_ids=None):
+def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids=None):
     """In-place Metadaten-Updates (/meta) für die ausgewählten Bücher.
 
     Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat und sich
@@ -191,7 +190,7 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
     berücksichtigt. Bücher, die ohnehin hochgeladen werden, werden NIE
     zusätzlich gepatcht – der Upload trägt die Metadaten mit.
 
-    Returns (uploads, meta_updates); uploads are returned unchanged.
+    Returns the planned metadata updates.
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
@@ -222,4 +221,4 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
         if not fields:
             continue
         updates.append((book_id, book_uuid, tolino_id, fields))
-    return list(uploads), updates
+    return updates

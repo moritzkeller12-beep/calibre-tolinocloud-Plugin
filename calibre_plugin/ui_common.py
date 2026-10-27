@@ -11,7 +11,7 @@ try:
                          QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox, QMenu,
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
-                         QTableWidgetItem, QTextEdit, QObject, QInputDialog,
+                         QTableWidgetItem, QObject, QInputDialog,
                          QFileDialog, Qt, pyqtSignal)
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
@@ -20,7 +20,7 @@ except ImportError:
                          QMenu,
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
-                         QTableWidgetItem, QTextEdit, QObject, QInputDialog,
+                         QTableWidgetItem, QObject, QInputDialog,
                          QFileDialog, Qt, Signal as pyqtSignal)
 
 # Weitergegeben an die anderen UI-Module (und teilweise nur dort benutzt):
@@ -36,7 +36,7 @@ __all__ = [
     "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QMenu",
     "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QTextEdit", "QThread", "QVBoxLayout", "Qt", "SyncJob",
+    "QThread", "QVBoxLayout", "Qt", "SyncJob",
     "_ORPHANED_THREADS", "_apply_busy", "_dialog_busy",
     "_display_value", "_format_signatures", "_login_failure_guidance",
     "_metadata_value", "_stop_thread", "plural",

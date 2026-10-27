@@ -9,13 +9,12 @@ import time
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
-from ..comparison import compare_inventory
 from ..partners import PARTNERS
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, tag_id_from_patch, tag_pairs, tag_state
 from ..browser_login import browser_login
-from ._support import (
-    UI_SOURCE_FILES, _ui_source_text, start_cdp_stubs, stop_cdp_stubs)
+from ._support import (UI_SOURCE_FILES, _ui_source_text, compare_inventory,
+                       start_cdp_stubs, stop_cdp_stubs)
 from pathlib import Path
 from unittest.mock import patch
 

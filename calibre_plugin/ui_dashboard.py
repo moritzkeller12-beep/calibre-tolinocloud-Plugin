@@ -18,8 +18,7 @@ from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      save_settings, set_active_account, settings)
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
                       create_custom_columns, custom_column_available,
-                      ignore_column_available, iter_book_ids, metadata_by_id,
-                      read_column_available, safe_format_path,
+                      ignore_column_available, read_column_available,
                       update_read_column, update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
@@ -752,7 +751,7 @@ class SyncDashboard(QDialog):
         settings["read_column_enabled"] = self.read_column_enabled
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
-            metadata = self._local_metadata()
+            metadata = _dashboard_plan.local_metadata(self)
         except Exception as exc:
             self._show_prepare_error(exc, settings)
             return
@@ -843,7 +842,7 @@ class SyncDashboard(QDialog):
             selection = self._confirm_comparison(
                 payload["comparison"], settings,
                 client_factory=lambda: self._worker_client(settings),
-                automatic=self._automatic_action_count(settings, metadata, state))
+                automatic=_dashboard_plan.automatic_action_count(metadata, state))
         except Exception as exc:
             # Ein Fehler NACH dem Vergleichsfenster darf nicht als Traceback
             # im Slot verschwinden: der Nutzer sähe nur ein geschlossenes
@@ -854,7 +853,8 @@ class SyncDashboard(QDialog):
         if selection is None:
             return
         try:
-            preparation = self._plan_actions(settings, metadata, state, selection)
+            preparation = _dashboard_plan.plan_actions(
+                self, settings, metadata, state, selection)
             if preparation["removals"] and not self._confirm_deletions(
                     preparation["removals"], state,
                     preparation.get("removal_titles")):
@@ -862,7 +862,7 @@ class SyncDashboard(QDialog):
                 return
             self._start_sync_worker(settings, preparation, state)
         except Exception as exc:
-            # `_plan_actions` legt Cover-Dateien an, bevor es fertig ist.
+            # Der Plan legt Cover-Dateien an, bevor er fertig ist.
             # Ein Fehler dort darf sie nicht bis zum naechsten Lauf liegen
             # lassen -- der fruehe Rueckweg raeumt sie mit auf.
             self._cleanup_temp_files()
@@ -892,19 +892,6 @@ class SyncDashboard(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return answer == QMessageBox.Yes
 
-    def _local_metadata(self):
-        """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
-        return _dashboard_plan.local_metadata(
-            self, iter_books=iter_book_ids, metadata_for=metadata_by_id)
-
-    def _automatic_action_count(self, settings, metadata, state):
-        """Serienänderungen zählen, die ohne Auswahl ausgeführt werden.
-
-        Der Vergleich darf ohne Auswahl nur schliessen, wenn diese Zahl
-        über null liegt.
-        """
-        return _dashboard_plan.automatic_action_count(settings, metadata, state)
-
     def _confirm_comparison(self, comparison, settings, client_factory=None,
                             automatic=0):
         """Bestätigungsfenster zeigen; None, wenn es abgebrochen wurde."""
@@ -933,19 +920,6 @@ class SyncDashboard(QDialog):
             "read_sync": dialog.selected_read_sync(),
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
-
-    def _plan_actions(self, settings, metadata, state, selection):
-        """Aus der Auswahl die Jobs und den neuen Sync-Stand bauen."""
-        return _dashboard_plan.plan_actions(
-            self, settings, metadata, state, selection,
-            upload_builder=self._upload_jobs,
-            safe_format_lookup=safe_format_path)
-
-    def _upload_jobs(self, settings, metadata, uploads):
-        """Upload-Jobs bauen; fehlende Dateien landen in `skipped_uploads`."""
-        return _dashboard_plan.upload_jobs(
-            self, settings, metadata, uploads, warning=log_warning,
-            safe_format_lookup=safe_format_path)
 
     def _confirm_replacements(self, jobs):
         """Ersetzen einer vorhandenen Cloud-Kopie vorher ansprechen.
@@ -1130,7 +1104,7 @@ class SyncDashboard(QDialog):
     def _cleanup_temp_files(self):
         """Temporäre Cover-Dateien löschen -- auch auf frühen Rückwegen.
 
-        Die Dateien entstehen in `_plan_actions`; stand die Aufraeumung nur
+        Die Dateien entstehen beim Planen; stand die Aufraeumung nur
         im Abschluss, blieben sie bei «Nichts zu übertragen» oder einer
         abgebrochenen Löschbestätigung bis zum nächsten Lauf liegen
 .

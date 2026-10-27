@@ -18,16 +18,14 @@ from .tolino import log_warning
 NOTHING_TO_DO_TEXT = "Es war nichts zu übertragen."
 
 
-def local_metadata(dialog, iter_books=None, metadata_for=None):
+def local_metadata(dialog):
     """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
-    iter_books = iter_books or iter_book_ids
-    metadata_for = metadata_for or metadata_by_id
     metadata = {}
     state = saved_state(dialog)
     legacy_ids = []
     account_name = str(getattr(dialog, "account_name", "") or "")
-    for book_id in iter_books(dialog.gui.current_db):
-        item = metadata_for(dialog.gui.current_db, book_id)
+    for book_id in iter_book_ids(dialog.gui.current_db):
+        item = metadata_by_id(dialog.gui.current_db, book_id)
         if dialog.sync_column_enabled and account_name:
             old_id = legacy_tolino_id(item)
             if old_id:
@@ -99,7 +97,7 @@ def syncable_metadata(metadata):
             if not _ignored(item)}
 
 
-def automatic_action_count(settings, metadata, state):
+def automatic_action_count(metadata, state):
     """Count automatic series updates waiting in the Cloud.
 
     Ignorierte Bücher zählen nicht mit: für sie würde der Start nichts tun.
@@ -108,8 +106,7 @@ def automatic_action_count(settings, metadata, state):
         series_map_from_metadata(syncable_metadata(metadata)), state))
 
 
-def plan_actions(dialog, settings, metadata, state, selection,
-                 upload_builder=None, safe_format_lookup=None):
+def plan_actions(dialog, settings, metadata, state, selection):
     """Turn the confirmed selection into concrete jobs and next state."""
     preferred = normalize_formats(settings["preferred_formats"])
     # Ignorierte Bücher fallen hier endgültig heraus -- unabhängig davon,
@@ -133,17 +130,11 @@ def plan_actions(dialog, settings, metadata, state, selection,
     removals, removal_titles = merge_removals(
         (selection or {}).get("cloud_deletions"))
     titles = titles_for(metadata, removal_titles)
-    uploads, meta_updates = plan_metadata_updates(
-        metadata, state, uploads, settings["preferred_formats"],
+    meta_updates = plan_metadata_updates(
+        metadata, state, uploads,
         only_book_ids=syncable_book_ids(metadata, selection["metadata"]))
     series_map = series_map_from_metadata(syncable_metadata(metadata))
-    builder = upload_builder or upload_jobs
-    if upload_builder is not None:
-        jobs, skipped_uploads = builder(settings, metadata, uploads)
-    else:
-        jobs, skipped_uploads = builder(
-            dialog, settings, metadata, uploads,
-            safe_format_lookup=safe_format_lookup)
+    jobs, skipped_uploads = upload_jobs(dialog, settings, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
     read_sync = read_sync_items(metadata, jobs, selection.get("read_sync"))
     settings["state"] = state
@@ -209,11 +200,8 @@ def selection_gaps(selection, uploads, meta_updates):
     return {"uploads": len(open_uploads), "metadata": len(open_meta)}
 
 
-def upload_jobs(dialog, settings, metadata, uploads, warning=None,
-                safe_format_lookup=None):
+def upload_jobs(dialog, settings, metadata, uploads):
     """Build upload jobs, recording unavailable local formats."""
-    warning = warning or log_warning
-    safe_format_lookup = safe_format_lookup or safe_format_path
     jobs = []
     skipped_uploads = []
     for upload in uploads:
@@ -223,7 +211,7 @@ def upload_jobs(dialog, settings, metadata, uploads, warning=None,
         fmt = record["format_name"]
         old_id = record["old_id"]
         try:
-            path = safe_format_lookup(dialog.gui.current_db, book_id, fmt)
+            path = safe_format_path(dialog.gui.current_db, book_id, fmt)
             if not os.path.isfile(path):
                 raise ValueError("Datei nicht gefunden: %s" % path)
         except ValueError as exc:
@@ -235,7 +223,7 @@ def upload_jobs(dialog, settings, metadata, uploads, warning=None,
         try:
             cover = cover_bytes(dialog.gui.current_db, book_id)
         except Exception as exc:
-            warning("Cover für Buch %s nicht verfügbar: %s" % (book_id, exc))
+            log_warning("Cover für Buch %s nicht verfügbar: %s" % (book_id, exc))
             cover = None
         suffix = image_suffix(cover)
         if cover and suffix:
@@ -245,7 +233,7 @@ def upload_jobs(dialog, settings, metadata, uploads, warning=None,
             cover_path = temp.name
             dialog.temp_files.append(cover_path)
         elif cover:
-            warning("Coverformat unbekannt – Cover wird nicht übertragen.")
+            log_warning("Coverformat unbekannt – Cover wird nicht übertragen.")
         title = (metadata.get(book_id) or {}).get("title") or ""
         jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path,
                             cover_path, title))

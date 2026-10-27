@@ -12,7 +12,9 @@ class TolinoSyncAction(InterfaceAction):
 
     def genesis(self):
         self.qaction.triggered.connect(self.show_dashboard)
-        _apply_toolbar_icon(self)
+        from calibre.gui2 import get_icons
+        self.qaction.setIcon(
+            get_icons("images/tolino_cloud_sync.png", "Tolino Cloud Sync"))
         # The keep-alive rotates the stored token periodically while Calibre
         # runs, so an adopted token survives between syncs.
         try:
@@ -53,18 +55,3 @@ class TolinoSyncAction(InterfaceAction):
         from .ui_dashboard import SyncDashboard
         dialog = SyncDashboard(self.gui)
         dialog.exec()
-
-
-def _apply_toolbar_icon(action):
-    """Give the toolbar action its icon via the fallback chain."""
-    try:
-        from .icons import toolbar_icon
-        icon = toolbar_icon()
-    except Exception:
-        return
-    if icon is None or icon.isNull():
-        return
-    try:
-        action.qaction.setIcon(icon)
-    except Exception:
-        action.setIcon(icon)

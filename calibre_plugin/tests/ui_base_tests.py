@@ -9,52 +9,13 @@ from ._support import load_ui_module, start_cdp_stubs, stop_cdp_stubs
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
+
 class ToolbarIconTests(unittest.TestCase):
-    """The toolbar action must receive an icon in real Calibre runs."""
+    """Shared UI module loader for tests without a live Calibre install."""
 
     @staticmethod
     def _load_ui_module(get_icons_result, qt_stub=None):
-        """Import ui.py with Calibre and Qt imports stubbed."""
         return load_ui_module(get_icons_result, qt_stub)
-
-    def test_get_icons_result_is_set_on_action(self):
-        set_calls = []
-
-        class Icon:
-            def isNull(self):
-                return False
-
-        class QAction:
-            def setIcon(self, icon):
-                set_calls.append(icon)
-
-        ui_module = self._load_ui_module(Icon())
-        try:
-            action = QAction()
-            ui_module._apply_toolbar_icon(action)
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(set_calls))
-        self.assertIsInstance(set_calls[0], Icon)
-
-    def test_null_icon_leaves_action_untouched(self):
-        set_calls = []
-
-        class Icon:
-            def isNull(self):
-                return True
-
-        class QAction:
-            def setIcon(self, icon):
-                set_calls.append(icon)
-
-        ui_module = self._load_ui_module(Icon())
-        try:
-            action = QAction()
-            ui_module._apply_toolbar_icon(action)
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual([], set_calls)
 
     def test_calibre_entry_does_not_load_the_dashboard_or_workers(self):
         ui_module = self._load_ui_module(None)

@@ -13,9 +13,30 @@ from pathlib import Path
 from unittest.mock import patch
 
 import calibre_plugin.cdp as cdp_module
+from calibre_plugin.comparison import compare_inventory as _compare_inventory
+from calibre_plugin.inventory import normalize_inventory_record, parse_inventory
 
 # setUpModule() stubs close_grabber_window; real close tests keep this.
 _REAL_CLOSE_WINDOW = cdp_module.close_grabber_window
+
+
+def parsed_inventory(value):
+    """Return canonical inventory records from a raw fixture or record list."""
+    if isinstance(value, list):
+        return [normalize_inventory_record(item)
+                for item in value if isinstance(item, dict)]
+    records, problems, valid_envelope = parse_inventory(value)
+    if not valid_envelope:
+        raise ValueError("Invalid inventory fixture: %s"
+                         % "; ".join(problems))
+    return records
+
+
+def compare_inventory(metadata, state, inventory, *args, **kwargs):
+    """Comparison test helper: normalize raw Tolino fixtures at the boundary."""
+    return _compare_inventory(metadata, state, parsed_inventory(inventory),
+                              *args, **kwargs)
+
 
 # Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
 # der Einstieg; Dialoge, Worker und Dashboard liegen in eigenen Modulen.

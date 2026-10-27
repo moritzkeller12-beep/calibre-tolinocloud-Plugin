@@ -1,7 +1,7 @@
 """Conservative Calibre-to-tolino inventory comparison and sync signatures."""
 import hashlib
 
-from .inventory import inventory_records
+
 
 from .identifiers import valid_book_uuid
 from .library import metadata_ignored, metadata_tolino_id, normalize_formats
@@ -223,9 +223,9 @@ class _RemoteIndex:
 
 
 def _remote_rows(inventory, read_known, read_ids):
-    """Cloud-Bestand in die Zeilenform des Vergleichs bringen."""
+    """Normalisierte Cloud-Datensätze in Vergleichszeilen umwandeln."""
     rows = []
-    for record in inventory_records(inventory):
+    for record in inventory:
         # Auch Datensätze ohne eindeutige Cloud-ID bleiben sichtbar;
         # andernfalls erschiene das Buch als neu und könnte ein Duplikat erzeugen.
         tolino_id = (record["tolino_id"]
@@ -473,11 +473,16 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     tragen dann ``read_known=False``, damit die Oberfläche «unbekannt» nicht
     als «ungelesen» darstellt und nichts zurückschreibt.
 
+    ``inventory`` enthält die von `TolinoClient.inventory()` gelieferten,
+    bereits normalisierten Cloud-Datensätze.
+
     ``read_column`` gleicht zusätzlich die Calibre-Spalte ``#tolino_read``
     ab (``metadata["calibre_read"]``); siehe `merge_read_status`.
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
+    if not isinstance(inventory, (list, tuple)):
+        raise ValueError("Comparison requires normalized inventory records.")
     preferred_formats = normalize_formats(preferred_formats)
     comparison_fields = set(comparison_fields or ())
     read_known = read_ids is not None

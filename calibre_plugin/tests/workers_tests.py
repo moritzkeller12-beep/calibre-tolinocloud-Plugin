@@ -6,10 +6,10 @@ import calibre_plugin.client as client_module
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
-from ..comparison import compare_inventory
 from ..plan import plan_sync
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
-from ._support import start_cdp_stubs, stop_cdp_stubs, ui_module_for
+from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
+                       stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -889,7 +889,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return self.refresh
 
             def inventory(self):
-                return [{"has_deliverable_id": False}]
+                return parsed_inventory([{"has_deliverable_id": False}])
 
             def read_ids(self):
                 return set()
@@ -922,7 +922,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return "rot"
 
             def inventory(self):
-                return [{"deliverableId": "d1"}]
+                return parsed_inventory([{"deliverableId": "d1"}])
 
             def read_ids(self):
                 return set()
@@ -940,7 +940,9 @@ class PrepareWorkerTests(unittest.TestCase):
         ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(payloads))
         self.assertIsInstance(payloads[0], dict)
-        self.assertEqual([[{"deliverableId": "d1"}]], compared)
+        self.assertEqual([[{"tolino_id": "d1", "has_deliverable_id": True,
+                            "identifier": "", "title": "", "authors": "",
+                            "isbn": "", "uuid": ""}]], compared)
         self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_login_failure_is_reported_without_starting_a_sync(self):

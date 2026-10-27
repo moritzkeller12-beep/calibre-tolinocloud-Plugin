@@ -6,11 +6,10 @@ import tempfile
 import threading
 import unittest
 from . import ui_base_tests
-from ..comparison import compare_inventory
 from ..plan import merge_removals
 from ._support import (FakeCheckBox, FakeMenu, FakeMessageBox,
-                      _ui_source_text, start_cdp_stubs, stop_cdp_stubs,
-                      ui_module_for)
+                      _ui_source_text, compare_inventory, start_cdp_stubs,
+                      stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -1090,10 +1089,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
 
     @staticmethod
     def _dashboard(ui_module):
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(
+        return ui_module.dashboard.SyncDashboard.__new__(
             ui_module.dashboard.SyncDashboard)
-        dashboard._upload_jobs = lambda *args, **kwargs: ([], [])
-        return dashboard
 
     @staticmethod
     def _settings():
@@ -1115,8 +1112,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
             dashboard = self._dashboard(ui_module)
             state = {"u-1": {"tolino_id": "t-1", "calibre_id": 1,
                              "title": "Titel"}}
-            preparation = dashboard._plan_actions(
-                self._settings(), self._metadata(), state,
+            preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+                dashboard, self._settings(), self._metadata(), state,
                 self._selection([("u-1", "t-1", "Titel")]))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -1128,8 +1125,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
         try:
             dashboard = self._dashboard(ui_module)
             state = {"u-9": {"tolino_id": "t-9", "title": "Alt"}}
-            preparation = dashboard._plan_actions(
-                self._settings(), self._metadata(), state,
+            preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+                dashboard, self._settings(), self._metadata(), state,
                 self._selection([("u-9", "t-9", "Alt")]))
         finally:
             ui_module._restore_stubs_for_tests()

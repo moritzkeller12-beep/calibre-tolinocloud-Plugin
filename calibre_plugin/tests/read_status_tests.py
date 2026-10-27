@@ -4,9 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from . import worker_base_tests
-from ._support import ui_module_for
+from ._support import compare_inventory, ui_module_for
 from .dialogs_tests import _QtDialogTest
-from ..comparison import compare_inventory, merge_read_status
+from ..comparison import merge_read_status
 from ..library import (TOLINO_READ_COLUMN, metadata_read_value,
                        read_column_available, update_read_column)
 

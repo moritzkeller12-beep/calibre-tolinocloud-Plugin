@@ -1,12 +1,11 @@
 """Pure text normalization and author matching for sync planning."""
 import re
 import unicodedata
-from functools import lru_cache
 
 
-@lru_cache(maxsize=4096)
-def _normalize_match_text_text(value):
-    value = unicodedata.normalize("NFKC", value).casefold()
+def normalize_match_text(value):
+    """Normalize human-readable matching text without dropping Unicode letters."""
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
     parts = []
     for character in value:
         category = unicodedata.category(character)
@@ -17,42 +16,26 @@ def _normalize_match_text_text(value):
     return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
-def normalize_match_text(value):
-    """Normalize human-readable matching text without dropping Unicode letters."""
-    return _normalize_match_text_text(str(value or ""))
-
-
-@lru_cache(maxsize=4096)
-def _normalize_title_text(value):
-    title = unicodedata.normalize("NFKC", value).strip()
+def normalize_title(value):
+    """Normalize a title, ignoring only a clearly technical file extension."""
+    title = unicodedata.normalize("NFKC", str(value or "")).strip()
     title = re.sub(r"\.(?:epub|pdf|mobi|azw3|azw|fb2|txt|html?)\s*$",
                    "", title, flags=re.IGNORECASE)
     return normalize_match_text(title)
 
 
-def normalize_title(value):
-    """Normalize a title, ignoring only a clearly technical file extension."""
-    return _normalize_title_text(str(value or ""))
-
-
-@lru_cache(maxsize=4096)
-def _normalize_isbn_text(value):
-    return re.sub(r"[^0-9x]+", "", value)
-
-
 def normalize_isbn(value):
     """Remove ISBN separators while preserving its digits and check digit."""
-    return _normalize_isbn_text(str(value or "").casefold())
+    return re.sub(r"[^0-9x]+", "", str(value or "").casefold())
 
 
 _AUTHOR_SEPARATORS = re.compile(r"[\W_]+")
 _AUTHOR_FILLER = {"and", "und", "et", "y", "with", "mit"}
 
 
-@lru_cache(maxsize=4096)
-def _author_tokens_text(value):
-    """Tokenize names ignoring order, accents and punctuation."""
-    text = value.casefold()
+def author_tokens(value):
+    """Return stable, sorted name tokens; accepts list-like metadata too."""
+    text = str(value or "").casefold()
     for umlaut, plain in (("\u00df", "ss"), ("\u00e4", "a"), ("\u00f6", "o"),
                           ("\u00fc", "u"), ("\u0142", "l"), ("\u00f8", "o")):
         text = text.replace(umlaut, plain)
@@ -63,11 +46,6 @@ def _author_tokens_text(value):
     tokens = [token for token in _AUTHOR_SEPARATORS.split(text) if token]
     return tuple(sorted({token for token in tokens
                          if token not in _AUTHOR_FILLER}))
-
-
-def author_tokens(value):
-    """Return stable, sorted name tokens; accepts list-like metadata too."""
-    return _author_tokens_text(str(value or ""))
 
 
 def authors_match(left, right):

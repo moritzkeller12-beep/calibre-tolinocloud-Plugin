@@ -4,10 +4,8 @@ from . import ui_base_tests
 from . import worker_base_tests
 import ast
 import json
-import os
 import re
 import runpy
-import tempfile
 import time
 import calibre_plugin.token_vault as vault_module
 import unittest
@@ -18,12 +16,11 @@ from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        cover_bytes, create_custom_columns,
                        custom_column_available, ignore_column_available,
                        iter_book_ids, metadata_by_id, metadata_ignored,
-                       metadata_tolino_id, missing_custom_columns,
+                       metadata_tolino_id,
                        normalize_formats, safe_format_path,
                        selected_table_rows, update_tolino_ids)
-from ..comparison import (compare_inventory, content_fingerprint,
-                          metadata_fingerprint, normalize_title,
-                          selected_book_ids)
+from ..comparison import (content_fingerprint, metadata_fingerprint,
+                          normalize_title, selected_book_ids)
 from ..plan import (metadata_update_fields, plan_collection_updates,
                     plan_metadata_updates, plan_sync, recorded_collections,
                     remember_collection, series_map_from_metadata,
@@ -48,7 +45,8 @@ from ..tolino import (
     normalize_refresh_token, sanitize_error)
 from pathlib import Path
 from unittest.mock import patch
-from ._support import start_cdp_stubs, stop_cdp_stubs, ui_module_for
+from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
+                       stop_cdp_stubs, ui_module_for)
 
 
 # Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
@@ -186,36 +184,30 @@ class SyncPlanTests(unittest.TestCase):
                 self.assertEqual(expected_uploads[0][0] if expected_uploads else None,
                                  unpack_upload_record(record)["book_id"])
 
-    def test_safe_format_path_accepts_wrapped_path_and_rejects_empty_result(self):
+    def test_safe_format_path_accepts_calibre_path_or_missing_format(self):
         class DatabaseAPI:
+            def __init__(self, path):
+                self.path = path
+                self.args = None
+
             def has_id(self, book_id):
                 return book_id == 1
 
             def format_abspath(self, book_id, format_name):
                 self.args = (book_id, format_name)
-                return ("/library/book.epub", format_name)
+                return self.path
 
         class Database:
-            new_api = DatabaseAPI()
+            def __init__(self, path):
+                self.new_api = DatabaseAPI(path)
 
-        database = Database()
+        database = Database("/library/book.epub")
         self.assertEqual("/library/book.epub", safe_format_path(database, 1, "EPUB"))
         self.assertEqual("/library/book.epub",
                          library_safe_format_path(database, 1, "EPUB"))
         self.assertEqual((1, "EPUB"), database.new_api.args)
-
-        class EmptyAPI:
-            def has_id(self, _book_id):
-                return True
-
-            def format_abspath(self, book_id, format_name):
-                return ()
-
-        class EmptyDatabase:
-            new_api = EmptyAPI()
-
         with self.assertRaises(ValueError):
-            safe_format_path(EmptyDatabase(), 1, "EPUB")
+            safe_format_path(Database(None), 1, "EPUB")
 
     def test_safe_format_path_rejects_invalid_ids_and_formats(self):
         class DatabaseAPI:
@@ -257,9 +249,15 @@ class SyncPlanTests(unittest.TestCase):
             "identifiers": {"isbn": "9783161484100", "amazon": "B00X123"},
             "formats": [], "last_modified": "now", "series": "",
         })()
-        result = local_metadata(
-            Dialog(), iter_books=lambda _db: [1],
-            metadata_for=lambda _db, _book_id: metadata)
+        class Api:
+            def all_book_ids(self):
+                return [1]
+
+            def get_metadata(self, _book_id):
+                return metadata
+
+        Dialog.gui.current_db.new_api = Api()
+        result = local_metadata(Dialog())
         self.assertEqual("9783161484100", result[1]["isbn"])
 
     def test_upload_job_skips_cover_when_cover_read_raises_os_error(self):
@@ -267,8 +265,6 @@ class SyncPlanTests(unittest.TestCase):
         ui_module = load_ui_module(lambda *args, **kwargs: None)
         self.addCleanup(ui_module._restore_stubs_for_tests)
         dashboard_plan = ui_module.dashboard._dashboard_plan
-        warnings = []
-
         class DatabaseAPI:
             @staticmethod
             def has_id(_book_id):
@@ -287,17 +283,17 @@ class SyncPlanTests(unittest.TestCase):
         })()
         with patch.object(dashboard_plan, "cover_bytes",
                           side_effect=OSError("cover unavailable")):
-            jobs, skipped = dashboard_plan.upload_jobs(
-                dialog, {},
-                {1: {"title": "Buch"}}, [(1, "u1", "EPUB", None)],
-                warning=warnings.append)
+            with patch.object(dashboard_plan, "log_warning") as warning:
+                jobs, skipped = dashboard_plan.upload_jobs(
+                    dialog, {},
+                    {1: {"title": "Buch"}}, [(1, "u1", "EPUB", None)])
         self.assertEqual(1, len(jobs))
         self.assertIsNone(jobs[0].cover_path)
         self.assertEqual([], skipped)
-        self.assertTrue(any("cover unavailable" in message
-                            for message in warnings))
+        warning.assert_called_once()
+        self.assertIn("cover unavailable", warning.call_args.args[0])
 
-    def test_cover_bytes_handles_bytes_paths_and_unexpected_values(self):
+    def test_cover_bytes_uses_calibre_bytes_or_none_contract(self):
         class DatabaseAPI:
             def __init__(self, value):
                 self.value = value
@@ -305,24 +301,19 @@ class SyncPlanTests(unittest.TestCase):
             def has_id(self, _book_id):
                 return True
 
-            def cover(self, book_id, as_file=False):
+            def cover(self, _book_id, as_file=False):
+                self.as_file = as_file
                 return self.value
 
         class Database:
             def __init__(self, value):
                 self.new_api = DatabaseAPI(value)
 
-        self.assertEqual(b"cover", cover_bytes(Database((b"cover", "jpg")), 1))
-        self.assertEqual(b"cover",
-                         library_cover_bytes(Database((b"cover", "jpg")), 1))
-        self.assertIsNone(cover_bytes(Database(("missing.jpg",)), 1))
-        with tempfile.NamedTemporaryFile(delete=False) as cover_file:
-            cover_file.write(b"cover-file")
-            path = cover_file.name
-        try:
-            self.assertEqual(b"cover-file", cover_bytes(Database((path, "jpg")), 1))
-        finally:
-            os.remove(path)
+        for value in (b"cover", None):
+            database = Database(value)
+            self.assertIs(value, cover_bytes(database, 1))
+            self.assertIs(value, library_cover_bytes(database, 1))
+            self.assertFalse(database.new_api.as_file)
 
     def test_cover_bytes_rejects_invalid_ids(self):
         class DatabaseAPI:
@@ -400,8 +391,6 @@ class SyncPlanTests(unittest.TestCase):
 
         database = Database()
         self.assertEqual(["tolino_read", "tolino_ignore"],
-                         missing_custom_columns(database))
-        self.assertEqual(["tolino_read", "tolino_ignore"],
                          create_custom_columns(database))
         self.assertEqual(
             [("tolino_read", "Gelesen (tolino)", "bool", False, True, {}),
@@ -409,7 +398,6 @@ class SyncPlanTests(unittest.TestCase):
             database.calls)
         # Zweiter Klick: nichts doppelt anlegen, auch wenn Calibre die neue
         # Spalte erst nach einem Neustart fuehrt.
-        self.assertEqual([], missing_custom_columns(database))
         self.assertEqual([], create_custom_columns(database))
 
     def test_a_single_column_can_be_created_on_its_own(self):
@@ -432,13 +420,9 @@ class SyncPlanTests(unittest.TestCase):
 
         database = Database()
         self.assertEqual(["tolino_ignore"],
-                         missing_custom_columns(database, ("tolino_ignore",)))
-        self.assertEqual(["tolino_ignore"],
                          create_custom_columns(database, ("tolino_ignore",)))
         self.assertEqual(["tolino_ignore"], database.calls)
         # Die andere Spalte bleibt unangetastet, auch beim zweiten Klick.
-        self.assertEqual(["tolino_read"],
-                         missing_custom_columns(database, ("tolino_read",)))
         self.assertEqual([], create_custom_columns(database, ("tolino_ignore",)))
         self.assertEqual(["tolino_ignore"], database.calls)
 
@@ -451,8 +435,6 @@ class SyncPlanTests(unittest.TestCase):
         class WithoutColumns:
             field_metadata = {"#tolino_id": {"datatype": "text"}}
 
-        self.assertEqual([], missing_custom_columns(WithoutColumns(),
-                                                    ("tolino_id",)))
         self.assertEqual([], create_custom_columns(WithoutColumns(),
                                                    ("tolino_id",)))
 
@@ -756,7 +738,7 @@ class SyncPlanTests(unittest.TestCase):
                  "formats": ["EPUB"]}},
             state,
             {"PublicationInventory": {"ebook": [{"resellerId": 3,
-                        "epubMetaData": {
+                        "deliverableId": "", "epubMetaData": {
                             "identifier": "978-3-16-148410-0",
                             "title": "Gekauftes Buch",
                             "author": [{"name": "Autorin"}]}}]}},
@@ -774,8 +756,9 @@ class SyncPlanTests(unittest.TestCase):
         """Der Datensatz verschwindet nicht mehr aus der Anzeige."""
         rows = compare_inventory(
             {}, {},
-            {"PublicationInventory": {"ebook": [{"epubMetaData": {
-                "identifier": "978-3-16-148410-0", "title": "Nur in tolino"}}]}},
+            {"PublicationInventory": {"ebook": [{"deliverableId": "",
+                "epubMetaData": {"identifier": "978-3-16-148410-0",
+                                  "title": "Nur in tolino"}}]}},
             ["EPUB"],
         )
         self.assertEqual(1, len(rows))
@@ -919,7 +902,6 @@ class SyncPlanTests(unittest.TestCase):
                                        ["EPUB"], upload_book_ids=set()))
 
     def test_stale_cloud_id_is_not_carried_into_upload_plan(self):
-        from ..comparison import compare_inventory
         metadata = {1: {"uuid": "u1", "title": "A", "formats": ["EPUB"]}}
         state = {"u1": {"tolino_id": "deleted-cloud-id"}}
         row = compare_inventory(metadata, state, [], ["EPUB"])[0]
@@ -1425,7 +1407,6 @@ class SyncPlanTests(unittest.TestCase):
                 "cdp_scripts.py",
                 "cdp_transport.py",
                 "cdp.py",
-                "icons.py",
                 "images/tolino_cloud_sync.png",
             }.issubset(set(plugin.namelist())))
             marker = next(name for name in plugin.namelist()
@@ -1543,9 +1524,8 @@ class MetadataUpdatePlanTests(unittest.TestCase):
     def test_selected_book_is_updated_in_place(self):
         book = self._book()
         state = self._state(book, meta_fp="stale")
-        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
-                                              only_book_ids={1})
-        self.assertEqual([], kept)
+        updates = plan_metadata_updates({1: book}, state, [],
+                                        only_book_ids={1})
         self.assertEqual(1, len(updates))
         record = unpack_meta_update_record(updates[0])
         self.assertEqual(1, record["book_id"])
@@ -1560,9 +1540,8 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         book = self._book()
         state = self._state(book, meta_fp="stale")
         for only in (set(), {"2"}):
-            kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
-                                                  only_book_ids=only)
-            self.assertEqual([], kept)
+            updates = plan_metadata_updates({1: book}, state, [],
+                                            only_book_ids=only)
             self.assertEqual([], updates)
 
     def test_selected_upload_is_never_silently_converted(self):
@@ -1570,36 +1549,32 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         book = self._book()
         state = self._state(book, meta_fp="stale")
         uploads = [(1, "u1", "EPUB", "d1")]
-        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"],
-                                              only_book_ids={1})
-        self.assertEqual(uploads, kept)
+        updates = plan_metadata_updates({1: book}, state, uploads,
+                                        only_book_ids={1})
         self.assertEqual([], updates)
 
     def test_replaced_file_stays_a_full_upload(self):
         book = self._book()
         state = self._state(book, content_fp="other-file", meta_fp="stale")
         uploads = [(1, "u1", "EPUB", "d1")]
-        kept, updates = plan_metadata_updates({1: book}, state, uploads, ["EPUB"],
-                                              only_book_ids={1})
-        self.assertEqual(uploads, kept)
+        updates = plan_metadata_updates({1: book}, state, uploads,
+                                        only_book_ids={1})
         self.assertEqual([], updates)
 
     def test_selected_metadata_update_does_not_need_the_book_file(self):
         """Metadaten lassen sich ohne ausgewählte Buchdatei patchen."""
         book = self._book(format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
-        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
-                                              only_book_ids={1})
-        self.assertEqual([], kept)
+        updates = plan_metadata_updates({1: book}, state, [],
+                                        only_book_ids={1})
         self.assertEqual(1, len(updates))
 
     def test_metadata_update_does_not_require_a_preferred_upload_format(self):
         """PDF-only/formatless books still support in-place metadata updates."""
         book = self._book(formats=["PDF"], format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
-        kept, updates = plan_metadata_updates(
-            {1: book}, state, [], ["EPUB"], only_book_ids={1})
-        self.assertEqual([], kept)
+        updates = plan_metadata_updates(
+            {1: book}, state, [], only_book_ids={1})
         self.assertEqual(1, len(updates))
         self.assertEqual("d1", updates[0][2])
 
@@ -1608,16 +1583,14 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         wer auswählt, bekommt den Abgleich."""
         book = self._book()
         state = {"u1": {"tolino_id": "d1", "fingerprint": "x"}}
-        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"],
-                                              only_book_ids={1})
-        self.assertEqual([], kept)
+        updates = plan_metadata_updates({1: book}, state, [],
+                                        only_book_ids={1})
         self.assertEqual(1, len(updates))
 
     def test_without_selection_every_qualifying_book_is_planned(self):
         book = self._book()
         state = self._state(book, meta_fp="stale")
-        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
-        self.assertEqual([], kept)
+        updates = plan_metadata_updates({1: book}, state, [])
         self.assertEqual(1, len(updates))
         self.assertEqual((1, "u1", "d1"), (updates[0][0], updates[0][1],
                                            updates[0][2]))
@@ -1625,7 +1598,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
     def test_unchanged_metadata_plans_nothing_without_explicit_selection(self):
         book = self._book()
         state = self._state(book)
-        kept, updates = plan_metadata_updates({1: book}, state, [], ["EPUB"])
+        updates = plan_metadata_updates({1: book}, state, [])
         self.assertEqual([], updates)
 
     def test_comparison_detected_metadata_difference_is_not_filtered_by_fp(self):
@@ -1641,14 +1614,14 @@ class MetadataUpdatePlanTests(unittest.TestCase):
             ["EPUB"])
         self.assertEqual("changed", rows[0]["status"])
         self.assertFalse(rows[0]["file_changed"])
-        _kept, updates = plan_metadata_updates(
-            {1: book}, state, [], ["EPUB"], only_book_ids={rows[0]["book_id"]})
+        updates = plan_metadata_updates(
+            {1: book}, state, [], only_book_ids={rows[0]["book_id"]})
         self.assertEqual(1, len(updates))
         self.assertEqual("d1", updates[0][2])
 
     def test_book_without_cloud_copy_is_skipped(self):
         book = self._book()
-        kept, updates = plan_metadata_updates({1: book}, {}, [], ["EPUB"])
+        updates = plan_metadata_updates({1: book}, {}, [])
         self.assertEqual([], updates)
 
     def test_uuid_object_and_uppercase_form_find_the_cloud_copy(self):
@@ -1664,9 +1637,8 @@ class MetadataUpdatePlanTests(unittest.TestCase):
                     "UUID('%s')" % canonical):
             with self.subTest(raw=raw):
                 book = self._book(uuid=raw)
-                kept, updates = plan_metadata_updates(
-                    {1: book}, state, [], ["EPUB"], only_book_ids={1})
-                self.assertEqual([], kept)
+                updates = plan_metadata_updates(
+                    {1: book}, state, [], only_book_ids={1})
                 self.assertEqual(1, len(updates))
                 self.assertEqual(canonical, updates[0][1])
 
@@ -1678,9 +1650,8 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         state = {"u1": {"tolino_id": "d1",
                         "content_fp": content_fingerprint(new_book, "EPUB"),
                         "meta_fp": metadata_fingerprint(old_book)}}
-        kept, updates = plan_metadata_updates({1: new_book}, state, [], ["EPUB"],
-                                              only_book_ids={1})
-        self.assertEqual([], kept)
+        updates = plan_metadata_updates({1: new_book}, state, [],
+                                        only_book_ids={1})
         self.assertEqual(1, len(updates))
         self.assertNotIn("series", updates[0][3])
 
@@ -1798,9 +1769,10 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertIs(sync_metadata, plan_module_metadata_plan)
 
     def test_sync_keeps_comparison_imports_compatible(self):
-        from ..comparison import compare_inventory as sync_compare_inventory
-        self.assertIs(sync_compare_inventory, comparison_compare_inventory)
-        self.assertEqual("new_in_calibre", sync_compare_inventory(
+        self.assertIs(comparison_compare_inventory,
+                      __import__("calibre_plugin.comparison",
+                                 fromlist=["compare_inventory"]).compare_inventory)
+        self.assertEqual("new_in_calibre", compare_inventory(
             {1: {"uuid": "u1", "formats": ["EPUB"]}}, {}, [], ["EPUB"])[0]["status"])
 
     def test_comparison_groups_cover_every_status(self):
@@ -1894,16 +1866,14 @@ class ConservativeMatchingTests(unittest.TestCase):
                 metadata[1]["ignored"] = True
             seen = []
 
-            def builder(_settings, _metadata, uploads):
-                seen.extend(uploads)
-                return [], []
-
-            plan_actions(
-                object(), {"preferred_formats": ["EPUB"]}, metadata,
-                dict(state),
-                {"uploads": [1, 2], "metadata": [1], "read": [],
-                 "unread": [], "cloud_deletions": []},
-                upload_builder=builder)
+            with patch("calibre_plugin.dashboard_plan.upload_jobs",
+                       side_effect=lambda _dialog, _settings, _metadata, uploads:
+                       (seen.extend(uploads) or [], [])):
+                plan_actions(
+                    object(), {"preferred_formats": ["EPUB"]}, metadata,
+                    dict(state),
+                    {"uploads": [1, 2], "metadata": [1], "read": [],
+                     "unread": [], "cloud_deletions": []})
             return [record[0] for record in seen]
 
         self.assertEqual([2], planned(True))
@@ -1926,7 +1896,7 @@ class ConservativeMatchingTests(unittest.TestCase):
         metadata = {1: {"uuid": "u1", "series": "Reihe", "ignored": True},
                     2: {"uuid": "u2", "series": "Reihe"}}
         state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": "t2"}}
-        self.assertEqual(1, automatic_action_count({}, metadata, state))
+        self.assertEqual(1, automatic_action_count(metadata, state))
 
     @staticmethod
     def _metadata(**values):
@@ -2062,7 +2032,6 @@ class ReadStateComparisonTests(unittest.TestCase):
             "format_signatures": {"EPUB": "1:1"}}
 
     def _rows(self, read_ids):
-        from ..comparison import compare_inventory
         inventory = [{"deliverableId": "t-1",
                       "epubMetaData": {"title": "Der Fall Collini",
                                        "author": [{"name": "F. v. Schirach"}]}},
@@ -2317,8 +2286,9 @@ class PrepareStateCopyTests(unittest.TestCase):
                 return self.refresh
 
             def inventory(self):
-                return [{"deliverableId": "t-1", "title": "Der Schwarm",
-                         "authors": "Frank Schatzing"}]
+                return parsed_inventory([{
+                    "deliverableId": "t-1", "title": "Der Schwarm",
+                    "authors": "Frank Schatzing"}])
 
             def read_ids(self):
                 return set()
@@ -2340,6 +2310,7 @@ class PrepareStateCopyTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(payloads))
+        self.assertIn("state", payloads[0])
         self.assertEqual("t-1", payloads[0]["state"][self.UUID]["tolino_id"])
         # Der gespeicherte Zustand bleibt unberuehrt: die Tolino-ID steht erst
         # nach dem bestaetigten Lauf in den Einstellungen.
@@ -2422,20 +2393,15 @@ class FingerprintCommitTests(unittest.TestCase):
     def _dashboard(ui_module):
         dashboard = ui_module.dashboard.SyncDashboard.__new__(
             ui_module.dashboard.SyncDashboard)
-
-        def upload_jobs(settings, metadata, uploads):
-            jobs = []
-            for upload in uploads:
-                record = unpack_upload_record(upload)
-                book = metadata.get(record["book_id"]) or {}
-                jobs.append(ui_module.common.SyncJob(
-                    record["book_id"], record["book_uuid"],
-                    record["format_name"], record["old_id"],
-                    "/library/%s.epub" % record["book_uuid"], None,
-                    book.get("title") or ""))
-            return jobs, []
-
-        dashboard._upload_jobs = upload_jobs
+        api = type("DatabaseAPI", (), {
+            "has_id": staticmethod(lambda _book_id: True),
+            "format_abspath": staticmethod(lambda _book_id, _fmt: __file__),
+            "cover": staticmethod(lambda _book_id, as_file=False: None),
+        })()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type("Database", (), {"new_api": api})(),
+        })()
+        dashboard.temp_files = []
         return dashboard
 
     def _synced_state(self, metadata):
@@ -2453,8 +2419,8 @@ class FingerprintCommitTests(unittest.TestCase):
 
     def _prepare(self, ui_module, metadata, previous, selection):
         settings = self._settings(previous)
-        preparation = self._dashboard(ui_module)._plan_actions(
-            settings, metadata, previous, selection)
+        preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+            self._dashboard(ui_module), settings, metadata, previous, selection)
         return settings, preparation
 
     @staticmethod
@@ -2602,8 +2568,8 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertNotIn("meta_verified_fp", worker.state["u1"])
         self.assertEqual([], worker.updates)
         # Und der naechste Lauf plant das Update erneut.
-        _kept, updates = plan_metadata_updates(
-            changed, worker.state, [], ["EPUB"], only_book_ids={1})
+        updates = plan_metadata_updates(
+            changed, worker.state, [], only_book_ids={1})
         self.assertEqual(1, len(updates))
 
     def test_only_the_successful_upload_of_a_batch_is_confirmed(self):
@@ -2616,8 +2582,11 @@ class FingerprintCommitTests(unittest.TestCase):
         settings, preparation = self._prepare(
             ui_module, changed, previous, self._selection([1, 2]))
 
-        def failing(path):
-            if "u2" in path:
+        attempts = []
+
+        def failing(_path):
+            attempts.append(True)
+            if len(attempts) == 2:
                 raise RuntimeError("Netz weg")
             return "new-1"
 
