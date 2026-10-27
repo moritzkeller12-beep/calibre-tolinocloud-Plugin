@@ -68,13 +68,20 @@ def load_ui_module(get_icons_result, qt_stub=None):
 
     class FakeIcon:
         def __init__(self, *args, **kwargs):
-            self._null = True
+            self._null = not args or not getattr(args[0], "data", None)
 
         def isNull(self):
             return self._null
 
+    class FakePixmap:
+        def loadFromData(self, data):
+            self.data = data
+            return bool(data)
+
     qt_core = types.ModuleType("qt.core")
     qt_core.QIcon = FakeIcon
+    qt_core.QPixmap = FakePixmap
+    qt_core.QByteArray = bytes
     for name in ("QCheckBox", "QComboBox", "QDialog", "QFormLayout",
                  "QGroupBox", "QLabel", "QLineEdit", "QMessageBox",
                  "QProgressBar", "QPushButton", "QThread", "QVBoxLayout",

@@ -17,6 +17,36 @@ class ToolbarIconTests(unittest.TestCase):
     def _load_ui_module(get_icons_result, qt_stub=None):
         return load_ui_module(get_icons_result, qt_stub)
 
+    def test_genesis_loads_the_bundled_icon_when_calibre_helper_returns_null(self):
+        class Signal:
+            def connect(self, _slot):
+                pass
+
+        class Action:
+            triggered = Signal()
+
+            def setIcon(self, icon):
+                self.icon = icon
+
+        class Plugin:
+            pass
+
+        icon_module = self._load_ui_module(None)
+        icon_module._test_resources = {
+            "images/tolino_cloud_sync.png": b"png-data"}
+        try:
+            plugin = Plugin()
+            plugin.qaction = Action()
+            plugin.show_dashboard = lambda: None
+            plugin.load_resources = lambda _names: icon_module._test_resources
+            plugin._keepalive_credentials = lambda: {}
+            plugin._keepalive_persist = lambda *_args: None
+            icon = icon_module.TolinoSyncAction._toolbar_icon(plugin)
+            self.assertIsNotNone(icon)
+            self.assertFalse(icon.isNull())
+        finally:
+            icon_module._restore_stubs_for_tests()
+
     def test_calibre_entry_does_not_load_the_dashboard_or_workers(self):
         ui_module = self._load_ui_module(None)
         try:

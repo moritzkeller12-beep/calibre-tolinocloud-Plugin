@@ -12,9 +12,9 @@ class TolinoSyncAction(InterfaceAction):
 
     def genesis(self):
         self.qaction.triggered.connect(self.show_dashboard)
-        from calibre.gui2 import get_icons
-        self.qaction.setIcon(
-            get_icons("images/tolino_cloud_sync.png", "Tolino Cloud Sync"))
+        icon = self._toolbar_icon()
+        if icon is not None and not icon.isNull():
+            self.qaction.setIcon(icon)
         # The keep-alive rotates the stored token periodically while Calibre
         # runs, so an adopted token survives between syncs.
         try:
@@ -55,3 +55,15 @@ class TolinoSyncAction(InterfaceAction):
         from .ui_dashboard import SyncDashboard
         dialog = SyncDashboard(self.gui)
         dialog.exec()
+
+    def _toolbar_icon(self):
+        """Load the plugin icon directly from the installed ZIP archive."""
+        from qt.core import QIcon, QPixmap
+        resources = self.load_resources(["images/tolino_cloud_sync.png"])
+        data = resources.get("images/tolino_cloud_sync.png")
+        if not data:
+            return None
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return None
+        return QIcon(pixmap)
