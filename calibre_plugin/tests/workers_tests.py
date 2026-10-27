@@ -690,7 +690,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.sync_column_enabled = False
         dashboard.finish_thread = lambda: None
-        dashboard.set_refresh_token = lambda value: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
         worker.account = {"hardware_id": "hw"}
@@ -1053,7 +1052,6 @@ class PrepareWorkerTests(unittest.TestCase):
             dashboard = ui_module.dashboard.SyncDashboard.__new__(
                 ui_module.dashboard.SyncDashboard)
             dashboard.account_name = "A"
-            dashboard.set_refresh_token = lambda value: updated.append(value)
             with patch("calibre_plugin.client.TolinoClient", FakeClient), \
                  patch("calibre_plugin.config.save_credentials",
                        lambda *args: saved.append(args)):

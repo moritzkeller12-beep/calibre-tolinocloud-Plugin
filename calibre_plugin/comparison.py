@@ -353,7 +353,6 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     file_changed = False
     tolino_id = ""
     status = "new_in_calibre"
-    candidate_indexes = []
     if remote_index is not None:
         matched.add(remote_index)
         remote_row = remote.rows[remote_index]
@@ -374,7 +373,6 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     elif ambiguous:
         status = "review"
         disputed.update(candidates)
-        candidate_indexes = candidates
     else:
         # A title alone is only a hint. It never consumes a remote row
         # and never seeds the sync state.
@@ -387,7 +385,6 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
             status = "review"
             match_reason = "title_only"
             disputed.update(free_titles)
-            candidate_indexes = free_titles
             if len(free_titles) > 1:
                 match_reason = "ambiguous"
         else:
@@ -408,10 +405,6 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         "group": "ignored" if ignored else comparison_group(status),
         "selected": status == "new_in_calibre" and not ignored,
         "match_reason": match_reason,
-        "candidate_ids": [str(remote.rows[index].get("tolino_id") or "")
-                          for index in candidate_indexes
-                          if remote.rows[index].get("tolino_id")],
-        "duplicate_count": remote.title_counts.get(title_key, 0),
         "file_changed": file_changed,
         "has_preferred_format": bool(selected_format),
         **_read_flags(tolino_id, read_known, read_ids),

@@ -4,6 +4,8 @@ import os
 import re
 from collections.abc import Iterable
 
+from .identifiers import is_real_uuid
+
 
 TOLINO_COLUMN = "#tolino_id"
 # Optionale Ja/Nein-Spalten: #tolino_ignore nimmt Buecher vom Abgleich aus,
@@ -232,13 +234,6 @@ def update_read_column(database, updates):
     return len(values)
 
 
-def tolino_column_active(values, database):
-    """Read and write account-scoped IDs when the custom column is enabled."""
-    return (isinstance(values, dict)
-            and bool(values.get("use_tolino_column"))
-            and custom_column_available(database))
-
-
 def update_tolino_ids(database, updates, enabled=True, account_name=None):
     """Merge this account's IDs into the shared Calibre custom column."""
     if not enabled or not updates or not custom_column_available(database):
@@ -283,6 +278,29 @@ def iter_book_ids(database):
 def metadata_by_id(database, book_id):
     """Read metadata by a real Calibre id, never by a filtered-view index."""
     return database.new_api.get_metadata(book_id)
+
+
+def uuid_coverage(database, iter_books=None, metadata_for=None):
+    """(gesamt, mit echter UUID, mit Ersatzkennung) aus der Bibliothek.
+
+    Grundlage fuer die Entscheidung, ob die Ersatzkennung ``calibre-<id>``
+    samt Migration noch gebraucht wird: liefert Calibre durchgehend echte
+    UUIDs, ist sie ueberfluessig.
+
+    Gezaehlt wird die kanonische UUID-Form (``is_real_uuid``): ein
+    vorhandener, aber unbrauchbarer Wert zaehlt zum fehlenden Teil, denn
+    genau dann springt die Ersatzkennung ein.
+    """
+    books = iter_books or iter_book_ids
+    read = metadata_for or metadata_by_id
+    total = real = 0
+    for book_id in books(database):
+        metadata = read(database, book_id) or {}
+        total += 1
+        raw = metadata.get("uuid") if hasattr(metadata, "get") else ""
+        if is_real_uuid(str(raw or "")):
+            real += 1
+    return total, real, total - real
 
 
 def normalize_formats(value):

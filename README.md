@@ -37,7 +37,9 @@ nach der Bestätigung vor dem Start gelöscht.
   der Bibliotheksspalte angezeigt. In den Einstellungen legt je Spalte ein
   eigener Knopf (**«#tolino_id anlegen …»**, **«#tolino_read anlegen …»**,
   **«#tolino_ignore anlegen …»**) genau diese Spalte an, falls sie fehlt;
-  danach Calibre neu starten.
+  danach Calibre neu starten. Mit **«UUID-Abdeckung prüfen …»** zählt
+  dasselbe Fenster, wie viele Bücher eine echte UUID haben und wie viele die
+  Ersatzkennung `calibre-<Nummer>` nutzen.
 - Für **gekaufte Bücher, die schon in tolino liegen**: lege zusätzlich eine
   Spalte **`#tolino_ignore`** vom Typ **Ja/Nein** an und setze sie bei diesen
   Büchern auf «Ja». Sie werden nicht hochgeladen und nicht verändert – damit
@@ -51,6 +53,10 @@ nach der Bestätigung vor dem Start gelöscht.
   sich beide Seiten, steht das Buch unter «Zu prüfen» und wird erst nach einem
   Klick auf «Gelesen» angeglichen. In Calibre gelesene Bücher werden nach dem
   ersten Upload auch in tolino als gelesen markiert.
+- Der **Zugangstoken wird nie angezeigt**: er liegt nur im Konto (nicht mehr
+  zusätzlich in einem Eingabefeld). Das Feld «Zugangstoken» ist reine
+  Handeingabe – leer lassen heisst «gespeicherten Zugang behalten»; mit
+  **«Abmelden»** löschst du den gespeicherten Zugang eines Kontos.
 - Das Plugin verwendet eine **inoffizielle Schnittstelle**. Es gibt keine
   Stabilitäts- oder Verfügbarkeitsgarantie; Endpunkte und Verhalten können
   sich ohne Vorwarnung ändern.

@@ -48,6 +48,9 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         dashboard = ui_module.dashboard.SyncDashboard.__new__(ui_module.dashboard.SyncDashboard)
         dashboard.thread = thread
         dashboard.values = lambda: settings
+        # Der Zugang liegt im Konto; der Stub sagt, welcher Token drin steht.
+        dashboard._effective_refresh = lambda: str(
+            (settings or {}).get("refresh_token") or "")
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.sync_column_enabled = None
         return dashboard
@@ -114,7 +117,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         ui_module = self._ui_module()
         try:
             settings = self._settings()
-            ui_module.dashboard.tolino_column_active = lambda *args: True
             dashboard = self._dashboard(ui_module, settings)
             dashboard.gui.current_db = type(
                 "Database", (), {"field_metadata": {"#tolino_id": {}}})()
@@ -142,7 +144,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                               "hardware_id": "hw", "refresh_token": "token",
                               "state": {}}],
                 "active_account": "konto",
-                "use_tolino_column": True,
             })
 
             class FieldMetadata:
@@ -162,7 +163,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
 
-    def test_sync_column_uses_global_settings_not_visible_values(self):
+    def test_sync_column_follows_the_calibre_field_metadata(self):
+        """Nur die Spalte entscheidet -- eine Einstellung gab es frueher."""
         ui_module = self._ui_module()
         original_preferences = config.PREFERENCES
         try:
@@ -172,7 +174,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                               "hardware_id": "hw", "refresh_token": "token",
                               "state": {}}],
                 "active_account": "konto",
-                "use_tolino_column": True,
             })
             cases = (({"#tolino_id": {}}, 1, True),
                      ({"#tolino_id": {}}, 2, True),
@@ -204,7 +205,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         try:
             warnings = []
             self._stub_warning(ui_module, warnings)
-            ui_module.dashboard.tolino_column_active = lambda *args: True
             settings = dict(self._settings(), refresh_token="")
             dashboard = self._dashboard(ui_module, settings)
             prepared = []
@@ -219,7 +219,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         ui_module = self._ui_module()
         try:
             errors = []
-            ui_module.dashboard.tolino_column_active = lambda *args: True
             settings = self._settings()
             dashboard = self._dashboard(ui_module, settings)
 
@@ -250,7 +249,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_thread = None
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
-            dashboard.set_refresh_token = lambda value: None
             dashboard._client_for = lambda given: object()
             dashboard._confirm_comparison = (
                 lambda comp, given, client_factory=None, automatic=0: None)
@@ -331,12 +329,15 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertIn("1 Löschung", labels[0])
         self.assertEqual([True], status_updates)
 
-    def test_prepare_ready_hands_the_rotated_token_to_the_plan(self):
+    def test_prepare_ready_stores_the_rotated_token_in_the_account(self):
         """Der SyncWorker darf nie den verbrauchten Token der Vorbereitung
-        bekommen: die Rotation muss vor dem Plan in settings stehen."""
+        bekommen: die Rotation steht im Konto, und von dort liest der Store
+        sie -- der uebergebene Snapshot traegt sie gar nicht mehr."""
         ui_module = self._ui_module()
+        original_preferences = config.PREFERENCES
         try:
-            settings = self._settings()
+            config.PREFERENCES = config.JSONConfig("test")
+            settings = dict(self._settings(), account_name="konto")
             dashboard = ui_module.dashboard.SyncDashboard.__new__(
                 ui_module.dashboard.SyncDashboard)
             dashboard.account_name = "konto"
@@ -344,7 +345,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_thread = None
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
-            dashboard.set_refresh_token = lambda value: None
             dashboard._client_for = lambda given: object()
             dashboard._confirm_comparison = (
                 lambda comp, given, client_factory=None, automatic=0: {
@@ -355,10 +355,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
 
             def plan(given, metadata, state, selection):
                 planned.append(dict(given))
-                return {"jobs": [], "removals": [], "removal_titles": {},
-                        "meta_updates": [], "series_map": {},
-                        "skipped_uploads": [], "selected_read": [],
-                        "selected_unread": []}
+                return _preparation()
 
             dashboard._plan_actions = plan
             dashboard._start_sync_worker = (
@@ -368,11 +365,18 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 "metadata": {}, "state": {}, "comparison": [],
                 "refresh": "tok-rotated", "hardware": "hw-rotated",
             })
+            stored = config.account_by_name("konto")["refresh_token"]
+            worker_store = ui_module.dashboard.CredentialStore(
+                started[0], "konto").freshest()
         finally:
+            config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
-        self.assertEqual("tok-rotated", planned[0]["refresh_token"])
-        self.assertEqual("tok-rotated", started[0]["refresh_token"])
+        self.assertEqual("tok-rotated", stored)
+        self.assertEqual("tok-rotated", worker_store["refresh_token"])
         self.assertEqual("hw-rotated", started[0]["hardware_id"])
+        # Der Snapshot traegt den Token der Vorbereitung nicht mehr: gelesen
+        # wird er aus dem Konto, das ist die einzige Quelle.
+        self.assertNotEqual("tok-rotated", planned[0].get("refresh_token", ""))
 
     def test_skipped_uploads_are_reported_before_the_run(self):
         ui_module = self._ui_module()
@@ -392,7 +396,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             })()
             dashboard.refresh = type("Edit", (), {"text": lambda self: "t"})()
             dashboard.update_status = lambda: None
-            dashboard.persist_refresh_token = lambda value: None
             for name in ("progress_changed", "sync_completed", "sync_failed"):
                 setattr(dashboard, name, lambda *args: None)
             dashboard._start_sync_worker(settings, {
@@ -516,7 +519,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard.prepare_thread = None
         dashboard.prepare_worker = None
         dashboard._finish_prepare = lambda: None
-        dashboard.set_refresh_token = lambda value: None
         return dashboard
 
     def _planning_dashboard(self, ui_module, **extra):

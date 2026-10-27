@@ -1404,13 +1404,14 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         saved = []
         dashboard = type("Dashboard", (), {})()
         dashboard.account_name = "konto"
-        dashboard.refresh = Field("alt")
+        # Das Feld ist leer: der Token kommt ins Konto, nicht in die UI.
+        dashboard.refresh = Field("")
         dashboard.hardware = Field("hw-alt")
-        dashboard.set_refresh_token = dashboard.refresh.setText
+        dashboard.update_status = lambda: None
         try:
             with patch("calibre_plugin.ui_dashboard.save_credentials",
                        lambda *args: saved.append(args)):
-                ui_module.dashboard.SyncDashboard.persist_refresh_token(
+                ui_module.dashboard.SyncDashboard.store_refresh(
                     dashboard, "tok-neu")
         finally:
             ui_module._restore_stubs_for_tests()

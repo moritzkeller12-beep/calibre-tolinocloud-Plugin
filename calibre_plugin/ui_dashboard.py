@@ -14,15 +14,13 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
 from calibre.gui2 import error_dialog, info_dialog
 from .client import make_client
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
-                     save_account, save_credentials, save_settings,
-                     set_active_account, settings)
+                     load_state, save_account, save_credentials,
+                     save_settings, set_active_account, settings)
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
-                      create_custom_columns, ignore_column_available,
-                      iter_book_ids, metadata_by_id, read_column_available,
-                      safe_format_path, tolino_column_active,
-                      update_read_column, update_tolino_ids)
-from .config import load_state
-from .config import settings as _global_settings
+                      create_custom_columns, custom_column_available,
+                      ignore_column_available, iter_book_ids, metadata_by_id,
+                      read_column_available, safe_format_path,
+                      update_read_column, update_tolino_ids, uuid_coverage)
 
 from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
@@ -53,11 +51,9 @@ def _offer_next_step(dialog):
         pass  # Test-Stub oder bereits geschlossenes Fenster
 
 
-def _persist_sync_result(dialog, state, refresh, updates,
-                         always_refresh=False):
+def _persist_sync_result(dialog, state, refresh, updates):
     """Ergebnis speichern und die optionalen Calibre-Spalten aktualisieren."""
-    _persist_run(dialog, state, refresh, updates,
-                 always_refresh=always_refresh)
+    _persist_run(dialog, state, refresh, updates)
     if dialog.sync_column_enabled:
         update_tolino_ids(
             dialog.gui.current_db, updates, enabled=True,
@@ -73,13 +69,13 @@ def _persist_sync_result(dialog, state, refresh, updates,
                         "geschrieben werden: %s" % sanitize_error(exc))
 
 
-def _persist_run(dialog, state, refresh, updates, always_refresh=False):
+def _persist_run(dialog, state, refresh, updates):
     """Ergebnis eines Laufs unter dem KONTO DES LAUFS sichern.
 
     Ein Speicherfehler darf das Ergebnis nie verschlucken: ohne diesen
     Schutz bliebe der Abschlussdialog aus, und ein erfolgreicher Upload
-    sähe aus wie «nichts passiert». UI-Felder werden nur überschrieben,
-    solange dieses Konto noch angezeigt wird.
+    sähe aus wie «nichts passiert». Zugangsdaten landen ausschliesslich im
+    Konto -- nie mehr zusaetzlich in einem Eingabefeld.
     """
     account_name = _worker_account_name(dialog)
     worker = dialog.worker
@@ -92,10 +88,6 @@ def _persist_run(dialog, state, refresh, updates, always_refresh=False):
             hardware = str(account_by_name(account_name).get("hardware_id") or "")
         if refresh and account_name:
             save_credentials(account_name, refresh, hardware)
-        if account_name and dialog.account_name == account_name:
-            if always_refresh or (refresh and
-                                  refresh != dialog.refresh.text().strip()):
-                dialog.set_refresh_token(refresh)
         if account_name:
             save_account(account_name, {
                 "state": state, "refresh_token": refresh,
@@ -253,6 +245,14 @@ class SyncDashboard(QDialog):
             # Nur die erste Zeile traegt die Beschriftung; drei eigene
             # Zeilen sind der klarere Weg als ein Knopf fuer alles.
             transfer.addRow("Calibre-Spalten" if index == 0 else "", button)
+        # Diagnose fuer die offene Frage, ob die Ersatzkennung
+        # ``calibre-<id>`` samt Migration noch gebraucht wird.
+        self.uuid_button = QPushButton("UUID-Abdeckung prüfen …")
+        self.uuid_button.setToolTip(
+            "Zählt, wie viele Bücher eine echte UUID haben und wie viele die "
+            "Ersatzkennung calibre-<Nummer> nutzen.")
+        self.uuid_button.clicked.connect(self.check_uuid_coverage)
+        transfer.addRow("", self.uuid_button)
 
     def _build_account_settings(self):
         """Kontoverwaltung und die beiden technischen Zugangsfelder."""
@@ -269,11 +269,21 @@ class SyncDashboard(QDialog):
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
         self.refresh.setEchoMode(QLineEdit.Password)
-        self.refresh.setPlaceholderText("Wird bei der Anmeldung gesetzt")
+        # Das Feld zeigt den Token nicht an: das Konto ist die Quelle, ein
+        # leeres Feld heisst «gespeicherten Zugang behalten».
+        self.refresh.setPlaceholderText(
+            "Gespeichert – nur zum Ersetzen eintippen")
         accounts.addRow("Aktives Konto", self.account_select)
         accounts.addRow("", account_buttons)
         accounts.addRow("Geräte-ID (automatisch)", self.hardware)
         accounts.addRow("Zugangstoken (nur bei Problemen ändern)", self.refresh)
+        # Das Feld ist Handeingabe ohne Zustand; abgemeldet wird ausdruecklich
+        # hier -- sonst gaebe es keinen Weg mehr, den Zugang zu loeschen.
+        self.logout_button = QPushButton("Abmelden")
+        self.logout_button.setToolTip(
+            "Löscht den gespeicherten Zugang dieses Kontos.")
+        self.logout_button.clicked.connect(self.logout)
+        accounts.addRow("", self.logout_button)
 
     def _build_footer(self, root):
         """Schliessen-Knopf ohne QDialogButtonBox (Qt6-Rollenwarnung)."""
@@ -304,11 +314,33 @@ class SyncDashboard(QDialog):
             show=True, show_copy_button=False)
         self._refresh_column_flags(database)
 
+    def check_uuid_coverage(self):
+        """Zaehlen: echte UUIDs gegen die Ersatzkennung der Zuordnung."""
+        database = getattr(self.gui, "current_db", None)
+        try:
+            total, real, fallback = uuid_coverage(database)
+        except Exception as exc:
+            log_warning("UUID-Abdeckung nicht lesbar: %s"
+                        % sanitize_error(exc))
+            error_dialog(self, "UUID-Abdeckung", str(exc), show=True)
+            return
+        if not total:
+            info_dialog(self, "UUID-Abdeckung",
+                        "Keine Bücher in dieser Bibliothek gefunden.",
+                        show=True, show_copy_button=False)
+            return
+        info_dialog(
+            self, "UUID-Abdeckung",
+            "%d von %d Büchern haben eine echte UUID; bei %d fehlt sie "
+            "(Ersatzkennung calibre-<Nummer>)." % (real, total, fallback),
+            show=True, show_copy_button=False)
+
     def _refresh_column_flags(self, database):
         """Spaltenstatus neu lesen: der naechste Vergleich nutzt sie sofort."""
         try:
-            self.sync_column_enabled = tolino_column_active(
-                _global_settings(), database)
+            # Die Spalte selbst entscheidet -- frueher konnte eine
+            # Einstellung sie zusaetzlich abschalten.
+            self.sync_column_enabled = custom_column_available(database)
             self.read_column_enabled = read_column_available(database)
         except Exception as exc:
             log_warning("Spaltenstatus konnte nicht gelesen werden: %s"
@@ -422,12 +454,12 @@ class SyncDashboard(QDialog):
                 save_account(self.account_name, {"partner_id": partner_id})
         self.partner.setCurrentIndex(max(0, self.partner.findData(partner_id)))
         self.hardware.setText(values["hardware_id"] or hardware_id())
-        self.refresh.setText(values["refresh_token"])
+        # Der Token steht NUR im Konto (config). Ein Feldinhalt war ein
+        # zweiter Ort, der einen im Hintergrund rotierten Token mit der
+        # alten Kopie ueberschreiben konnte -- jetzt bleibt es leer.
+        self.refresh.setText("")
         # Vergleichsstand fuer values(): nur was der Nutzer WIRKLICH aendert,
-        # darf den gespeicherten Zugang ersetzen. Ein im Hintergrund
-        # rotierter Token liegt nicht im Feld und wuerde sonst von der alten
-        # Kopie ueberschrieben.
-        self._loaded_refresh = normalize_refresh_token(self.refresh.text())
+        # darf die gespeicherte Geraetekennung ersetzen.
         self._loaded_hardware = self.hardware.text().strip()
         self.formats.setText(", ".join(values["preferred_formats"]))
         self.update_status()
@@ -452,7 +484,7 @@ class SyncDashboard(QDialog):
             self.start_sync()
 
     def update_status(self):
-        logged_in = bool(self.refresh.text().strip())
+        logged_in = bool(self._effective_refresh())
         running = _dialog_busy(self)
         if running:
             # Sperren und «… läuft»-Text kommen aus dem gemeinsamen Helfer;
@@ -490,45 +522,66 @@ class SyncDashboard(QDialog):
                 "Vergleicht deine Calibre-Bibliothek mit tolino."
                 if logged_in else "Noch nicht angemeldet. " + RELOGIN)
 
-    def set_refresh_token(self, refresh):
-        normalized = normalize_refresh_token(refresh)
-        self.refresh.setText(normalized)
-        # Frisch gelesen heisst gewollt: der Wert ist jetzt der Vergleichsstand
-        # fuer values().
-        self._loaded_refresh = normalized
+    def _stored_refresh(self):
+        """Gespeicherter Zugang des ANGEGEZEIGTEN Kontos -- nie ein anderes."""
+        account = self._selected_account() or {}
+        return normalize_refresh_token(account.get("refresh_token") or "")
+
+    def _typed_refresh(self):
+        """Von Hand eingetippter Token; leer heisst «nichts ersetzen»."""
+        refresh = getattr(self, "refresh", None)
+        return normalize_refresh_token(refresh.text()) if refresh is not None else ""
+
+    def _effective_refresh(self):
+        """Der Token, mit dem gearbeitet wird: eingetippt vor gespeichert."""
+        return self._typed_refresh() or self._stored_refresh()
+
+    def _secret_tokens(self):
+        """Zugangsdaten fuer die Redaktion von Fehlertexten."""
+        return tuple(token for token in
+                     (self._stored_refresh(), self._typed_refresh()) if token)
+
+    def store_refresh(self, refresh, hardware=""):
+        """Token im Konto speichern -- der einzige Ort fuer Zugangsdaten."""
+        token = normalize_refresh_token(refresh)
+        if not token or not self.account_name:
+            return
+        save_credentials(
+            self.account_name, token,
+            str(hardware or "").strip() or self.hardware.text().strip()
+            or hardware_id())
         self.update_status()
 
-    def persist_refresh_token(self, refresh):
-        """Rotierten Token speichern (derselbe Weg wie im Worker)."""
-        self.set_refresh_token(refresh)
-        save_credentials(self.account_name, self.refresh.text(),
-                         self.hardware.text().strip() or hardware_id())
+    def logout(self):
+        """Nur den gespeicherten Zugang loeschen -- Konto und ID bleiben."""
+        if not self.account_name:
+            return
+        save_account(self.account_name, {"refresh_token": ""},
+                     active=self.account_name)
+        self.refresh.setText("")
+        self.update_status()
 
     def _selected_account(self):
         """The account this dialog shows – never a different 'active' one."""
         return account_by_name(getattr(self, "account_name", None))
 
     def values(self):
-        refresh_token = normalize_refresh_token(self.refresh.text())
+        """Sichtbare Werte des Kontos; der Token nur, wenn eingetippt wurde.
+
+        Ohne Eingabe fehlt der Schluessel ganz: ``save_account()`` mischt
+        nur vorhandene Schluessel und laesst den gespeicherten Token damit
+        unberuehrt -- auch wenn der Keep-alive ihn gerade rotiert hat.
+        """
         account = self._selected_account() or settings()
-        if refresh_token == getattr(self, "_loaded_refresh", None):
-            # Unveraendertes Feld: es gilt der GESPEICHERTE Zugang. Hat der
-            # Keep-alive im Hintergrund rotiert, wuerde die alte Kopie sonst
-            # beim Speichern oder beim Sync die Rotation verbrennen.
-            stored_token = normalize_refresh_token(
-                account.get("refresh_token") or "")
-            if stored_token:
-                refresh_token = stored_token
         hardware = self.hardware.text().strip() or hardware_id()
         if hardware == getattr(self, "_loaded_hardware", None):
             stored_hardware = str(account.get("hardware_id") or "").strip()
             if stored_hardware:
                 hardware = stored_hardware
-        return {
+        values = {
             "account_name": self.account_name,
             "partner_id": self.partner.currentData(),
             "hardware_id": hardware,
-            "refresh_token": refresh_token,
             "preferred_formats": ([
                 value for value in dict.fromkeys(
                     x.strip().upper() for x in self.formats.text().split(",")
@@ -537,6 +590,10 @@ class SyncDashboard(QDialog):
             "state": (account.get("state")
                       if isinstance(account.get("state"), dict) else {}),
         }
+        typed = self._typed_refresh()
+        if typed:
+            values["refresh_token"] = typed
+        return values
 
     def _login_running(self):
         """Läuft gerade eine Anmeldeprüfung oder ein Anmeldefenster?"""
@@ -553,7 +610,13 @@ class SyncDashboard(QDialog):
         if self._login_running():
             return  # eine Prüfung oder Anmeldung läuft bereits
         settings = self.values()
-        if settings["refresh_token"]:
+        if self._typed_refresh():
+            # Von Hand eingetippt: erst ins Konto speichern, dann pruefen --
+            # danach ist das Feld wieder leer.
+            self.store_refresh(self._typed_refresh())
+            self.refresh.setText("")
+            settings = self.values()
+        if self._effective_refresh():
             self._check_stored_login(settings)
             return
         self._start_login_window(settings)
@@ -578,7 +641,7 @@ class SyncDashboard(QDialog):
         """Prüfung bestanden: Anmeldung bleibt gültig."""
         try:
             self._login_cleanup()
-            self.persist_refresh_token(refresh)
+            self.store_refresh(refresh)
             self.status.setText("Angemeldet.")
             _offer_next_step(self)
         except RuntimeError:
@@ -630,11 +693,9 @@ class SyncDashboard(QDialog):
     def login_completed(self, refresh, hardware):
         try:
             self._login_cleanup()
-            self.set_refresh_token(refresh)
             if hardware:
                 self.hardware.setText(str(hardware))
-            self.persist_refresh_token(refresh)
-            self.update_status()
+            self.store_refresh(refresh, str(hardware or ""))
             # Erfolg steht in der Statuszeile -- kein zusaetzlicher modaler
             # Dialog fuer den Normalfall.
             self.status.setText("Angemeldet.")
@@ -654,12 +715,7 @@ class SyncDashboard(QDialog):
             # Technische Details (inkl. Traceback) nur ins Log.
             # Der sichtbare Zugang ist ein bekanntes Geheimnis: er darf
             # weder im Dialog noch im Log auftauchen.
-            refresh = getattr(self, "refresh", None)
-            try:
-                token = str(refresh.text()) if refresh is not None else ""
-            except Exception:
-                token = ""
-            secrets = (token,) if token else ()
+            secrets = self._secret_tokens()
             if isinstance(error, BaseException):
                 detail = report_error(error, "Anmeldefenster", secrets)
             else:
@@ -713,14 +769,13 @@ class SyncDashboard(QDialog):
         if self.thread is not None or getattr(self, "prepare_thread", None) is not None:
             return
         settings = self.values()
-        if not settings["refresh_token"]:
+        if not self._effective_refresh():
             status = getattr(self, "status", None)
             if status is not None:
                 status.setText("Nicht angemeldet.")
             return
         self._save_visible_account(settings)
-        self.sync_column_enabled = tolino_column_active(
-            _global_settings(), self.gui.current_db)
+        self.sync_column_enabled = custom_column_available(self.gui.current_db)
         settings["sync_column_enabled"] = self.sync_column_enabled
         self.read_column_enabled = read_column_available(self.gui.current_db)
         settings["read_column_enabled"] = self.read_column_enabled
@@ -797,12 +852,10 @@ class SyncDashboard(QDialog):
         # noch angezeigt wird. Gespeichert wurde bereits unter dem Konto.
         refresh = payload.get("refresh")
         if refresh:
-            # Der SyncWorker startet mit DIESEM Dict. Ohne die Uebernahme
-            # wuerde er den schon verbrauchten Token aus der Vorbereitung
-            # erneut einloesen (A02).
-            settings["refresh_token"] = refresh
-            if self.account_name == account_name:
-                self.set_refresh_token(refresh)
+            # Der einzige Ort fuer Zugangsdaten ist das Konto in config. Der
+            # SyncWorker holt den frischen Token von dort selbst ab
+            # (CredentialStore.freshest), damit ein schon verbrauchter Token
+            # nicht erneut eingeloest wird (A02).
             save_credentials(account_name, refresh,
                              payload.get("hardware") or settings["hardware_id"])
         hardware = getattr(self, "hardware", None)
@@ -1088,7 +1141,7 @@ class SyncDashboard(QDialog):
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
         _persist_sync_result(
             self, getattr(worker, "state", {}), refresh,
-            getattr(worker, "updates", ()), always_refresh=True)
+            getattr(worker, "updates", ()))
         self.finish_thread()
         if cancelled:
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),

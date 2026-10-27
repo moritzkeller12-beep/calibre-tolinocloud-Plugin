@@ -30,8 +30,9 @@ DEFAULT_ACCOUNT = {
     "refresh_token": "",
     "state": {},
 }
+# Nur globale Schluessel: Kontofelder stehen in `accounts` und werden dort
+# gelesen -- als Top-Level-Default waeren sie stille Leichen.
 DEFAULTS = {
-    **DEFAULT_ACCOUNT,
     PREFERRED_FORMATS: ["EPUB"],
     "accounts": [],
     "active_account": DEFAULT_ACCOUNT_NAME,
@@ -95,8 +96,6 @@ def settings():
         current = next(item for item in accounts if item["name"] == active)
         values = {PREFERRED_FORMATS: _copy(PREFERENCES.get(
             PREFERRED_FORMATS, DEFAULTS[PREFERRED_FORMATS]))}
-        values["use_tolino_column"] = bool(PREFERENCES.get(
-            "use_tolino_column", True))
         values.update({key: _copy(current[key]) for key in ACCOUNT_KEYS})
         values.update({
             "name": current["name"],
