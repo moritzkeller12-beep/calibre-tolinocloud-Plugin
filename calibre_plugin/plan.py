@@ -1,11 +1,10 @@
 """Pure sync-plan construction and collection/metadata action planning."""
-from .comparison import metadata_fingerprint
 from .identifiers import valid_book_uuid
 from .library import normalize_formats
 
 
 def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
-    """Build upload jobs for the explicitly selected Calibre book IDs."""
+    """Build upload jobs for selected Calibre book IDs with a supported format."""
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
     selected_ids = set(upload_book_ids or ())
@@ -22,11 +21,7 @@ def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
         selected_format = next(
             (fmt for fmt in preferred_formats if fmt in available), None)
         if not selected_format:
-            title = metadata.get("title") or "ohne Titel"
-            requested = ", ".join(preferred_formats) or "kein bevorzugtes Format"
-            raise ValueError(
-                "Buch %r (%s): kein unterstütztes Buchformat gefunden "
-                "(gesucht: %s)." % (book_id, title, requested))
+            continue
         old = state.get(book_uuid)
         old_id = old.get("tolino_id") if isinstance(old, dict) else None
         uploads.append((book_id, book_uuid, selected_format, old_id))
@@ -34,7 +29,7 @@ def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
 
 
 def merge_removals(explicit=()):
-    """Combine automatic and user-picked cloud deletions.
+    """Combine user-picked cloud deletions.
 
     `explicit` holds (book_uuid, tolino_id, title) triples marked in the
     comparison dialog. A cloud copy is deleted once. Returns the selected
@@ -180,29 +175,27 @@ def unpack_meta_update_record(record):
     }
 
 
-def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
-                          only_book_ids=None):
+def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     """In-place Metadaten-Updates (/meta) für die ausgewählten Bücher.
 
     Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat und sich
     Titel/Autor(en)/ISBN/Serie geändert haben oder der gespeicherte Zustand
-    keinen passenden Metadaten-Fingerabdruck kennt. `only_book_ids` grenzt auf die vom
-    Nutzer ausgewählten Bücher ein; ohne Angabe werden alle passenden Bücher
-    berücksichtigt. Bücher, die ohnehin hochgeladen werden, werden NIE
+    keinen passenden Metadaten-Fingerabdruck kennt. `only_book_ids` enthält
+    die vom Nutzer ausgewählten Bücher. Bücher, die ohnehin hochgeladen werden, werden NIE
     zusätzlich gepatcht – der Upload trägt die Metadaten mit.
 
-    Returns (uploads, meta_updates); uploads are returned unchanged.
+    Returns the planned metadata updates.
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
     upload_uuids = {str(unpack_upload_record(record)["book_uuid"])
                     for record in uploads}
-    requested = None if only_book_ids is None else {str(item) for item in only_book_ids}
+    requested = {str(item) for item in only_book_ids}
     updates = []
     for book_id, metadata in metadata_by_id.items():
         if not isinstance(metadata, dict):
             raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
-        if requested is not None and str(book_id) not in requested:
+        if str(book_id) not in requested:
             continue
         book_uuid = valid_book_uuid(metadata.get("uuid"))
         if not book_uuid or book_uuid in upload_uuids:
@@ -211,15 +204,8 @@ def plan_metadata_updates(metadata_by_id, state, uploads, preferred_formats=(),
         tolino_id = str(old.get("tolino_id") or "")
         if not tolino_id:
             continue
-        stored_meta_fp = old.get("meta_fp")
-        # Eine ausdruecklich ausgewaehlte Metadatenaktion muss den Cloud-Stand
-        # auch dann korrigieren, wenn der lokale Fingerabdruck bereits bekannt
-        # ist: die Cloud kann nach einem Upload trotzdem abweichen.
-        if (requested is None and stored_meta_fp
-                and stored_meta_fp == metadata_fingerprint(metadata)):
-            continue
         fields = metadata_update_fields(metadata)
         if not fields:
             continue
         updates.append((book_id, book_uuid, tolino_id, fields))
-    return list(uploads), updates
+    return updates

@@ -9,7 +9,6 @@ Das Plugin protokolliert weder Zugangstoken noch andere Anmeldedaten.
 | A01 | tolino-Sitzung beendet | im Web Reader neu anmelden, dann «Bei tolino anmelden» |
 | A02 | Zugangstoken verbraucht oder widerrufen | neu bei tolino anmelden |
 | A03 | noch nicht angemeldet | «Bei tolino anmelden» |
-| A05 | Buchhändler ohne automatische Anmeldung | anderen Händler wählen oder Zugangstoken unter «Einstellungen …» → «Konten und Verbindung» eintragen |
 | A06 | Anmeldung bei tolino fehlgeschlagen | Details im Log, später erneut |
 | A07 | ungültige Anmelde-Antwort | erneut versuchen |
 | B01 | Anmeldefenster offen, aber nicht angemeldet | im Fenster anmelden |

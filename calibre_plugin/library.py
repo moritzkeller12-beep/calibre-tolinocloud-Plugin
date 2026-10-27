@@ -1,11 +1,17 @@
 """Adapters for Calibre library and Qt APIs used by the plugin."""
 import json
-import os
 import re
 from collections.abc import Iterable
 
-
 TOLINO_COLUMN = "#tolino_id"
+# Optionale Ja/Nein-Spalten: #tolino_ignore nimmt Buecher vom Abgleich aus,
+# #tolino_read spiegelt den Lesestatus in die Bibliothek.
+TOLINO_IGNORE_COLUMN = "#tolino_ignore"
+TOLINO_READ_COLUMN = "#tolino_read"
+
+# Calibre liefert ein Ja/Nein-Feld je nach Weg als Bool, Text oder Zahl.
+_TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
+_FALSE_VALUES = frozenset(("false", "no", "nein", "0"))
 
 
 def _column_value(metadata):
@@ -54,24 +60,163 @@ def metadata_tolino_id(metadata, account_name=None):
     return str(value or "").strip()
 
 
-def custom_column_available(database):
-    """Check Calibre's public field metadata for the configured custom column."""
+def _field_info(database, column):
+    """(vorhanden, Feldinfo) aus Calibres oeffentlichen Feldmetadaten."""
     fields = getattr(database, "field_metadata", None)
     if callable(fields):
         fields = fields()
     if fields is None:
-        return False
+        return False, None
     try:
-        return TOLINO_COLUMN in fields
+        if column not in fields:
+            return False, None
     except (TypeError, AttributeError):
+        return False, None
+    # Ein Test-Stub oder eine aeltere Calibre-Fassung liefert moeglicherweise
+    # keine Feldinfo: dann gilt die Spalte als vorhanden, aber unbekannt.
+    try:
+        return True, fields[column]
+    except (TypeError, AttributeError, KeyError, IndexError):
+        return True, None
+
+
+def custom_column_available(database):
+    """Check Calibre's public field metadata for the configured custom column."""
+    return _field_info(database, TOLINO_COLUMN)[0]
+
+
+def bool_column_available(database, column):
+    """True, wenn Calibre ``column`` als Ja/Nein-Feld kennt.
+
+    Ein Text- oder Zahlenfeld gilt nicht: dort stuenden fremde Werte, die
+    wie ein versehentliches «ignoriert» aussehen koennten.
+    """
+    present, info = _field_info(database, column)
+    if not present:
         return False
+    datatype = info.get("datatype") if isinstance(info, dict) else None
+    return datatype in (None, "bool")
 
 
-def tolino_column_active(values, database):
-    """Read and write account-scoped IDs when the custom column is enabled."""
-    return (isinstance(values, dict)
-            and bool(values.get("use_tolino_column"))
-            and custom_column_available(database))
+def bool_column_value(metadata, column):
+    """Ja/Nein-Wert einer Spalte: True, False oder None (leer/unbekannt)."""
+    getter = getattr(metadata, "get", None)
+    value = getter(column, None) if callable(getter) else None
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().casefold()
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    return None
+
+
+def ignore_column_available(database):
+    """True, wenn Calibre die Spalte ``#tolino_ignore`` kennt."""
+    return bool_column_available(database, TOLINO_IGNORE_COLUMN)
+
+
+def metadata_ignored(metadata):
+    """True, wenn das Buch vom Abgleich ausgeschlossen ist.
+
+    Nur ein deutliches «Ja» zaehlt: ein leeres oder unbekanntes Feld ist
+    KEIN Ausschluss -- sonst verschwaende ein Buch wegen eines Tippfehlers
+    aus dem Vergleich.
+    """
+    return bool_column_value(metadata, TOLINO_IGNORE_COLUMN) is True
+
+
+# Spalten, die das Plugin benutzt: (Label ohne «#», Anzeigename, Calibre-Typ).
+CUSTOM_COLUMNS = (
+    ("tolino_id", "tolino-ID", "text"),
+    ("tolino_read", "Gelesen (tolino)", "bool"),
+    ("tolino_ignore", "Ignoriert (tolino)", "bool"),
+)
+
+# Klartext des Calibre-Typs fuer die Oberflaeche (je Spalte ein Knopf).
+COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein"}
+
+# In dieser Calibre-Sitzung angelegte Spalten. Calibre fuehrt eine neue
+# Spalte in `field_metadata` erst nach einem Neustart -- ohne diesen Merker
+# wollte ein zweiter Klick dieselben Spalten erneut anlegen.
+CREATED_COLUMNS = set()
+
+
+def _column_present(database, label):
+    """True, wenn die Spalte in der Bibliothek (oder in dieser Sitzung) da ist."""
+    return label in CREATED_COLUMNS or _field_info(database, "#" + label)[0]
+
+
+def create_custom_columns(database, labels=None):
+    """Fehlende Plugin-Spalten anlegen; gibt die angelegten Labels zurueck.
+
+    Calibre kennt dafuer ``create_custom_column(label, name, datatype,
+    is_multiple, editable, display)`` -- auf ``new_api`` wie auf dem
+    Legacy-Objekt. Vorhandene Spalten werden nie angefasst: es wird weder
+    etwas geloescht noch ein Typ geaendert.
+
+    ``labels`` grenzt das auf einzelne Spalten ein -- in den Einstellungen
+    legt so ein Knopf je Spalte nur SEINE Spalte an. Fehlt nichts, wird
+    auch die Calibre-Schnittstelle nicht befragt.
+
+    Eine neu angelegte Spalte ist in der laufenden Oberflaeche erst nach
+    einem Neustart von Calibre nutzbar.
+    """
+    wanted = None if labels is None else set(labels)
+    selected = (CUSTOM_COLUMNS if wanted is None else
+                tuple(spec for spec in CUSTOM_COLUMNS if spec[0] in wanted))
+    missing = [spec for spec in selected
+               if not _column_present(database, spec[0])]
+    if not missing:
+        return []
+    create = getattr(database, "create_custom_column", None)
+    if not callable(create):
+        create = getattr(getattr(database, "new_api", None),
+                         "create_custom_column", None)
+    if not callable(create):
+        raise RuntimeError(
+            "Diese Calibre-Version kennt create_custom_column nicht. Lege "
+            "die Spalten bitte von Hand an: %s."
+            % ", ".join("#" + label for label, _name, _datatype
+                        in missing))
+    created = []
+    for label, name, datatype in missing:
+        try:
+            create(label, name, datatype, False, editable=True, display={})
+        except TypeError:
+            # Aeltere Fassungen kennen die Schluesselwoerter nicht.
+            create(label, name, datatype, False)
+        CREATED_COLUMNS.add(label)
+        created.append(label)
+    return created
+
+
+def read_column_available(database):
+    """True, wenn Calibre die Ja/Nein-Spalte ``#tolino_read`` kennt.
+
+    Eine Spalte mit anderem Typ wird nicht beschrieben: ein Text- oder
+    Zahlenfeld würde ``True``/``False`` als fremden Wert speichern.
+    """
+    return bool_column_available(database, TOLINO_READ_COLUMN)
+
+
+def metadata_read_value(metadata):
+    """Lesestatus aus ``#tolino_read``: True, False oder None (leer)."""
+    return bool_column_value(metadata, TOLINO_READ_COLUMN)
+
+
+def update_read_column(database, updates):
+    """Lesestatus ``(book_id, bool)`` in ``#tolino_read`` schreiben."""
+    if not updates or not read_column_available(database):
+        return 0
+    api = database.new_api
+    values = {book_id: bool(value) for book_id, value in updates
+              if book_id is not None and api.has_id(book_id)}
+    if not values:
+        return 0
+    api.set_field(TOLINO_READ_COLUMN, values)
+    return len(values)
 
 
 def update_tolino_ids(database, updates, enabled=True, account_name=None):
@@ -124,9 +269,7 @@ def normalize_formats(value):
     """Return canonical format names from Calibre string or iterable values."""
     if isinstance(value, str):
         values = value.split(",")
-    elif isinstance(value, (bytes, bytearray)):
-        values = [os.fsdecode(value)]
-    elif isinstance(value, Iterable):
+    elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
         values = value
     else:
         return []
@@ -161,14 +304,10 @@ def safe_format_path(database, book_id, format_name):
     except (IndexError, KeyError, OSError) as exc:
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name)) from exc
-    if isinstance(path, (tuple, list)):
-        path = next((item for item in path if isinstance(item, (str, bytes, os.PathLike))), None)
-    if isinstance(path, bytes):
-        path = os.fsdecode(path)
-    if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
+    if not isinstance(path, str) or not path:
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name))
-    return os.fspath(path)
+    return path
 
 
 def cover_bytes(database, book_id):
@@ -179,31 +318,14 @@ def cover_bytes(database, book_id):
     if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
     cover = api.cover(book_id, as_file=False)
-    if isinstance(cover, (bytes, bytearray, memoryview)):
-        return bytes(cover)
-    if isinstance(cover, (str, os.PathLike)):
-        path = os.fspath(cover)
-        if os.path.isfile(path):
-            with open(path, "rb") as cover_file:
-                return cover_file.read()
-        return None
-    if isinstance(cover, (tuple, list)):
-        for value in cover:
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                return bytes(value)
-            if isinstance(value, (str, os.PathLike)):
-                path = os.fspath(value)
-                if os.path.isfile(path):
-                    with open(path, "rb") as cover_file:
-                        return cover_file.read()
-    return None
+    return cover
 
 
 def image_suffix(data):
     """Return a recognized image suffix, or '' for unknown cover bytes."""
-    if not isinstance(data, (bytes, bytearray, memoryview)) or not data:
+    if not isinstance(data, bytes) or not data:
         return ""
-    raw = bytes(data)
+    raw = data
     if raw.startswith(b"\xff\xd8\xff"):
         return ".jpg"
     if raw.startswith(b"\x89PNG\r\n\x1a\n"):

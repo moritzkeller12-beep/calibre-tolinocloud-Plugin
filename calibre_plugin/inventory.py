@@ -152,13 +152,3 @@ def parse_inventory(data):
     records = [normalize_inventory_record(item) for item in raw]
     return records, problems, True
 
-
-def inventory_records(value):
-    """Return normalized records from the API envelope or a parsed record list."""
-    if isinstance(value, (list, tuple)):
-        return [normalize_inventory_record(item) for item in value
-                if isinstance(item, dict)]
-    records, _problems, _envelope_ok = parse_inventory(value)
-    return records
-
-

@@ -7,19 +7,19 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
                         _dialog_busy, _discard_item,
                         _login_failure_guidance,
-                        _stop_thread, _worker_account_name,
+                        _stop_thread, _thread_running, _worker_account_name,
                         _worker_outcome,
                         sync_result_detail,
                         sync_result_text)
 from calibre.gui2 import error_dialog, info_dialog
 from .client import make_client
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
-                     save_account, save_credentials, save_settings,
-                     set_active_account, settings)
-from .library import (iter_book_ids, metadata_by_id, safe_format_path,
-                      tolino_column_active, update_tolino_ids)
-from .config import load_state
-from .config import settings as _global_settings
+                     load_state, save_account, save_credentials,
+                     save_settings, set_active_account, settings)
+from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
+                      create_custom_columns, custom_column_available,
+                      ignore_column_available, read_column_available,
+                      update_read_column, update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
@@ -50,13 +50,31 @@ def _offer_next_step(dialog):
         pass  # Test-Stub oder bereits geschlossenes Fenster
 
 
-def _persist_run(dialog, state, refresh, updates, always_refresh=False):
+def _persist_sync_result(dialog, state, refresh, updates):
+    """Ergebnis speichern und die optionalen Calibre-Spalten aktualisieren."""
+    _persist_run(dialog, state, refresh, updates)
+    if dialog.sync_column_enabled:
+        update_tolino_ids(
+            dialog.gui.current_db, updates, enabled=True,
+            account_name=_worker_account_name(dialog))
+    read_updates = list(getattr(dialog.worker, "read_updates", None) or ())
+    if read_updates and getattr(dialog, "read_column_enabled", False):
+        try:
+            update_read_column(dialog.gui.current_db, read_updates)
+        except Exception as exc:
+            # Ein misslungener Spalten-Schreibvorgang darf das Ergebnis des
+            # Laufs nicht verschlucken.
+            log_warning("Lesestatus konnte nicht in #tolino_read "
+                        "geschrieben werden: %s" % sanitize_error(exc))
+
+
+def _persist_run(dialog, state, refresh, updates):
     """Ergebnis eines Laufs unter dem KONTO DES LAUFS sichern.
 
     Ein Speicherfehler darf das Ergebnis nie verschlucken: ohne diesen
     Schutz bliebe der Abschlussdialog aus, und ein erfolgreicher Upload
-    sähe aus wie «nichts passiert». UI-Felder werden nur überschrieben,
-    solange dieses Konto noch angezeigt wird.
+    sähe aus wie «nichts passiert». Zugangsdaten landen ausschliesslich im
+    Konto -- nie mehr zusaetzlich in einem Eingabefeld.
     """
     account_name = _worker_account_name(dialog)
     worker = dialog.worker
@@ -69,10 +87,6 @@ def _persist_run(dialog, state, refresh, updates, always_refresh=False):
             hardware = str(account_by_name(account_name).get("hardware_id") or "")
         if refresh and account_name:
             save_credentials(account_name, refresh, hardware)
-        if account_name and dialog.account_name == account_name:
-            if always_refresh or (refresh and
-                                  refresh != dialog.refresh.text().strip()):
-                dialog.set_refresh_token(refresh)
         if account_name:
             save_account(account_name, {
                 "state": state, "refresh_token": refresh,
@@ -82,6 +96,45 @@ def _persist_run(dialog, state, refresh, updates, always_refresh=False):
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s"
                     % sanitize_error(exc, (refresh,)))
+
+
+def _register_login_thread(dialog, thread, worker):
+    """Anmelde-Thread starten und am Leben halten.
+
+    Ohne Elternteil: ein bereits geschlossenes Fenster darf den laufenden
+    Thread nicht zerstören. Die Liste hält die Referenz, bis der Thread
+    fertig ist -- sonst räumt ihn der Garbage Collector vorzeitig ab.
+    """
+    thread.finished.connect(thread.deleteLater)
+    thread.finished.connect(
+        lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))
+    _LOGIN_WORKER_THREADS.append(thread)
+    dialog.login_thread = thread
+    dialog.login_worker = worker
+    thread.start()
+
+
+def _sync_cancelled_text(outcome):
+    """Abschlusstext eines regulären Abbruchs -- auch mit Teilerfolgen."""
+    result = sync_result_text(outcome, "")
+    if result:
+        return "Abgebrochen. " + result
+    return "Abgebrochen. Es wurde nichts übertragen."
+
+
+def _sync_failure_heading(outcome):
+    """Titel und Vorsatz eines fehlerhaften Laufs.
+
+    «Teilweise fehlgeschlagen» heisst: mindestens eine Aktion wurde wirklich
+    übertragen. Der Unterschied gehört in Titel und Text; die beiden Handler
+    bleiben getrennt, weil sich ihre Ergebnisfälle unterscheiden.
+    """
+    succeeded = (int(outcome.get("uploaded") or 0)
+                 + int(outcome.get("updated") or 0)
+                 + int(outcome.get("deleted") or 0))
+    if succeeded:
+        return "Teilweise fehlgeschlagen", "Teilweise abgeschlossen: "
+    return "Fehlgeschlagen", "Fehlgeschlagen: "
 
 
 class SyncDashboard(QDialog):
@@ -95,6 +148,7 @@ class SyncDashboard(QDialog):
         self.prepare_thread = None
         self.prepare_worker = None
         self.sync_column_enabled = False
+        self.read_column_enabled = False
         self.account_name = ""
         self.temp_files = []
         self.setWindowTitle("tolino Cloud Sync")
@@ -167,13 +221,29 @@ class SyncDashboard(QDialog):
         root.addLayout(action_form)
 
     def _build_transfer_settings(self):
-        """Upload-Optionen; Cover und Serien sind standardmäßig aktiv."""
+        """Upload-Optionen und ein Knopf je Calibre-Spalte."""
         transfer = self.settings_dialog.transfer_form
         self.formats = QLineEdit()
         self.formats.setToolTip(
             "EPUB oder PDF, durch Komma getrennt. Es wird das erste "
             "vorhandene Format hochgeladen.")
         transfer.addRow("Upload-Formate", self.formats)
+        # Die Spalten von Hand anzulegen ist fehleranfaellig. Je Spalte ein
+        # eigener Knopf: er legt NUR seine Spalte an, wenn sie fehlt, und
+        # laesst Vorhandenes unberuehrt.
+        self.column_buttons = {}
+        for index, (label, _name, datatype) in enumerate(CUSTOM_COLUMNS):
+            button = QPushButton("#%s anlegen …" % label)
+            button.setToolTip(
+                "Legt die Spalte #%s (%s) an, falls sie fehlt. Vorhandene "
+                "Spalten bleiben unverändert."
+                % (label, COLUMN_KIND_NAMES.get(datatype, datatype)))
+            button.clicked.connect(
+                lambda _checked=False, key=label: self.create_columns(key))
+            self.column_buttons[label] = button
+            # Nur die erste Zeile traegt die Beschriftung; drei eigene
+            # Zeilen sind der klarere Weg als ein Knopf fuer alles.
+            transfer.addRow("Calibre-Spalten" if index == 0 else "", button)
 
     def _build_account_settings(self):
         """Kontoverwaltung und die beiden technischen Zugangsfelder."""
@@ -190,17 +260,62 @@ class SyncDashboard(QDialog):
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
         self.refresh.setEchoMode(QLineEdit.Password)
-        self.refresh.setPlaceholderText("Wird bei der Anmeldung gesetzt")
+        # Das Feld zeigt den Token nicht an: das Konto ist die Quelle, ein
+        # leeres Feld heisst «gespeicherten Zugang behalten».
+        self.refresh.setPlaceholderText(
+            "Gespeichert – nur zum Ersetzen eintippen")
         accounts.addRow("Aktives Konto", self.account_select)
         accounts.addRow("", account_buttons)
         accounts.addRow("Geräte-ID (automatisch)", self.hardware)
         accounts.addRow("Zugangstoken (nur bei Problemen ändern)", self.refresh)
+        # Das Feld ist Handeingabe ohne Zustand; abgemeldet wird ausdruecklich
+        # hier -- sonst gaebe es keinen Weg mehr, den Zugang zu loeschen.
+        self.logout_button = QPushButton("Abmelden")
+        self.logout_button.setToolTip(
+            "Löscht den gespeicherten Zugang dieses Kontos.")
+        self.logout_button.clicked.connect(self.logout)
+        accounts.addRow("", self.logout_button)
 
     def _build_footer(self, root):
         """Schliessen-Knopf ohne QDialogButtonBox (Qt6-Rollenwarnung)."""
         close = QPushButton("Schließen")
         close.clicked.connect(self.close)
         root.addWidget(close)
+
+    def create_columns(self, label):
+        """Genau diese Calibre-Spalte anlegen -- vorhandene bleibt unberührt."""
+        database = getattr(self.gui, "current_db", None)
+        try:
+            created = create_custom_columns(database, (label,))
+        except Exception as exc:
+            log_warning("Spalte #%s konnte nicht angelegt werden: %s"
+                        % (label, sanitize_error(exc)))
+            error_dialog(self, "Spalte nicht angelegt", str(exc), show=True)
+            return
+        if not created:
+            info_dialog(
+                self, "Calibre-Spalte",
+                "Die Spalte #%s ist schon vorhanden." % label,
+                show=True, show_copy_button=False)
+            return
+        info_dialog(
+            self, "Calibre-Spalte angelegt",
+            "Angelegt: #%s.\n\nCalibre neu starten, damit die Spalte in der "
+            "Bibliothek nutzbar ist." % label,
+            show=True, show_copy_button=False)
+        self._refresh_column_flags(database)
+
+    def _refresh_column_flags(self, database):
+        """Spaltenstatus neu lesen: der naechste Vergleich nutzt sie sofort."""
+        try:
+            # Die Spalte selbst entscheidet -- frueher konnte eine
+            # Einstellung sie zusaetzlich abschalten.
+            self.sync_column_enabled = custom_column_available(database)
+            self.read_column_enabled = read_column_available(database)
+        except Exception as exc:
+            log_warning("Spaltenstatus konnte nicht gelesen werden: %s"
+                        % sanitize_error(exc))
+        self.update_status()
 
     def _save_visible_account(self, values=None):
         """Das sichtbare Konto und die globalen Optionen EINMAL einlesen.
@@ -309,12 +424,12 @@ class SyncDashboard(QDialog):
                 save_account(self.account_name, {"partner_id": partner_id})
         self.partner.setCurrentIndex(max(0, self.partner.findData(partner_id)))
         self.hardware.setText(values["hardware_id"] or hardware_id())
-        self.refresh.setText(values["refresh_token"])
+        # Der Token steht NUR im Konto (config). Ein Feldinhalt war ein
+        # zweiter Ort, der einen im Hintergrund rotierten Token mit der
+        # alten Kopie ueberschreiben konnte -- jetzt bleibt es leer.
+        self.refresh.setText("")
         # Vergleichsstand fuer values(): nur was der Nutzer WIRKLICH aendert,
-        # darf den gespeicherten Zugang ersetzen. Ein im Hintergrund
-        # rotierter Token liegt nicht im Feld und wuerde sonst von der alten
-        # Kopie ueberschrieben.
-        self._loaded_refresh = normalize_refresh_token(self.refresh.text())
+        # darf die gespeicherte Geraetekennung ersetzen.
         self._loaded_hardware = self.hardware.text().strip()
         self.formats.setText(", ".join(values["preferred_formats"]))
         self.update_status()
@@ -339,18 +454,12 @@ class SyncDashboard(QDialog):
             self.start_sync()
 
     def update_status(self):
-        logged_in = bool(self.refresh.text().strip())
+        logged_in = bool(self._effective_refresh())
         running = _dialog_busy(self)
         if running:
-            status = getattr(self, "status", None)
-            if status is not None and hasattr(status, "setText"):
-                if getattr(self, "thread", None) is not None:
-                    text = "Synchronisierung läuft …"
-                elif getattr(self, "prepare_thread", None) is not None:
-                    text = "Vergleich läuft …"
-                else:
-                    text = "Anmeldung wird geprüft …"
-                status.setText(text)
+            # Sperren und «… läuft»-Text kommen aus dem gemeinsamen Helfer;
+            # hier bleibt nur die Auswahl der Zweige.
+            _apply_busy(self, True)
         elif logged_in:
             self.status.setText("Angemeldet.")
         else:
@@ -383,45 +492,66 @@ class SyncDashboard(QDialog):
                 "Vergleicht deine Calibre-Bibliothek mit tolino."
                 if logged_in else "Noch nicht angemeldet. " + RELOGIN)
 
-    def set_refresh_token(self, refresh):
-        normalized = normalize_refresh_token(refresh)
-        self.refresh.setText(normalized)
-        # Frisch gelesen heisst gewollt: der Wert ist jetzt der Vergleichsstand
-        # fuer values().
-        self._loaded_refresh = normalized
+    def _stored_refresh(self):
+        """Gespeicherter Zugang des ANGEGEZEIGTEN Kontos -- nie ein anderes."""
+        account = self._selected_account() or {}
+        return normalize_refresh_token(account.get("refresh_token") or "")
+
+    def _typed_refresh(self):
+        """Von Hand eingetippter Token; leer heisst «nichts ersetzen»."""
+        refresh = getattr(self, "refresh", None)
+        return normalize_refresh_token(refresh.text()) if refresh is not None else ""
+
+    def _effective_refresh(self):
+        """Der Token, mit dem gearbeitet wird: eingetippt vor gespeichert."""
+        return self._typed_refresh() or self._stored_refresh()
+
+    def _secret_tokens(self):
+        """Zugangsdaten fuer die Redaktion von Fehlertexten."""
+        return tuple(token for token in
+                     (self._stored_refresh(), self._typed_refresh()) if token)
+
+    def store_refresh(self, refresh, hardware=""):
+        """Token im Konto speichern -- der einzige Ort fuer Zugangsdaten."""
+        token = normalize_refresh_token(refresh)
+        if not token or not self.account_name:
+            return
+        save_credentials(
+            self.account_name, token,
+            str(hardware or "").strip() or self.hardware.text().strip()
+            or hardware_id())
         self.update_status()
 
-    def persist_refresh_token(self, refresh):
-        """Rotierten Token speichern (derselbe Weg wie im Worker)."""
-        self.set_refresh_token(refresh)
-        save_credentials(self.account_name, self.refresh.text(),
-                         self.hardware.text().strip() or hardware_id())
+    def logout(self):
+        """Nur den gespeicherten Zugang loeschen -- Konto und ID bleiben."""
+        if not self.account_name:
+            return
+        save_account(self.account_name, {"refresh_token": ""},
+                     active=self.account_name)
+        self.refresh.setText("")
+        self.update_status()
 
     def _selected_account(self):
         """The account this dialog shows – never a different 'active' one."""
         return account_by_name(getattr(self, "account_name", None))
 
     def values(self):
-        refresh_token = normalize_refresh_token(self.refresh.text())
+        """Sichtbare Werte des Kontos; der Token nur, wenn eingetippt wurde.
+
+        Ohne Eingabe fehlt der Schluessel ganz: ``save_account()`` mischt
+        nur vorhandene Schluessel und laesst den gespeicherten Token damit
+        unberuehrt -- auch wenn der Keep-alive ihn gerade rotiert hat.
+        """
         account = self._selected_account() or settings()
-        if refresh_token == getattr(self, "_loaded_refresh", None):
-            # Unveraendertes Feld: es gilt der GESPEICHERTE Zugang. Hat der
-            # Keep-alive im Hintergrund rotiert, wuerde die alte Kopie sonst
-            # beim Speichern oder beim Sync die Rotation verbrennen.
-            stored_token = normalize_refresh_token(
-                account.get("refresh_token") or "")
-            if stored_token:
-                refresh_token = stored_token
         hardware = self.hardware.text().strip() or hardware_id()
         if hardware == getattr(self, "_loaded_hardware", None):
             stored_hardware = str(account.get("hardware_id") or "").strip()
             if stored_hardware:
                 hardware = stored_hardware
-        return {
+        values = {
             "account_name": self.account_name,
             "partner_id": self.partner.currentData(),
             "hardware_id": hardware,
-            "refresh_token": refresh_token,
             "preferred_formats": ([
                 value for value in dict.fromkeys(
                     x.strip().upper() for x in self.formats.text().split(",")
@@ -430,14 +560,14 @@ class SyncDashboard(QDialog):
             "state": (account.get("state")
                       if isinstance(account.get("state"), dict) else {}),
         }
+        typed = self._typed_refresh()
+        if typed:
+            values["refresh_token"] = typed
+        return values
 
     def _login_running(self):
         """Läuft gerade eine Anmeldeprüfung oder ein Anmeldefenster?"""
-        thread = getattr(self, "login_thread", None)
-        try:
-            return thread is not None and thread.isRunning()
-        except Exception:
-            return thread is not None
+        return _thread_running(getattr(self, "login_thread", None))
 
     def browser_login(self):
         """Anmeldeknopf: erst die gespeicherte Anmeldung prüfen.
@@ -450,7 +580,13 @@ class SyncDashboard(QDialog):
         if self._login_running():
             return  # eine Prüfung oder Anmeldung läuft bereits
         settings = self.values()
-        if settings["refresh_token"]:
+        if self._typed_refresh():
+            # Von Hand eingetippt: erst ins Konto speichern, dann pruefen --
+            # danach ist das Feld wieder leer.
+            self.store_refresh(self._typed_refresh())
+            self.refresh.setText("")
+            settings = self.values()
+        if self._effective_refresh():
             self._check_stored_login(settings)
             return
         self._start_login_window(settings)
@@ -469,19 +605,13 @@ class SyncDashboard(QDialog):
         worker.valid.connect(self.login_still_valid)
         worker.invalid.connect(self.login_rejected)
         worker.busy.connect(self.login_check_busy)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(
-            lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))
-        _LOGIN_WORKER_THREADS.append(thread)
-        self.login_thread = thread
-        self.login_worker = worker
-        thread.start()
+        _register_login_thread(self, thread, worker)
 
     def login_still_valid(self, refresh):
         """Prüfung bestanden: Anmeldung bleibt gültig."""
         try:
             self._login_cleanup()
-            self.persist_refresh_token(refresh)
+            self.store_refresh(refresh)
             self.status.setText("Angemeldet.")
             _offer_next_step(self)
         except RuntimeError:
@@ -528,22 +658,14 @@ class SyncDashboard(QDialog):
         worker.failed.connect(thread.quit)
         worker.completed.connect(self.login_completed)
         worker.failed.connect(self.login_failed)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(
-            lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))
-        _LOGIN_WORKER_THREADS.append(thread)
-        self.login_thread = thread
-        self.login_worker = worker
-        thread.start()
+        _register_login_thread(self, thread, worker)
 
     def login_completed(self, refresh, hardware):
         try:
             self._login_cleanup()
-            self.set_refresh_token(refresh)
             if hardware:
                 self.hardware.setText(str(hardware))
-            self.persist_refresh_token(refresh)
-            self.update_status()
+            self.store_refresh(refresh, str(hardware or ""))
             # Erfolg steht in der Statuszeile -- kein zusaetzlicher modaler
             # Dialog fuer den Normalfall.
             self.status.setText("Angemeldet.")
@@ -563,12 +685,7 @@ class SyncDashboard(QDialog):
             # Technische Details (inkl. Traceback) nur ins Log.
             # Der sichtbare Zugang ist ein bekanntes Geheimnis: er darf
             # weder im Dialog noch im Log auftauchen.
-            refresh = getattr(self, "refresh", None)
-            try:
-                token = str(refresh.text()) if refresh is not None else ""
-            except Exception:
-                token = ""
-            secrets = (token,) if token else ()
+            secrets = self._secret_tokens()
             if isinstance(error, BaseException):
                 detail = report_error(error, "Anmeldefenster", secrets)
             else:
@@ -622,18 +739,19 @@ class SyncDashboard(QDialog):
         if self.thread is not None or getattr(self, "prepare_thread", None) is not None:
             return
         settings = self.values()
-        if not settings["refresh_token"]:
+        if not self._effective_refresh():
             status = getattr(self, "status", None)
             if status is not None:
                 status.setText("Nicht angemeldet.")
             return
         self._save_visible_account(settings)
-        self.sync_column_enabled = tolino_column_active(
-            _global_settings(), self.gui.current_db)
+        self.sync_column_enabled = custom_column_available(self.gui.current_db)
         settings["sync_column_enabled"] = self.sync_column_enabled
+        self.read_column_enabled = read_column_available(self.gui.current_db)
+        settings["read_column_enabled"] = self.read_column_enabled
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
-            metadata = self._local_metadata()
+            metadata = _dashboard_plan.local_metadata(self)
         except Exception as exc:
             self._show_prepare_error(exc, settings)
             return
@@ -704,12 +822,10 @@ class SyncDashboard(QDialog):
         # noch angezeigt wird. Gespeichert wurde bereits unter dem Konto.
         refresh = payload.get("refresh")
         if refresh:
-            # Der SyncWorker startet mit DIESEM Dict. Ohne die Uebernahme
-            # wuerde er den schon verbrauchten Token aus der Vorbereitung
-            # erneut einloesen (A02).
-            settings["refresh_token"] = refresh
-            if self.account_name == account_name:
-                self.set_refresh_token(refresh)
+            # Der einzige Ort fuer Zugangsdaten ist das Konto in config. Der
+            # SyncWorker holt den frischen Token von dort selbst ab
+            # (CredentialStore.freshest), damit ein schon verbrauchter Token
+            # nicht erneut eingeloest wird (A02).
             save_credentials(account_name, refresh,
                              payload.get("hardware") or settings["hardware_id"])
         hardware = getattr(self, "hardware", None)
@@ -726,7 +842,7 @@ class SyncDashboard(QDialog):
             selection = self._confirm_comparison(
                 payload["comparison"], settings,
                 client_factory=lambda: self._worker_client(settings),
-                automatic=self._automatic_action_count(settings, metadata, state))
+                automatic=_dashboard_plan.automatic_action_count(metadata, state))
         except Exception as exc:
             # Ein Fehler NACH dem Vergleichsfenster darf nicht als Traceback
             # im Slot verschwinden: der Nutzer sähe nur ein geschlossenes
@@ -737,7 +853,8 @@ class SyncDashboard(QDialog):
         if selection is None:
             return
         try:
-            preparation = self._plan_actions(settings, metadata, state, selection)
+            preparation = _dashboard_plan.plan_actions(
+                self, settings, metadata, state, selection)
             if preparation["removals"] and not self._confirm_deletions(
                     preparation["removals"], state,
                     preparation.get("removal_titles")):
@@ -745,7 +862,7 @@ class SyncDashboard(QDialog):
                 return
             self._start_sync_worker(settings, preparation, state)
         except Exception as exc:
-            # `_plan_actions` legt Cover-Dateien an, bevor es fertig ist.
+            # Der Plan legt Cover-Dateien an, bevor er fertig ist.
             # Ein Fehler dort darf sie nicht bis zum naechsten Lauf liegen
             # lassen -- der fruehe Rueckweg raeumt sie mit auf.
             self._cleanup_temp_files()
@@ -775,19 +892,6 @@ class SyncDashboard(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return answer == QMessageBox.Yes
 
-    def _local_metadata(self):
-        """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
-        return _dashboard_plan.local_metadata(
-            self, iter_books=iter_book_ids, metadata_for=metadata_by_id)
-
-    def _automatic_action_count(self, settings, metadata, state):
-        """Serienänderungen zählen, die ohne Auswahl ausgeführt werden.
-
-        Der Vergleich darf ohne Auswahl nur schliessen, wenn diese Zahl
-        über null liegt.
-        """
-        return _dashboard_plan.automatic_action_count(settings, metadata, state)
-
     def _confirm_comparison(self, comparison, settings, client_factory=None,
                             automatic=0):
         """Bestätigungsfenster zeigen; None, wenn es abgebrochen wurde."""
@@ -798,6 +902,10 @@ class SyncDashboard(QDialog):
             options={
                 "collections": True,
                 "automatic": int(automatic or 0),
+                # Für den Hinweis im Fenster: ohne diese Spalte bleiben
+                # gekaufte Bücher Upload-Kandidaten.
+                "ignore_column": ignore_column_available(
+                    getattr(getattr(self, "gui", None), "current_db", None)),
             })
         if dialog.exec() != QDialog.Accepted:
             return None
@@ -809,21 +917,9 @@ class SyncDashboard(QDialog):
             "metadata": dialog.selected_metadata_ids(),
             "read": dialog.selected_read_targets(),
             "unread": dialog.selected_read_unmarks(),
+            "read_sync": dialog.selected_read_sync(),
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
-
-    def _plan_actions(self, settings, metadata, state, selection):
-        """Aus der Auswahl die Jobs und den neuen Sync-Stand bauen."""
-        return _dashboard_plan.plan_actions(
-            self, settings, metadata, state, selection,
-            upload_builder=self._upload_jobs,
-            safe_format_lookup=safe_format_path)
-
-    def _upload_jobs(self, settings, metadata, uploads):
-        """Upload-Jobs bauen; fehlende Dateien landen in `skipped_uploads`."""
-        return _dashboard_plan.upload_jobs(
-            self, settings, metadata, uploads, warning=log_warning,
-            safe_format_lookup=safe_format_path)
 
     def _confirm_replacements(self, jobs):
         """Ersetzen einer vorhandenen Cloud-Kopie vorher ansprechen.
@@ -923,7 +1019,8 @@ class SyncDashboard(QDialog):
                                  preparation["series_map"],
                                  preparation["selected_read"],
                                  preparation["selected_unread"],
-                                 titles=preparation.get("titles"))
+                                 titles=preparation.get("titles"),
+                                 read_sync=preparation.get("read_sync"))
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)
@@ -958,16 +1055,6 @@ class SyncDashboard(QDialog):
         self.progress_label.setText("Abbruch angefordert …")
         self.primary.setEnabled(False)
 
-    def _persist_sync_result(self, state, refresh, updates,
-                             always_refresh=False):
-        """Ergebnis speichern und die optionale Calibre-Spalte aktualisieren."""
-        _persist_run(self, state, refresh, updates,
-                     always_refresh=always_refresh)
-        if self.sync_column_enabled:
-            update_tolino_ids(
-                self.gui.current_db, updates, enabled=True,
-                account_name=_worker_account_name(self))
-
     def sync_completed(self, state, refresh, updates):
         """Erfolgreicher Lauf (auch nach regulaerem Abbruch).
 
@@ -975,24 +1062,15 @@ class SyncDashboard(QDialog):
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
         outcome = _worker_outcome(self)
-        self._persist_sync_result(state, refresh, updates)
+        _persist_sync_result(self, state, refresh, updates)
         self.finish_thread()
         if outcome.get("cancelled"):
-            result = sync_result_text(outcome, "")
-            text = ("Abgebrochen. " + result if result else
-                    "Abgebrochen. Es wurde nichts übertragen.")
-            info_dialog(self, "Abgebrochen", text,
+            info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)
             return
         if outcome.get("failed"):
-            result = sync_result_text(outcome, "")
-            succeeded = (int(outcome.get("uploaded") or 0)
-                         + int(outcome.get("updated") or 0)
-                         + int(outcome.get("deleted") or 0))
-            title = "Teilweise fehlgeschlagen" if succeeded else "Fehlgeschlagen"
-            text = ("Teilweise abgeschlossen: " + result if succeeded
-                    else "Fehlgeschlagen: " + result)
-            error_dialog(self, title, text,
+            title, prefix = _sync_failure_heading(outcome)
+            error_dialog(self, title, prefix + sync_result_text(outcome, ""),
                          det_msg=sync_result_detail(outcome), show=True)
             return
         info_dialog(self, "Fertig",
@@ -1006,15 +1084,12 @@ class SyncDashboard(QDialog):
             str(message) == CANCEL_MESSAGE
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
-        self._persist_sync_result(
-            getattr(worker, "state", {}), refresh,
-            getattr(worker, "updates", ()), always_refresh=True)
+        _persist_sync_result(
+            self, getattr(worker, "state", {}), refresh,
+            getattr(worker, "updates", ()))
         self.finish_thread()
         if cancelled:
-            result = sync_result_text(outcome, "")
-            text = ("Abgebrochen. " + result if result else
-                    "Abgebrochen. Es wurde nichts übertragen.")
-            info_dialog(self, "Abgebrochen", text,
+            info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)
             return
         result = sync_result_text(outcome, "")
@@ -1022,17 +1097,14 @@ class SyncDashboard(QDialog):
         if outcome.get("failed") and result:
             text += "\n\n" + result
 
-        succeeded = (int(outcome.get("uploaded") or 0)
-                     + int(outcome.get("updated") or 0)
-                     + int(outcome.get("deleted") or 0))
         error_dialog(
-            self, "Teilweise fehlgeschlagen" if succeeded else "Fehlgeschlagen",
-            text, det_msg=sync_result_detail(outcome), show=True)
+            self, _sync_failure_heading(outcome)[0], text,
+            det_msg=sync_result_detail(outcome), show=True)
 
     def _cleanup_temp_files(self):
         """Temporäre Cover-Dateien löschen -- auch auf frühen Rückwegen.
 
-        Die Dateien entstehen in `_plan_actions`; stand die Aufraeumung nur
+        Die Dateien entstehen beim Planen; stand die Aufraeumung nur
         im Abschluss, blieben sie bei «Nichts zu übertragen» oder einer
         abgebrochenen Löschbestätigung bis zum nächsten Lauf liegen
 .

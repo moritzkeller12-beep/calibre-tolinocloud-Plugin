@@ -13,9 +13,32 @@ from pathlib import Path
 from unittest.mock import patch
 
 import calibre_plugin.cdp as cdp_module
+from calibre_plugin.comparison import compare_inventory as _compare_inventory
+from calibre_plugin.inventory import normalize_inventory_record, parse_inventory
 
 # setUpModule() stubs close_grabber_window; real close tests keep this.
 _REAL_CLOSE_WINDOW = cdp_module.close_grabber_window
+
+
+def parsed_inventory(value):
+    """Return canonical inventory records from a raw fixture or record list."""
+    if isinstance(value, list):
+        return [normalize_inventory_record(item)
+                for item in value if isinstance(item, dict)]
+    records, problems, valid_envelope = parse_inventory(value)
+    if not valid_envelope:
+        raise ValueError("Invalid inventory fixture: %s"
+                         % "; ".join(problems))
+    return records
+
+
+def compare_inventory(metadata, state, inventory, preferred_formats=(),
+                      use_metadata_ids=True, read_ids=(), read_column=False):
+    """Comparison test helper: normalize raw Tolino fixtures at the boundary."""
+    return _compare_inventory(
+        metadata, state, parsed_inventory(inventory), preferred_formats,
+        use_metadata_ids, read_ids, read_column)
+
 
 # Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
 # der Einstieg; Dialoge, Worker und Dashboard liegen in eigenen Modulen.
@@ -45,20 +68,25 @@ def load_ui_module(get_icons_result, qt_stub=None):
 
     class FakeIcon:
         def __init__(self, *args, **kwargs):
-            self._null = True
+            self._null = not args or not getattr(args[0], "data", None)
 
         def isNull(self):
             return self._null
 
+    class FakePixmap:
+        def loadFromData(self, data):
+            self.data = data
+            return bool(data)
+
     qt_core = types.ModuleType("qt.core")
     qt_core.QIcon = FakeIcon
-    for name in ("QCheckBox", "QComboBox", "QDialog", "QDialogButtonBox",
-                 "QFormLayout", "QGroupBox", "QLabel", "QLineEdit",
-                 "QMessageBox", "QProgressBar", "QPushButton",
-                 "QProgressDialog", "QThread",
-                 "QVBoxLayout", "QHBoxLayout", "QTableWidget",
-                 "QTableWidgetItem", "QTextEdit", "QObject",
-                 "QInputDialog", "QFileDialog", "QMenu", "Qt", "QTimer"):
+    qt_core.QPixmap = FakePixmap
+    qt_core.QByteArray = bytes
+    for name in ("QCheckBox", "QComboBox", "QDialog", "QFormLayout",
+                 "QGroupBox", "QLabel", "QLineEdit", "QMessageBox",
+                 "QProgressBar", "QPushButton", "QThread", "QVBoxLayout",
+                 "QHBoxLayout", "QTableWidget", "QTableWidgetItem",
+                 "QObject", "QInputDialog", "QFileDialog", "QMenu", "Qt"):
         setattr(qt_core, name, type(name, (), {}))
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None
@@ -177,3 +205,84 @@ def stop_cdp_stubs():
     if _CLOSE_WINDOW_PATCH is not None:
         _CLOSE_WINDOW_PATCH.stop()
         _CLOSE_WINDOW_PATCH = None
+
+
+# --- Wiederverwendete GUI-Test-Doubles ---------------------------------
+
+
+class FakeText:
+    """QLabel/QLineEdit-Ersatz: merkt sich den angezeigten Text."""
+
+    def __init__(self, text=""):
+        self.value = text
+
+    def setText(self, text):
+        self.value = text
+
+    def text(self):
+        return self.value
+
+
+class FakeCheckBox:
+    """QCheckBox-Ersatz fuer die Zell-Widgets der Bestandsliste."""
+
+    def __init__(self):
+        self._checked = False
+        self.enabled = True
+        self.tooltip = ""
+
+    def setChecked(self, value):
+        self._checked = bool(value)
+
+    def isChecked(self):
+        return self._checked
+
+    def setEnabled(self, value):
+        self.enabled = value
+
+    def setToolTip(self, text):
+        self.tooltip = text
+
+    def stateChanged(self):
+        return None
+
+
+class FakeMenu:
+    """QMenu-Ersatz: sammelt Aktionen, wahlweise mit Auswahlprotokoll."""
+
+    def __init__(self, _parent=None, selected=None, pick=0):
+        self.actions = []
+        self.selected = selected
+        self.pick = pick
+
+    def addAction(self, label):
+        self.actions.append(label)
+        return label
+
+    def exec(self, _position=None):
+        if self.selected is not None:
+            self.selected.extend(self.actions)
+        if self.pick is None or not self.actions:
+            return None
+        return self.actions[self.pick]
+
+
+class FakeMessageBox:
+    """QMessageBox-Ersatz: sammelt die Argumente je Aufruf."""
+
+    Yes = 1
+    No = 0
+
+    def __init__(self, calls, question_result=0):
+        self.calls = calls
+        self.question_result = question_result
+
+    def information(self, *args, **_kwargs):
+        self.calls.append(args)
+
+    def warning(self, *args, **_kwargs):
+        self.calls.append(args)
+
+    def question(self, *args, **_kwargs):
+        self.calls.append(args)
+        return self.question_result

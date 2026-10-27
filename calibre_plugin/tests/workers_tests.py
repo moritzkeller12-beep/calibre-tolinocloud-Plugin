@@ -6,10 +6,10 @@ import calibre_plugin.client as client_module
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
-from ..comparison import compare_inventory
 from ..plan import plan_sync
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
-from ._support import start_cdp_stubs, stop_cdp_stubs, ui_module_for
+from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
+                       stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -690,7 +690,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.sync_column_enabled = False
         dashboard.finish_thread = lambda: None
-        dashboard.set_refresh_token = lambda value: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
         worker.account = {"hardware_id": "hw"}
@@ -890,7 +889,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return self.refresh
 
             def inventory(self):
-                return [{"has_deliverable_id": False}]
+                return parsed_inventory([{"has_deliverable_id": False}])
 
             def read_ids(self):
                 return set()
@@ -923,7 +922,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return "rot"
 
             def inventory(self):
-                return [{"deliverableId": "d1"}]
+                return parsed_inventory([{"deliverableId": "d1"}])
 
             def read_ids(self):
                 return set()
@@ -941,7 +940,9 @@ class PrepareWorkerTests(unittest.TestCase):
         ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(payloads))
         self.assertIsInstance(payloads[0], dict)
-        self.assertEqual([[{"deliverableId": "d1"}]], compared)
+        self.assertEqual([[{"tolino_id": "d1", "has_deliverable_id": True,
+                            "identifier": "", "title": "", "authors": "",
+                            "isbn": "", "uuid": ""}]], compared)
         self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_login_failure_is_reported_without_starting_a_sync(self):
@@ -1053,7 +1054,6 @@ class PrepareWorkerTests(unittest.TestCase):
             dashboard = ui_module.dashboard.SyncDashboard.__new__(
                 ui_module.dashboard.SyncDashboard)
             dashboard.account_name = "A"
-            dashboard.set_refresh_token = lambda value: updated.append(value)
             with patch("calibre_plugin.client.TolinoClient", FakeClient), \
                  patch("calibre_plugin.config.save_credentials",
                        lambda *args: saved.append(args)):
@@ -1526,27 +1526,23 @@ class ReadStatusUnknownTests(unittest.TestCase):
     def test_failed_fetch_marks_the_status_unknown(self):
         row = self._rows(None)[0]
         self.assertFalse(row["read_known"])
-        self.assertEqual("unknown", row["read_status"])
         self.assertFalse(row["read_in_cloud"])
         self.assertFalse(row["read"])
 
     def test_unknown_is_not_the_same_as_nothing_read(self):
         row = self._rows(()) [0]
         self.assertTrue(row["read_known"])
-        self.assertEqual("unread", row["read_status"])
         self.assertFalse(row["read_in_cloud"])
 
     def test_a_known_read_state_still_prechecks(self):
         row = self._rows({"t1"})[0]
         self.assertTrue(row["read_known"])
-        self.assertEqual("read", row["read_status"])
         self.assertTrue(row["read_in_cloud"])
 
     def test_cloud_only_rows_are_unknown_too(self):
         rows = compare_inventory(
             {}, {}, [{"id": "t9", "title": "Nur Cloud"}], ["EPUB"],
             read_ids=None)
-        self.assertEqual("unknown", rows[0]["read_status"])
         self.assertFalse(rows[0]["read_known"])
 
     def test_prepare_worker_reports_an_unknown_read_state(self):

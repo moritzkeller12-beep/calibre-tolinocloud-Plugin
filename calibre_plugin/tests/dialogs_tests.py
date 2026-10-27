@@ -6,10 +6,10 @@ import tempfile
 import threading
 import unittest
 from . import ui_base_tests
-from ..comparison import compare_inventory
 from ..plan import merge_removals
-from ._support import (_ui_source_text, start_cdp_stubs, stop_cdp_stubs,
-                      ui_module_for)
+from ._support import (FakeCheckBox, FakeMenu, FakeMessageBox,
+                      _ui_source_text, compare_inventory, start_cdp_stubs,
+                      stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -76,25 +76,6 @@ class InventoryDialogSortTests(unittest.TestCase):
         Auswahl (Hochladen/Metadaten/Gelesen) bleibt denselben Büchern
         zugeordnet (Feldbefund: „das sortieren funktioniert nicht")."""
 
-        class FakeCheck:
-            def __init__(self):
-                self._checked = False
-
-            def setChecked(self, value):
-                self._checked = bool(value)
-
-            def isChecked(self):
-                return self._checked
-
-            def setEnabled(self, value):
-                pass
-
-            def setToolTip(self, text):
-                pass
-
-            def stateChanged(self):
-                return None
-
         class FakeHeader:
             def setSortIndicatorShown(self, value):
                 pass
@@ -127,7 +108,7 @@ class InventoryDialogSortTests(unittest.TestCase):
 
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
-        ui_module.dialogs.QCheckBox = FakeCheck
+        ui_module.dialogs.QCheckBox = FakeCheckBox
         ui_module.dialogs.QTableWidgetItem = FakeItem
         try:
             dialog = ui_module.dialogs.InventoryDialog.__new__(
@@ -151,9 +132,9 @@ class InventoryDialogSortTests(unittest.TestCase):
                  "explanation": "Noch nicht in der Cloud – kann hochgeladen werden."},
             ]
             dialog.rows = rows
-            dialog.checks = [FakeCheck() for _ in rows]
-            dialog.meta_checks = [FakeCheck() for _ in rows]
-            dialog.read_checks = [FakeCheck() for _ in rows]
+            dialog.checks = [FakeCheckBox() for _ in rows]
+            dialog.meta_checks = [FakeCheckBox() for _ in rows]
+            dialog.read_checks = [FakeCheckBox() for _ in rows]
             for uploads, metadata, read, row in zip(dialog.checks,
                                                     dialog.meta_checks,
                                                     dialog.read_checks, rows):
@@ -280,23 +261,7 @@ class InventoryDialogSortTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
-            class FakeCheck:
-                def __init__(self):
-                    self._checked = False
-
-                def setChecked(self, value):
-                    self._checked = bool(value)
-
-                def isChecked(self):
-                    return self._checked
-
-                def setEnabled(self, value):
-                    pass
-
-                def setToolTip(self, text):
-                    self.tooltip = text
-
-            ui_module.dialogs.QCheckBox = FakeCheck
+            ui_module.dialogs.QCheckBox = FakeCheckBox
             dialog = ui_module.dialogs.InventoryDialog.__new__(
                 ui_module.dialogs.InventoryDialog)
             rows = [
@@ -308,9 +273,9 @@ class InventoryDialogSortTests(unittest.TestCase):
                 {"status": "only_tolino", "book_id": None, "tolino_id": "c9"},
             ]
             dialog.rows = rows
-            dialog.checks = [FakeCheck() for _ in rows]
-            dialog.meta_checks = [FakeCheck() for _ in rows]
-            dialog.read_checks = [FakeCheck() for _ in rows]
+            dialog.checks = [FakeCheckBox() for _ in rows]
+            dialog.meta_checks = [FakeCheckBox() for _ in rows]
+            dialog.read_checks = [FakeCheckBox() for _ in rows]
             dialog.apply_recommended()
             # Neu -> hochladen, geänderte Datei -> hochladen, sonst
             # Metadaten; nichts für unveränderte oder reine Cloud-Bücher.
@@ -918,20 +883,8 @@ class RowActionPromptTests(_QtDialogTest):
         ui_module = self._ui()
         try:
             chosen = []
-
-            class Menu:
-                def __init__(self, _parent=None):
-                    self.actions = []
-
-                def addAction(self, label):
-                    self.actions.append(label)
-                    return label
-
-                def exec(self, _position=None):
-                    chosen.extend(self.actions)
-                    return self.actions[0]
-
-            ui_module.dialogs.QMenu = Menu
+            ui_module.dialogs.QMenu = (
+                lambda parent=None: FakeMenu(parent, selected=chosen))
             ui_module.dialogs.QMessageBox = type("MsgBox", (), {
                 "information": staticmethod(lambda *args, **kwargs: None)})
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
@@ -947,20 +900,9 @@ class RowActionPromptTests(_QtDialogTest):
         ui_module = self._ui()
         try:
             chosen = []
-
-            class Menu:
-                def __init__(self, _parent=None):
-                    self.actions = []
-
-                def addAction(self, label):
-                    self.actions.append(label)
-                    return label
-
-                def exec(self, _position=None):
-                    chosen.extend(self.actions)
-                    return None
-
-            ui_module.dialogs.QMenu = Menu
+            ui_module.dialogs.QMenu = (
+                lambda parent=None: FakeMenu(
+                    parent, selected=chosen, pick=None))
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             local_index = next(index for index, row in enumerate(dialog.rows)
                                if row["title"] == "Nur lokal")
@@ -982,15 +924,10 @@ class RowActionPromptTests(_QtDialogTest):
         try:
             prompts = []
 
-            class Menu:
+            class Menu(FakeMenu):
                 def __init__(self, _parent=None):
+                    FakeMenu.__init__(self, _parent)
                     prompts.append("menu")
-
-                def addAction(self, label):
-                    return label
-
-                def exec(self, _position=None):
-                    return None
 
             class MsgBox:
                 @staticmethod
@@ -1152,10 +1089,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
 
     @staticmethod
     def _dashboard(ui_module):
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(
+        return ui_module.dashboard.SyncDashboard.__new__(
             ui_module.dashboard.SyncDashboard)
-        dashboard._upload_jobs = lambda *args, **kwargs: ([], [])
-        return dashboard
 
     @staticmethod
     def _settings():
@@ -1177,8 +1112,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
             dashboard = self._dashboard(ui_module)
             state = {"u-1": {"tolino_id": "t-1", "calibre_id": 1,
                              "title": "Titel"}}
-            preparation = dashboard._plan_actions(
-                self._settings(), self._metadata(), state,
+            preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+                dashboard, self._settings(), self._metadata(), state,
                 self._selection([("u-1", "t-1", "Titel")]))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -1190,8 +1125,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
         try:
             dashboard = self._dashboard(ui_module)
             state = {"u-9": {"tolino_id": "t-9", "title": "Alt"}}
-            preparation = dashboard._plan_actions(
-                self._settings(), self._metadata(), state,
+            preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+                dashboard, self._settings(), self._metadata(), state,
                 self._selection([("u-9", "t-9", "Alt")]))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -1224,6 +1159,9 @@ class CloudDeletionPlanTests(unittest.TestCase):
                     return []
 
                 def selected_read_unmarks(self):
+                    return []
+
+                def selected_read_sync(self):
                     return []
 
                 def selected_cloud_deletions(self):
@@ -1270,17 +1208,8 @@ class ReviewHintTests(unittest.TestCase):
     """Zeilen in «Zu prüfen» werden nicht vorausgewählt – das muss dastehen."""
 
     def _ui(self, messages):
-        class MessageBox:
-            @staticmethod
-            def information(*args, **_kwargs):
-                messages.append(args)
-
-            @staticmethod
-            def warning(*args, **_kwargs):
-                messages.append(args)
-
         stub = ui_base_tests.InventoryDialogBuildTests._qt_stub()
-        stub["QMessageBox"] = MessageBox
+        stub["QMessageBox"] = FakeMessageBox(messages)
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None, qt_stub=stub)
         self.addCleanup(ui_module._restore_stubs_for_tests)
@@ -1318,22 +1247,9 @@ class AutomaticCloseGuardTests(unittest.TestCase):
             def accept(self):
                 BaseDialog.closed.append(True)
 
-        class MessageBox:
-            @staticmethod
-            def information(*args, **_kwargs):
-                messages.append(args)
-
-            @staticmethod
-            def warning(*args, **_kwargs):
-                messages.append(args)
-
-            @staticmethod
-            def question(*args, **_kwargs):
-                return 0
-
         stub = ui_base_tests.InventoryDialogBuildTests._qt_stub()
         stub["QDialog"] = BaseDialog
-        stub["QMessageBox"] = MessageBox
+        stub["QMessageBox"] = FakeMessageBox(messages, question_result=0)
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None, qt_stub=stub)
         self.addCleanup(ui_module._restore_stubs_for_tests)
@@ -1393,7 +1309,7 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
         rows = compare_inventory(
             metadata or self._metadata(), state or {},
             inventory or self._inventory(), ["EPUB"],
-            ("authors", "title", "isbn"), use_metadata_ids=False)
+            use_metadata_ids=False)
         return rows[0]
 
     def test_reversed_author_order_is_not_a_conflict(self):
@@ -1441,6 +1357,58 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
         row = self._row(state=state)
         self.assertNotEqual("review", row["status"])
         self.assertEqual("t1", row["tolino_id"])
+
+class IgnoredRowDialogTests(_QtDialogTest):
+    """Ignorierte Bücher stehen sichtbar da, sind aber nicht wählbar."""
+
+    @staticmethod
+    def _rows():
+        return [{"title": "Gekauft", "authors": "Autorin",
+                 "status": "new_in_calibre", "book_id": 1, "tolino_id": "",
+                 "ignored": True, "group": "ignored",
+                 "explanation": "In Calibre ignoriert – kein Upload."}]
+
+    def test_the_filter_offers_the_ignored_group(self):
+        ui_module = self._ui()
+        try:
+            groups = dict(ui_module.dialogs.InventoryDialog.GROUP_FILTERS)
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual("ignored", groups.get("Ignoriert"))
+
+    def test_the_ignored_row_is_visible_but_not_selectable(self):
+        ui_module = self._ui()
+        try:
+            dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
+            self.assertEqual(1, len(dialog.rows))
+            self.assertEqual("ignored", dialog.rows[0]["group"])
+            self.assertFalse(dialog.checks[0].enabled)
+            self.assertFalse(dialog.checks[0].isChecked())
+            self.assertIn("ignoriert", dialog.checks[0].tooltip)
+            self.assertEqual(
+                (False, False),
+                ui_module.dialogs.InventoryDialog.default_actions(
+                    dialog.rows[0]))
+            dialog.apply_recommended()
+            self.assertEqual(set(), dialog.selected_upload_ids())
+            self.assertEqual(0, dialog.selected_work_count())
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_an_ignored_row_is_never_uploaded_or_deleted(self):
+        """Auch eine erzwungene Markierung bleibt ohne Wirkung."""
+        ui_module = self._ui()
+        try:
+            dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
+            dialog.checks[0].setChecked(True)
+            dialog.rows[0]["delete_cloud"] = True
+            self.assertEqual(set(), dialog.selected_upload_ids())
+            self.assertEqual([], dialog.selected_cloud_deletions())
+            self.assertFalse(dialog._column_applies("upload", dialog.rows[0]))
+            self.assertFalse(dialog._set_row_choice(0, "upload", True))
+        finally:
+            ui_module._restore_stubs_for_tests()
+
 
 class DialogClientReuseTests(_QtDialogTest):
     """Aktionen im Vergleichsfenster teilen einen Client bis zum Fehler."""
