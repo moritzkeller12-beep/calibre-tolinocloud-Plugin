@@ -6,8 +6,8 @@ from .ui_common import (SyncJob, _display_value, _format_signatures,
                         _metadata_value, plural)
 from .identifiers import book_uuid, state_key_for, valid_book_uuid
 from .library import (cover_bytes, image_suffix, iter_book_ids, legacy_tolino_id,
-                      metadata_by_id, metadata_tolino_id, normalize_formats,
-                      safe_format_path, update_tolino_ids)
+                      metadata_by_id, metadata_ignored, metadata_tolino_id,
+                      normalize_formats, safe_format_path, update_tolino_ids)
 from .plan import (merge_removals, plan_collection_updates,
                    plan_metadata_updates, plan_sync, series_map_from_metadata,
                    unpack_upload_record)
@@ -42,6 +42,9 @@ def local_metadata(dialog, iter_books=None, metadata_for=None):
         metadata[book_id] = {
             "uuid": identifier,
             "title": _metadata_value(item, "title"),
+            # Vom Abgleich ausgenommen: gekaufte Bücher sollen nicht erneut
+            # in die Cloud geladen werden.
+            "ignored": metadata_ignored(item),
             "authors": _display_value(_metadata_value(
                 item, "authors", _metadata_value(item, "author"))),
             "isbn": _display_value(isbn),
@@ -76,17 +79,39 @@ def saved_state(dialog):
         return {}
 
 
+def _ignored(item):
+    """True, wenn das Buch laut Calibre-Spalte vom Abgleich ausgenommen ist."""
+    return bool(isinstance(item, dict) and item.get("ignored"))
+
+
+def syncable_book_ids(metadata, book_ids):
+    """Ausgewählte Calibre-Nummern ohne die ignorierten Bücher."""
+    return {book_id for book_id in (book_ids or ())
+            if not _ignored((metadata or {}).get(book_id))}
+
+
+def syncable_metadata(metadata):
+    """Metadaten ohne ignorierte Bücher (für Serien und Sammlungen)."""
+    return {book_id: item for book_id, item in (metadata or {}).items()
+            if not _ignored(item)}
+
+
 def automatic_action_count(settings, metadata, state):
-    """Count automatic series updates waiting in the Cloud."""
+    """Count automatic series updates waiting in the Cloud.
+
+    Ignorierte Bücher zählen nicht mit: für sie würde der Start nichts tun.
+    """
     return len(plan_collection_updates(
-        series_map_from_metadata(metadata), state))
+        series_map_from_metadata(syncable_metadata(metadata)), state))
 
 
 def plan_actions(dialog, settings, metadata, state, selection,
                  upload_builder=None, safe_format_lookup=None):
     """Turn the confirmed selection into concrete jobs and next state."""
     preferred = normalize_formats(settings["preferred_formats"])
-    requested_uploads = set(selection["uploads"])
+    # Ignorierte Bücher fallen hier endgültig heraus -- unabhängig davon,
+    # was die Auswahl enthält.
+    requested_uploads = syncable_book_ids(metadata, selection["uploads"])
     valid_uploads = set()
     skipped_formats = []
     for book_id in requested_uploads:
@@ -107,8 +132,8 @@ def plan_actions(dialog, settings, metadata, state, selection,
     titles = titles_for(metadata, removal_titles)
     uploads, meta_updates = plan_metadata_updates(
         metadata, state, uploads, settings["preferred_formats"],
-        only_book_ids=selection["metadata"])
-    series_map = series_map_from_metadata(metadata)
+        only_book_ids=syncable_book_ids(metadata, selection["metadata"]))
+    series_map = series_map_from_metadata(syncable_metadata(metadata))
     builder = upload_builder or upload_jobs
     if upload_builder is not None:
         jobs, skipped_uploads = builder(settings, metadata, uploads)

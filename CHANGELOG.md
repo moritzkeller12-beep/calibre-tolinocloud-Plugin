@@ -1,5 +1,10 @@
 # Änderungen
 
+## Unveröffentlicht
+
+- Neue optionale Calibre-Spalte `#tolino_ignore` (Ja/Nein): so markierte Bücher lädt der Abgleich nicht hoch und ändert sie nicht — gekaufte Bücher erzeugen damit keine zweite Kopie in der Cloud. Sie bleiben im Vergleich sichtbar (Gruppe «Ignoriert») und ihre Cloud-Kopie wird weiterhin zugeordnet.
+- Der Vergleich zeigt einen Hinweis, solange die Spalte `#tolino_ignore` fehlt.
+
 ## 0.1.02
 
 - Browser- und Token-Verwaltung vereinfacht, ohne den Schutz gegen Wiederverwendung rotierter Refresh-Tokens aufzugeben.

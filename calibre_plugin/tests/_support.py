@@ -177,3 +177,84 @@ def stop_cdp_stubs():
     if _CLOSE_WINDOW_PATCH is not None:
         _CLOSE_WINDOW_PATCH.stop()
         _CLOSE_WINDOW_PATCH = None
+
+
+# --- Wiederverwendete GUI-Test-Doubles ---------------------------------
+
+
+class FakeText:
+    """QLabel/QLineEdit-Ersatz: merkt sich den angezeigten Text."""
+
+    def __init__(self, text=""):
+        self.value = text
+
+    def setText(self, text):
+        self.value = text
+
+    def text(self):
+        return self.value
+
+
+class FakeCheckBox:
+    """QCheckBox-Ersatz fuer die Zell-Widgets der Bestandsliste."""
+
+    def __init__(self):
+        self._checked = False
+        self.enabled = True
+        self.tooltip = ""
+
+    def setChecked(self, value):
+        self._checked = bool(value)
+
+    def isChecked(self):
+        return self._checked
+
+    def setEnabled(self, value):
+        self.enabled = value
+
+    def setToolTip(self, text):
+        self.tooltip = text
+
+    def stateChanged(self):
+        return None
+
+
+class FakeMenu:
+    """QMenu-Ersatz: sammelt Aktionen, wahlweise mit Auswahlprotokoll."""
+
+    def __init__(self, _parent=None, selected=None, pick=0):
+        self.actions = []
+        self.selected = selected
+        self.pick = pick
+
+    def addAction(self, label):
+        self.actions.append(label)
+        return label
+
+    def exec(self, _position=None):
+        if self.selected is not None:
+            self.selected.extend(self.actions)
+        if self.pick is None or not self.actions:
+            return None
+        return self.actions[self.pick]
+
+
+class FakeMessageBox:
+    """QMessageBox-Ersatz: sammelt die Argumente je Aufruf."""
+
+    Yes = 1
+    No = 0
+
+    def __init__(self, calls, question_result=0):
+        self.calls = calls
+        self.question_result = question_result
+
+    def information(self, *args, **_kwargs):
+        self.calls.append(args)
+
+    def warning(self, *args, **_kwargs):
+        self.calls.append(args)
+
+    def question(self, *args, **_kwargs):
+        self.calls.append(args)
+        return self.question_result

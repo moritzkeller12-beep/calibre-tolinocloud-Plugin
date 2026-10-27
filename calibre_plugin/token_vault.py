@@ -16,14 +16,8 @@ class TokenVault:
     @contextlib.contextmanager
     def login(self, store, lock_timeout=5, client_factory=None):
         """Yield a logged-in client; the lock covers only the login phase."""
-        if not self._lock.acquire(timeout=max(0, lock_timeout)):
-            raise TolinoAuthError(BUSY_MESSAGE, code="S91")
-        try:
-            values = store.freshest()
-            refresh = normalize_refresh_token(values.get("refresh_token"))
-            if not refresh:
-                raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
-                                      code="A03")
+        with self._held_lock(lock_timeout):
+            values, refresh = self._freshest_token(store)
             save_rotation = self._callback_for_value(
                 store.refresh_token, store.save_refresh)
             factory = client_factory or TolinoClient
@@ -41,30 +35,39 @@ class TokenVault:
                 save_rotation(client.refresh)
             finally:
                 client.token_lock_held = False
+        yield client
+
+    @contextlib.contextmanager
+    def _held_lock(self, timeout):
+        """Konto-Lock für die Dauer des Blocks halten -- sonst «belegt»."""
+        if not self._lock.acquire(timeout=max(0, timeout)):
+            raise TolinoAuthError(BUSY_MESSAGE, code="S91")
+        try:
+            yield
         finally:
             self._lock.release()
-        yield client
+
+    @staticmethod
+    def _freshest_token(store):
+        """Werte und frischer Token des Kontos; leer heisst «nicht angemeldet»."""
+        values = store.freshest()
+        refresh = normalize_refresh_token(values.get("refresh_token"))
+        if not refresh:
+            raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
+                                  code="A03")
+        return values, refresh
 
     def relogin(self, client):
         """Refresh once under the account lock using the freshest saved token."""
         store = client.credential_store
-        if not self._lock.acquire(
-                timeout=max(0, client.token_lock_timeout)):
-            raise TolinoAuthError(BUSY_MESSAGE, code="S91")
-        try:
-            values = store.freshest()
-            refresh = normalize_refresh_token(values.get("refresh_token"))
-            if not refresh:
-                raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
-                                      code="A03")
+        with self._held_lock(client.token_lock_timeout):
+            values, refresh = self._freshest_token(store)
             client.refresh = refresh
             client.hardware = values.get("hardware_id") or client.hardware
             result = client._login()
             if client.refresh:
                 store.save_refresh(client.refresh)
             return result
-        finally:
-            self._lock.release()
 
     def keepalive_refresh(self, get_credentials, persist):
         """Rotate available saved accounts without replaying a busy token."""
@@ -107,12 +110,11 @@ class TokenVault:
                     rotated.append(client.refresh)
                 finally:
                     self._lock.release()
-            except TolinoAuthError as exc:
-                if exc.code != "S91":
-                    log_warning("Tolino-Keep-alive fehlgeschlagen (%s): %s"
-                                % (account or "Konto",
-                                   sanitize_error(exc, (creds.get("refresh_token"),))))
             except Exception as exc:
+                if isinstance(exc, TolinoAuthError) and exc.code == "S91":
+                    # Belegt statt kaputt: der nächste Durchlauf versucht es
+                    # erneut -- ein Logeintrag wäre hier nur Rauschen.
+                    continue
                 log_warning("Tolino-Keep-alive fehlgeschlagen (%s): %s"
                             % (account or "Konto",
                                sanitize_error(exc, (creds.get("refresh_token"),))))

@@ -10,7 +10,7 @@ from ..partners import PARTNERS
 from ..library import TOLINO_COLUMN
 from ..tolino import TolinoAuthError
 from ._support import (
-    _ui_source_text, start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+    FakeText, _ui_source_text, start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1010,19 +1010,9 @@ class LoginMessageTests(unittest.TestCase):
         ui_module = self._ui()
         boxes = []
 
-        class Status:
-            def __init__(self):
-                self.value = ""
-
-            def setText(self, text):
-                self.value = text
-
-        class Hardware(Status):
-            pass
-
         dashboard = type("Dashboard", (), {})()
-        dashboard.status = Status()
-        dashboard.hardware = Hardware()
+        dashboard.status = FakeText()
+        dashboard.hardware = FakeText()
         dashboard.set_refresh_token = lambda refresh: None
         dashboard.persist_refresh_token = lambda refresh: None
         dashboard.update_status = lambda: None
@@ -1045,15 +1035,9 @@ class LoginMessageTests(unittest.TestCase):
         ui_module = self._ui()
         self.addCleanup(ui_module._restore_stubs_for_tests)
 
-        class Status:
-            value = ""
-
-            def setText(self, text):
-                Status.value = text
-
         dashboard = type("Dashboard", (), {})()
-        dashboard.status = Status()
-        dashboard.hardware = Status()
+        dashboard.status = FakeText()
+        dashboard.hardware = FakeText()
         dashboard.set_refresh_token = lambda refresh: None
         dashboard.persist_refresh_token = lambda refresh: None
         dashboard.update_status = lambda: None
@@ -1076,13 +1060,6 @@ class LoginMessageTests(unittest.TestCase):
         naechste Schritt und hat den Fokus."""
         ui_module = self._ui()
 
-        class Status:
-            def __init__(self):
-                self.value = ""
-
-            def setText(self, text):
-                self.value = text
-
         class Primary:
             def __init__(self):
                 self.calls = []
@@ -1094,8 +1071,8 @@ class LoginMessageTests(unittest.TestCase):
                 self.calls.append(("focus",))
 
         dashboard = type("Dashboard", (), {})()
-        dashboard.status = Status()
-        dashboard.hardware = Status()
+        dashboard.status = FakeText()
+        dashboard.hardware = FakeText()
         dashboard.primary = Primary()
         dashboard.set_refresh_token = lambda refresh: None
         dashboard.persist_refresh_token = lambda refresh: None
@@ -1153,17 +1130,13 @@ class LoginMessageTests(unittest.TestCase):
         ui_module = self._ui()
         boxes, logged = [], []
 
-        class Status:
-            def setText(self, text):
-                self.value = text
-
         class Refresh:
             @staticmethod
             def text():
                 return "tok-geheim"
 
         dashboard = type("Dashboard", (), {})()
-        dashboard.status = Status()
+        dashboard.status = FakeText()
         dashboard.refresh = Refresh()
         dashboard._login_cleanup = lambda: None
         dashboard.login_failed = ui_module.dashboard.SyncDashboard.login_failed.__get__(

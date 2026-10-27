@@ -41,7 +41,7 @@ __all__ = [
     "_display_value", "_format_signatures", "_login_failure_guidance",
     "_metadata_value", "_stop_thread", "plural",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
-    "_discard_item",
+    "_discard_item", "_thread_running",
     "pyqtSignal", "safe_format_path",
     "sync_result_detail",
     "sync_result_text",
@@ -196,17 +196,21 @@ def _worker_outcome(dialog):
     return dict(getattr(worker, "outcome", None) or {})
 
 
+def _thread_running(thread):
+    """Läuft dieser Thread noch? (None = nein, Stub ohne isRunning = ja)"""
+    try:
+        return thread is not None and thread.isRunning()
+    except Exception:
+        return thread is not None
+
+
 def _dialog_busy(dialog):
     """Läuft Sync, Vorbereitung oder Anmeldung? (ohne Qt-Abhängigkeit)"""
     if getattr(dialog, "thread", None) is not None:
         return True
     if getattr(dialog, "prepare_thread", None) is not None:
         return True
-    thread = getattr(dialog, "login_thread", None)
-    try:
-        return thread is not None and thread.isRunning()
-    except Exception:
-        return thread is not None
+    return _thread_running(getattr(dialog, "login_thread", None))
 
 
 def _set_enabled(owner, names, enabled):

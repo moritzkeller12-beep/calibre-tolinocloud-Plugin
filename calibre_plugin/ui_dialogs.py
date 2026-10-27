@@ -7,7 +7,7 @@ from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import (comparison_group, selected_book_ids,
                          sort_comparison_rows)
-from .library import selected_table_rows
+from .library import TOLINO_IGNORE_COLUMN, selected_table_rows
 from .tolino import report_error
 from .ui_common import _set_enabled, plural, start_call
 
@@ -32,6 +32,7 @@ class InventoryDialog(QDialog):
         ("Nur in tolino", "tolino_only"),
         ("Zu prüfen", "review"),
         ("Unverändert", "unchanged"),
+        ("Ignoriert", "ignored"),
     )
 
     # Ein Klick ändert die Auswahl. Die Zusammenfassung zählt die Änderungen.
@@ -123,6 +124,10 @@ class InventoryDialog(QDialog):
         erzeugen könnte. Bücher ohne passendes Upload-Format erhalten keinen
         Upload-Vorschlag.
         """
+        # Ein ignoriertes Buch wird nie vorgeschlagen -- weder Upload noch
+        # Metadaten.
+        if row.get("ignored"):
+            return (False, False)
         # Bei unsicheren Zuordnungen könnte ein Upload Duplikate erzeugen.
         if row.get("status") == "review":
             return (False, False)
@@ -194,6 +199,10 @@ class InventoryDialog(QDialog):
             self.note.setText(
                 "Lesestatus unbekannt: konnte nicht geladen werden und "
                 "wird nicht verändert.")
+        if not self.note.text() and self.options.get("ignore_column") is False:
+            self.note.setText(
+                "Spalte %s (Ja/Nein) anlegen: so markierte Bücher werden "
+                "nicht hochgeladen." % TOLINO_IGNORE_COLUMN)
         layout.addWidget(self.note)
 
     def _build_toolbar(self, layout):
@@ -396,7 +405,7 @@ class InventoryDialog(QDialog):
             return
         for row, upload_check, metadata_check, read_check in zip(
                 self.rows, self.checks, self.meta_checks, self.read_checks):
-            if row.get("delete_cloud"):
+            if row.get("delete_cloud") or row.get("ignored"):
                 continue
             wanted = tuple(chooser(row))
             upload, metadata = bool(wanted[0]), bool(wanted[1])
@@ -471,19 +480,20 @@ class InventoryDialog(QDialog):
         return [(str(row.get("uuid") or ""), str(row["tolino_id"]),
                  str(row.get("title") or ""))
                 for row in self.rows
-                if row.get("delete_cloud") and row.get("tolino_id")]
+                if row.get("delete_cloud") and row.get("tolino_id")
+                and not row.get("ignored")]
 
     def selected_upload_ids(self):
         """Bücher, deren Datei hochgeladen werden soll."""
         return selected_book_ids([
-            dict(row, selected=check.isChecked())
+            dict(row, selected=check.isChecked() and not row.get("ignored"))
             for row, check in zip(self.rows, self.checks)
         ])
 
     def selected_metadata_ids(self):
         """Bücher, deren Cloud-Metadaten aktualisiert werden sollen."""
         return selected_book_ids([
-            dict(row, selected=check.isChecked())
+            dict(row, selected=check.isChecked() and not row.get("ignored"))
             for row, check in zip(self.rows, self.meta_checks)
         ])
 
@@ -495,7 +505,8 @@ class InventoryDialog(QDialog):
         return [str(row["tolino_id"])
                 for row, check in zip(self.rows, self.read_checks)
                 if check.isChecked() and row.get("tolino_id")
-                and not row.get("delete_cloud") and not row.get("read_in_cloud")]
+                and not row.get("delete_cloud") and not row.get("read_in_cloud")
+                and not row.get("ignored")]
 
     def selected_read_unmarks(self):
         """tolino-IDs, deren Lesestatus jetzt auf ungelesen gesetzt wird.
@@ -506,7 +517,8 @@ class InventoryDialog(QDialog):
         return [str(row["tolino_id"])
                 for row, check in zip(self.rows, self.read_checks)
                 if not check.isChecked() and row.get("tolino_id")
-                and not row.get("delete_cloud") and row.get("read_in_cloud")]
+                and not row.get("delete_cloud") and row.get("read_in_cloud")
+                and not row.get("ignored")]
 
     def _marked_row_indexes(self):
         """Markierte Zeilen -- oder ein Hinweis, wenn keine markiert ist."""
@@ -670,7 +682,7 @@ class InventoryDialog(QDialog):
     @staticmethod
     def _column_applies(key, row):
         """Geht diese Spalte bei dieser Zeile? (wie beim einzelnen Klick)"""
-        if row.get("delete_cloud"):
+        if row.get("delete_cloud") or row.get("ignored"):
             return False
         if key == "upload":
             return row.get("book_id") is not None
@@ -686,7 +698,7 @@ class InventoryDialog(QDialog):
         Die Auswahl folgt dem Cloud-Lesestatus; übertragen wird sie beim Sync.
         """
         row = self.rows[index]
-        if row.get("delete_cloud"):
+        if row.get("delete_cloud") or row.get("ignored"):
             return False
         if key == "read":
             check = self.read_checks[index]
@@ -752,14 +764,20 @@ class InventoryDialog(QDialog):
                 "«Löschmarkierung aufheben».")
             # Unbekannter Lesestatus bleibt gesperrt und wird nicht geändert.
             read_known = row.get("read_known", True) is not False
+            # In Calibre ignorierte Bücher bleiben sichtbar, sind aber in
+            # keiner Richtung wählbar.
+            ignored = bool(row.get("ignored"))
+            ignored_tooltip = ("In Calibre ignoriert (%s) – wird nicht "
+                               "abgeglichen." % TOLINO_IGNORE_COLUMN)
             checks = (
-                ("upload", has_book and not delete_cloud
+                ("upload", has_book and not delete_cloud and not ignored
                  and row.get("has_preferred_format", True),
                  "Buchdatei in die Cloud hochladen.",
                  ("Nur in tolino – es gibt keine Calibre-Datei zum Hochladen."
                   if not has_book else
                   "Kein Buchformat aus den Upload-Formaten vorhanden.")),
-                ("metadata", has_book and in_cloud and not delete_cloud,
+                ("metadata", has_book and in_cloud and not delete_cloud
+                 and not ignored,
                  "Titel, Autor und ISBN in der Cloud aktualisieren, ohne "
                  "Upload.",
                  "Nur in Calibre – es gibt in tolino nichts zu "
@@ -769,7 +787,8 @@ class InventoryDialog(QDialog):
                 # anklickbar: gelesen markieren und wieder ungelesen setzen.
                 # Schon gelesene Bücher sind zusätzlich gesperrt -- der erste
                 # Klick löst nur die Sperre.
-                ("read", in_cloud and read_known and not delete_cloud,
+                ("read", in_cloud and read_known and not delete_cloud
+                 and not ignored,
                  "Im tolino-Konto als gelesen markieren.",
                  "Lesestatus unbekannt – nicht geladen." if in_cloud else
                  "Geht erst, wenn das Buch in tolino liegt."),
@@ -781,9 +800,11 @@ class InventoryDialog(QDialog):
                 if (key == "upload" and row.get("match_reason") in
                         ("title_only", "ambiguous")):
                     tooltip = "Kann ein Duplikat erzeugen."
-                check.setToolTip(tooltip if enabled else
-                                 (delete_tooltip if delete_cloud
-                                  else disabled_tooltip))
+                check.setToolTip(
+                    ignored_tooltip if ignored
+                    else tooltip if enabled
+                    else (delete_tooltip if delete_cloud
+                          else disabled_tooltip))
                 state_signal = getattr(check, "stateChanged", None)
                 if state_signal is not None:
                     try:

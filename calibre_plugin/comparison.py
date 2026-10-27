@@ -4,7 +4,13 @@ import hashlib
 from .inventory import inventory_records
 
 from .identifiers import valid_book_uuid
-from .library import metadata_tolino_id, normalize_formats
+from .library import metadata_ignored, metadata_tolino_id, normalize_formats
+
+
+# Hinweis einer Zeile, deren Buch in Calibre vom Abgleich ausgenommen ist.
+IGNORED_EXPLANATION = (
+    "In Calibre als «ignoriert» markiert (#tolino_ignore) – wird weder "
+    "hochgeladen noch abgeglichen.")
 from .matching import (author_tokens as _author_tokens,
                        authors_match as _authors_match,
                        normalize_isbn as _normalize_isbn,
@@ -283,6 +289,12 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     if not isinstance(metadata, dict):
         raise ValueError("Preparation returned invalid metadata for book %r."
                          % (book_id,))
+    # Ausschluss aus der Calibre-Spalte: das Buch wird weiter zugeordnet
+    # (sonst erschiene seine Cloud-Kopie als «nur in tolino»), aber es
+    # bekommt keine Aktion.
+    # Zwei Wege sind erlaubt: die fertige Kennzeichnung des Dashboards
+    # («ignored») und die rohe Calibre-Spalte.
+    ignored = bool(metadata.get("ignored")) or metadata_ignored(metadata)
     book_uuid = valid_book_uuid(metadata.get("uuid"))
     title = _metadata_text(metadata, "title")
     authors = _metadata_text(metadata, "authors", "author")
@@ -354,9 +366,10 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         "tolino_id": tolino_id,
         "stale_cloud_id": (stored_id if status == "new_in_calibre"
                             and not tolino_id and stored_id else ""),
+        "ignored": ignored,
         "status": status,
-        "group": comparison_group(status),
-        "selected": status == "new_in_calibre",
+        "group": "ignored" if ignored else comparison_group(status),
+        "selected": status == "new_in_calibre" and not ignored,
         "match_reason": match_reason,
         "candidate_ids": [str(remote.rows[index].get("tolino_id") or "")
                           for index in candidate_indexes
@@ -365,7 +378,9 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         "file_changed": file_changed,
         "has_preferred_format": bool(selected_format),
         **_read_flags(tolino_id, read_known, read_ids),
-        "explanation": _row_explanation(status, match_reason, file_changed),
+        "explanation": (IGNORED_EXPLANATION if ignored
+                        else _row_explanation(status, match_reason,
+                                              file_changed)),
     }
 
 

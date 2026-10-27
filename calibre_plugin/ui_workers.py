@@ -136,6 +136,17 @@ class SyncWorker(QObject):
                     % ((operation or {}).get("label") or "?", detail))
         self._refresh_counts()
 
+    def _count_failure(self, operation, exc, client=None):
+        """Schritt als gescheitert zählen -- fatal beendet den Lauf.
+
+        Nur eine beschädigte Anmeldung/Sitzung ist fatal: danach liefert
+        jeder weitere Aufruf denselben Fehler. Alles andere wird pro Schritt
+        gezählt, der Lauf macht weiter.
+        """
+        self._record_failure(operation, exc, client)
+        if self._fatal_error(exc):
+            raise
+
     @staticmethod
     def _fatal_error(exc):
         """Fehler, nach denen jeder weitere Aufruf scheitern wuerde.
@@ -223,9 +234,7 @@ class SyncWorker(QObject):
         try:
             deleted = self._delete_or_skip(client, job.old_id)
         except Exception as exc:
-            self._record_failure(operation, exc, client)
-            if self._fatal_error(exc):
-                raise
+            self._count_failure(operation, exc, client)
         else:
             self._finish_operation(
                 operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
@@ -244,9 +253,7 @@ class SyncWorker(QObject):
             try:
                 deleted = self._delete_or_skip(client, tolino_id)
             except Exception as exc:
-                self._record_failure(operation, exc, client)
-                if self._fatal_error(exc):
-                    raise
+                self._count_failure(operation, exc, client)
                 done += 1
                 continue
             self._finish_operation(
@@ -284,9 +291,7 @@ class SyncWorker(QObject):
             try:
                 client.mark_read_many(book_ids, finished=finished)
             except Exception as exc:
-                self._record_failure(operation, exc, client)
-                if self._fatal_error(exc):
-                    raise
+                self._count_failure(operation, exc, client)
             else:
                 self._finish_operation(operation, OP_SUCCEEDED)
                 self._refresh_counts()
@@ -310,9 +315,10 @@ class SyncWorker(QObject):
             if self._fatal_error(exc):
                 raise
         revision = None
-        for book_uuid, tolino_id, series, operation in collection_ops:
-            if known is None:
-                break
+        # Ohne Bestand ist keine Zuordnung möglich: dann startet kein
+        # Schritt -- auch kein Checkpoint.
+        for book_uuid, tolino_id, series, operation in (
+                collection_ops if known is not None else ()):
             checkpoint()
             if (tolino_id, series) in known:
                 remember_collection(self.state, book_uuid, series)
@@ -329,9 +335,7 @@ class SyncWorker(QObject):
                 revision = client.add_to_collection(
                     tolino_id, series, revision=revision)
             except Exception as exc:
-                self._record_failure(operation, exc, client)
-                if self._fatal_error(exc):
-                    raise
+                self._count_failure(operation, exc, client)
                 # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
                 revision = None
                 done += 1
@@ -375,9 +379,7 @@ class SyncWorker(QObject):
                 try:
                     client.update_metadata(record["tolino_id"], record["fields"])
                 except Exception as exc:
-                    self._record_failure(operation, exc, client)
-                    if self._fatal_error(exc):
-                        raise
+                    self._count_failure(operation, exc, client)
                     done += 1
                     continue
                 self._finish_operation(operation, OP_SUCCEEDED)
@@ -402,9 +404,7 @@ class SyncWorker(QObject):
                 try:
                     new_id = client.upload(job.path)
                 except Exception as exc:
-                    self._record_failure(operation, exc, client)
-                    if self._fatal_error(exc):
-                        raise
+                    self._count_failure(operation, exc, client)
                     done += 1
                     self.progress.emit(done, total, "Fehlgeschlagen: %s"
                                        % job.label())
@@ -436,9 +436,7 @@ class SyncWorker(QObject):
                         cover_op = self._add_operation(
                             "cover", "Buchcover: %s" % job.label(),
                             book_uuid=job.book_uuid)
-                        self._record_failure(cover_op, exc, client)
-                        if self._fatal_error(exc):
-                            raise
+                        self._count_failure(cover_op, exc, client)
                 self._remove_replaced_copy(client, job)
                 done += 1
                 self._refresh_counts()

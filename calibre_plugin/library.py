@@ -6,6 +6,12 @@ from collections.abc import Iterable
 
 
 TOLINO_COLUMN = "#tolino_id"
+# Optionales Ja/Nein-Feld: solche Buecher nimmt der Abgleich nicht an.
+TOLINO_IGNORE_COLUMN = "#tolino_ignore"
+
+# Calibre liefert ein Ja/Nein-Feld je nach Weg als Bool, Text oder Zahl.
+_TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
+_FALSE_VALUES = frozenset(("false", "no", "nein", "0"))
 
 
 def _column_value(metadata):
@@ -54,17 +60,71 @@ def metadata_tolino_id(metadata, account_name=None):
     return str(value or "").strip()
 
 
-def custom_column_available(database):
-    """Check Calibre's public field metadata for the configured custom column."""
+def _field_info(database, column):
+    """(vorhanden, Feldinfo) aus Calibres oeffentlichen Feldmetadaten."""
     fields = getattr(database, "field_metadata", None)
     if callable(fields):
         fields = fields()
     if fields is None:
-        return False
+        return False, None
     try:
-        return TOLINO_COLUMN in fields
+        if column not in fields:
+            return False, None
     except (TypeError, AttributeError):
+        return False, None
+    # Ein Test-Stub oder eine aeltere Calibre-Fassung liefert moeglicherweise
+    # keine Feldinfo: dann gilt die Spalte als vorhanden, aber unbekannt.
+    try:
+        return True, fields[column]
+    except (TypeError, AttributeError, KeyError, IndexError):
+        return True, None
+
+
+def custom_column_available(database):
+    """Check Calibre's public field metadata for the configured custom column."""
+    return _field_info(database, TOLINO_COLUMN)[0]
+
+
+def bool_column_available(database, column):
+    """True, wenn Calibre ``column`` als Ja/Nein-Feld kennt.
+
+    Ein Text- oder Zahlenfeld gilt nicht: dort stuenden fremde Werte, die
+    wie ein versehentliches «ignoriert» aussehen koennten.
+    """
+    present, info = _field_info(database, column)
+    if not present:
         return False
+    datatype = info.get("datatype") if isinstance(info, dict) else None
+    return datatype in (None, "bool")
+
+
+def bool_column_value(metadata, column):
+    """Ja/Nein-Wert einer Spalte: True, False oder None (leer/unbekannt)."""
+    getter = getattr(metadata, "get", None)
+    value = getter(column, None) if callable(getter) else None
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().casefold()
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    return None
+
+
+def ignore_column_available(database):
+    """True, wenn Calibre die Spalte ``#tolino_ignore`` kennt."""
+    return bool_column_available(database, TOLINO_IGNORE_COLUMN)
+
+
+def metadata_ignored(metadata):
+    """True, wenn das Buch vom Abgleich ausgeschlossen ist.
+
+    Nur ein deutliches «Ja» zaehlt: ein leeres oder unbekanntes Feld ist
+    KEIN Ausschluss -- sonst verschwaende ein Buch wegen eines Tippfehlers
+    aus dem Vergleich.
+    """
+    return bool_column_value(metadata, TOLINO_IGNORE_COLUMN) is True
 
 
 def tolino_column_active(values, database):

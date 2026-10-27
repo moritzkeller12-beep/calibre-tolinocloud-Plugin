@@ -7,7 +7,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
                         _dialog_busy, _discard_item,
                         _login_failure_guidance,
-                        _stop_thread, _worker_account_name,
+                        _stop_thread, _thread_running, _worker_account_name,
                         _worker_outcome,
                         sync_result_detail,
                         sync_result_text)
@@ -16,8 +16,9 @@ from .client import make_client
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      save_account, save_credentials, save_settings,
                      set_active_account, settings)
-from .library import (iter_book_ids, metadata_by_id, safe_format_path,
-                      tolino_column_active, update_tolino_ids)
+from .library import (ignore_column_available, iter_book_ids, metadata_by_id,
+                      safe_format_path, tolino_column_active,
+                      update_tolino_ids)
 from .config import load_state
 from .config import settings as _global_settings
 
@@ -48,6 +49,17 @@ def _offer_next_step(dialog):
         primary.setFocus()
     except Exception:
         pass  # Test-Stub oder bereits geschlossenes Fenster
+
+
+def _persist_sync_result(dialog, state, refresh, updates,
+                         always_refresh=False):
+    """Ergebnis speichern und die optionale Calibre-Spalte aktualisieren."""
+    _persist_run(dialog, state, refresh, updates,
+                 always_refresh=always_refresh)
+    if dialog.sync_column_enabled:
+        update_tolino_ids(
+            dialog.gui.current_db, updates, enabled=True,
+            account_name=_worker_account_name(dialog))
 
 
 def _persist_run(dialog, state, refresh, updates, always_refresh=False):
@@ -82,6 +94,45 @@ def _persist_run(dialog, state, refresh, updates, always_refresh=False):
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s"
                     % sanitize_error(exc, (refresh,)))
+
+
+def _register_login_thread(dialog, thread, worker):
+    """Anmelde-Thread starten und am Leben halten.
+
+    Ohne Elternteil: ein bereits geschlossenes Fenster darf den laufenden
+    Thread nicht zerstören. Die Liste hält die Referenz, bis der Thread
+    fertig ist -- sonst räumt ihn der Garbage Collector vorzeitig ab.
+    """
+    thread.finished.connect(thread.deleteLater)
+    thread.finished.connect(
+        lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))
+    _LOGIN_WORKER_THREADS.append(thread)
+    dialog.login_thread = thread
+    dialog.login_worker = worker
+    thread.start()
+
+
+def _sync_cancelled_text(outcome):
+    """Abschlusstext eines regulären Abbruchs -- auch mit Teilerfolgen."""
+    result = sync_result_text(outcome, "")
+    if result:
+        return "Abgebrochen. " + result
+    return "Abgebrochen. Es wurde nichts übertragen."
+
+
+def _sync_failure_heading(outcome):
+    """Titel und Vorsatz eines fehlerhaften Laufs.
+
+    «Teilweise fehlgeschlagen» heisst: mindestens eine Aktion wurde wirklich
+    übertragen. Der Unterschied gehört in Titel und Text; die beiden Handler
+    bleiben getrennt, weil sich ihre Ergebnisfälle unterscheiden.
+    """
+    succeeded = (int(outcome.get("uploaded") or 0)
+                 + int(outcome.get("updated") or 0)
+                 + int(outcome.get("deleted") or 0))
+    if succeeded:
+        return "Teilweise fehlgeschlagen", "Teilweise abgeschlossen: "
+    return "Fehlgeschlagen", "Fehlgeschlagen: "
 
 
 class SyncDashboard(QDialog):
@@ -342,15 +393,9 @@ class SyncDashboard(QDialog):
         logged_in = bool(self.refresh.text().strip())
         running = _dialog_busy(self)
         if running:
-            status = getattr(self, "status", None)
-            if status is not None and hasattr(status, "setText"):
-                if getattr(self, "thread", None) is not None:
-                    text = "Synchronisierung läuft …"
-                elif getattr(self, "prepare_thread", None) is not None:
-                    text = "Vergleich läuft …"
-                else:
-                    text = "Anmeldung wird geprüft …"
-                status.setText(text)
+            # Sperren und «… läuft»-Text kommen aus dem gemeinsamen Helfer;
+            # hier bleibt nur die Auswahl der Zweige.
+            _apply_busy(self, True)
         elif logged_in:
             self.status.setText("Angemeldet.")
         else:
@@ -433,11 +478,7 @@ class SyncDashboard(QDialog):
 
     def _login_running(self):
         """Läuft gerade eine Anmeldeprüfung oder ein Anmeldefenster?"""
-        thread = getattr(self, "login_thread", None)
-        try:
-            return thread is not None and thread.isRunning()
-        except Exception:
-            return thread is not None
+        return _thread_running(getattr(self, "login_thread", None))
 
     def browser_login(self):
         """Anmeldeknopf: erst die gespeicherte Anmeldung prüfen.
@@ -469,13 +510,7 @@ class SyncDashboard(QDialog):
         worker.valid.connect(self.login_still_valid)
         worker.invalid.connect(self.login_rejected)
         worker.busy.connect(self.login_check_busy)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(
-            lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))
-        _LOGIN_WORKER_THREADS.append(thread)
-        self.login_thread = thread
-        self.login_worker = worker
-        thread.start()
+        _register_login_thread(self, thread, worker)
 
     def login_still_valid(self, refresh):
         """Prüfung bestanden: Anmeldung bleibt gültig."""
@@ -528,13 +563,7 @@ class SyncDashboard(QDialog):
         worker.failed.connect(thread.quit)
         worker.completed.connect(self.login_completed)
         worker.failed.connect(self.login_failed)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(
-            lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))
-        _LOGIN_WORKER_THREADS.append(thread)
-        self.login_thread = thread
-        self.login_worker = worker
-        thread.start()
+        _register_login_thread(self, thread, worker)
 
     def login_completed(self, refresh, hardware):
         try:
@@ -798,6 +827,10 @@ class SyncDashboard(QDialog):
             options={
                 "collections": True,
                 "automatic": int(automatic or 0),
+                # Für den Hinweis im Fenster: ohne diese Spalte bleiben
+                # gekaufte Bücher Upload-Kandidaten.
+                "ignore_column": ignore_column_available(
+                    getattr(getattr(self, "gui", None), "current_db", None)),
             })
         if dialog.exec() != QDialog.Accepted:
             return None
@@ -958,16 +991,6 @@ class SyncDashboard(QDialog):
         self.progress_label.setText("Abbruch angefordert …")
         self.primary.setEnabled(False)
 
-    def _persist_sync_result(self, state, refresh, updates,
-                             always_refresh=False):
-        """Ergebnis speichern und die optionale Calibre-Spalte aktualisieren."""
-        _persist_run(self, state, refresh, updates,
-                     always_refresh=always_refresh)
-        if self.sync_column_enabled:
-            update_tolino_ids(
-                self.gui.current_db, updates, enabled=True,
-                account_name=_worker_account_name(self))
-
     def sync_completed(self, state, refresh, updates):
         """Erfolgreicher Lauf (auch nach regulaerem Abbruch).
 
@@ -975,24 +998,15 @@ class SyncDashboard(QDialog):
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
         outcome = _worker_outcome(self)
-        self._persist_sync_result(state, refresh, updates)
+        _persist_sync_result(self, state, refresh, updates)
         self.finish_thread()
         if outcome.get("cancelled"):
-            result = sync_result_text(outcome, "")
-            text = ("Abgebrochen. " + result if result else
-                    "Abgebrochen. Es wurde nichts übertragen.")
-            info_dialog(self, "Abgebrochen", text,
+            info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)
             return
         if outcome.get("failed"):
-            result = sync_result_text(outcome, "")
-            succeeded = (int(outcome.get("uploaded") or 0)
-                         + int(outcome.get("updated") or 0)
-                         + int(outcome.get("deleted") or 0))
-            title = "Teilweise fehlgeschlagen" if succeeded else "Fehlgeschlagen"
-            text = ("Teilweise abgeschlossen: " + result if succeeded
-                    else "Fehlgeschlagen: " + result)
-            error_dialog(self, title, text,
+            title, prefix = _sync_failure_heading(outcome)
+            error_dialog(self, title, prefix + sync_result_text(outcome, ""),
                          det_msg=sync_result_detail(outcome), show=True)
             return
         info_dialog(self, "Fertig",
@@ -1006,15 +1020,12 @@ class SyncDashboard(QDialog):
             str(message) == CANCEL_MESSAGE
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
-        self._persist_sync_result(
-            getattr(worker, "state", {}), refresh,
+        _persist_sync_result(
+            self, getattr(worker, "state", {}), refresh,
             getattr(worker, "updates", ()), always_refresh=True)
         self.finish_thread()
         if cancelled:
-            result = sync_result_text(outcome, "")
-            text = ("Abgebrochen. " + result if result else
-                    "Abgebrochen. Es wurde nichts übertragen.")
-            info_dialog(self, "Abgebrochen", text,
+            info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)
             return
         result = sync_result_text(outcome, "")
@@ -1022,12 +1033,9 @@ class SyncDashboard(QDialog):
         if outcome.get("failed") and result:
             text += "\n\n" + result
 
-        succeeded = (int(outcome.get("uploaded") or 0)
-                     + int(outcome.get("updated") or 0)
-                     + int(outcome.get("deleted") or 0))
         error_dialog(
-            self, "Teilweise fehlgeschlagen" if succeeded else "Fehlgeschlagen",
-            text, det_msg=sync_result_detail(outcome), show=True)
+            self, _sync_failure_heading(outcome)[0], text,
+            det_msg=sync_result_detail(outcome), show=True)
 
     def _cleanup_temp_files(self):
         """Temporäre Cover-Dateien löschen -- auch auf frühen Rückwegen.

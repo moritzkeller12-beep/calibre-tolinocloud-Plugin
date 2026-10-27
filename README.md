@@ -35,6 +35,12 @@ nach der Bestätigung vor dem Start gelöscht.
   benutzerdefinierte Spalte **`#tolino_id`** vom Typ **Text** an. Ohne diese
   Spalte bleibt die Zuordnung im Plugin-Zustand gespeichert und wird nicht in
   der Bibliotheksspalte angezeigt.
+- Für **gekaufte Bücher, die schon in tolino liegen**: lege zusätzlich eine
+  Spalte **`#tolino_ignore`** vom Typ **Ja/Nein** an und setze sie bei diesen
+  Büchern auf «Ja». Sie werden nicht hochgeladen und nicht verändert – damit
+  entsteht keine zweite Kopie in der Cloud. Im Vergleich bleiben sie sichtbar
+  und stehen dort in der Gruppe **Ignoriert**; ein leeres Feld bedeutet
+  «nicht ignoriert».
 - Das Plugin verwendet eine **inoffizielle Schnittstelle**. Es gibt keine
   Stabilitäts- oder Verfügbarkeitsgarantie; Endpunkte und Verhalten können
   sich ohne Vorwarnung ändern.

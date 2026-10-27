@@ -14,9 +14,10 @@ import unittest
 import uuid
 import zipfile
 from .. import config
-from ..library import (TOLINO_COLUMN, cover_bytes, custom_column_available,
-                       iter_book_ids, metadata_by_id, metadata_tolino_id,
-                       normalize_formats, safe_format_path,
+from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, cover_bytes,
+                       custom_column_available, ignore_column_available,
+                       iter_book_ids, metadata_by_id, metadata_ignored,
+                       metadata_tolino_id, normalize_formats, safe_format_path,
                        selected_table_rows, update_tolino_ids)
 from ..comparison import (compare_inventory, content_fingerprint,
                           metadata_fingerprint, normalize_title,
@@ -1727,6 +1728,121 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertEqual("review", comparison_group("not_matchable"))
         self.assertEqual("unchanged", comparison_group("identical"))
         self.assertEqual("tolino_only", comparison_group("only_tolino"))
+
+    def test_the_ignore_column_is_only_used_as_a_yes_no_field(self):
+        """Nur ein Ja/Nein-Feld zählt; Text- oder Zahlenfelder nicht."""
+        class Bool:
+            field_metadata = {TOLINO_IGNORE_COLUMN: {"datatype": "bool"}}
+
+        class Text:
+            field_metadata = {TOLINO_IGNORE_COLUMN: {"datatype": "text"}}
+
+        class Missing:
+            field_metadata = {}
+
+        self.assertTrue(ignore_column_available(Bool()))
+        self.assertFalse(ignore_column_available(Text()))
+        self.assertFalse(ignore_column_available(Missing()))
+
+    def test_only_a_clear_yes_excludes_a_book(self):
+        """Leer oder unlesbar ist KEIN Ausschluss."""
+        cases = ((True, True), (False, False), ("ja", True), ("Ja", True),
+                 (1, True), (0, False), ("nein", False), ("", False),
+                 (None, False), ("vielleicht", False))
+        for value, expected in cases:
+            metadata = {TOLINO_IGNORE_COLUMN: value}
+            self.assertEqual(expected, metadata_ignored(metadata), value)
+        self.assertFalse(metadata_ignored({}))
+
+    def test_an_ignored_book_is_not_offered_for_upload(self):
+        """Feldwunsch: gekaufte Bücher nicht erneut in die Cloud laden.
+
+        Beide Wege zählen: die rohe Calibre-Spalte und die fertige
+        Kennzeichnung, die der Vergleich vom Dashboard bekommt.
+        """
+        for metadata in (self._metadata(**{TOLINO_IGNORE_COLUMN: True}),
+                         self._metadata(ignored=True)):
+            rows = compare_inventory(metadata, {}, [], ["EPUB"])
+            self.assertEqual(1, len(rows))
+            self.assertTrue(rows[0]["ignored"], metadata)
+            self.assertEqual("ignored", rows[0]["group"], metadata)
+            self.assertFalse(rows[0]["selected"], metadata)
+            self.assertIn("ignoriert", rows[0]["explanation"], metadata)
+
+    def test_an_ignored_book_still_matches_its_cloud_copy(self):
+        """Die gekaufte Cloud-Kopie taucht nicht zusätzlich als Prüffall auf."""
+        rows = compare_inventory(
+            self._metadata(**{TOLINO_IGNORE_COLUMN: "ja"}), {},
+            [{"id": "t1", "title": "Titel", "authors": "Autor"}], ["EPUB"])
+        self.assertEqual(1, len(rows))
+        self.assertEqual("t1", rows[0]["tolino_id"])
+        self.assertTrue(rows[0]["ignored"])
+
+    def test_an_unset_or_unreadable_column_changes_nothing(self):
+        """Ohne deutliches Ja bleibt die Zeile eine normale Upload-Zeile."""
+        for value in (False, "", None, "nein"):
+            rows = compare_inventory(
+                self._metadata(**{TOLINO_IGNORE_COLUMN: value}), {}, [],
+                ["EPUB"])
+            self.assertFalse(rows[0]["ignored"], value)
+            self.assertEqual("action", rows[0]["group"], value)
+            self.assertTrue(rows[0]["selected"], value)
+
+    def test_ignored_books_are_filtered_out_of_the_selection_helpers(self):
+        from ..dashboard_plan import syncable_book_ids, syncable_metadata
+        metadata = {1: {"ignored": True}, 2: {}, 3: {"ignored": False}}
+        self.assertEqual({2, 3}, syncable_book_ids(metadata, [1, 2, 3]))
+        self.assertEqual({2, 3}, set(syncable_metadata(metadata)))
+
+    def test_plan_actions_drops_ignored_books_but_keeps_the_others(self):
+        """Letzte Sicherung: auch eine erzwungene Auswahl bleibt wirkungslos."""
+        from ..dashboard_plan import plan_actions
+        state = {"u2": {"tolino_id": "t2"}}
+
+        def planned(ignored):
+            metadata = {
+                1: {"uuid": "u1", "title": "Gekauft",
+                    "authors": "Autorin", "formats": ["EPUB"]},
+                2: {"uuid": "u2", "title": "Eigenes",
+                    "authors": "Autorin", "formats": ["EPUB"]},
+            }
+            if ignored:
+                metadata[1]["ignored"] = True
+            seen = []
+
+            def builder(_settings, _metadata, uploads):
+                seen.extend(uploads)
+                return [], []
+
+            plan_actions(
+                object(), {"preferred_formats": ["EPUB"]}, metadata,
+                dict(state),
+                {"uploads": [1, 2], "metadata": [1], "read": [],
+                 "unread": [], "cloud_deletions": []},
+                upload_builder=builder)
+            return [record[0] for record in seen]
+
+        self.assertEqual([2], planned(True))
+        self.assertEqual([1, 2], planned(False))
+
+    def test_an_ignored_book_creates_no_collection(self):
+        """Die Serien-Zuordnung folgt den gefilterten Metadaten."""
+        from ..dashboard_plan import syncable_metadata
+        metadata = {1: {"uuid": "u1", "series": "Reihe", "ignored": True}}
+        state = {"u1": {"tolino_id": "t1"}}
+        self.assertEqual([("u1", "t1", "Reihe")],
+                         plan_collection_updates(
+                             series_map_from_metadata(metadata), state))
+        self.assertEqual([], plan_collection_updates(
+            series_map_from_metadata(syncable_metadata(metadata)), state))
+
+    def test_automatic_collections_skip_ignored_books(self):
+        """Ein ignoriertes Buch zählt auch automatisch nicht mit."""
+        from ..dashboard_plan import automatic_action_count
+        metadata = {1: {"uuid": "u1", "series": "Reihe", "ignored": True},
+                    2: {"uuid": "u2", "series": "Reihe"}}
+        state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": "t2"}}
+        self.assertEqual(1, automatic_action_count({}, metadata, state))
 
     @staticmethod
     def _metadata(**values):
