@@ -16,11 +16,11 @@ from .client import make_client
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      save_account, save_credentials, save_settings,
                      set_active_account, settings)
-from .library import (CUSTOM_COLUMNS, create_custom_columns,
-                      ignore_column_available, iter_book_ids, metadata_by_id,
-                      read_column_available, safe_format_path,
-                      tolino_column_active, update_read_column,
-                      update_tolino_ids)
+from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
+                      create_custom_columns, ignore_column_available,
+                      iter_book_ids, metadata_by_id, read_column_available,
+                      safe_format_path, tolino_column_active,
+                      update_read_column, update_tolino_ids)
 from .config import load_state
 from .config import settings as _global_settings
 
@@ -230,22 +230,29 @@ class SyncDashboard(QDialog):
         root.addLayout(action_form)
 
     def _build_transfer_settings(self):
-        """Upload-Optionen und die Calibre-Spalten."""
+        """Upload-Optionen und ein Knopf je Calibre-Spalte."""
         transfer = self.settings_dialog.transfer_form
         self.formats = QLineEdit()
         self.formats.setToolTip(
             "EPUB oder PDF, durch Komma getrennt. Es wird das erste "
             "vorhandene Format hochgeladen.")
         transfer.addRow("Upload-Formate", self.formats)
-        # Die drei Spalten von Hand anzulegen ist fehleranfaellig -- der
-        # Knopf legt nur an, was fehlt, und laesst Vorhandenes unberuehrt.
-        self.setup_columns = QPushButton("Calibre-Spalten anlegen …")
-        self.setup_columns.setToolTip(
-            "Legt fehlende Spalten an: %s. Vorhandene bleiben unverändert."
-            % ", ".join("#" + label for label, _name, _datatype
-                        in CUSTOM_COLUMNS))
-        self.setup_columns.clicked.connect(self.create_columns)
-        transfer.addRow("", self.setup_columns)
+        # Die Spalten von Hand anzulegen ist fehleranfaellig. Je Spalte ein
+        # eigener Knopf: er legt NUR seine Spalte an, wenn sie fehlt, und
+        # laesst Vorhandenes unberuehrt.
+        self.column_buttons = {}
+        for index, (label, _name, datatype) in enumerate(CUSTOM_COLUMNS):
+            button = QPushButton("#%s anlegen …" % label)
+            button.setToolTip(
+                "Legt die Spalte #%s (%s) an, falls sie fehlt. Vorhandene "
+                "Spalten bleiben unverändert."
+                % (label, COLUMN_KIND_NAMES.get(datatype, datatype)))
+            button.clicked.connect(
+                lambda _checked=False, key=label: self.create_columns(key))
+            self.column_buttons[label] = button
+            # Nur die erste Zeile traegt die Beschriftung; drei eigene
+            # Zeilen sind der klarere Weg als ein Knopf fuer alles.
+            transfer.addRow("Calibre-Spalten" if index == 0 else "", button)
 
     def _build_account_settings(self):
         """Kontoverwaltung und die beiden technischen Zugangsfelder."""
@@ -274,30 +281,31 @@ class SyncDashboard(QDialog):
         close.clicked.connect(self.close)
         root.addWidget(close)
 
-    def create_columns(self):
-        """Fehlende Calibre-Spalten anlegen -- vorhandene bleiben unberührt."""
+    def create_columns(self, label):
+        """Genau diese Calibre-Spalte anlegen -- vorhandene bleibt unberührt."""
         database = getattr(self.gui, "current_db", None)
         try:
-            created = create_custom_columns(database)
+            created = create_custom_columns(database, (label,))
         except Exception as exc:
-            log_warning("Spalten konnten nicht angelegt werden: %s"
-                        % sanitize_error(exc))
-            error_dialog(self, "Spalten nicht angelegt", str(exc), show=True)
+            log_warning("Spalte #%s konnte nicht angelegt werden: %s"
+                        % (label, sanitize_error(exc)))
+            error_dialog(self, "Spalte nicht angelegt", str(exc), show=True)
             return
         if not created:
             info_dialog(
-                self, "Calibre-Spalten",
-                "Alle Spalten sind schon vorhanden: %s."
-                % ", ".join("#" + label for label, _name, _datatype
-                            in CUSTOM_COLUMNS),
+                self, "Calibre-Spalte",
+                "Die Spalte #%s ist schon vorhanden." % label,
                 show=True, show_copy_button=False)
             return
         info_dialog(
-            self, "Calibre-Spalten angelegt",
-            "Angelegt: %s.\n\nCalibre neu starten, damit die Spalten in der "
-            "Bibliothek nutzbar sind."
-            % ", ".join("#" + label for label in created),
+            self, "Calibre-Spalte angelegt",
+            "Angelegt: #%s.\n\nCalibre neu starten, damit die Spalte in der "
+            "Bibliothek nutzbar ist." % label,
             show=True, show_copy_button=False)
+        self._refresh_column_flags(database)
+
+    def _refresh_column_flags(self, database):
+        """Spaltenstatus neu lesen: der naechste Vergleich nutzt sie sofort."""
         try:
             self.sync_column_enabled = tolino_column_active(
                 _global_settings(), database)

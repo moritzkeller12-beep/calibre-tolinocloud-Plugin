@@ -136,6 +136,9 @@ CUSTOM_COLUMNS = (
     ("tolino_ignore", "Ignoriert (tolino)", "bool"),
 )
 
+# Klartext des Calibre-Typs fuer die Oberflaeche (je Spalte ein Knopf).
+COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein"}
+
 # In dieser Calibre-Sitzung angelegte Spalten. Calibre fuehrt eine neue
 # Spalte in `field_metadata` erst nach einem Neustart -- ohne diesen Merker
 # wollte ein zweiter Klick dieselben Spalten erneut anlegen.
@@ -147,13 +150,21 @@ def _column_present(database, label):
     return label in CREATED_COLUMNS or _field_info(database, "#" + label)[0]
 
 
-def missing_custom_columns(database):
+def selected_columns(labels=None):
+    """Die Plugin-Spalten, eingegrenzt auf ``labels`` (None = alle)."""
+    if labels is None:
+        return list(CUSTOM_COLUMNS)
+    wanted = set(labels)
+    return [spec for spec in CUSTOM_COLUMNS if spec[0] in wanted]
+
+
+def missing_custom_columns(database, labels=None):
     """Labels der Plugin-Spalten, die in dieser Bibliothek fehlen."""
-    return [label for label, _name, _datatype in CUSTOM_COLUMNS
+    return [label for label, _name, _datatype in selected_columns(labels)
             if not _column_present(database, label)]
 
 
-def create_custom_columns(database):
+def create_custom_columns(database, labels=None):
     """Fehlende Plugin-Spalten anlegen; gibt die angelegten Labels zurueck.
 
     Calibre kennt dafuer ``create_custom_column(label, name, datatype,
@@ -161,9 +172,17 @@ def create_custom_columns(database):
     Legacy-Objekt. Vorhandene Spalten werden nie angefasst: es wird weder
     etwas geloescht noch ein Typ geaendert.
 
+    ``labels`` grenzt das auf einzelne Spalten ein -- in den Einstellungen
+    legt so ein Knopf je Spalte nur SEINE Spalte an. Fehlt nichts, wird
+    auch die Calibre-Schnittstelle nicht befragt.
+
     Eine neu angelegte Spalte ist in der laufenden Oberflaeche erst nach
     einem Neustart von Calibre nutzbar.
     """
+    missing = [spec for spec in selected_columns(labels)
+               if not _column_present(database, spec[0])]
+    if not missing:
+        return []
     create = getattr(database, "create_custom_column", None)
     if not callable(create):
         create = getattr(getattr(database, "new_api", None),
@@ -173,11 +192,9 @@ def create_custom_columns(database):
             "Diese Calibre-Version kennt create_custom_column nicht. Lege "
             "die Spalten bitte von Hand an: %s."
             % ", ".join("#" + label for label, _name, _datatype
-                        in CUSTOM_COLUMNS))
+                        in missing))
     created = []
-    for label, name, datatype in CUSTOM_COLUMNS:
-        if _column_present(database, label):
-            continue
+    for label, name, datatype in missing:
         try:
             create(label, name, datatype, False, editable=True, display={})
         except TypeError:

@@ -412,6 +412,50 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual([], missing_custom_columns(database))
         self.assertEqual([], create_custom_columns(database))
 
+    def test_a_single_column_can_be_created_on_its_own(self):
+        """Je Spalte ein Knopf: nur die fehlende Spalte wird angelegt."""
+        from .. import library as library_module
+        library_module.CREATED_COLUMNS.clear()
+        self.addCleanup(library_module.CREATED_COLUMNS.clear)
+
+        class Database:
+            field_metadata = {"#tolino_id": {"datatype": "text"}}
+
+            def __init__(self):
+                self.calls = []
+
+            def create_custom_column(self, label, name, datatype,
+                                     is_multiple, editable=True, display=None):
+                self.calls.append(label)
+                self.field_metadata["#" + label] = {"datatype": datatype}
+                return 1
+
+        database = Database()
+        self.assertEqual(["tolino_ignore"],
+                         missing_custom_columns(database, ("tolino_ignore",)))
+        self.assertEqual(["tolino_ignore"],
+                         create_custom_columns(database, ("tolino_ignore",)))
+        self.assertEqual(["tolino_ignore"], database.calls)
+        # Die andere Spalte bleibt unangetastet, auch beim zweiten Klick.
+        self.assertEqual(["tolino_read"],
+                         missing_custom_columns(database, ("tolino_read",)))
+        self.assertEqual([], create_custom_columns(database, ("tolino_ignore",)))
+        self.assertEqual(["tolino_ignore"], database.calls)
+
+    def test_a_present_column_needs_no_calibre_api(self):
+        """Ist die Spalte schon da, gibt es keinen Fehler -- nur «schon da»."""
+        from .. import library as library_module
+        library_module.CREATED_COLUMNS.clear()
+        self.addCleanup(library_module.CREATED_COLUMNS.clear)
+
+        class WithoutColumns:
+            field_metadata = {"#tolino_id": {"datatype": "text"}}
+
+        self.assertEqual([], missing_custom_columns(WithoutColumns(),
+                                                    ("tolino_id",)))
+        self.assertEqual([], create_custom_columns(WithoutColumns(),
+                                                   ("tolino_id",)))
+
     def test_the_column_types_match_what_the_plugin_reads(self):
         """Text fuer die ID, Ja/Nein fuer Lesestatus und Ignorieren."""
         self.assertEqual([("tolino_id", "tolino-ID", "text"),

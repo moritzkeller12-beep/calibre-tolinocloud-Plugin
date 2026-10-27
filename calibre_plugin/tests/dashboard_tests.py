@@ -254,7 +254,7 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn("self.partner.findData(partner_id) < 0", source)
 
 class ColumnSetupButtonTests(unittest.TestCase):
-    """Der Knopf in den Einstellungen legt die Calibre-Spalten an."""
+    """Je Calibre-Spalte ein Knopf in den Einstellungen."""
 
     def _ui(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -263,77 +263,88 @@ class ColumnSetupButtonTests(unittest.TestCase):
         return ui_module
 
     @staticmethod
-    def _dashboard(calls):
+    def _dashboard(ui_module, calls):
+        """Stub ohne Qt-Aufbau, aber mit den echten Methoden gebunden."""
+        cls = ui_module.dashboard.SyncDashboard
         dashboard = type("Dashboard", (), {})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.sync_column_enabled = False
         dashboard.read_column_enabled = False
         dashboard.update_status = lambda: calls.append("status")
+        for name in ("create_columns", "_refresh_column_flags"):
+            setattr(dashboard, name, getattr(cls, name).__get__(dashboard))
         return dashboard
 
-    def test_the_settings_offer_the_button(self):
+    def test_the_settings_offer_one_button_per_column(self):
         source = _ui_source_text()
-        self.assertIn("self.setup_columns = QPushButton(", source)
-        self.assertIn(
-            "self.setup_columns.clicked.connect(self.create_columns)", source)
-        self.assertIn('transfer.addRow("", self.setup_columns)', source)
+        self.assertIn("self.column_buttons = {}", source)
+        self.assertIn("for index, (label, _name, datatype) in "
+                      "enumerate(CUSTOM_COLUMNS):", source)
+        self.assertIn('button = QPushButton("#%s anlegen …" % label)', source)
+        self.assertIn("lambda _checked=False, key=label: "
+                      "self.create_columns(key)", source)
+        self.assertIn("self.column_buttons[label] = button", source)
+        self.assertIn('transfer.addRow("Calibre-Spalten" if index == 0 '
+                      'else "", button)', source)
 
-    def test_new_columns_are_reported_and_the_flags_refreshed(self):
+    def test_one_button_creates_only_its_own_column(self):
         from unittest.mock import patch
         ui_module = self._ui()
-        calls, boxes = [], []
-        dashboard = self._dashboard(calls)
-        create = ui_module.dashboard.SyncDashboard.create_columns.__get__(
-            dashboard)
+        calls, boxes, seen = [], [], []
+        dashboard = self._dashboard(ui_module, calls)
+
+        def fake_create(_db, labels):
+            seen.append(list(labels))
+            return list(labels)
+
         with patch("calibre_plugin.ui_dashboard.create_custom_columns",
-                   lambda _db: ["tolino_read"]), \
+                   fake_create), \
              patch("calibre_plugin.ui_dashboard.tolino_column_active",
                    lambda *_args: True), \
              patch("calibre_plugin.ui_dashboard.read_column_available",
                    lambda _db: True), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
-            create()
-        self.assertIn("#tolino_read", boxes[0][2])
+            dashboard.create_columns("tolino_ignore")
+        # Genau diese eine Spalte wird angelegt -- nicht alle drei.
+        self.assertEqual([["tolino_ignore"]], seen)
+        self.assertIn("#tolino_ignore", boxes[0][2])
         self.assertIn("neu starten", boxes[0][2])
         self.assertTrue(dashboard.sync_column_enabled)
         self.assertTrue(dashboard.read_column_enabled)
         self.assertEqual(["status"], calls)
 
-    def test_an_existing_setup_says_so_and_changes_nothing(self):
+    def test_an_existing_column_says_so_and_changes_nothing(self):
         from unittest.mock import patch
         ui_module = self._ui()
         calls, boxes = [], []
-        dashboard = self._dashboard(calls)
-        create = ui_module.dashboard.SyncDashboard.create_columns.__get__(
-            dashboard)
+        dashboard = self._dashboard(ui_module, calls)
         with patch("calibre_plugin.ui_dashboard.create_custom_columns",
-                   lambda _db: []), \
+                   lambda _db, _labels: []), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
-            create()
+            dashboard.create_columns("tolino_read")
         self.assertIn("schon vorhanden", boxes[0][2])
+        self.assertIn("#tolino_read", boxes[0][2])
         self.assertEqual([], calls)
         self.assertFalse(dashboard.read_column_enabled)
 
     def test_a_refused_creation_is_reported_instead_of_crashing(self):
         from unittest.mock import patch
 
-        def boom(_db):
+        def boom(_db, _labels):
             raise RuntimeError(
                 "Diese Calibre-Version kennt create_custom_column nicht.")
 
         ui_module = self._ui()
         calls, errors = [], []
-        dashboard = self._dashboard(calls)
-        create = ui_module.dashboard.SyncDashboard.create_columns.__get__(
-            dashboard)
+        dashboard = self._dashboard(ui_module, calls)
         with patch("calibre_plugin.ui_dashboard.create_custom_columns", boom), \
              patch("calibre_plugin.ui_dashboard.log_warning",
                    lambda _text: None), \
              patch("calibre_plugin.ui_dashboard.error_dialog",
                    lambda *args, **kwargs: errors.append(args)):
-            create()
+            dashboard.create_columns("tolino_id")
         self.assertIn("create_custom_column", errors[0][2])
         self.assertEqual([], calls)
 
