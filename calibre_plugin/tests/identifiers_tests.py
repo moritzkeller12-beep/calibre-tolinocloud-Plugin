@@ -1,6 +1,5 @@
 """Buchkennungen und duenne Metadaten-Fixtures."""
 
-import json
 import unittest
 from unittest.mock import patch
 from . import orchestration_tests
@@ -99,7 +98,7 @@ class BookIdentifierSourceTests(unittest.TestCase):
         state = {}
         compare_inventory(metadata, state, [{
             "deliverableId": "t1", "title": "A", "authors": "B"}],
-            ["EPUB"], ("authors", "title"), use_metadata_ids=False)
+            ["EPUB"], use_metadata_ids=False)
         self.assertEqual(7, state[self.UUID]["calibre_id"])
         self.assertEqual(self.UUID, state_key_for(state, 7))
 
@@ -207,14 +206,14 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         compare_inventory(metadata, state, [{
             "deliverableId": "t1", "title": "Der Schwarm",
             "authors": "Frank Schatzing"}], ["EPUB"],
-            ("authors", "title"), use_metadata_ids=False)
+            use_metadata_ids=False)
         self.assertEqual("t1", state.get("calibre-7", {}).get("tolino_id"))
         uploads = plan_sync(metadata, state, ["EPUB"],
                             upload_book_ids={7})
         self.assertEqual(1, len(uploads))
         self.assertEqual("calibre-7", uploads[0][1])
         meta_updates = plan_metadata_updates(
-            metadata, state, [], only_book_ids={7})
+            metadata, state, [], {7})
         self.assertEqual(1, len(meta_updates))
         self.assertEqual("t1", meta_updates[0][2])
 
@@ -222,7 +221,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         state = {"frueher": {"calibre_id": 7, "tolino_id": "t1",
                              "fingerprint": "1:1"}}
         dashboard = self._dashboard(self._books(), {
-            "state": json.dumps(state), "preferred_formats": ["EPUB"]})
+            "state": state, "preferred_formats": ["EPUB"]})
         metadata = self.dashboard_plan.local_metadata(dashboard)
         self.assertEqual("frueher", metadata[7]["uuid"])
 
@@ -238,7 +237,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             uuid=title, title=title, authors=["Frank Herbert"],
             formats=["EPUB"], last_modified="2026-01-01")
         dashboard = self._dashboard(books, {
-            "state": json.dumps(state), "preferred_formats": ["EPUB"]})
+            "state": state, "preferred_formats": ["EPUB"]})
         metadata = self.dashboard_plan.local_metadata(dashboard)
         self.assertEqual(title, metadata[7]["uuid"])
         # A legacy fingerprint isn't part of the authoritative state anymore;
@@ -297,13 +296,12 @@ class UuidValueTests(unittest.TestCase):
     def test_metadata_update_is_planned_for_a_uuid_object(self):
         state = {}
         compare_inventory(self._metadata("obj"), state, self._inventory(),
-                          ["EPUB"], ("authors", "title", "isbn"),
-                          use_metadata_ids=False)
+                          ["EPUB"], use_metadata_ids=False)
         # Der Vergleich merkt sich die gefundene Tolino-ID.
         self.assertEqual("t1", state.get(self.UUID, {}).get("tolino_id"))
         uploads = []
         meta_updates = plan_metadata_updates(
-            self._metadata("obj"), state, uploads, only_book_ids={1})
+            self._metadata("obj"), state, uploads, {1})
         self.assertEqual(1, len(meta_updates))
         self.assertEqual("t1", meta_updates[0][2])
 
@@ -311,9 +309,9 @@ class UuidValueTests(unittest.TestCase):
         string_state = {}
         compare_inventory(self._metadata("str"), string_state,
                           self._inventory(), ["EPUB"],
-                          ("authors", "title", "isbn"), use_metadata_ids=False)
+                          use_metadata_ids=False)
         object_state = {}
         compare_inventory(self._metadata("obj"), object_state,
                           self._inventory(), ["EPUB"],
-                          ("authors", "title", "isbn"), use_metadata_ids=False)
+                          use_metadata_ids=False)
         self.assertEqual(string_state, object_state)

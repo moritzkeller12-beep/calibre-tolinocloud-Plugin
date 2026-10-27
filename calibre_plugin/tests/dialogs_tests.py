@@ -1309,7 +1309,7 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
         rows = compare_inventory(
             metadata or self._metadata(), state or {},
             inventory or self._inventory(), ["EPUB"],
-            ("authors", "title", "isbn"), use_metadata_ids=False)
+            use_metadata_ids=False)
         return rows[0]
 
     def test_reversed_author_order_is_not_a_conflict(self):

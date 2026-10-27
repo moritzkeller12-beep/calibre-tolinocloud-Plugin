@@ -1207,7 +1207,7 @@ class LoginMessageTests(unittest.TestCase):
         try:
             guide = ui_module.common._login_failure_guidance
             titles = {}
-            for code in ("B05", "B06", "B08", "N01", "A02", "B07", "B03", "B04", "A06", "A05"):
+            for code in ("B05", "B06", "B08", "N01", "A02", "B07", "B03", "B04", "A06"):
                 exc = tolino_module.TolinoAuthError("egal", code=code)
                 title, step = guide(exc)
                 titles[code] = title

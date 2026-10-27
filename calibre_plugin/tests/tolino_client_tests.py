@@ -9,7 +9,7 @@ import time
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
-from ..partners import PARTNERS
+from ..partners import PARTNERS, WEBREADER_URL
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, tag_id_from_patch, tag_pairs, tag_state
 from ..browser_login import browser_login
@@ -702,16 +702,9 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
 
     SHARED = (1, 2, 4, 5, 6, 7, 8)
 
-    def test_shared_reader_covers_every_shop(self):
-        for pid in self.SHARED:
-            partner = PARTNERS[pid]
-            self.assertIn("webreader.mytolino.com", partner["reader_url"], pid)
-
-    def test_hugendubel_reader_is_the_shared_reader(self):
-        # webreader.hugendubel.de leitet 301 auf webreader.mytolino.com
-        # (reseller=13&autologin=true) -- ab jetzt direkt dorthin.
-        self.assertEqual(PARTNERS[4]["reader_url"],
-                         PARTNERS[5]["reader_url"])
+    def test_all_shops_use_the_shared_reader(self):
+        self.assertEqual("https://webreader.mytolino.com/library/", WEBREADER_URL)
+        self.assertEqual({1, 2, 4, 5, 6, 7, 8}, set(PARTNERS))
 
     def test_ebook_de_partner_matches_reference_config(self):
         partner = PARTNERS[8]

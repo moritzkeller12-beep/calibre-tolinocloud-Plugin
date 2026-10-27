@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 
 from .partners import PARTNERS
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
-                     TolinoClient, _NO_AUTO_LOGIN, _bot_check_detected,
+                     TolinoClient, _bot_check_detected,
                      _compact_error_text, log_info, log_warning,
                      normalize_hardware_id, sanitize_error)
 from .token_candidates import (
@@ -234,11 +234,6 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
 def browser_login(partner_id, hardware, timeout=LOGIN_TIMEOUT,
                   progress=None):
     """Sign in via the partner's OAuth authorization endpoint."""
-    partner = PARTNERS.get(int(partner_id))
-
-    if not partner:
-        raise TolinoAuthError(_NO_AUTO_LOGIN, code="A05")
-
     # Die OAuth-Seite speichert den Token im gemeinsamen Web Reader. Lies
     # ihn aus dem Plugin-Browser; ein lokaler Callback funktioniert hier nicht.
     return grab_live_refresh(int(partner_id), hardware, timeout=timeout,

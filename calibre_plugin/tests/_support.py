@@ -32,10 +32,12 @@ def parsed_inventory(value):
     return records
 
 
-def compare_inventory(metadata, state, inventory, *args, **kwargs):
+def compare_inventory(metadata, state, inventory, preferred_formats=(),
+                      use_metadata_ids=True, read_ids=(), read_column=False):
     """Comparison test helper: normalize raw Tolino fixtures at the boundary."""
-    return _compare_inventory(metadata, state, parsed_inventory(inventory),
-                              *args, **kwargs)
+    return _compare_inventory(
+        metadata, state, parsed_inventory(inventory), preferred_formats,
+        use_metadata_ids, read_ids, read_column)
 
 
 # Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
@@ -73,13 +75,11 @@ def load_ui_module(get_icons_result, qt_stub=None):
 
     qt_core = types.ModuleType("qt.core")
     qt_core.QIcon = FakeIcon
-    for name in ("QCheckBox", "QComboBox", "QDialog", "QDialogButtonBox",
-                 "QFormLayout", "QGroupBox", "QLabel", "QLineEdit",
-                 "QMessageBox", "QProgressBar", "QPushButton",
-                 "QProgressDialog", "QThread",
-                 "QVBoxLayout", "QHBoxLayout", "QTableWidget",
-                 "QTableWidgetItem", "QTextEdit", "QObject",
-                 "QInputDialog", "QFileDialog", "QMenu", "Qt", "QTimer"):
+    for name in ("QCheckBox", "QComboBox", "QDialog", "QFormLayout",
+                 "QGroupBox", "QLabel", "QLineEdit", "QMessageBox",
+                 "QProgressBar", "QPushButton", "QThread", "QVBoxLayout",
+                 "QHBoxLayout", "QTableWidget", "QTableWidgetItem",
+                 "QObject", "QInputDialog", "QFileDialog", "QMenu", "Qt"):
         setattr(qt_core, name, type(name, (), {}))
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None

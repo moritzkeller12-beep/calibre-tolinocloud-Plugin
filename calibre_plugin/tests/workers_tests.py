@@ -1526,27 +1526,23 @@ class ReadStatusUnknownTests(unittest.TestCase):
     def test_failed_fetch_marks_the_status_unknown(self):
         row = self._rows(None)[0]
         self.assertFalse(row["read_known"])
-        self.assertEqual("unknown", row["read_status"])
         self.assertFalse(row["read_in_cloud"])
         self.assertFalse(row["read"])
 
     def test_unknown_is_not_the_same_as_nothing_read(self):
         row = self._rows(()) [0]
         self.assertTrue(row["read_known"])
-        self.assertEqual("unread", row["read_status"])
         self.assertFalse(row["read_in_cloud"])
 
     def test_a_known_read_state_still_prechecks(self):
         row = self._rows({"t1"})[0]
         self.assertTrue(row["read_known"])
-        self.assertEqual("read", row["read_status"])
         self.assertTrue(row["read_in_cloud"])
 
     def test_cloud_only_rows_are_unknown_too(self):
         rows = compare_inventory(
             {}, {}, [{"id": "t9", "title": "Nur Cloud"}], ["EPUB"],
             read_ids=None)
-        self.assertEqual("unknown", rows[0]["read_status"])
         self.assertFalse(rows[0]["read_known"])
 
     def test_prepare_worker_reports_an_unknown_read_state(self):

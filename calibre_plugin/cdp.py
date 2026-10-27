@@ -9,7 +9,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-from .partners import PARTNERS
+from .partners import WEBREADER_URL
 from .tolino import RELOGIN, RELOGIN_THEN, TolinoAuthError
 from .cdp_transport import _Ws, _http_get_json
 from .cdp_scripts import _EXCHANGE_SNIPPET, _GRAB_SNIPPET, idb_expression
@@ -58,11 +58,6 @@ def _verified_owner(port=None):
 def _new_profile_dir():
     return tempfile.mkdtemp(prefix="tolino-grab-")
 
-
-def _reader_url(partner_id):
-    partner = PARTNERS.get(int(partner_id)) or {}
-    return (partner.get("reader_url")
-            or "https://webreader.mytolino.com/library/index.html")
 
 
 def devtools_port_alive():
@@ -182,7 +177,7 @@ def launch_reader_window(partner_id):
         "--remote-debugging-port=%d" % port,
         "--no-first-run", "--no-default-browser-check",
         "--disable-session-crashed-bubble", "--disable-infobars",
-        "--window-size=1280,900", "--new-window", _reader_url(partner_id),
+        "--window-size=1280,900", "--new-window", WEBREADER_URL,
     ]
     creationflags = 0x00000008 if os.name == "nt" else 0
     attempts = [(list(binary), label)]

@@ -5,8 +5,7 @@ from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QPushButton, QTableWidget, QTableWidgetItem,
                         QVBoxLayout, Qt, _set_enabled, plural, start_call)
 from calibre.gui2 import error_dialog, info_dialog
-from .comparison import (comparison_group, selected_book_ids,
-                         sort_comparison_rows)
+from .comparison import comparison_group, sort_comparison_rows
 from .library import TOLINO_IGNORE_COLUMN, selected_table_rows
 from .tolino import report_error
 
@@ -494,17 +493,15 @@ class InventoryDialog(QDialog):
 
     def selected_upload_ids(self):
         """Bücher, deren Datei hochgeladen werden soll."""
-        return selected_book_ids([
-            dict(row, selected=check.isChecked() and not row.get("ignored"))
-            for row, check in zip(self.rows, self.checks)
-        ])
+        return {row["book_id"] for row, check in zip(self.rows, self.checks)
+                if check.isChecked() and not row.get("ignored")
+                and row.get("book_id") is not None}
 
     def selected_metadata_ids(self):
         """Bücher, deren Cloud-Metadaten aktualisiert werden sollen."""
-        return selected_book_ids([
-            dict(row, selected=check.isChecked() and not row.get("ignored"))
-            for row, check in zip(self.rows, self.meta_checks)
-        ])
+        return {row["book_id"] for row, check in zip(self.rows, self.meta_checks)
+                if check.isChecked() and not row.get("ignored")
+                and row.get("book_id") is not None}
 
     def selected_read_targets(self):
         """tolino-IDs, die jetzt als gelesen markiert werden.

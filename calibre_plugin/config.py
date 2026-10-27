@@ -1,5 +1,4 @@
 """Fresh settings store for tolino Cloud Sync."""
-import json
 import threading
 
 try:
@@ -48,11 +47,7 @@ def load_state(raw):
         return {}
     if isinstance(raw, dict):
         return raw
-    try:
-        value = json.loads(raw)
-        return value if isinstance(value, dict) else {}
-    except (TypeError, ValueError):
-        return {}
+    return {}
 
 
 def _copy(value):

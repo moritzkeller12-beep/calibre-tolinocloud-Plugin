@@ -49,11 +49,6 @@ RELOGIN = "Bitte bei tolino anmelden."
 # Sitzung dann ab). Kurz warten, dann erneut versuchen.
 BUSY_MESSAGE = "Die Anmeldung wird gerade erneuert, bitte kurz warten."
 RELOGIN_THEN = "Danach bei tolino anmelden."
-_NO_AUTO_LOGIN = (
-    "Für diesen Buchhändler gibt es keine automatische Anmeldung. "
-    "Bitte den Zugang unter «Einstellungen …» → «Konten und Verbindung» "
-    "eintragen.")
-
 def _trace_text(exc):
     """Vollständiger Traceback samt Ursachenkette -- "" wenn es keinen gibt.
 
@@ -450,8 +445,7 @@ class TolinoClient:
                 headers.update({
                     "t_auth_token": self.access,
                     "hardware_id": self.hardware,
-                    "reseller_id": self.partner.get(
-                        "reseller_id", str(self.partner_id)),
+                    "reseller_id": self.partner["reseller_id"],
                 })
                 for key, shared in (("client_type", WEBREADER_CLIENT_TYPE),
                                     ("client_version", WEBREADER_CLIENT_VERSION)):
@@ -588,7 +582,7 @@ class TolinoClient:
             "deviceListRequest": {
                 "accounts": [{
                     "auth_token": self.access,
-                    "reseller_id": self.partner.get("reseller_id", str(self.partner_id)),
+                    "reseller_id": self.partner["reseller_id"],
                 }],
             },
         }
@@ -618,9 +612,8 @@ class TolinoClient:
         payload = {"hardware_name": "other"}
         extra = {
             "hardware_type": "HTML5",
-            "client_type": (self.partner.get("client_type")
-                            or "TOLINO_WEBREADER"),
-            "client_version": self.partner.get("client_version") or "5.2.0",
+            "client_type": WEBREADER_CLIENT_TYPE,
+            "client_version": WEBREADER_CLIENT_VERSION,
         }
         for url in (BASE_URL + "/v2/registerhw", BASE_URL + "/registerhw"):
             try:
@@ -687,7 +680,7 @@ class TolinoClient:
             request.add_unredirected_header("t_auth_token", self.access)
             request.add_unredirected_header("hardware_id", self.hardware)
             request.add_unredirected_header(
-                "reseller_id", self.partner.get("reseller_id", str(self.partner_id)))
+                "reseller_id", self.partner["reseller_id"])
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 get_final_url = getattr(response, "geturl", None)

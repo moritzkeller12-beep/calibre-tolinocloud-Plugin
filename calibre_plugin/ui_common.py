@@ -283,9 +283,6 @@ _LOGIN_GUIDANCE = {
             "erneut versuchen."),
     "A06": ("Anmeldung abgelehnt",
             "Details im Calibre-Log; Buchhändler und Zugang prüfen."),
-    "A05": ("Automatische Anmeldung nicht möglich",
-            "Anderen Buchhändler wählen oder den Zugang in den "
-            "Einstellungen eintragen."),
 }
 
 _LOGIN_DEFAULT_GUIDANCE = (

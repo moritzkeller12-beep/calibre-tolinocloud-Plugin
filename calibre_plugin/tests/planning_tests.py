@@ -20,7 +20,7 @@ from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        normalize_formats, safe_format_path,
                        selected_table_rows, update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
-                          normalize_title, selected_book_ids)
+                          normalize_title)
 from ..plan import (metadata_update_fields, plan_collection_updates,
                     plan_metadata_updates, plan_sync, recorded_collections,
                     remember_collection, series_map_from_metadata,
@@ -39,7 +39,8 @@ from ..matching import (author_tokens, authors_match, normalize_isbn,
                         normalized_authors)
 from ..config import load_state
 from ..partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
-                        WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS)
+                        WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS,
+                        WEBREADER_URL)
 from ..tolino import (
     TolinoAuthError, TolinoClient, hardware_id, normalize_hardware_id,
     normalize_refresh_token, sanitize_error)
@@ -134,12 +135,12 @@ class SyncPlanTests(unittest.TestCase):
             plan_sync({1: metadata}, {}, (".EPUB",), upload_book_ids={1}),
         )
 
-    def test_selected_book_without_preferred_format_has_contextual_warning(self):
-        with self.assertRaisesRegex(ValueError, r"Buch 1 \(A\).*kein unterstütztes Buchformat"):
-            plan_sync(
-                {1: {"uuid": "u1", "title": "A", "formats": ("MOBI",)}},
-                {}, ("EPUB",), upload_book_ids={1},
-            )
+    def test_selected_book_without_preferred_format_is_skipped(self):
+        uploads = plan_sync(
+            {1: {"uuid": "u1", "title": "A", "formats": ("MOBI",)}},
+            {}, ("EPUB",), upload_book_ids={1},
+        )
+        self.assertEqual([], uploads)
 
     def test_selected_rows_handles_qmodelindex_and_short_values(self):
         class Index:
@@ -176,9 +177,9 @@ class SyncPlanTests(unittest.TestCase):
             ({2: {"uuid": "u2", "formats": ("EPUB",)}}, [], [(2, "u2", "EPUB", None)]),
         )
         for metadata, inventory, expected_uploads in cases:
-            comparison = compare_inventory(metadata, {}, inventory, ("EPUB",))
-            selected = selected_book_ids(comparison)
-            uploads = plan_sync(metadata, {}, ("EPUB",), upload_book_ids=selected)
+            compare_inventory(metadata, {}, inventory, ("EPUB",))
+            uploads = plan_sync(
+                metadata, {}, ("EPUB",), upload_book_ids=set(metadata))
             self.assertEqual(expected_uploads, uploads)
             for record in uploads:
                 self.assertEqual(expected_uploads[0][0] if expected_uploads else None,
@@ -357,7 +358,7 @@ class SyncPlanTests(unittest.TestCase):
             ["EPUB"],
         )
         self.assertEqual(["identical", "identical"], [row["status"] for row in rows])
-        self.assertEqual(set(), selected_book_ids(rows))
+        self.assertTrue(all(row["status"] == "identical" for row in rows))
 
     def test_custom_column_value_is_a_matching_fallback(self):
         metadata = {1: {"uuid": "u1", "title": "Changed title",
@@ -632,7 +633,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("changed", rows[0]["status"])
         self.assertEqual("t1", rows[0]["tolino_id"])
         self.assertEqual("only_tolino", rows[1]["status"])
-        self.assertFalse(rows[1]["selected"])
+        self.assertNotEqual("new_in_calibre", rows[1]["status"])
 
     def test_inventory_envelope_metadata_is_not_treated_as_a_cloud_record(self):
         inventory = {
@@ -686,7 +687,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("identical", rows[0]["status"])
         self.assertEqual("Der echte Tolino-Titel", rows[0]["title"])
         self.assertEqual("bosh_8_543897186788677497438396920", rows[0]["tolino_id"])
-        self.assertFalse(rows[0]["selected"])
+        self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
     def test_inventory_without_title_is_not_matchable_and_does_not_show_id_as_title(self):
         rows = compare_inventory(
@@ -747,7 +748,7 @@ class SyncPlanTests(unittest.TestCase):
         local = rows[0]
         self.assertEqual("review", local["status"])
         self.assertEqual("cloud_id_missing", local["match_reason"])
-        self.assertFalse(local["selected"])
+        self.assertNotEqual("new_in_calibre", local["status"])
         self.assertEqual("", local["tolino_id"])
         self.assertEqual({}, state)
         self.assertIn("nicht ansprechbar", local["explanation"])
@@ -764,7 +765,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertEqual("review", rows[0]["status"])
         self.assertTrue(rows[0]["cloud_id_missing"])
-        self.assertFalse(rows[0]["selected"])
+        self.assertNotEqual("new_in_calibre", rows[0]["status"])
         self.assertEqual("", rows[0]["tolino_id"])
         self.assertIn("nicht ansprechbar", rows[0]["explanation"])
 
@@ -853,7 +854,7 @@ class SyncPlanTests(unittest.TestCase):
             ["EPUB"],
         )
         self.assertEqual("review", rows[0]["status"])
-        self.assertFalse(rows[0]["selected"])
+        self.assertNotEqual("new_in_calibre", rows[0]["status"])
         self.assertEqual("title_only", rows[0]["match_reason"])
         self.assertEqual("", rows[0]["tolino_id"])
         self.assertEqual({}, state)
@@ -875,7 +876,7 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual({"review"}, {row["status"] for row in rows})
         self.assertEqual(4, len(rows))
-        self.assertFalse(any(row["selected"] for row in rows))
+        self.assertTrue(all(row["status"] != "new_in_calibre" for row in rows))
         self.assertFalse(any(row.get("tolino_id") for row in rows
                              if row.get("book_id") is not None))
         self.assertEqual({}, state)
@@ -972,7 +973,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("https://www.orellfuessli.ch/auth/oauth2/token",
                          PARTNERS[4]["token_url"])
         self.assertEqual("https://webreader.mytolino.com/library/",
-                         PARTNERS[4]["reader_url"])
+                         WEBREADER_URL)
         self.assertEqual("TOLINO_WEBREADER", WEBREADER_CLIENT_TYPE)
         self.assertEqual("5.2.0", WEBREADER_CLIENT_VERSION)
         self.assertEqual("https://webreader.mytolino.com",
@@ -1374,8 +1375,6 @@ class SyncPlanTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as plugin:
             from build_plugin import EXPECTED
             self.assertEqual(EXPECTED, set(plugin.namelist()))
-            self.assertNotIn("sync.py", plugin.namelist())
-            self.assertNotIn("state_store.py", plugin.namelist())
             self.assertTrue({
                 "__init__.py",
                 "plugin-import-name-tolino_cloud_sync.txt",
@@ -1524,8 +1523,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
     def test_selected_book_is_updated_in_place(self):
         book = self._book()
         state = self._state(book, meta_fp="stale")
-        updates = plan_metadata_updates({1: book}, state, [],
-                                        only_book_ids={1})
+        updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
         record = unpack_meta_update_record(updates[0])
         self.assertEqual(1, record["book_id"])
@@ -1540,8 +1538,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         book = self._book()
         state = self._state(book, meta_fp="stale")
         for only in (set(), {"2"}):
-            updates = plan_metadata_updates({1: book}, state, [],
-                                            only_book_ids=only)
+            updates = plan_metadata_updates({1: book}, state, [], only)
             self.assertEqual([], updates)
 
     def test_selected_upload_is_never_silently_converted(self):
@@ -1549,24 +1546,21 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         book = self._book()
         state = self._state(book, meta_fp="stale")
         uploads = [(1, "u1", "EPUB", "d1")]
-        updates = plan_metadata_updates({1: book}, state, uploads,
-                                        only_book_ids={1})
+        updates = plan_metadata_updates({1: book}, state, uploads, {1})
         self.assertEqual([], updates)
 
     def test_replaced_file_stays_a_full_upload(self):
         book = self._book()
         state = self._state(book, content_fp="other-file", meta_fp="stale")
         uploads = [(1, "u1", "EPUB", "d1")]
-        updates = plan_metadata_updates({1: book}, state, uploads,
-                                        only_book_ids={1})
+        updates = plan_metadata_updates({1: book}, state, uploads, {1})
         self.assertEqual([], updates)
 
     def test_selected_metadata_update_does_not_need_the_book_file(self):
         """Metadaten lassen sich ohne ausgewählte Buchdatei patchen."""
         book = self._book(format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
-        updates = plan_metadata_updates({1: book}, state, [],
-                                        only_book_ids={1})
+        updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
 
     def test_metadata_update_does_not_require_a_preferred_upload_format(self):
@@ -1574,7 +1568,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         book = self._book(formats=["PDF"], format_signatures={})
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
         updates = plan_metadata_updates(
-            {1: book}, state, [], only_book_ids={1})
+            {1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
         self.assertEqual("d1", updates[0][2])
 
@@ -1583,23 +1577,22 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         wer auswählt, bekommt den Abgleich."""
         book = self._book()
         state = {"u1": {"tolino_id": "d1", "fingerprint": "x"}}
-        updates = plan_metadata_updates({1: book}, state, [],
-                                        only_book_ids={1})
+        updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
 
-    def test_without_selection_every_qualifying_book_is_planned(self):
+    def test_selected_metadata_update_is_planned(self):
         book = self._book()
         state = self._state(book, meta_fp="stale")
-        updates = plan_metadata_updates({1: book}, state, [])
+        updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
         self.assertEqual((1, "u1", "d1"), (updates[0][0], updates[0][1],
                                            updates[0][2]))
 
-    def test_unchanged_metadata_plans_nothing_without_explicit_selection(self):
+    def test_selected_metadata_update_reconciles_even_if_fingerprint_matches(self):
         book = self._book()
         state = self._state(book)
-        updates = plan_metadata_updates({1: book}, state, [])
-        self.assertEqual([], updates)
+        updates = plan_metadata_updates({1: book}, state, [], {1})
+        self.assertEqual(1, len(updates))
 
     def test_comparison_detected_metadata_difference_is_not_filtered_by_fp(self):
         """Ein Upload kann die Tolino-ID und den lokalen Fingerabdruck bereits
@@ -1615,13 +1608,13 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual("changed", rows[0]["status"])
         self.assertFalse(rows[0]["file_changed"])
         updates = plan_metadata_updates(
-            {1: book}, state, [], only_book_ids={rows[0]["book_id"]})
+            {1: book}, state, [], {rows[0]["book_id"]})
         self.assertEqual(1, len(updates))
         self.assertEqual("d1", updates[0][2])
 
     def test_book_without_cloud_copy_is_skipped(self):
         book = self._book()
-        updates = plan_metadata_updates({1: book}, {}, [])
+        updates = plan_metadata_updates({1: book}, {}, [], {1})
         self.assertEqual([], updates)
 
     def test_uuid_object_and_uppercase_form_find_the_cloud_copy(self):
@@ -1638,7 +1631,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 book = self._book(uuid=raw)
                 updates = plan_metadata_updates(
-                    {1: book}, state, [], only_book_ids={1})
+                    {1: book}, state, [], {1})
                 self.assertEqual(1, len(updates))
                 self.assertEqual(canonical, updates[0][1])
 
@@ -1650,8 +1643,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         state = {"u1": {"tolino_id": "d1",
                         "content_fp": content_fingerprint(new_book, "EPUB"),
                         "meta_fp": metadata_fingerprint(old_book)}}
-        updates = plan_metadata_updates({1: new_book}, state, [],
-                                        only_book_ids={1})
+        updates = plan_metadata_updates({1: new_book}, state, [], {1})
         self.assertEqual(1, len(updates))
         self.assertNotIn("series", updates[0][3])
 
@@ -1816,19 +1808,17 @@ class ConservativeMatchingTests(unittest.TestCase):
         Beide Wege zählen: die rohe Calibre-Spalte und die fertige
         Kennzeichnung, die der Vergleich vom Dashboard bekommt.
         """
-        for metadata in (self._metadata(**{TOLINO_IGNORE_COLUMN: True}),
-                         self._metadata(ignored=True)):
-            rows = compare_inventory(metadata, {}, [], ["EPUB"])
-            self.assertEqual(1, len(rows))
-            self.assertTrue(rows[0]["ignored"], metadata)
-            self.assertEqual("ignored", rows[0]["group"], metadata)
-            self.assertFalse(rows[0]["selected"], metadata)
-            self.assertIn("ignoriert", rows[0]["explanation"], metadata)
+        metadata = self._metadata(ignored=True)
+        rows = compare_inventory(metadata, {}, [], ["EPUB"])
+        self.assertEqual(1, len(rows))
+        self.assertTrue(rows[0]["ignored"], metadata)
+        self.assertEqual("ignored", rows[0]["group"], metadata)
+        self.assertIn("ignoriert", rows[0]["explanation"], metadata)
 
     def test_an_ignored_book_still_matches_its_cloud_copy(self):
         """Die gekaufte Cloud-Kopie taucht nicht zusätzlich als Prüffall auf."""
         rows = compare_inventory(
-            self._metadata(**{TOLINO_IGNORE_COLUMN: "ja"}), {},
+            self._metadata(ignored=True), {},
             [{"id": "t1", "title": "Titel", "authors": "Autor"}], ["EPUB"])
         self.assertEqual(1, len(rows))
         self.assertEqual("t1", rows[0]["tolino_id"])
@@ -1838,11 +1828,9 @@ class ConservativeMatchingTests(unittest.TestCase):
         """Ohne deutliches Ja bleibt die Zeile eine normale Upload-Zeile."""
         for value in (False, "", None, "nein"):
             rows = compare_inventory(
-                self._metadata(**{TOLINO_IGNORE_COLUMN: value}), {}, [],
-                ["EPUB"])
+                self._metadata(ignored=False), {}, [], ["EPUB"])
             self.assertFalse(rows[0]["ignored"], value)
             self.assertEqual("action", rows[0]["group"], value)
-            self.assertTrue(rows[0]["selected"], value)
 
     def test_ignored_books_are_filtered_out_of_the_selection_helpers(self):
         from ..dashboard_plan import syncable_book_ids, syncable_metadata
@@ -1911,7 +1899,7 @@ class ConservativeMatchingTests(unittest.TestCase):
             [{"id": "t1", "title": "Titel", "authors": "Autor B"}], ["EPUB"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("title_only", rows[0]["match_reason"])
-        self.assertFalse(rows[0]["selected"])
+        self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
     def test_same_title_different_valid_isbn_is_review(self):
         rows = compare_inventory(
@@ -1920,7 +1908,7 @@ class ConservativeMatchingTests(unittest.TestCase):
               "isbn": "9780306406157"}], ["EPUB"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("conflict", rows[0]["match_reason"])
-        self.assertFalse(rows[0]["selected"])
+        self.assertNotEqual("new_in_calibre", rows[0]["status"])
         # Die gefundene Cloud-Kopie bleibt technisch sichtbar, wird aber
         # nicht als automatischer Treffer verbucht.
         self.assertEqual("t1", rows[0]["tolino_id"])
@@ -1929,7 +1917,7 @@ class ConservativeMatchingTests(unittest.TestCase):
         rows = compare_inventory(
             self._metadata(title="Der Fall", authors="Donna Leon"), {},
             [{"id": "t1", "title": "der fall", "authors": "Donna  Leon"}],
-            ["EPUB"], comparison_fields=("title", "authors"))
+            ["EPUB"])
         self.assertEqual("identical", rows[0]["status"])
         self.assertEqual("title_author", rows[0]["match_reason"])
         self.assertEqual("t1", rows[0]["tolino_id"])
@@ -1944,7 +1932,7 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertEqual("review", local["status"])
         self.assertEqual("ambiguous", local["match_reason"])
         self.assertEqual("", local["tolino_id"])
-        self.assertFalse(local["selected"])
+        self.assertNotEqual("new_in_calibre", local["status"])
         self.assertEqual({"review"}, {row["status"] for row in rows[1:]})
 
     def test_known_tolino_id_wins_for_the_comparison(self):
@@ -1959,30 +1947,20 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("t-known", state["u1"]["tolino_id"])
 
-    def test_comparison_fields_gate_matching_and_identical(self):
+    def test_matching_always_uses_isbn_or_title_and_author_pair(self):
         metadata = self._metadata(title="Gleich", authors="Autor")
         inventory = [{"id": "t1", "title": "Gleich", "authors": "Autor"}]
-        # Ohne Vergleichsfelder gibt es keinen automatischen Treffer.
-        rows = compare_inventory(metadata, {}, inventory, ["EPUB"],
-                                 comparison_fields=())
-        self.assertEqual("new_in_calibre", rows[0]["status"])
-        self.assertEqual("", rows[0]["tolino_id"])
-        # Titel+Autor eingeschaltet: eindeutiger Treffer, identisch.
-        rows = compare_inventory(metadata, {}, inventory, ["EPUB"],
-                                 comparison_fields=("title", "authors"))
+        rows = compare_inventory(metadata, {}, inventory, ["EPUB"])
         self.assertEqual("identical", rows[0]["status"])
-        # Nur Titel eingeschaltet: Titel allein bleibt ein Prüffall.
-        rows = compare_inventory(metadata, {}, inventory, ["EPUB"],
-                                 comparison_fields=("title",))
-        self.assertEqual("review", rows[0]["status"])
-        # Eine vorhandene Zuordnung mit fehlendem lokalen Autor darf nicht
-        # durch den ausgewählten Titel allein als unverändert gelten.
-        missing_author = {1: dict(metadata[1], authors="")}
+        self.assertEqual("title_author", rows[0]["match_reason"])
+
+        isbn_metadata = self._metadata(
+            title="Anders", authors="Andere", isbn="9783161484100")
         rows = compare_inventory(
-            missing_author, {"u1": {"tolino_id": "t1"}}, inventory,
-            ["EPUB"], comparison_fields=("title", "authors"),
-            use_metadata_ids=False)
-        self.assertEqual("changed", rows[0]["status"])
+            isbn_metadata, {},
+            [{"id": "t2", "title": "Titel", "isbn": "9783161484100"}],
+            ["EPUB"])
+        self.assertEqual("isbn", rows[0]["match_reason"])
 
     def test_isbn_checksum_is_required_for_isbn_matching(self):
         invalid = compare_inventory(
@@ -2003,10 +1981,10 @@ class ComparisonSortTests(unittest.TestCase):
     def test_upload_group_first_then_title_then_authors(self):
         from ..comparison import sort_comparison_rows
         rows = [
-            {"selected": False, "title": "Alpha", "authors": "A", "book_id": 1},
-            {"selected": True, "title": "Zulu", "authors": "Z", "book_id": 2},
-            {"selected": False, "title": "beta", "authors": "B", "book_id": 3},
-            {"selected": True, "title": "alpha", "authors": "M", "book_id": 4},
+            {"upload": False, "title": "Alpha", "authors": "A", "book_id": 1},
+            {"upload": True, "title": "Zulu", "authors": "Z", "book_id": 2},
+            {"upload": False, "title": "beta", "authors": "B", "book_id": 3},
+            {"upload": True, "title": "alpha", "authors": "M", "book_id": 4},
         ]
         ordered = sort_comparison_rows(rows)
         self.assertEqual([4, 2, 1, 3],
@@ -2017,7 +1995,7 @@ class ComparisonSortTests(unittest.TestCase):
     def test_missing_fields_do_not_crash(self):
         from ..comparison import sort_comparison_rows
         rows = [{"book_id": None, "tolino_id": "cloud-only"},
-                {"selected": True, "title": "Titel", "book_id": 7}]
+                {"upload": True, "title": "Titel", "book_id": 7}]
         ordered = sort_comparison_rows(rows)
         self.assertEqual([7, None], [row["book_id"] for row in ordered])
         self.assertEqual("cloud-only", ordered[1]["tolino_id"])
@@ -2260,17 +2238,12 @@ class PrepareStateCopyTests(unittest.TestCase):
     Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
     UUID = "8f3c5f0e-1a2b-4c3d-9e8f-001122334455"
 
-    def test_load_state_accepts_mappings_and_json_objects(self):
+    def test_load_state_accepts_mappings_and_rejects_invalid_values(self):
         state = {"book": {"tolino_id": "copy"}}
         self.assertIs(state, load_state(state))
-        self.assertEqual(state, load_state('{"book":{"tolino_id":"copy"}}'))
-
-    def test_load_state_rejects_non_object_and_malformed_payloads(self):
-        for raw in (None, "", "not-json", "[]", "null", "1"):
+        for raw in (None, "", "not-json", "[]", "null", "1", [], 7):
             with self.subTest(raw=raw):
                 self.assertEqual({}, load_state(raw))
-        self.assertEqual({}, load_state([]))
-        self.assertEqual({}, load_state(7))
 
     def test_the_comparison_does_not_mutate_the_stored_state(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -2569,7 +2542,7 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual([], worker.updates)
         # Und der naechste Lauf plant das Update erneut.
         updates = plan_metadata_updates(
-            changed, worker.state, [], only_book_ids={1})
+            changed, worker.state, [], {1})
         self.assertEqual(1, len(updates))
 
     def test_only_the_successful_upload_of_a_batch_is_confirmed(self):

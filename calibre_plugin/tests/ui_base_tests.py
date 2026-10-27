@@ -29,7 +29,6 @@ class ToolbarIconTests(unittest.TestCase):
             "calibre_plugin.ui_dialogs",
             "calibre_plugin.ui_workers",
             "calibre_plugin.config",
-            "calibre_plugin.sessions",
             "calibre_plugin.tolino",
         } & loaded)
 
