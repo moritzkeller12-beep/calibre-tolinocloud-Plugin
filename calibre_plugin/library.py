@@ -129,6 +129,65 @@ def metadata_ignored(metadata):
     return bool_column_value(metadata, TOLINO_IGNORE_COLUMN) is True
 
 
+# Spalten, die das Plugin benutzt: (Label ohne «#», Anzeigename, Calibre-Typ).
+CUSTOM_COLUMNS = (
+    ("tolino_id", "tolino-ID", "text"),
+    ("tolino_read", "Gelesen (tolino)", "bool"),
+    ("tolino_ignore", "Ignoriert (tolino)", "bool"),
+)
+
+# In dieser Calibre-Sitzung angelegte Spalten. Calibre fuehrt eine neue
+# Spalte in `field_metadata` erst nach einem Neustart -- ohne diesen Merker
+# wollte ein zweiter Klick dieselben Spalten erneut anlegen.
+CREATED_COLUMNS = set()
+
+
+def _column_present(database, label):
+    """True, wenn die Spalte in der Bibliothek (oder in dieser Sitzung) da ist."""
+    return label in CREATED_COLUMNS or _field_info(database, "#" + label)[0]
+
+
+def missing_custom_columns(database):
+    """Labels der Plugin-Spalten, die in dieser Bibliothek fehlen."""
+    return [label for label, _name, _datatype in CUSTOM_COLUMNS
+            if not _column_present(database, label)]
+
+
+def create_custom_columns(database):
+    """Fehlende Plugin-Spalten anlegen; gibt die angelegten Labels zurueck.
+
+    Calibre kennt dafuer ``create_custom_column(label, name, datatype,
+    is_multiple, editable, display)`` -- auf ``new_api`` wie auf dem
+    Legacy-Objekt. Vorhandene Spalten werden nie angefasst: es wird weder
+    etwas geloescht noch ein Typ geaendert.
+
+    Eine neu angelegte Spalte ist in der laufenden Oberflaeche erst nach
+    einem Neustart von Calibre nutzbar.
+    """
+    create = getattr(database, "create_custom_column", None)
+    if not callable(create):
+        create = getattr(getattr(database, "new_api", None),
+                         "create_custom_column", None)
+    if not callable(create):
+        raise RuntimeError(
+            "Diese Calibre-Version kennt create_custom_column nicht. Lege "
+            "die Spalten bitte von Hand an: %s."
+            % ", ".join("#" + label for label, _name, _datatype
+                        in CUSTOM_COLUMNS))
+    created = []
+    for label, name, datatype in CUSTOM_COLUMNS:
+        if _column_present(database, label):
+            continue
+        try:
+            create(label, name, datatype, False, editable=True, display={})
+        except TypeError:
+            # Aeltere Fassungen kennen die Schluesselwoerter nicht.
+            create(label, name, datatype, False)
+        CREATED_COLUMNS.add(label)
+        created.append(label)
+    return created
+
+
 def read_column_available(database):
     """True, wenn Calibre die Ja/Nein-Spalte ``#tolino_read`` kennt.
 

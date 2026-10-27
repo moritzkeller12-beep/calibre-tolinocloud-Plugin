@@ -253,6 +253,91 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertNotIn("partner.get(\"token_url\")", source)
         self.assertIn("self.partner.findData(partner_id) < 0", source)
 
+class ColumnSetupButtonTests(unittest.TestCase):
+    """Der Knopf in den Einstellungen legt die Calibre-Spalten an."""
+
+    def _ui(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        return ui_module
+
+    @staticmethod
+    def _dashboard(calls):
+        dashboard = type("Dashboard", (), {})()
+        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.sync_column_enabled = False
+        dashboard.read_column_enabled = False
+        dashboard.update_status = lambda: calls.append("status")
+        return dashboard
+
+    def test_the_settings_offer_the_button(self):
+        source = _ui_source_text()
+        self.assertIn("self.setup_columns = QPushButton(", source)
+        self.assertIn(
+            "self.setup_columns.clicked.connect(self.create_columns)", source)
+        self.assertIn('transfer.addRow("", self.setup_columns)', source)
+
+    def test_new_columns_are_reported_and_the_flags_refreshed(self):
+        from unittest.mock import patch
+        ui_module = self._ui()
+        calls, boxes = [], []
+        dashboard = self._dashboard(calls)
+        create = ui_module.dashboard.SyncDashboard.create_columns.__get__(
+            dashboard)
+        with patch("calibre_plugin.ui_dashboard.create_custom_columns",
+                   lambda _db: ["tolino_read"]), \
+             patch("calibre_plugin.ui_dashboard.tolino_column_active",
+                   lambda *_args: True), \
+             patch("calibre_plugin.ui_dashboard.read_column_available",
+                   lambda _db: True), \
+             patch("calibre_plugin.ui_dashboard.info_dialog",
+                   lambda *args, **kwargs: boxes.append(args)):
+            create()
+        self.assertIn("#tolino_read", boxes[0][2])
+        self.assertIn("neu starten", boxes[0][2])
+        self.assertTrue(dashboard.sync_column_enabled)
+        self.assertTrue(dashboard.read_column_enabled)
+        self.assertEqual(["status"], calls)
+
+    def test_an_existing_setup_says_so_and_changes_nothing(self):
+        from unittest.mock import patch
+        ui_module = self._ui()
+        calls, boxes = [], []
+        dashboard = self._dashboard(calls)
+        create = ui_module.dashboard.SyncDashboard.create_columns.__get__(
+            dashboard)
+        with patch("calibre_plugin.ui_dashboard.create_custom_columns",
+                   lambda _db: []), \
+             patch("calibre_plugin.ui_dashboard.info_dialog",
+                   lambda *args, **kwargs: boxes.append(args)):
+            create()
+        self.assertIn("schon vorhanden", boxes[0][2])
+        self.assertEqual([], calls)
+        self.assertFalse(dashboard.read_column_enabled)
+
+    def test_a_refused_creation_is_reported_instead_of_crashing(self):
+        from unittest.mock import patch
+
+        def boom(_db):
+            raise RuntimeError(
+                "Diese Calibre-Version kennt create_custom_column nicht.")
+
+        ui_module = self._ui()
+        calls, errors = [], []
+        dashboard = self._dashboard(calls)
+        create = ui_module.dashboard.SyncDashboard.create_columns.__get__(
+            dashboard)
+        with patch("calibre_plugin.ui_dashboard.create_custom_columns", boom), \
+             patch("calibre_plugin.ui_dashboard.log_warning",
+                   lambda _text: None), \
+             patch("calibre_plugin.ui_dashboard.error_dialog",
+                   lambda *args, **kwargs: errors.append(args)):
+            create()
+        self.assertIn("create_custom_column", errors[0][2])
+        self.assertEqual([], calls)
+
+
 class DashboardPrimaryActionTests(unittest.TestCase):
     """Hauptknopf und Anmeldeknopf getrennt.
 

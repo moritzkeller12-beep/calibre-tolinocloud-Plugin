@@ -14,10 +14,12 @@ import unittest
 import uuid
 import zipfile
 from .. import config
-from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, cover_bytes,
+from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
+                       cover_bytes, create_custom_columns,
                        custom_column_available, ignore_column_available,
                        iter_book_ids, metadata_by_id, metadata_ignored,
-                       metadata_tolino_id, normalize_formats, safe_format_path,
+                       metadata_tolino_id, missing_custom_columns,
+                       normalize_formats, safe_format_path,
                        selected_table_rows, update_tolino_ids)
 from ..comparison import (compare_inventory, content_fingerprint,
                           metadata_fingerprint, normalize_title,
@@ -376,6 +378,56 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("changed", rows[0]["status"])
         self.assertEqual("bosh_8_saved", rows[0]["tolino_id"])
         self.assertEqual("stored_id_or_uuid", rows[0]["match_reason"])
+
+    def test_missing_columns_are_created_once_with_calibre_types(self):
+        """Der Knopf legt nur fehlende Spalten an -- mit passendem Typ."""
+        from .. import library as library_module
+        library_module.CREATED_COLUMNS.clear()
+        self.addCleanup(library_module.CREATED_COLUMNS.clear)
+
+        class Database:
+            field_metadata = {"#tolino_id": {"datatype": "text"}}
+
+            def __init__(self):
+                self.calls = []
+
+            def create_custom_column(self, label, name, datatype,
+                                     is_multiple, editable=True, display=None):
+                self.calls.append((label, name, datatype, is_multiple,
+                                   editable, display))
+                self.field_metadata["#" + label] = {"datatype": datatype}
+                return 1
+
+        database = Database()
+        self.assertEqual(["tolino_read", "tolino_ignore"],
+                         missing_custom_columns(database))
+        self.assertEqual(["tolino_read", "tolino_ignore"],
+                         create_custom_columns(database))
+        self.assertEqual(
+            [("tolino_read", "Gelesen (tolino)", "bool", False, True, {}),
+             ("tolino_ignore", "Ignoriert (tolino)", "bool", False, True, {})],
+            database.calls)
+        # Zweiter Klick: nichts doppelt anlegen, auch wenn Calibre die neue
+        # Spalte erst nach einem Neustart fuehrt.
+        self.assertEqual([], missing_custom_columns(database))
+        self.assertEqual([], create_custom_columns(database))
+
+    def test_the_column_types_match_what_the_plugin_reads(self):
+        """Text fuer die ID, Ja/Nein fuer Lesestatus und Ignorieren."""
+        self.assertEqual([("tolino_id", "tolino-ID", "text"),
+                          ("tolino_read", "Gelesen (tolino)", "bool"),
+                          ("tolino_ignore", "Ignoriert (tolino)", "bool")],
+                         list(CUSTOM_COLUMNS))
+
+    def test_without_the_calibre_api_the_error_names_the_columns(self):
+        """Eine alte Calibre-Fassung bekommt eine umsetzbare Meldung."""
+        class WithoutColumns:
+            field_metadata = {}
+
+        with self.assertRaises(RuntimeError) as caught:
+            create_custom_columns(WithoutColumns())
+        for label in ("#tolino_id", "#tolino_read", "#tolino_ignore"):
+            self.assertIn(label, str(caught.exception))
 
     def test_custom_column_availability_accepts_calibre_field_metadata(self):
         class FieldMetadata:

@@ -34,7 +34,9 @@ nach der Bestätigung vor dem Start gelöscht.
 - Lege in Calibre unter **Einstellungen → Spalten hinzufügen** eine
   benutzerdefinierte Spalte **`#tolino_id`** vom Typ **Text** an. Ohne diese
   Spalte bleibt die Zuordnung im Plugin-Zustand gespeichert und wird nicht in
-  der Bibliotheksspalte angezeigt.
+  der Bibliotheksspalte angezeigt. Der Knopf **«Calibre-Spalten anlegen …»**
+  in den Einstellungen legt alle drei Spalten an, die noch fehlen; danach
+  Calibre neu starten.
 - Für **gekaufte Bücher, die schon in tolino liegen**: lege zusätzlich eine
   Spalte **`#tolino_ignore`** vom Typ **Ja/Nein** an und setze sie bei diesen
   Büchern auf «Ja». Sie werden nicht hochgeladen und nicht verändert – damit
