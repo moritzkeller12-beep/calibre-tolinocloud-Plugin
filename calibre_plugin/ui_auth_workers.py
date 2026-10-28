@@ -6,12 +6,6 @@ from .token_vault import check_stored_login
 from .tolino import report_error
 
 
-# Browser sign-in keeps a module-level reference to its worker thread: the
-# dashboard may be closed while the flow is still polling the browser
-# storages, and a parented QThread destroyed while running crashes Calibre.
-_LOGIN_WORKER_THREADS = []
-
-
 class BrowserLoginWorker(QObject):
     """Runs browser_login off the GUI thread (it polls for minutes)."""
     completed = pyqtSignal(object, object)
@@ -59,20 +53,3 @@ class SessionCheckWorker(QObject):
             self.busy.emit(detail)
         else:
             self.invalid.emit(detail)
-
-class CallWorker(QObject):
-    """Run one value-only callback outside the GUI thread."""
-    done = pyqtSignal(object)
-    failed = pyqtSignal(object)
-
-    def __init__(self, call):
-        QObject.__init__(self)
-        self.call = call
-
-    def run(self):
-        try:
-            result = self.call()
-        except Exception as exc:
-            self.failed.emit(exc)
-            return
-        self.done.emit(result)

@@ -1544,7 +1544,7 @@ class BackgroundCallTests(unittest.TestCase):
                     self.done.emit(result)
 
         ui_module.common.QThread = Thread
-        ui_module.auth_workers.CallWorker = Worker
+        ui_module.common.CallWorker = Worker
         return Thread
 
     def _dialog(self, ui_module):
@@ -1630,8 +1630,7 @@ class BackgroundCallTests(unittest.TestCase):
 
     def test_no_ui_module_uses_a_lambda_as_worker_signal_receiver(self):
         source = _ui_source_text()
-        ignored = {"thread.finished.connect(lambda: _discard_item(_CALL_THREADS, thread))",
-                   "thread.finished.connect(\n            lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))"}
+        ignored = {"thread.finished.connect(lambda: _discard_item(_THREADS, thread))"}
         violations = []
         for line_number, line in enumerate(source.splitlines(), 1):
             if "lambda" not in line or not re.search(

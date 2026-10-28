@@ -5,7 +5,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QFormLayout, QHBoxLayout, QInputDialog,
                         QLabel, QLineEdit, QMessageBox, QProgressBar,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
-                        _dialog_busy, _discard_item,
+                        _dialog_busy, _keep_thread_alive,
                         _login_failure_guidance,
                         _stop_thread, _thread_running, _worker_account_name,
                         _worker_outcome,
@@ -28,8 +28,7 @@ from .tolino import (RELOGIN, hardware_id, log_warning,
 from .cdp import devtools_port_alive
 from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
-from .ui_auth_workers import (BrowserLoginWorker, SessionCheckWorker,
-                              _LOGIN_WORKER_THREADS)
+from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
 from .ui_settings import SettingsDialog
 
 def _offer_next_step(dialog):
@@ -87,9 +86,7 @@ def _register_login_thread(dialog, thread, worker):
     fertig ist -- sonst räumt ihn der Garbage Collector vorzeitig ab.
     """
     thread.finished.connect(thread.deleteLater)
-    thread.finished.connect(
-        lambda: _discard_item(_LOGIN_WORKER_THREADS, thread))
-    _LOGIN_WORKER_THREADS.append(thread)
+    _keep_thread_alive(thread)
     dialog.login_thread = thread
     dialog.login_worker = worker
     thread.start()

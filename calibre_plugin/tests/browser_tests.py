@@ -1754,9 +1754,9 @@ class ThreadShutdownTests(unittest.TestCase):
             self.assertFalse(ui_module.common._stop_thread(thread, timeout_ms=1234))
             self.assertIn(("wait", 1234), calls)
             self.assertIn(("parent", None), calls)
-            self.assertIn(thread, ui_module.common._ORPHANED_THREADS)
+            self.assertIn(thread, ui_module.common._THREADS)
         finally:
-            ui_module.common._ORPHANED_THREADS.clear()
+            ui_module.common._THREADS.clear()
             ui_module._restore_stubs_for_tests()
 
     def test_close_event_cancels_and_never_waits_forever(self):
@@ -1792,5 +1792,5 @@ class ThreadShutdownTests(unittest.TestCase):
             self.assertIn("accepted", calls)
             self.assertIn(("wait", 3000), calls)
         finally:
-            ui_module.common._ORPHANED_THREADS.clear()
+            ui_module.common._THREADS.clear()
             ui_module._restore_stubs_for_tests()

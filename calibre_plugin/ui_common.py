@@ -37,11 +37,11 @@ __all__ = [
     "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
     "QThread", "QVBoxLayout", "Qt", "SyncJob",
-    "_ORPHANED_THREADS", "_apply_busy", "_dialog_busy",
+    "_THREADS", "_apply_busy", "_dialog_busy",
     "_display_value", "_format_signatures", "_login_failure_guidance",
     "_metadata_value", "_stop_thread", "plural",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
-    "_discard_item", "_thread_running",
+    "_keep_thread_alive", "_thread_running",
     "pyqtSignal", "safe_format_path",
     "sync_result_detail",
     "sync_result_text",
@@ -119,13 +119,27 @@ OP_SKIPPED = "skipped"
 OP_FAILED = "failed"
 OP_NOT_STARTED = "not_started"
 
-# Threads, die beim Schliessen nicht innerhalb des Zeitlimits fertig wurden:
-# Die Referenz haelt sie am Leben, statt sie (und Calibre) abzustuerzen.
-_ORPHANED_THREADS = []
+# Laufende oder nach einem Timeout noch nicht beendete Threads bleiben bis
+# zum finished-Signal referenziert.
+_THREADS = []
 
-# Laufende Einzelaufrufe (CallWorker). Wie bei der Anmeldung haelt diese
-# Referenz den Thread am Leben, wenn das Fenster vorher schliesst.
-_CALL_THREADS = []
+
+class CallWorker(QObject):
+    """Run one value-only callback outside the GUI thread."""
+    done = pyqtSignal(object)
+    failed = pyqtSignal(object)
+
+    def __init__(self, call):
+        QObject.__init__(self)
+        self.call = call
+
+    def run(self):
+        try:
+            result = self.call()
+        except Exception as exc:
+            self.failed.emit(exc)
+            return
+        self.done.emit(result)
 
 
 def start_call(dialog, call, on_done, on_failed):
@@ -136,8 +150,6 @@ def start_call(dialog, call, on_done, on_failed):
     stellt sie in den GUI-Thread. Ohne Elternteil, damit ein geschlossenes
     Fenster keinen laufenden Thread zerstoert.
     """
-    from .ui_auth_workers import CallWorker
-
     thread = QThread()
     worker = CallWorker(call)
     worker.moveToThread(thread)
@@ -147,8 +159,7 @@ def start_call(dialog, call, on_done, on_failed):
     worker.done.connect(on_done)
     worker.failed.connect(on_failed)
     thread.finished.connect(thread.deleteLater)
-    thread.finished.connect(lambda: _discard_item(_CALL_THREADS, thread))
-    _CALL_THREADS.append(thread)
+    _keep_thread_alive(thread)
     dialog._call_thread = thread
     dialog._call_worker = worker
     thread.start()
@@ -161,6 +172,15 @@ def _discard_item(collection, item):
         collection.remove(item)
     except ValueError:
         pass
+
+
+def _keep_thread_alive(thread):
+    """Retain a thread until Qt reports that it has finished."""
+    if thread not in _THREADS:
+        _THREADS.append(thread)
+        finished = getattr(thread, "finished", None)
+        if finished is not None:
+            finished.connect(lambda: _discard_item(_THREADS, thread))
 
 
 def _stop_thread(thread, timeout_ms=3000):
@@ -180,7 +200,12 @@ def _stop_thread(thread, timeout_ms=3000):
             thread.setParent(None)
         except Exception:
             pass
-        _ORPHANED_THREADS.append(thread)
+        _keep_thread_alive(thread)
+        try:
+            if thread.isFinished():
+                _discard_item(_THREADS, thread)
+        except Exception:
+            pass
     return finished
 
 
