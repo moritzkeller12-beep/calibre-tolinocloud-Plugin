@@ -382,7 +382,7 @@ class ReadColumnPersistTests(unittest.TestCase):
              patch("calibre_plugin.ui_dashboard.update_read_column",
                    lambda db, updates: writes.append(list(updates))):
             ui_module.dashboard._persist_sync_result(
-                dashboard, {}, "rot", [])
+                dashboard, {}, [])
         self.assertEqual([[(1, True)]], writes)
         dashboard.read_column_enabled = False
         with patch("calibre_plugin.ui_dashboard._persist_run",
@@ -390,5 +390,5 @@ class ReadColumnPersistTests(unittest.TestCase):
              patch("calibre_plugin.ui_dashboard.update_read_column",
                    lambda db, updates: writes.append(list(updates))):
             ui_module.dashboard._persist_sync_result(
-                dashboard, {}, "rot", [])
+                dashboard, {}, [])
         self.assertEqual(1, len(writes))

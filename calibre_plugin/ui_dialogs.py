@@ -357,18 +357,19 @@ class InventoryDialog(QDialog):
         if not 0 <= index < len(self.rows):
             return
         row = self.rows[index]
-        check = self.read_checks[index]
-        row["read"] = bool(check.isChecked())
+        row["read"] = bool(self.read_checks[index].isChecked())
         # Ein Klick entscheidet auch einen Konflikt mit #tolino_read.
         row["read_sync"] = True
         self._update_summary()
 
-    def _sync_checks_to_rows(self):
-        for row, upload, metadata, read in zip(
-                self.rows, self.checks, self.meta_checks, self.read_checks):
-            row["upload"] = bool(upload.isChecked())
-            row["metadata"] = bool(metadata.isChecked())
-            row["read"] = bool(read.isChecked())
+    def _choice_changed(self, index, key):
+        """Die Zeile hält die Auswahl; die Checkbox zeigt sie nur an."""
+        if 0 <= index < len(self.rows):
+            self.rows[index][key] = bool(
+                (self.checks if key == "upload" else
+                 self.meta_checks if key == "metadata" else
+                 self.read_checks)[index].isChecked())
+            self._update_summary()
 
     @staticmethod
     def _set_checked_quietly(check_widget, value):
@@ -393,24 +394,26 @@ class InventoryDialog(QDialog):
         markierte Zeilen bleiben unberührt; «Auswahl zurücksetzen» hebt auch
         die Löschmarkierung auf.
         """
-        self._sync_checks_to_rows()
         if clear_deletions:
-            for row, upload, metadata, read in zip(
-                    self.rows, self.checks, self.meta_checks, self.read_checks):
+            for index, row in enumerate(self.rows):
                 row.pop("delete_cloud", None)
                 row["upload"] = row["metadata"] = False
                 row["read"] = bool(row.get("read_in_cloud"))
                 row["read_sync"] = False
-                for check, checked in ((upload, False), (metadata, False),
-                                       (read, row["read"])):
+                for check, checked in (
+                        (self.checks[index], False),
+                        (self.meta_checks[index], False),
+                        (self.read_checks[index], row["read"])):
                     self._set_checked_quietly(check, checked)
             if getattr(self, "table", None) is not None:
                 self._rebuild_table(self.rows)
             else:
                 self._update_summary()
             return
-        for row, upload_check, metadata_check, read_check in zip(
-                self.rows, self.checks, self.meta_checks, self.read_checks):
+        for index, row in enumerate(self.rows):
+            upload_check = self.checks[index]
+            metadata_check = self.meta_checks[index]
+            read_check = self.read_checks[index]
             if row.get("delete_cloud") or row.get("ignored"):
                 continue
             wanted = tuple(chooser(row))
@@ -493,14 +496,14 @@ class InventoryDialog(QDialog):
 
     def selected_upload_ids(self):
         """Bücher, deren Datei hochgeladen werden soll."""
-        return {row["book_id"] for row, check in zip(self.rows, self.checks)
-                if check.isChecked() and not row.get("ignored")
+        return {row["book_id"] for row in self.rows
+                if row.get("upload") and not row.get("ignored")
                 and row.get("book_id") is not None}
 
     def selected_metadata_ids(self):
         """Bücher, deren Cloud-Metadaten aktualisiert werden sollen."""
-        return {row["book_id"] for row, check in zip(self.rows, self.meta_checks)
-                if check.isChecked() and not row.get("ignored")
+        return {row["book_id"] for row in self.rows
+                if row.get("metadata") and not row.get("ignored")
                 and row.get("book_id") is not None}
 
     def selected_read_targets(self):
@@ -509,8 +512,8 @@ class InventoryDialog(QDialog):
         Schon gelesene Bücher fallen heraus; übertragen wird nur eine Änderung.
         """
         return [str(row["tolino_id"])
-                for row, check in zip(self.rows, self.read_checks)
-                if check.isChecked() and row.get("tolino_id")
+                for row in self.rows
+                if row.get("read") and row.get("tolino_id")
                 and not row.get("delete_cloud") and not row.get("read_in_cloud")
                 and not row.get("ignored")]
 
@@ -521,8 +524,8 @@ class InventoryDialog(QDialog):
         behalten ihren Lesestatus.
         """
         return [str(row["tolino_id"])
-                for row, check in zip(self.rows, self.read_checks)
-                if not check.isChecked() and row.get("tolino_id")
+                for row in self.rows
+                if not row.get("read") and row.get("tolino_id")
                 and not row.get("delete_cloud") and row.get("read_in_cloud")
                 and not row.get("ignored")]
 
@@ -534,13 +537,13 @@ class InventoryDialog(QDialog):
         Konflikte ohne Klick und Bücher zum Löschen fallen heraus.
         """
         items = []
-        for row, check in zip(self.rows, self.read_checks):
+        for row in self.rows:
             if (not row.get("read_column") or not row.get("read_sync")
                     or row.get("book_id") is None or not row.get("tolino_id")
                     or row.get("read_known") is False
                     or row.get("delete_cloud")):
                 continue
-            value = bool(check.isChecked())
+            value = bool(row.get("read"))
             items.append({
                 "book_id": row["book_id"],
                 "book_uuid": str(row.get("uuid") or ""),
@@ -578,48 +581,24 @@ class InventoryDialog(QDialog):
         actions = {}
         row_indexes = [index for index in marked
                        if 0 <= index < len(self.rows)]
-        cloud_rows = [self.rows[index] for index in row_indexes
-                      if self.rows[index].get("tolino_id")]
-        has_cloud = bool(cloud_rows)
-        has_upload_selected = any(self.rows[index].get("upload")
-                                  for index in row_indexes)
-        has_metadata_selected = any(self.rows[index].get("metadata")
-                                    for index in row_indexes)
-        has_metadata_target = any(
-            self.rows[index].get("book_id") is not None
-            and self.rows[index].get("tolino_id")
-            and not self.rows[index].get("metadata")
-            for index in row_indexes)
-        has_unread_target = any(
-            self.rows[index].get("tolino_id") and not self.rows[index].get("read")
-            for index in row_indexes)
-        has_read_target = any(
-            self.rows[index].get("tolino_id") and self.rows[index].get("read")
-            for index in row_indexes)
-        has_deletions = any(self.rows[index].get("delete_cloud")
-                            for index in row_indexes)
+        predicates = {
+            "upload_on": lambda row: (
+                row.get("book_id") is not None and not row.get("upload")
+                and row.get("has_preferred_format", True)),
+            "upload_off": lambda row: bool(row.get("upload")),
+            "metadata_on": lambda row: (
+                row.get("book_id") is not None and row.get("tolino_id")
+                and not row.get("metadata")),
+            "metadata_off": lambda row: bool(row.get("metadata")),
+            "read": lambda row: row.get("tolino_id") and not row.get("read"),
+            "read_off": lambda row: row.get("tolino_id") and row.get("read"),
+            "download": lambda row: bool(row.get("tolino_id")),
+            "cloud_delete": lambda row: bool(row.get("tolino_id")),
+            "cloud_delete_off": lambda row: bool(row.get("delete_cloud")),
+        }
         for label, key in self.ROW_ACTIONS:
-            if key == "download" and not has_cloud:
-                continue
-            if key == "cloud_delete" and not has_cloud:
-                continue
-            if key == "metadata_on" and not has_metadata_target:
-                continue
-            if key == "metadata_off" and not has_metadata_selected:
-                continue
-            if key == "read" and not has_unread_target:
-                continue
-            if key == "read_off" and not has_read_target:
-                continue
-            if key == "cloud_delete_off" and not has_deletions:
-                continue
-            if key == "upload_on" and not any(
-                    self.rows[index].get("book_id") is not None
-                    and not self.rows[index].get("upload")
-                    and self.rows[index].get("has_preferred_format", True)
-                    for index in row_indexes):
-                continue
-            if key == "upload_off" and not has_upload_selected:
+            if not any(predicates[key](self.rows[index])
+                       for index in row_indexes):
                 continue
             actions[menu.addAction(label)] = key
         position = self.row_actions.mapToGlobal(
@@ -740,11 +719,9 @@ class InventoryDialog(QDialog):
             if row.get("read_known") is False:
                 return False
             if row.get("read_column"):
-                # Mit #tolino_read zählt auch Calibre: dieselbe Auswahl wie
-                # in tolino kann die Calibre-Spalte noch ändern oder einen
-                # Konflikt entscheiden.
+                # Mit #tolino_read kann dieselbe Auswahl einen Konflikt
+                # entscheiden oder den Calibre-Wert ändern.
                 if (bool(row.get("read")) == bool(value)
-                        and bool(check.isChecked()) == bool(value)
                         and row.get("read_sync")
                         and row.get("read_local") is bool(value)):
                     return False
@@ -752,12 +729,11 @@ class InventoryDialog(QDialog):
                 row[key] = bool(value)
                 self._set_checked_quietly(check, bool(value))
                 return True
-            if ((value and row.get("read_in_cloud"))
-                    or (not value and not row.get("read_in_cloud"))):
+            if bool(value) == bool(row.get("read_in_cloud")):
                 return False
         else:
             check = (self.checks if key == "upload" else self.meta_checks)[index]
-        if bool(row.get(key)) == bool(value) and bool(check.isChecked()) == bool(value):
+        if bool(row.get(key)) == bool(value):
             return False
         row[key] = bool(value)
         self._set_checked_quietly(check, bool(value))
@@ -767,9 +743,8 @@ class InventoryDialog(QDialog):
         """Spaltenkopf anklicken: aufsteigend <-> absteigend umschalten."""
         if not 0 <= column < len(self._SORT_KEYS):
             return
-        # Auswahlzustand zuerst in die Zeilen retten, sonst geht nach dem
-        # Umsortieren die Auswahl verloren.
-        self._sync_checks_to_rows()
+        # Die Zeilen sind die einzige Quelle der Auswahl; Checkboxen werden
+        # beim Neuaufbau aus ihnen erzeugt.
         if self._sort_column == column:
             self._sort_descending = not self._sort_descending
         else:
@@ -857,7 +832,9 @@ class InventoryDialog(QDialog):
                 state_signal = getattr(check, "stateChanged", None)
                 if state_signal is not None:
                     try:
-                        state_signal.connect(self._update_summary)
+                        state_signal.connect(
+                            lambda _state, i=row_index, k=key:
+                            self._choice_changed(i, k))
                     except Exception:
                         pass  # Qt-Stub ohne echtes Signal
                 if column == 2:
@@ -1163,7 +1140,6 @@ class InventoryDialog(QDialog):
                 "in tolino oder sind bereits zum Löschen markiert.")
             return
         # Die endgültige Löschliste wird einmalig vor dem Sync bestätigt.
-        self._sync_checks_to_rows()
         for row in candidates:
             row["delete_cloud"] = True
             row["upload"] = False
@@ -1176,7 +1152,6 @@ class InventoryDialog(QDialog):
         if not marked:
             return
         changed = 0
-        self._sync_checks_to_rows()
         for index in marked:
             if 0 <= index < len(self.rows):
                 if self.rows[index].pop("delete_cloud", None) is not None:

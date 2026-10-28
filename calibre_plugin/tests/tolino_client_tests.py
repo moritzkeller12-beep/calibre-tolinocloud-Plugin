@@ -1380,7 +1380,7 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         self.assertEqual([("konto", "tok-neu", "hw-alt"),
                           ("konto", "tok-neu", "hw-neu")], saved)
 
-    def test_dashboard_persists_rotated_token_through_shared_helper(self):
+    def test_dashboard_stores_a_manually_entered_token(self):
         ui_module = self._ui_module()
 
         class Field:

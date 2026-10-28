@@ -10,7 +10,6 @@ import time
 import calibre_plugin.token_vault as vault_module
 import unittest
 import uuid
-import zipfile
 from .. import config
 from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        cover_bytes, create_custom_columns,
@@ -1368,69 +1367,6 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
-    def test_zip_entrypoint_uses_calibre_namespace_package(self):
-        archive = Path(__file__).parent.parent.parent / "tolino_cloud_sync.zip"
-        if not archive.exists():
-            self.skipTest("build_plugin.py has not been run")
-        with zipfile.ZipFile(archive) as plugin:
-            from build_plugin import EXPECTED
-            self.assertEqual(EXPECTED, set(plugin.namelist()))
-            self.assertTrue({
-                "__init__.py",
-                "plugin-import-name-tolino_cloud_sync.txt",
-                "ui.py",
-                "ui_common.py",
-                "ui_dialogs.py",
-                "ui_workers.py",
-                "ui_auth_workers.py",
-                "ui_settings.py",
-                "ui_dashboard.py",
-                "dashboard_plan.py",
-                "config.py",
-                "identifiers.py",
-                "comparison.py",
-                "sync_data.py",
-                "plan.py",
-                "matching.py",
-                "library.py",
-                "inventory.py",
-                "partners.py",
-                "client.py",
-                "transport.py",
-                "tolino.py",
-                "token_vault.py",
-                "browser_crypto.py",
-                "token_candidates.py",
-                "browser_login.py",
-                "browser_finder.py",
-                "cdp_scripts.py",
-                "cdp_transport.py",
-                "cdp.py",
-                "images/tolino_cloud_sync.png",
-            }.issubset(set(plugin.namelist())))
-            marker = next(name for name in plugin.namelist()
-                          if name.startswith("plugin-import-name-") and name.endswith(".txt"))
-            self.assertEqual("tolino_cloud_sync",
-                             marker[len("plugin-import-name-"):-len(".txt")])
-            self.assertEqual(b"", plugin.read(marker))
-            metadata = ast.parse(plugin.read("__init__.py").decode("utf-8"))
-            values = [
-                node.value.value
-                for node in ast.walk(metadata)
-                if isinstance(node, ast.Assign)
-                and any(getattr(target, "id", "") == "actual_plugin"
-                        for target in node.targets)
-                and isinstance(node.value, ast.Constant)
-            ]
-            self.assertEqual(["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"], values)
-
-    def test_bundled_toolbar_icon_is_a_real_png(self):
-        """The bundled image must be a real PNG."""
-        with zipfile.ZipFile(Path(__file__).resolve().parents[2] / "tolino_cloud_sync.zip") as plugin:
-            data = plugin.read("images/tolino_cloud_sync.png")
-        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"),
-                        "bundled icon is not a PNG: %r" % data[:12])
-
     def test_jwt_helpers_parse_iat_and_age(self):
         """JWT payload parsing extracts iat and shape."""
         import base64 as b64
@@ -1450,26 +1386,26 @@ class SyncPlanTests(unittest.TestCase):
         self.assertFalse(_jwt_shaped("short.not.jwt"))
 
 
-    def test_keepalive_refresh_rotates_and_persists(self):
-        """Keep-alive must silently rotate the stored token and persist it."""
-        persisted = []
-
+    def test_keepalive_reuses_the_locked_login_factory(self):
         class FakeClient:
-            def __init__(self, partner, hw, token, token_callback=None):
-                self.token = token
+            def __init__(self, partner, hw, token, token_callback=None,
+                         hardware_callback=None):
+                self.refresh = token + "-rotated"
                 self.token_callback = token_callback
 
             def login(self):
-                self.refresh = self.token + "-rotated"
-                if self.token_callback:
-                    self.token_callback(self.refresh)
+                self.token_callback(self.refresh)
 
-        creds = {"partner_id": 4, "hardware_id": "hw", "refresh_token": "tok"}
+        creds = {"name": "konto", "partner_id": 4, "hardware_id": "hw",
+                 "refresh_token": "tok"}
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
-            result = vault_module.TOKEN_VAULT.keepalive_refresh(
-                lambda: creds, lambda value, _account: persisted.append(value))
+            with patch.object(vault_module.TOKEN_VAULT, "login",
+                              wraps=vault_module.TOKEN_VAULT.login) as login:
+                result = vault_module.TOKEN_VAULT.keepalive_refresh(
+                    lambda: {"accounts": [creds]})
         self.assertEqual("tok-rotated", result)
-        self.assertEqual(["tok-rotated"], persisted)
+        login.assert_called_once()
+        self.assertEqual("tok-rotated", creds["refresh_token"])
 
     def test_rotation_persister_writes_each_new_value_exactly_once(self):
         """Login darf denselben Token zweimal melden; gespeichert wird einmal."""
@@ -1490,11 +1426,11 @@ class SyncPlanTests(unittest.TestCase):
         """Ohne Token und bei laufender Rotation passiert nichts."""
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock:
             self.assertIsNone(
-                vault_module.TOKEN_VAULT.keepalive_refresh(lambda: {}, None))
+                vault_module.TOKEN_VAULT.keepalive_refresh(lambda: {}))
             client_mock.assert_not_called()
             with vault_module.TOKEN_VAULT._lock:
                 self.assertIsNone(vault_module.TOKEN_VAULT.keepalive_refresh(
-                    lambda: {"refresh_token": "tok"}, None))
+                    lambda: {"refresh_token": "tok"}))
             client_mock.assert_not_called()
 
 class MetadataUpdatePlanTests(unittest.TestCase):

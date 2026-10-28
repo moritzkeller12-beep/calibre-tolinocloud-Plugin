@@ -135,12 +135,15 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog.checks = [FakeCheckBox() for _ in rows]
             dialog.meta_checks = [FakeCheckBox() for _ in rows]
             dialog.read_checks = [FakeCheckBox() for _ in rows]
-            for uploads, metadata, read, row in zip(dialog.checks,
-                                                    dialog.meta_checks,
-                                                    dialog.read_checks, rows):
-                uploads.setChecked(row["upload"])
-                metadata.setChecked(row["metadata"])
-                read.setChecked(row["read"])
+            for index, (uploads, metadata, read, row) in enumerate(zip(
+                    dialog.checks, dialog.meta_checks,
+                    dialog.read_checks, rows)):
+                for key, check in (("upload", uploads),
+                                   ("metadata", metadata), ("read", read)):
+                    check.setChecked(row[key])
+                    check.stateChanged.connect(
+                        lambda value, i=index, k=key:
+                        dialog._choice_changed(i, k))
             dialog._sort_column = 0
             dialog._sort_descending = False
             dialog.table = FakeTable()
@@ -151,15 +154,12 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertEqual(
                 ["alpha", "alpha", "beta", "zulu"],
                 [row["title"].casefold() for row in dialog.rows])
-            upload_titles = {row["title"].casefold()
-                             for row, check in zip(dialog.rows, dialog.checks)
-                             if check.isChecked()}
-            meta_titles = {row["title"].casefold()
-                           for row, check in zip(dialog.rows, dialog.meta_checks)
-                           if check.isChecked()}
-            read_titles = {row["title"].casefold()
-                           for row, check in zip(dialog.rows, dialog.read_checks)
-                           if check.isChecked()}
+            upload_titles = {row["title"].casefold() for row in dialog.rows
+                             if row["upload"]}
+            meta_titles = {row["title"].casefold() for row in dialog.rows
+                           if row["metadata"]}
+            read_titles = {row["title"].casefold() for row in dialog.rows
+                           if row["read"]}
             self.assertEqual({"alpha", "zulu"}, upload_titles)
             self.assertEqual({"beta"}, meta_titles)
             self.assertEqual({"beta"}, read_titles)
@@ -170,9 +170,8 @@ class InventoryDialogSortTests(unittest.TestCase):
                 [row["title"].casefold() for row in dialog.rows])
             self.assertEqual(
                 {"alpha", "zulu"},
-                {row["title"].casefold()
-                 for row, check in zip(dialog.rows, dialog.checks)
-                 if check.isChecked()})
+                {row["title"].casefold() for row in dialog.rows
+                 if row["upload"]})
             # Hochladen-Spalte (0): ausgewählte zuerst, danach Titel.
             dialog._sort_by_column(0)
             first_two = dialog.rows[:2]
@@ -276,18 +275,24 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog.checks = [FakeCheckBox() for _ in rows]
             dialog.meta_checks = [FakeCheckBox() for _ in rows]
             dialog.read_checks = [FakeCheckBox() for _ in rows]
+            for index, (uploads, metadata, read) in enumerate(zip(
+                    dialog.checks, dialog.meta_checks, dialog.read_checks)):
+                for key, check in (("upload", uploads),
+                                   ("metadata", metadata), ("read", read)):
+                    check.stateChanged.connect(
+                        lambda _state, i=index, k=key:
+                        dialog._choice_changed(i, k))
             dialog.apply_recommended()
             # Neu -> hochladen, geänderte Datei -> hochladen, sonst
             # Metadaten; nichts für unveränderte oder reine Cloud-Bücher.
             self.assertEqual({2, 3}, dialog.selected_upload_ids())
             self.assertEqual({4}, dialog.selected_metadata_ids())
             self.assertEqual([False, True, True, False, False],
-                             [check.isChecked() for check in dialog.checks])
+                             [row["upload"] for row in rows])
             self.assertEqual([False, False, False, True, False],
-                             [check.isChecked() for check in dialog.meta_checks])
+                             [row["metadata"] for row in rows])
             # Die Lese-Marke ist nie Teil der Empfehlung.
-            self.assertEqual([False] * 5,
-                             [check.isChecked() for check in dialog.read_checks])
+            self.assertEqual([False] * 5, [row["read"] for row in rows])
             self.assertEqual([], dialog.selected_read_targets())
             # Ausdrücklich angehakt zählt sie aber -- nur mit Tolino-ID.
             dialog.read_checks[0].setChecked(True)
@@ -496,7 +501,6 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             read_cell = self._cells_by_title(dialog)
             read_cell["Ungelesen"].setChecked(True)
-            dialog._sync_checks_to_rows()
             dialog.apply_recommended()
             self.assertTrue(read_cell["Gelesen"].isChecked())
             self.assertFalse(read_cell["Ungelesen"].isChecked())

@@ -5,6 +5,4 @@ from .tolino import TolinoClient
 
 def make_client(store, lock_timeout=5):
     """Log in with the freshest stored token for an account."""
-    with TOKEN_VAULT.login(store, lock_timeout,
-                           client_factory=TolinoClient) as client:
-        return client
+    return TOKEN_VAULT.login(store, lock_timeout, client_factory=TolinoClient)

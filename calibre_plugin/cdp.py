@@ -306,21 +306,28 @@ def _is_reader_url(url):
             and (host == "mytolino.com" or host.endswith(".mytolino.com")))
 
 
-def _reader_ws_url(targets, port):
-    """First mytolino page's validated WebSocket on the owned port."""
+def _reader_target(targets, port):
+    """Return the first validated reader WebSocket and whether a reader exists."""
     if not isinstance(targets, list):
-        return None
+        return None, False
+    reader_found = False
     for target in targets:
         if (not isinstance(target, dict) or target.get("type") != "page"
                 or not _is_reader_url(target.get("url"))):
             continue
+        reader_found = True
         ws_url = str(target.get("webSocketDebuggerUrl") or "")
         try:
             _devtools_ws_address(ws_url, port)
         except (TypeError, ValueError):
             continue
-        return ws_url
-    return None
+        return ws_url, reader_found
+    return None, reader_found
+
+
+def _reader_ws_url(targets, port):
+    """First mytolino page's validated WebSocket on the owned port."""
+    return _reader_target(targets, port)[0]
 
 
 def grab_once_from_grabber(port=None, timeout=12):
@@ -505,13 +512,7 @@ def grabber_window_state(port=None, timeout=5):
     targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
     if not isinstance(targets, list):
         return {"window": False, "reader_tab": False}
-    reader_tab = False
-    for target in targets:
-        if not isinstance(target, dict) or target.get("type") != "page":
-            continue
-        if _is_reader_url(target.get("url")):
-            reader_tab = True
-            break
+    _ws_url, reader_tab = _reader_target(targets, port)
     return {"window": True, "reader_tab": reader_tab}
 
 
@@ -548,12 +549,9 @@ def collect_grab(port, timeout=180, progress=None):
             time.sleep(1)
             continue
         endpoint_misses = 0
-        ws_url = _reader_ws_url(targets, port)
+        ws_url, reader_found = _reader_target(targets, port)
         if ws_url is None:
-            saw_reader = saw_reader or any(
-                isinstance(target, dict) and target.get("type") == "page"
-                and _is_reader_url(target.get("url"))
-                for target in targets)
+            saw_reader = saw_reader or reader_found
             foreign_page = any(
                 isinstance(target, dict) and target.get("type") == "page"
                 and not str(target.get("url") or "").startswith(

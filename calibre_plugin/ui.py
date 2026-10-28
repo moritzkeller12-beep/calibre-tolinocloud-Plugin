@@ -19,8 +19,7 @@ class TolinoSyncAction(InterfaceAction):
         # runs, so an adopted token survives between syncs.
         try:
             from .token_vault import start_token_keepalive
-            start_token_keepalive(self._keepalive_credentials,
-                                  self._keepalive_persist)
+            start_token_keepalive(self._keepalive_credentials)
         except Exception:
             pass  # keep-alive must never break plugin loading
 
@@ -35,21 +34,6 @@ class TolinoSyncAction(InterfaceAction):
             for item in cfg.get("accounts", ())
             if item.get("refresh_token")
         ]}
-
-    def _keepalive_persist(self, refresh, account_name=None):
-        try:
-            from .config import save_account, settings
-            cfg = settings()
-            name = (account_name or cfg.get("active_account")
-                    or cfg.get("name"))
-            if name and refresh:
-                save_account(name, {"refresh_token": refresh}, active=name)
-        except Exception as exc:
-            # Nicht still scheitern: eine unterbliebene Rotation faellt sonst
-            # erst Stunden spaeter als abgelaufene Sitzung auf. Ohne Token.
-            from .tolino import log_warning, sanitize_error
-            log_warning("Tolino-Keep-alive konnte den neuen Zugang nicht "
-                        "speichern: %s" % sanitize_error(exc, (refresh,)))
 
     def show_dashboard(self):
         from .ui_dashboard import SyncDashboard

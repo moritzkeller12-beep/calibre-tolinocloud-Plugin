@@ -655,7 +655,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
-        worker.account = {"hardware_id": "hw-A"}
         worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
                           "skipped": 0, "failed": 0, "not_started": 0}
         worker.state = {"u1": {"tolino_id": "new-1"}}
@@ -670,10 +669,10 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             ui_module.dashboard.SyncDashboard.sync_completed(
-                dashboard, {"u1": {"tolino_id": "new-1"}}, "rot-A", [(1, "new-1")])
+                dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
         ui_module._restore_stubs_for_tests()
         self.assertEqual({"A"}, {name for name, _values in saved})
-        self.assertEqual({"A"}, {args[0] for args in credentials})
+        self.assertEqual([], credentials)
         self.assertEqual(1, len(column_writes))
         self.assertEqual("A", column_writes[0][1]["account_name"])
         self.assertEqual("tok-B", dashboard.refresh.text())  # Feld bleibt B
@@ -692,7 +691,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
-        worker.account = {"hardware_id": "hw"}
         worker.cancelled = True
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
@@ -708,7 +706,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
              patch("calibre_plugin.ui_dashboard.error_dialog",
                    lambda *args, **kwargs: errors.append(args)):
             ui_module.dashboard.SyncDashboard.sync_failed(
-                dashboard, ui_module.common.CANCEL_MESSAGE, "rot")
+                dashboard, ui_module.common.CANCEL_MESSAGE)
         ui_module._restore_stubs_for_tests()
         self.assertEqual([], errors)
         self.assertEqual(1, len(infos))
@@ -765,9 +763,8 @@ class PrepareWorkerTests(unittest.TestCase):
         payload = payloads[0]
         self.assertEqual("A", payload["account_name"])
         self.assertEqual([{"status": "review"}], payload["comparison"])
-        self.assertEqual("rot-A", payload["refresh"])
-        # Der SyncWorker bekommt genau diese settings: die Rotation muss
-        # dort ankommen, sonst loest er den verbrauchten Token erneut ein.
+        self.assertNotIn("refresh", payload)
+        # Der Token wird ausschließlich über den Client-Callback gespeichert.
         self.assertEqual("rot-A", payload["settings"]["refresh_token"])
         self.assertEqual({("A", "rot-A", "hw-A")}, set(credentials))
         # Der Vergleich bekommt die Einstellungen (Vergleichsfelder,
@@ -1141,12 +1138,17 @@ class KeepaliveSafetyTests(unittest.TestCase):
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock:
             with vault_module.TOKEN_VAULT._lock:
                 result = vault_module.TOKEN_VAULT.keepalive_refresh(
-                    lambda: {"refresh_token": "tok"}, None)
+                    lambda: {"accounts": [{"name": "A", "partner_id": 4,
+                                            "hardware_id": "hw",
+                                            "refresh_token": "tok"}]})
             self.assertIsNone(result)
             client_mock.assert_not_called()
+            client_mock.return_value.login.return_value = None
             client_mock.return_value.refresh = "rotiert"
             self.assertEqual("rotiert", vault_module.TOKEN_VAULT.keepalive_refresh(
-                lambda: {"refresh_token": "tok"}, None))
+                lambda: {"accounts": [{"name": "A", "partner_id": 4,
+                                        "hardware_id": "hw",
+                                        "refresh_token": "tok"}]}))
         client_mock.assert_called_once()
 
     def test_token_vault_serializes_refreshes_and_releases_on_failure(self):
@@ -1185,8 +1187,9 @@ class KeepaliveSafetyTests(unittest.TestCase):
         with patch("calibre_plugin.token_vault.log_info", logged.append), \
                 patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
             result = vault_module.TOKEN_VAULT.keepalive_refresh(
-                lambda: {"partner_id": 4, "hardware_id": "hw",
-                         "refresh_token": "alt"}, None)
+                lambda: {"accounts": [{"name": "A", "partner_id": 4,
+                                        "hardware_id": "hw",
+                                        "refresh_token": "alt"}]})
         self.assertEqual("neu", result)
         self.assertTrue(any("Keep-alive" in line for line in logged))
 
@@ -1198,13 +1201,14 @@ class KeepaliveSafetyTests(unittest.TestCase):
                 pass
 
             def login(self):
-                raise RuntimeError("kaputt mit sk-geheim-token")
+                raise RuntimeError("kaputt mit refresh_token=sk-geheim-token")
 
         with patch("calibre_plugin.token_vault.log_warning", logged.append), \
                 patch("calibre_plugin.token_vault.TolinoClient", BoomClient):
             result = vault_module.TOKEN_VAULT.keepalive_refresh(
-                lambda: {"partner_id": 4, "hardware_id": "hw",
-                         "refresh_token": "sk-geheim-token"}, None)
+                lambda: {"accounts": [{"name": "A", "partner_id": 4,
+                                        "hardware_id": "hw",
+                                        "refresh_token": "sk-geheim-token"}]})
         self.assertIsNone(result)
         self.assertEqual(1, len(logged))
         self.assertIn("Keep-alive", logged[0])
@@ -1229,8 +1233,7 @@ class BackgroundCallTokenTests(unittest.TestCase):
         store = config.CredentialStore(
             {"partner_id": 4, "refresh_token": ""})
         with self.assertRaises(tolino_module.TolinoAuthError) as caught:
-            with TOKEN_VAULT.login(store):
-                pass
+            TOKEN_VAULT.login(store)
         self.assertEqual("A03", caught.exception.code)
 
 class InventoryFailureDeletionTests(unittest.TestCase):

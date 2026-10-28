@@ -633,14 +633,11 @@ class LoginPreflightTests(unittest.TestCase):
 
     @staticmethod
     def _patch_client(records, error=None, rotate=True):
-        """Replace the vault's network client with a deterministic fake."""
-        from contextlib import contextmanager
-
-        @contextmanager
+        """Replace the vault's client factory with a deterministic fake."""
         def login(store, _timeout=5):
             token = store.refresh_token
-            records.append((store.values.get("partner_id"),
-                            store.hardware_id, token))
+            records.append((store.values.get("partner_id"), store.hardware_id, token))
+
             class FakeClient:
                 refresh = token
 
@@ -649,14 +646,14 @@ class LoginPreflightTests(unittest.TestCase):
                         raise error
                     if rotate:
                         self.refresh = token + "-rotated"
-                        store.save_refresh(self.refresh)
+                        self.token_callback(self.refresh)
                         records.append(("persisted", self.refresh))
                     return self.refresh
 
             client = FakeClient()
-            if rotate:
-                client.login()
-            yield client
+            client.token_callback = lambda value: store.save_refresh(value)
+            client.login()
+            return client
 
         return patch("calibre_plugin.token_vault.TOKEN_VAULT.login", login)
 
@@ -667,20 +664,19 @@ class LoginPreflightTests(unittest.TestCase):
              "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records):
             status, detail = vault_module.check_stored_login(store)
-        self.assertEqual("valid", status)
-        self.assertEqual("tok-1-rotated", detail)
+        self.assertEqual(("valid", ""), (status, detail))
         self.assertEqual((4, "hw-1", "tok-1"), records[0])
         self.assertEqual("tok-1-rotated", store.refresh_token)
 
-    def test_an_unchanged_token_is_not_written_again(self):
+    def test_a_successful_check_does_not_return_a_token_to_the_ui(self):
         records = []
         store = config.CredentialStore(
             {"partner_id": 4, "hardware_id": "hw-1",
              "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records, rotate=False):
             status, detail = vault_module.check_stored_login(store)
-        self.assertEqual(("valid", "tok-1"), (status, detail))
-        self.assertEqual([], records[1:])
+        self.assertEqual(("valid", ""), (status, detail))
+        self.assertEqual((4, "hw-1", "tok-1"), records[0])
 
     def test_a_rejected_access_reports_the_reason_without_the_token(self):
         records = []
@@ -761,10 +757,10 @@ class LoginPreflightTests(unittest.TestCase):
                    side_effect=lambda _name: {
                        "refresh_token": store.refresh_token,
                        "hardware_id": store.hardware_id}):
-            with TOKEN_VAULT.login(store) as client:
-                store.save_refresh("rotated-by-keepalive")
-                client.access = None
-                client.login()
+            client = TOKEN_VAULT.login(store)
+            store.save_refresh("rotated-by-keepalive")
+            client.access = None
+            client.login()
         self.assertEqual(["saved-old", "rotated"], requested)
 
     def test_the_rotation_lock_is_released_afterwards(self):
@@ -880,13 +876,6 @@ class LoginPreflightTests(unittest.TestCase):
             "warning": staticmethod(record),
         })
 
-    def _assert_one_line(self, box, title):
-        """Die neuen Infofenster bleiben EINE Zeile (Feldwunsch)."""
-        self.assertEqual(title, box[1])
-        text = box[2]
-        self.assertNotIn("\n", text)
-        self.assertLessEqual(len(text), 100, text)
-
     def _dashboard(self, ui_module, token="tok-1"):
         dashboard = type("Dashboard", (), {})()
         dashboard.account_name = "konto"
@@ -956,10 +945,10 @@ class LoginPreflightTests(unittest.TestCase):
         with patch("calibre_plugin.ui_dashboard.save_credentials",
                    lambda *args: saved.append(args)):
             dashboard.browser_login()
-            dashboard.login_worker.valid.fire("tok-rotated")
+            dashboard.login_worker.valid.fire()
         self.assertEqual([], opened)
-        self.assertEqual([("konto", "tok-rotated", "hw-1")], saved)
-        # Der rotierte Token landet im Konto: das Feld bleibt unberuehrt.
+        self.assertEqual([], saved)
+        # Der rotierte Token wurde schon durch den Client-Callback gespeichert.
         self.assertEqual("tok-1", dashboard.refresh.text())
         self.assertIn("Angemeldet.", dashboard.status.text())
         # Knopf und Fenster sind wieder frei, die Pruefung ist beendet.
@@ -1059,7 +1048,8 @@ class LoginPreflightTests(unittest.TestCase):
 
         def signal(name):
             return type("Signal", (), {
-                "emit": lambda self, value: emitted.append((name, value))})()
+                "emit": lambda self, *values:
+                    emitted.append((name,) + values)})()
 
         emitted, calls = [], []
         settings = {"partner_id": 4, "hardware_id": "hw-1",
@@ -1075,20 +1065,21 @@ class LoginPreflightTests(unittest.TestCase):
     def test_the_worker_hands_the_stored_account_to_the_check(self):
         ui_module = self._ui()
         _worker, emitted, calls = self._run_check_worker(
-            ui_module, ("valid", "tok-2"))
+            ui_module, ("valid", ""))
         args, kwargs = calls[0]
         self.assertEqual(1, len(args))
         self.assertEqual("konto", args[0].account_name)
         self.assertEqual("tok-1", args[0].refresh_token)
         self.assertEqual({}, kwargs)
-        self.assertEqual([("valid", "tok-2")], emitted)
+        self.assertEqual([("valid",)], emitted)
 
     def test_every_check_result_reaches_the_matching_slot(self):
         ui_module = self._ui()
-        results = (("valid", "tok-2"), ("invalid", "Grund"), ("busy", ""))
+        results = (("valid", ""), ("invalid", "Grund"), ("busy", ""))
         reported = [self._run_check_worker(ui_module, result)[1]
                     for result in results]
-        self.assertEqual([[result] for result in results], reported)
+        self.assertEqual([[("valid",)], [("invalid", "Grund")],
+                          [("busy", "")]], reported)
 
     def test_a_failing_check_is_reported_as_a_rejection(self):
         ui_module = self._ui()
@@ -1195,7 +1186,7 @@ class LoginMessageTests(unittest.TestCase):
             self.assertEqual([("default", True), ("focus",)],
                              dashboard.primary.calls)
             dashboard.primary.calls = []
-            dashboard.login_still_valid("tok-neu")
+            dashboard.login_still_valid()
             self.assertEqual([("default", True), ("focus",)],
                              dashboard.primary.calls)
             self.assertIn("Angemeldet.", dashboard.status.value)

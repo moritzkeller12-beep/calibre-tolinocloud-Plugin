@@ -16,8 +16,8 @@ from .tolino import (TolinoApiError, TolinoAuthError, log_warning,
 
 class SyncWorker(QObject):
     progress = pyqtSignal(int, int, str)
-    completed = pyqtSignal(object, object, object)
-    failed = pyqtSignal(str, str)
+    completed = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
 
     def __init__(self, settings, jobs, removals, meta_updates=None,
                  series_map=None, read_marks=None, read_unmarks=None,
@@ -438,7 +438,7 @@ class SyncWorker(QObject):
                 # Alle geplanten Operationen, die noch nicht gestartet sind,
                 # bleiben «nicht begonnen» -- der Bericht weist sie aus.
                 self._refresh_counts()
-                self.completed.emit(state, client.refresh, self.updates)
+                self.completed.emit(state, self.updates)
                 raise _SyncCancelled()
 
             # Erst die in-place Metadaten-Updates, dann die Uploads.
@@ -538,7 +538,7 @@ class SyncWorker(QObject):
             done = self._run_collections(
                 client, collection_ops, checkpoint, done, total)
             self._refresh_counts()
-            self.completed.emit(state, client.refresh, self.updates)
+            self.completed.emit(state, self.updates)
         except _SyncCancelled:
             return
         except Exception as exc:
@@ -549,9 +549,7 @@ class SyncWorker(QObject):
                        else report_error(exc, "Sync", (
                            self.store.refresh_token,
                            getattr(client, "access", None))))
-            self.failed.emit(
-                message,
-                client.refresh if client else self.store.refresh_token)
+            self.failed.emit(message)
 
 
 class _SyncCancelled(Exception):
@@ -648,15 +646,14 @@ class PrepareWorker(QObject):
                 use_metadata_ids=self.settings.get("sync_column_enabled", True),
                 read_ids=read_ids,
                 read_column=bool(self.settings.get("read_column_enabled")))
-            if getattr(client, "inventory_ok", True):
-                for row in comparison:
-                    stale_id = str(row.get("stale_cloud_id") or "").strip()
-                    book_uuid = str(row.get("uuid") or "").strip()
-                    if stale_id and book_uuid:
-                        entry = state.get(book_uuid)
-                        if isinstance(entry, dict) and str(
-                                entry.get("tolino_id") or "").strip() == stale_id:
-                            entry.pop("tolino_id", None)
+            for row in comparison:
+                stale_id = str(row.get("stale_cloud_id") or "").strip()
+                book_uuid = str(row.get("uuid") or "").strip()
+                if stale_id and book_uuid:
+                    entry = state.get(book_uuid)
+                    if isinstance(entry, dict) and str(
+                            entry.get("tolino_id") or "").strip() == stale_id:
+                        entry.pop("tolino_id", None)
             if self._stop_requested():
                 return
             self.ready.emit({
@@ -665,7 +662,6 @@ class PrepareWorker(QObject):
                 "state": state,
                 "comparison": comparison,
                 "read_status_known": read_known,
-                "refresh": client.refresh,
                 "hardware": client.hardware,
                 "account_name": self.account_name,
             })

@@ -332,10 +332,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertIn("1 Löschung", labels[0])
         self.assertEqual([True], status_updates)
 
-    def test_prepare_ready_stores_the_rotated_token_in_the_account(self):
-        """Der SyncWorker darf nie den verbrauchten Token der Vorbereitung
-        bekommen: die Rotation steht im Konto, und von dort liest der Store
-        sie -- der uebergebene Snapshot traegt sie gar nicht mehr."""
+    def test_prepare_ready_ignores_a_token_in_the_payload(self):
+        """A token snapshot may be stale; only the client callback persists it."""
         ui_module = self._ui_module()
         original_preferences = config.PREFERENCES
         try:
@@ -369,17 +367,11 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                     "metadata": {}, "state": {}, "comparison": [],
                     "refresh": "tok-rotated", "hardware": "hw-rotated",
                 })
-            stored = config.account_by_name("konto")["refresh_token"]
-            worker_store = ui_module.dashboard.CredentialStore(
-                started[0], "konto").freshest()
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
-        self.assertEqual("tok-rotated", stored)
-        self.assertEqual("tok-rotated", worker_store["refresh_token"])
+        self.assertEqual("token-1", started[0]["refresh_token"])
         self.assertEqual("hw-rotated", started[0]["hardware_id"])
-        # Der Snapshot traegt den Token der Vorbereitung nicht mehr: gelesen
-        # wird er aus dem Konto, das ist die einzige Quelle.
 
     def test_skipped_uploads_are_reported_before_the_run(self):
         ui_module = self._ui_module()
@@ -745,15 +737,13 @@ class NoSilentDeadEndTests(unittest.TestCase):
         def boom(*_args, **_kwargs):
             raise OSError("Platte voll")
 
-        with patch("calibre_plugin.ui_dashboard.save_credentials", boom), \
-             patch("calibre_plugin.ui_dashboard.save_account",
-                   lambda *args, **kwargs: None), \
+        with patch("calibre_plugin.ui_dashboard.save_account", boom), \
              patch("calibre_plugin.ui_dashboard.update_tolino_ids",
                    lambda *args, **kwargs: None), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             ui_module.dashboard.SyncDashboard.sync_completed(
-                dashboard, {"u1": {"tolino_id": "new-1"}}, "rot-A", [(1, "new-1")])
+                dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
         # Der Abschlussdialog kommt trotz Speicherfehler: der Upload ist
         # gelaufen und darf nicht als «nichts passiert» erscheinen.
         self.assertEqual(1, len(boxes))
@@ -973,7 +963,7 @@ class VisibleResultTests(unittest.TestCase):
                         "operations": []},
             "account": {}, "account_name": "konto"})()
         dashboard.finish_thread = lambda: None
-        dashboard.sync_completed({}, None, [])
+        dashboard.sync_completed({}, [])
         self.assertEqual(1, len(seen))
         self.assertIs(True, seen[0].get("show"))
 

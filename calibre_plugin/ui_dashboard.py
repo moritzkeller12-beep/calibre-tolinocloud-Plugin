@@ -50,9 +50,9 @@ def _offer_next_step(dialog):
         pass  # Test-Stub oder bereits geschlossenes Fenster
 
 
-def _persist_sync_result(dialog, state, refresh, updates):
+def _persist_sync_result(dialog, state, updates):
     """Ergebnis speichern und die optionalen Calibre-Spalten aktualisieren."""
-    _persist_run(dialog, state, refresh, updates)
+    _persist_run(dialog, state)
     if dialog.sync_column_enabled:
         update_tolino_ids(
             dialog.gui.current_db, updates, enabled=True,
@@ -68,34 +68,15 @@ def _persist_sync_result(dialog, state, refresh, updates):
                         "geschrieben werden: %s" % sanitize_error(exc))
 
 
-def _persist_run(dialog, state, refresh, updates):
-    """Ergebnis eines Laufs unter dem KONTO DES LAUFS sichern.
-
-    Ein Speicherfehler darf das Ergebnis nie verschlucken: ohne diesen
-    Schutz bliebe der Abschlussdialog aus, und ein erfolgreicher Upload
-    sähe aus wie «nichts passiert». Zugangsdaten landen ausschliesslich im
-    Konto -- nie mehr zusaetzlich in einem Eingabefeld.
-    """
+def _persist_run(dialog, state):
+    """Sync-Zustand unter dem beim Lauf erfassten Konto sichern."""
     account_name = _worker_account_name(dialog)
-    worker = dialog.worker
-    hardware = ""
     try:
-        if worker is not None:
-            hardware = str((getattr(worker, "account", {}) or {}).get(
-                "hardware_id") or "")
-        if account_name and not hardware:
-            hardware = str(account_by_name(account_name).get("hardware_id") or "")
-        if refresh and account_name:
-            save_credentials(account_name, refresh, hardware)
         if account_name:
-            save_account(account_name, {
-                "state": state, "refresh_token": refresh,
-                "hardware_id": hardware or hardware_id(),
-            }, active=account_name)
+            save_account(account_name, {"state": state}, active=account_name)
     except Exception as exc:
         log_warning("Ergebnis der Synchronisierung konnte nicht "
-                    "gespeichert werden: %s"
-                    % sanitize_error(exc, (refresh,)))
+                    "gespeichert werden: %s" % sanitize_error(exc))
 
 
 def _register_login_thread(dialog, thread, worker):
@@ -607,11 +588,10 @@ class SyncDashboard(QDialog):
         worker.busy.connect(self.login_check_busy)
         _register_login_thread(self, thread, worker)
 
-    def login_still_valid(self, refresh):
+    def login_still_valid(self):
         """Prüfung bestanden: Anmeldung bleibt gültig."""
         try:
             self._login_cleanup()
-            self.store_refresh(refresh)
             self.status.setText("Angemeldet.")
             _offer_next_step(self)
         except RuntimeError:
@@ -818,16 +798,8 @@ class SyncDashboard(QDialog):
         metadata = payload["metadata"]
         state = payload["state"]
         self._finish_prepare()
-        # Token/Hardware nur dann in die Felder schreiben, wenn dieses Konto
-        # noch angezeigt wird. Gespeichert wurde bereits unter dem Konto.
-        refresh = payload.get("refresh")
-        if refresh:
-            # Der einzige Ort fuer Zugangsdaten ist das Konto in config. Der
-            # SyncWorker holt den frischen Token von dort selbst ab
-            # (CredentialStore.freshest), damit ein schon verbrauchter Token
-            # nicht erneut eingeloest wird (A02).
-            save_credentials(account_name, refresh,
-                             payload.get("hardware") or settings["hardware_id"])
+        # Nur die Hardware-ID gehört nach dem Vergleich in die Einstellungen.
+        # Der Token wird durch den Client-Callback beim Rotieren gespeichert.
         hardware = getattr(self, "hardware", None)
         if payload.get("hardware"):
             settings["hardware_id"] = str(payload["hardware"])
@@ -1055,14 +1027,14 @@ class SyncDashboard(QDialog):
         self.progress_label.setText("Abbruch angefordert …")
         self.primary.setEnabled(False)
 
-    def sync_completed(self, state, refresh, updates):
+    def sync_completed(self, state, updates):
         """Erfolgreicher Lauf (auch nach regulaerem Abbruch).
 
         Persistiert wird unter dem KONTO DES LAUFS. UI-Felder werden nur
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
         outcome = _worker_outcome(self)
-        _persist_sync_result(self, state, refresh, updates)
+        _persist_sync_result(self, state, updates)
         self.finish_thread()
         if outcome.get("cancelled"):
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
@@ -1077,7 +1049,7 @@ class SyncDashboard(QDialog):
                     sync_result_text(outcome, "Fertig"), show=True,
                     show_copy_button=False)
 
-    def sync_failed(self, message, refresh):
+    def sync_failed(self, message):
         outcome = _worker_outcome(self)
         worker = self.worker
         cancelled = bool(getattr(worker, "cancelled", False)) or \
@@ -1085,7 +1057,7 @@ class SyncDashboard(QDialog):
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
         _persist_sync_result(
-            self, getattr(worker, "state", {}), refresh,
+            self, getattr(worker, "state", {}),
             getattr(worker, "updates", ()))
         self.finish_thread()
         if cancelled:
@@ -1117,7 +1089,6 @@ class SyncDashboard(QDialog):
         self.temp_files = []
 
     def finish_thread(self):
-        self._save_visible_account()
         thread = self.thread
         self.thread = None
         self.worker = None

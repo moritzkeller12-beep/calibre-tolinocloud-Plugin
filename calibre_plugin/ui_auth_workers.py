@@ -36,7 +36,7 @@ class BrowserLoginWorker(QObject):
 
 class SessionCheckWorker(QObject):
     """Check a saved login outside the GUI thread."""
-    valid = pyqtSignal(str)
+    valid = pyqtSignal()
     invalid = pyqtSignal(str)
     busy = pyqtSignal(str)
 
@@ -54,7 +54,7 @@ class SessionCheckWorker(QObject):
                 exc, "Zugangsprüfung", (values["refresh_token"],)))
             return
         if status == "valid":
-            self.valid.emit(detail)
+            self.valid.emit()
         elif status == "busy":
             self.busy.emit(detail)
         else:

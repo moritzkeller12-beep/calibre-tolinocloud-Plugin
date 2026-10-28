@@ -5,10 +5,9 @@ import tempfile
 from .ui_common import (SyncJob, _display_value, _format_signatures,
                         _metadata_value, plural)
 from .identifiers import book_uuid, state_key_for, valid_book_uuid
-from .library import (cover_bytes, image_suffix, iter_book_ids, legacy_tolino_id,
+from .library import (cover_bytes, image_suffix, iter_book_ids,
                       metadata_by_id, metadata_ignored, metadata_read_value,
-                      metadata_tolino_id,
-                      normalize_formats, safe_format_path, update_tolino_ids)
+                      metadata_tolino_id, normalize_formats, safe_format_path)
 from .plan import (merge_removals, plan_collection_updates,
                    plan_metadata_updates, plan_sync, series_map_from_metadata,
                    unpack_upload_record)
@@ -22,14 +21,8 @@ def local_metadata(dialog):
     """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
     metadata = {}
     state = saved_state(dialog)
-    legacy_ids = []
-    account_name = str(getattr(dialog, "account_name", "") or "")
     for book_id in iter_book_ids(dialog.gui.current_db):
         item = metadata_by_id(dialog.gui.current_db, book_id)
-        if dialog.sync_column_enabled and account_name:
-            old_id = legacy_tolino_id(item)
-            if old_id:
-                legacy_ids.append((book_id, old_id))
         identifier = book_uuid(item)
         if not identifier:
             identifier = (state_key_for(state, book_id)
@@ -57,12 +50,6 @@ def local_metadata(dialog):
         if getattr(dialog, "read_column_enabled", False):
             metadata[book_id]["calibre_read"] = metadata_read_value(item)
     values = dialog.values()
-    if (legacy_ids and len(values.get("accounts") or []) > 1
-            and dialog.sync_column_enabled):
-        # One-time migration: assign old unscoped IDs to the account that is
-        # active during the first multi-account sync.
-        update_tolino_ids(dialog.gui.current_db, legacy_ids, enabled=True,
-                          account_name=account_name)
     preferred_formats = normalize_formats(
         values.get("preferred_formats", ()))
     for book_id, item in metadata.items():

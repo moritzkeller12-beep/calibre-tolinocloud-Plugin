@@ -223,6 +223,20 @@ class FakeText:
         return self.value
 
 
+class FakeSignal:
+    """Kleines Signal-Doppel für Widgettests."""
+
+    def __init__(self):
+        self.slots = []
+
+    def connect(self, slot):
+        self.slots.append(slot)
+
+    def emit(self, *args):
+        for slot in self.slots:
+            slot(*args)
+
+
 class FakeCheckBox:
     """QCheckBox-Ersatz fuer die Zell-Widgets der Bestandsliste."""
 
@@ -230,9 +244,20 @@ class FakeCheckBox:
         self._checked = False
         self.enabled = True
         self.tooltip = ""
+        self.stateChanged = FakeSignal()
+        self._signals_blocked = False
 
     def setChecked(self, value):
-        self._checked = bool(value)
+        value = bool(value)
+        if value != self._checked:
+            self._checked = value
+            if not self._signals_blocked:
+                self.stateChanged.emit(int(value))
+
+    def blockSignals(self, blocked):
+        previous = self._signals_blocked
+        self._signals_blocked = bool(blocked)
+        return previous
 
     def isChecked(self):
         return self._checked
@@ -242,9 +267,6 @@ class FakeCheckBox:
 
     def setToolTip(self, text):
         self.tooltip = text
-
-    def stateChanged(self):
-        return None
 
 
 class FakeMenu:

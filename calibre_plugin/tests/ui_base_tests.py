@@ -40,7 +40,6 @@ class ToolbarIconTests(unittest.TestCase):
             plugin.show_dashboard = lambda: None
             plugin.load_resources = lambda _names: icon_module._test_resources
             plugin._keepalive_credentials = lambda: {}
-            plugin._keepalive_persist = lambda *_args: None
             icon = icon_module.TolinoSyncAction._toolbar_icon(plugin)
             self.assertIsNotNone(icon)
             self.assertFalse(icon.isNull())
@@ -228,8 +227,21 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 Widget.__init__(self, text)
                 self.stateChanged = Signal()
                 self.toggled = Signal()
+                self._signals_blocked = False
                 # Wie in Qt: nach dem Umschalten kommt clicked.
                 self.clicked = Signal()
+
+            def setChecked(self, value):
+                value = bool(value)
+                changed = value != self.isChecked()
+                self.checked = value
+                if changed and not self._signals_blocked:
+                    self.stateChanged.emit(int(value))
+
+            def blockSignals(self, blocked):
+                previous = self._signals_blocked
+                self._signals_blocked = bool(blocked)
+                return previous
 
         class Button(Widget):
             def __init__(self, text=""):

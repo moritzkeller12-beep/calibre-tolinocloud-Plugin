@@ -45,14 +45,8 @@ def _encode_tolino_ids(ids):
                       separators=(",", ":")) if ids else ""
 
 
-def legacy_tolino_id(metadata):
-    """Return a pre-account ID so the first active account can adopt it."""
-    value = _column_value(metadata)
-    return "" if _decode_tolino_ids(value) is not None else str(value or "").strip()
-
-
 def metadata_tolino_id(metadata, account_name=None):
-    """Read this account's ID from a legacy value or account-map column."""
+    """Read this account's ID from its account-map column."""
     value = _column_value(metadata)
     account_ids = _decode_tolino_ids(value)
     if account_ids is not None:
@@ -237,8 +231,8 @@ def update_tolino_ids(database, updates, enabled=True, account_name=None):
         raw = _column_value(metadata)
         account_ids = _decode_tolino_ids(raw)
         if account_ids is None:
-            # Migration from the old one-ID format: attribute it to the
-            # account currently active when the column was first written.
+            # Migrate a legacy single ID when this account first writes the
+            # account-scoped column value.
             legacy = str(raw or "").strip()
             account_ids = {}
             if legacy:
