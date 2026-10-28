@@ -141,6 +141,33 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual([], uploads)
 
+    def test_upload_planner_filters_formats_without_rechecking_them(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            plan_module = ui_module.dashboard._dashboard_plan
+            metadata = {
+                1: {"uuid": "u1", "title": "EPUB verfügbar", "formats": ["EPUB"]},
+                2: {"uuid": "u2", "title": "Nur PDF", "formats": ["PDF"]},
+            }
+            dialog = type("Dialog", (), {"temp_files": []})()
+            with patch.object(plan_module, "normalize_formats",
+                              wraps=normalize_formats) as normalize:
+                with patch.object(plan_module, "upload_jobs",
+                                  return_value=([], [])):
+                    preparation = plan_module.plan_actions(
+                        dialog, {"preferred_formats": ["EPUB"]}, metadata, {},
+                        {"uploads": {1, 2}, "metadata": set(), "read": [],
+                         "unread": [], "read_sync": [],
+                         "cloud_deletions": []})
+            self.assertEqual(1, normalize.call_count)
+            self.assertEqual(1, preparation["selected_without_action"]["uploads"])
+            self.assertEqual(1, len(preparation["skipped_uploads"]))
+            self.assertIn("Nur PDF", preparation["skipped_uploads"][0])
+            self.assertIn("EPUB", preparation["skipped_uploads"][0])
+        finally:
+            ui_module._restore_stubs_for_tests()
+
     def test_selected_rows_handles_qmodelindex_and_short_values(self):
         class Index:
             def __init__(self, value):

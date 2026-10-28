@@ -99,21 +99,19 @@ def plan_actions(dialog, settings, metadata, state, selection):
     # Ignorierte Bücher fallen hier endgültig heraus -- unabhängig davon,
     # was die Auswahl enthält.
     requested_uploads = syncable_book_ids(metadata, selection["uploads"])
-    valid_uploads = set()
-    skipped_formats = []
-    for book_id in requested_uploads:
-        item = metadata.get(book_id) or {}
-        available = set(normalize_formats(item.get("formats")))
-        if any(fmt in available for fmt in preferred):
-            valid_uploads.add(book_id)
-        else:
-            title = item.get("title") or "ohne Titel"
-            display = ", ".join(preferred) or "EPUB"
-            skipped_formats.append(
-                "Buch %s (%s): kein Format %s." %
-                (book_id, title, display))
     uploads = plan_sync(
-        metadata, state, preferred, upload_book_ids=valid_uploads)
+        metadata, state, preferred, upload_book_ids=requested_uploads)
+    planned_book_ids = {record[0] for record in uploads}
+    skipped_formats = []
+    display = ", ".join(preferred) or "EPUB"
+    for book_id in requested_uploads - planned_book_ids:
+        item = metadata.get(book_id)
+        if not isinstance(item, dict) or not valid_book_uuid(item.get("uuid")):
+            continue
+        title = item.get("title") or "ohne Titel"
+        skipped_formats.append(
+            "Buch %s (%s): kein Format %s." %
+            (book_id, title, display))
     removals, removal_titles = merge_removals(
         (selection or {}).get("cloud_deletions"))
     titles = titles_for(metadata, removal_titles)
