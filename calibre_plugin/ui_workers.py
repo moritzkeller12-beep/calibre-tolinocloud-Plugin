@@ -4,8 +4,7 @@ from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, plural, pyqtSignal)
 from .client import make_client
 from .config import CredentialStore, save_account
-from .plan import (plan_collection_updates, remember_collection,
-                  unpack_meta_update_record)
+from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
 from .identifiers import display_title, migrate_state_keys
@@ -145,7 +144,7 @@ class SyncWorker(QObject):
         """
         self._record_failure(operation, exc, client)
         if self._fatal_error(exc):
-            raise
+            raise exc
 
     @staticmethod
     def _fatal_error(exc):
@@ -192,12 +191,12 @@ class SyncWorker(QObject):
         """Plan selected actions; collections are added after uploads."""
         meta_ops = []
         for update in self.meta_updates:
-            record = unpack_meta_update_record(update)
-            meta_ops.append((record, self._add_operation(
+            fields = update.fields or {}
+            meta_ops.append((update, self._add_operation(
                 "metadata", "Metadaten: %s"
-                % self._label(record["book_uuid"], record["book_id"],
-                              (record.get("fields") or {}).get("title")),
-                book_uuid=record["book_uuid"])))
+                % self._label(update.book_uuid, update.book_id,
+                              fields.get("title")),
+                book_uuid=update.book_uuid)))
         upload_ops = []
         for job in self.jobs:
             upload_ops.append((job, self._add_operation(
@@ -322,6 +321,7 @@ class SyncWorker(QObject):
             if self._fatal_error(exc):
                 raise
         revision = None
+        changed = False
         # Ohne Bestand ist keine Zuordnung möglich: dann startet kein
         # Schritt -- auch kein Checkpoint.
         for book_uuid, tolino_id, series, operation in (
@@ -331,7 +331,7 @@ class SyncWorker(QObject):
                 remember_collection(self.state, book_uuid, series)
                 self._finish_operation(operation, OP_SKIPPED,
                                        reason="schon in der Cloud")
-                self._persist_state()
+                changed = True
                 done += 1
                 self._refresh_counts()
                 continue
@@ -351,38 +351,44 @@ class SyncWorker(QObject):
             known.add((tolino_id, series))
             remember_collection(self.state, book_uuid, series)
             self._finish_operation(operation, OP_SUCCEEDED)
-            self._persist_state()
+            changed = True
             done += 1
             self._refresh_counts()
+        if changed:
+            self._persist_state()
         self.progress.emit(done, total, "Serien geprüft")
         return done
 
     def _run_metadata_updates(self, client, operations, checkpoint, done, total):
         """Apply selected metadata patches and persist their confirmed state."""
+        changed = False
         for record, operation in operations:
             checkpoint()
             self.progress.emit(
                 done, total,
                 "Metadaten: %s" % self._label(
-                    record["book_uuid"], record["book_id"],
-                    (record.get("fields") or {}).get("title")))
+                    record.book_uuid, record.book_id,
+                    (record.fields or {}).get("title")))
             try:
-                client.update_metadata(record["tolino_id"], record["fields"])
+                client.update_metadata(record.tolino_id, record.fields)
             except Exception as exc:
                 self._count_failure(operation, exc, client)
                 done += 1
                 continue
             self._finish_operation(operation, OP_SUCCEEDED)
             self._refresh_counts()
-            entry = self.state.get(record["book_uuid"])
-            metadata = self.metadata_by_uuid.get(record["book_uuid"])
+            entry = self.state.get(record.book_uuid)
+            metadata = self.metadata_by_uuid.get(record.book_uuid)
             if isinstance(entry, dict) and metadata:
                 entry["meta_fp"] = metadata_fingerprint(metadata)
                 entry["meta_verified_fp"] = entry["meta_fp"]
             # Keep the confirmed Tolino-ID mapping current.
-            self.updates.append((record["book_id"], record["tolino_id"]))
-            self._persist_state()
+            self.updates.append((record.book_id, record.tolino_id))
+            changed = True
             done += 1
+        if changed:
+            # Einmal je Phase statt je Buch: derselbe Patch ist idempotent.
+            self._persist_state()
         return done
 
     def _run_uploads(self, client, operations, checkpoint, done, total):

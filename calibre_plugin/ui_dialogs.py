@@ -1,8 +1,8 @@
 """Dialoge für den tolino-Bibliotheksvergleich."""
 import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                        QHBoxLayout, QLabel, QMessageBox, QMenu,
-                        QPushButton, QTableWidget, QTableWidgetItem,
+                        QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+                        QMenu, QPushButton, QTableWidget, QTableWidgetItem,
                         QVBoxLayout, Qt, _set_enabled, plural, start_call)
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import comparison_group, sort_comparison_rows
@@ -209,15 +209,12 @@ class InventoryDialog(QDialog):
         """Gruppenfilter, Empfehlung/Auswahl und Zeilenaktionen."""
         helpers = QHBoxLayout()
         self.group_filter = QComboBox()
-        try:
-            for label, key in self.GROUP_FILTERS:
-                self.group_filter.addItem(label, key)
-            self.group_filter.setToolTip(
-                "Filtert nach Aktion, Cloud-Bestand, Prüfung oder unverändert.")
-            self.group_filter.currentIndexChanged.connect(
-                self._apply_group_filter)
-        except AttributeError:
-            pass  # minimaler Qt-Stub ohne Kombobox-Methoden
+        for label, key in self.GROUP_FILTERS:
+            self.group_filter.addItem(label, key)
+        self.group_filter.setToolTip(
+            "Filtert nach Aktion, Cloud-Bestand, Prüfung oder unverändert.")
+        self.group_filter.currentIndexChanged.connect(
+            self._apply_group_filter)
         self.recommend = QPushButton("Empfohlene Aktionen auswählen")
         self.recommend.setToolTip(
             "Wählt Upload oder Metadaten für eindeutig zugeordnete Bücher.")
@@ -268,11 +265,8 @@ class InventoryDialog(QDialog):
         self._sort_column = 0
         self._sort_descending = False
         table_header = self.table.horizontalHeader()
-        try:
-            table_header.setSortIndicatorShown(True)
-            table_header.setSortIndicator(0, Qt.AscendingOrder)
-        except Exception:
-            pass  # Sortieranzeige ist nur Kosmetik
+        table_header.setSortIndicatorShown(True)
+        table_header.setSortIndicator(0, Qt.AscendingOrder)
         table_header.sectionClicked.connect(self._sort_by_column)
         self._rebuild_table(self.rows)
         layout.addWidget(self.table)
@@ -327,10 +321,7 @@ class InventoryDialog(QDialog):
 
     def _apply_technical_visibility(self):
         for column in self.TECHNICAL_COLUMNS:
-            try:
-                self.table.setColumnHidden(column, not self._technical_visible)
-            except Exception:
-                pass  # Qt-Stub ohne Spaltenverstecken
+            self.table.setColumnHidden(column, not self._technical_visible)
 
     def _choice_changed(self, index, key):
         """Die Zeile hält die Auswahl; die Checkbox zeigt sie nur an."""
@@ -622,10 +613,7 @@ class InventoryDialog(QDialog):
         label = getattr(self, "action_feedback", None)
         if label is None:
             return
-        try:
-            label.setText(text)
-        except Exception:
-            pass  # Qt-Stub ohne Text
+        label.setText(text)
 
     @staticmethod
     def _column_applies(key, row):
@@ -673,23 +661,15 @@ class InventoryDialog(QDialog):
             self._sort_descending = False
         ordered = sorted(self.rows, key=self._SORT_KEYS[column],
                          reverse=self._sort_descending)
-        try:
-            self.table.horizontalHeader().setSortIndicator(
-                column,
-                Qt.DescendingOrder if self._sort_descending
-                else Qt.AscendingOrder)
-        except Exception:
-            pass  # Sortieranzeige ist nur Kosmetik
+        self.table.horizontalHeader().setSortIndicator(
+            column,
+            Qt.DescendingOrder if self._sort_descending
+            else Qt.AscendingOrder)
         self._rebuild_table(ordered)
 
     def _set_table_updates(self, enabled):
         """Disable expensive redraws while populating a large table."""
-        updates = getattr(self.table, "setUpdatesEnabled", None)
-        if callable(updates):
-            try:
-                updates(enabled)
-            except Exception:
-                pass
+        self.table.setUpdatesEnabled(enabled)
 
     def _action_check_specs(self, row):
         """Return enabled state and tooltips for this row's action checks."""
@@ -740,13 +720,9 @@ class InventoryDialog(QDialog):
                 else tooltip if enabled
                 else (delete_tooltip if delete_cloud else disabled_tooltip))
             state_signal = getattr(check, "stateChanged", None)
-            if state_signal is not None:
-                try:
-                    state_signal.connect(
-                        lambda _state, i=row_index, k=key:
-                        self._choice_changed(i, k))
-                except Exception:
-                    pass
+            state_signal.connect(
+                lambda _state, i=row_index, k=key:
+                self._choice_changed(i, k))
             (self.checks, self.meta_checks,
              self.read_checks)[column].append(check)
             self.table.setCellWidget(row_index, column, check)
@@ -810,16 +786,11 @@ class InventoryDialog(QDialog):
         Ohne das erzwingen Titel und Hinweis eine sehr breite Tabelle und
         damit eine Mindestbreite weit über einem 1366x768-Fenster.
         """
-        try:
-            from qt.core import QHeaderView
-            header = self.table.horizontalHeader()
-            for column in (5, 7):
-                header.setSectionResizeMode(column, QHeaderView.Stretch)
-            for column in (0, 1, 2, 3, 4, 6):
-                header.setSectionResizeMode(column,
-                                            QHeaderView.ResizeToContents)
-        except Exception:
-            pass  # Qt-Stub oder aeltere Qt-Version: keine Spaltenbreiten
+        header = self.table.horizontalHeader()
+        for column in (5, 7):
+            header.setSectionResizeMode(column, QHeaderView.Stretch)
+        for column in (0, 1, 2, 3, 4, 6):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
 
     def _apply_group_filter(self, *_args):
         """Gruppenfilter ohne die Zeilen/Wahlzustaende zu verlieren.
@@ -827,19 +798,11 @@ class InventoryDialog(QDialog):
         Es werden nur Tabellenzeilen versteckt; `self.rows` bleibt die
         vollstaendige Liste, damit Auswahl und Sortierung unberuehrt bleiben.
         """
-        try:
-            combo = getattr(self, "group_filter", None)
-            selected = combo.currentData() if combo is not None else None
-        except Exception:
-            selected = None
+        combo = getattr(self, "group_filter", None)
+        selected = combo.currentData() if combo is not None else None
         for index, row in enumerate(getattr(self, "rows", ())):
             visible = selected is None or row.get("group") == selected
-            hide = getattr(self.table, "setRowHidden", None)
-            if hide is not None:
-                try:
-                    hide(index, not visible)
-                except Exception:
-                    pass  # Qt-Stub ohne Zeilenverstecken
+            self.table.setRowHidden(index, not visible)
 
     def _update_summary(self, *_args):
         """Kurzzeile: wie viele Aktionen gerade ausgewählt sind."""
@@ -947,13 +910,10 @@ class InventoryDialog(QDialog):
         summary = getattr(self, "summary", None)
         if summary is None:
             return
-        try:
-            if busy:
-                summary.setText(text or "Verbindung zu tolino …")
-            else:
-                self._update_summary()
-        except Exception:
-            pass  # noch nicht aufgebaute Oberflaeche
+        if busy:
+            summary.setText(text or "Verbindung zu tolino …")
+        else:
+            self._update_summary()
 
     def download_selected(self):
         row = self._selected_row()

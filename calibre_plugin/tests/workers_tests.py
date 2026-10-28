@@ -6,7 +6,7 @@ import calibre_plugin.client as client_module
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
-from ..plan import plan_sync
+from ..plan import MetaUpdateRecord, plan_sync
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
 from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
                        stop_cdp_stubs, ui_module_for)
@@ -317,7 +317,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state),
                 [self._job(ui_module, 2, "u2")], FakeClient,
-                meta_updates=[(1, "u1", "t-1", {"title": "Neu"})])
+                meta_updates=[MetaUpdateRecord(1, "u1", "t-1", {"title": "Neu"})])
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertIsNotNone(emitted["completed"])
@@ -1120,7 +1120,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
             with patch("calibre_plugin.client.TolinoClient", FakeClient):
                 worker = ui_module.workers.SyncWorker(
                     settings, [], [],
-                    meta_updates=[(1, "u1", "t1", {"title": "A"})])
+                    meta_updates=[MetaUpdateRecord(1, "u1", "t1", {"title": "A"})])
                 worker.completed.connect(lambda *args: completed.append(True))
                 worker.cancel()
                 worker.run()

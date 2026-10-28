@@ -45,8 +45,8 @@ def _offer_next_step(dialog):
     try:
         primary.setDefault(True)
         primary.setFocus()
-    except Exception:
-        pass  # Test-Stub oder bereits geschlossenes Fenster
+    except RuntimeError:
+        pass  # Fenster wurde bereits geschlossen
 
 
 def _persist_sync_result(dialog, state, updates):

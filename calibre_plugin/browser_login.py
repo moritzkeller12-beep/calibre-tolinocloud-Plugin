@@ -16,12 +16,9 @@ from .token_candidates import (
 LOGIN_TIMEOUT = 300
 
 
-def _exchange_fresh_response(partner_id, hardware, candidate, data):
-    """Exchange via in-page fetch and apply the response with full logic."""
-    client = TolinoClient(partner_id, hardware or "")
-    client.refresh = candidate
-    client._apply_token_response(data)
-    return client.refresh or candidate, client.hardware or hardware
+def _token_from_response(candidate, hardware, data):
+    """Read the rotated refresh token straight from a token response."""
+    return str(data.get("refresh_token") or candidate), hardware
 
 
 def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
@@ -68,8 +65,7 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
                 data = {}
             if isinstance(data, dict) and data.get("access_token"):
                 log_info("Tolino-Token-Tausch: Browser-Reader (in-page fetch).")
-                return _exchange_fresh_response(
-                    partner_id, hardware_id, candidate, data)
+                return _token_from_response(candidate, hardware_id, data)
         # A fetch rejection (status 0), malformed success, OAuth response,
         # or server error is ambiguous: the server may already have consumed
         # this single-use grant. Only a positively identified WAF block is a

@@ -22,8 +22,8 @@ from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
 from ..plan import (metadata_update_fields, plan_collection_updates,
                     plan_metadata_updates, plan_sync, recorded_collections,
-                    remember_collection, series_map_from_metadata,
-                    unpack_meta_update_record, unpack_upload_record)
+                    remember_collection, series_map_from_metadata)
+from ..plan import UploadRecord
 from ..inventory import normalize_inventory_record
 from ..comparison import compare_inventory as comparison_compare_inventory
 from ..plan import plan_sync as plan_module_plan_sync
@@ -185,16 +185,6 @@ class SyncPlanTests(unittest.TestCase):
 
         self.assertEqual([2, 0], selected_table_rows(Table()))
 
-    def test_plan_result_helpers_reject_short_records_with_context(self):
-        with self.assertRaisesRegex(ValueError, "invalid upload record"):
-            unpack_upload_record((1, "uuid"))
-        with self.assertRaisesRegex(ValueError, "invalid upload record"):
-            unpack_upload_record((1, "uuid"))
-        self.assertEqual(
-            {"book_id": 1, "book_uuid": "u1", "format_name": "EPUB", "old_id": None},
-            unpack_upload_record((1, "u1", "EPUB", None)),
-        )
-
     def test_complete_preparation_path_handles_empty_single_and_short_data(self):
         cases = (
             ({}, [], []),
@@ -208,7 +198,7 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual(expected_uploads, uploads)
             for record in uploads:
                 self.assertEqual(expected_uploads[0][0] if expected_uploads else None,
-                                 unpack_upload_record(record)["book_id"])
+                                 record.book_id)
 
     def test_safe_format_path_accepts_calibre_path_or_missing_format(self):
         class DatabaseAPI:
@@ -312,7 +302,8 @@ class SyncPlanTests(unittest.TestCase):
             with patch.object(dashboard_plan, "log_warning") as warning:
                 jobs, skipped = dashboard_plan.upload_jobs(
                     dialog, {},
-                    {1: {"title": "Buch"}}, [(1, "u1", "EPUB", None)])
+                    {1: {"title": "Buch"}},
+                    [UploadRecord(1, "u1", "EPUB", None)])
         self.assertEqual(1, len(jobs))
         self.assertIsNone(jobs[0].cover_path)
         self.assertEqual([], skipped)
@@ -1487,12 +1478,12 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         state = self._state(book, meta_fp="stale")
         updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
-        record = unpack_meta_update_record(updates[0])
-        self.assertEqual(1, record["book_id"])
-        self.assertEqual("u1", record["book_uuid"])
-        self.assertEqual("d1", record["tolino_id"])
+        record = updates[0]
+        self.assertEqual(1, record.book_id)
+        self.assertEqual("u1", record.book_uuid)
+        self.assertEqual("d1", record.tolino_id)
         self.assertEqual({"title": "A", "author": "Fred Vargas", "isbn": "123"},
-                         record["fields"])
+                         record.fields)
 
     def test_unchecked_books_are_never_touched(self):
         """Ohne Auswahl kein /meta-Schreibvorgang – auch wenn sich die
@@ -1507,14 +1498,14 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         """"Hochladen" heisst hochladen – kein heimliches /meta."""
         book = self._book()
         state = self._state(book, meta_fp="stale")
-        uploads = [(1, "u1", "EPUB", "d1")]
+        uploads = [UploadRecord(1, "u1", "EPUB", "d1")]
         updates = plan_metadata_updates({1: book}, state, uploads, {1})
         self.assertEqual([], updates)
 
     def test_replaced_file_stays_a_full_upload(self):
         book = self._book()
         state = self._state(book, content_fp="other-file", meta_fp="stale")
-        uploads = [(1, "u1", "EPUB", "d1")]
+        uploads = [UploadRecord(1, "u1", "EPUB", "d1")]
         updates = plan_metadata_updates({1: book}, state, uploads, {1})
         self.assertEqual([], updates)
 
@@ -1608,14 +1599,6 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         updates = plan_metadata_updates({1: new_book}, state, [], {1})
         self.assertEqual(1, len(updates))
         self.assertNotIn("series", updates[0][3])
-
-    def test_meta_update_record_validation(self):
-        with self.assertRaisesRegex(ValueError, "invalid metadata update"):
-            unpack_meta_update_record((1, "u1"))
-        with self.assertRaisesRegex(ValueError, "incomplete metadata update"):
-            unpack_meta_update_record((1, "u1", "d1", {}))
-        with self.assertRaisesRegex(ValueError, "incomplete metadata update"):
-            unpack_meta_update_record((1, "u1", "", {"title": "A"}))
 
     def test_plan_sync_preserves_old_state_until_the_worker_succeeds(self):
         previous = {"u1": {"tolino_id": "d1", "content_fp": "old-content",
@@ -2162,8 +2145,7 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
                  "u2": {"tolino_id": "t2", "fingerprint": "fp-u2"}}
         uploads = plan_sync(metadata, state, ["EPUB"], upload_book_ids={2})
         current = state
-        self.assertEqual([2], [unpack_upload_record(item)["book_id"]
-                               for item in uploads])
+        self.assertEqual([2], [item.book_id for item in uploads])
         self.assertEqual("t2", current["u2"]["tolino_id"])
         self.assertEqual("t2", current["u2"]["tolino_id"])
         self.assertEqual("t1", current["u1"]["tolino_id"])
@@ -2176,8 +2158,8 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
         uploads = plan_sync(later, state, ["EPUB"], upload_book_ids={1})
         current = state
         self.assertEqual(1, len(uploads))
-        record = unpack_upload_record(uploads[0])
-        self.assertEqual("t1", record["old_id"])
+        record = uploads[0]
+        self.assertEqual("t1", record.old_id)
         self.assertEqual("t1", current["u1"]["tolino_id"])
         # Auch der Vergleich findet das Buch über die gemerkte ID wieder,
         # statt eine zweite Cloud-Kopie anzunehmen.

@@ -36,19 +36,6 @@ def is_real_uuid(value):
     return bool(_UUID_TEXT.fullmatch(normalize_uuid_text(value)))
 
 
-def metadata_uuid(item):
-    """Read a raw UUID from a metadata object or mapping."""
-    if isinstance(item, dict):
-        return item.get("uuid")
-    try:
-        return item.uuid
-    except Exception:
-        try:
-            return item.get("uuid")
-        except Exception:
-            return None
-
-
 def display_title(title, number=None):
     """Prefer a human-readable title to an internal identifier in progress."""
     text = str(title or "").strip()
@@ -62,7 +49,9 @@ def display_title(title, number=None):
 
 def book_uuid(item):
     """Return a canonical Calibre UUID from Metadata, if present."""
-    value = normalize_uuid_text(metadata_uuid(item))
+    raw = (item.get("uuid") if isinstance(item, dict)
+           else getattr(item, "uuid", None))
+    value = normalize_uuid_text(raw)
     return value if value and is_real_uuid(value) else ""
 
 

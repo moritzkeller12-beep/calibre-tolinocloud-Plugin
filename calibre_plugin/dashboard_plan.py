@@ -9,8 +9,7 @@ from .library import (cover_bytes, image_suffix, iter_book_ids,
                       metadata_by_id, metadata_ignored, metadata_read_value,
                       metadata_tolino_id, normalize_formats, safe_format_path)
 from .plan import (merge_removals, plan_collection_updates,
-                   plan_metadata_updates, plan_sync, series_map_from_metadata,
-                   unpack_upload_record)
+                   plan_metadata_updates, plan_sync, series_map_from_metadata)
 from .config import load_state
 from .tolino import log_warning
 
@@ -153,7 +152,7 @@ def titles_for(metadata, removal_titles=None):
 
 def selection_gaps(selection, uploads, meta_updates):
     """Count selected actions that could not become work items."""
-    planned_uploads = {unpack_upload_record(item)["book_id"] for item in uploads}
+    planned_uploads = {item.book_id for item in uploads}
     planned_meta = {record[0] for record in meta_updates}
     open_uploads = set(selection["uploads"]) - planned_uploads
     open_meta = set(selection["metadata"]) - planned_meta
@@ -165,11 +164,10 @@ def upload_jobs(dialog, settings, metadata, uploads):
     jobs = []
     skipped_uploads = []
     for upload in uploads:
-        record = unpack_upload_record(upload)
-        book_id = record["book_id"]
-        book_uuid = record["book_uuid"]
-        fmt = record["format_name"]
-        old_id = record["old_id"]
+        book_id = upload.book_id
+        book_uuid = upload.book_uuid
+        fmt = upload.format_name
+        old_id = upload.old_id
         try:
             path = safe_format_path(dialog.gui.current_db, book_id, fmt)
             if not os.path.isfile(path):

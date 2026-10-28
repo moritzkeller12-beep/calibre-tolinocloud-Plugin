@@ -8,7 +8,8 @@ import re
 
 try:
     from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox, QMenu,
+                         QFormLayout, QGroupBox, QHeaderView, QLabel,
+                         QLineEdit, QMessageBox, QMenu,
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QObject, QInputDialog,
@@ -16,8 +17,8 @@ try:
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
-                         QMenu,
+                         QFormLayout, QGroupBox, QHeaderView, QLabel,
+                         QLineEdit, QMessageBox, QMenu,
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QObject, QInputDialog,
@@ -33,8 +34,8 @@ from .library import safe_format_path
 __all__ = [
     "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
     "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog",
-    "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QMenu",
-    "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
+    "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView",
+    "QMenu", "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
     "QThread", "QVBoxLayout", "Qt", "SyncJob",
     "_THREADS", "_apply_busy", "_dialog_busy",
@@ -222,11 +223,8 @@ def _worker_outcome(dialog):
 
 
 def _thread_running(thread):
-    """Läuft dieser Thread noch? (None = nein, Stub ohne isRunning = ja)"""
-    try:
-        return thread is not None and thread.isRunning()
-    except Exception:
-        return thread is not None
+    """Läuft dieser Thread noch?"""
+    return thread is not None and thread.isRunning()
 
 
 def _dialog_busy(dialog):
@@ -239,15 +237,12 @@ def _dialog_busy(dialog):
 
 
 def _set_enabled(owner, names, enabled):
-    """Widgets sperren/freigeben -- tolerant gegen fehlende Qt-Stubs."""
+    """Widgets sperren/freigeben -- nur vorhandene Widgets."""
     for name in names:
         setter = getattr(getattr(owner, name, None), "setEnabled", None)
         if setter is None:
             continue
-        try:
-            setter(enabled)
-        except Exception:
-            pass  # Qt-Stub ohne Aktivierung
+        setter(enabled)
 
 
 def _apply_busy(dialog, busy):
@@ -260,16 +255,13 @@ def _apply_busy(dialog, busy):
     if busy:
         status = getattr(dialog, "status", None)
         if status is not None:
-            try:
-                if getattr(dialog, "thread", None) is not None:
-                    text = "Synchronisierung läuft …"
-                elif getattr(dialog, "prepare_thread", None) is not None:
-                    text = "Vergleich läuft …"
-                else:
-                    text = "Anmeldung wird geprüft …"
-                status.setText(text)
-            except Exception:
-                pass
+            if getattr(dialog, "thread", None) is not None:
+                text = "Synchronisierung läuft …"
+            elif getattr(dialog, "prepare_thread", None) is not None:
+                text = "Vergleich läuft …"
+            else:
+                text = "Anmeldung wird geprüft …"
+            status.setText(text)
 
 
 # Titel + naechster Schritt je Anmelde-Fehlercode. Kurz, einzeilig und
@@ -362,19 +354,11 @@ def sync_result_text(outcome, prefix="Fertig"):
 def _operation_line(item):
     """Eine Zeile je gescheitertem Schritt -- Name und kurzer Grund."""
     item = item if isinstance(item, dict) else {}
-    error = item.get("error")
-    if error and hasattr(error, "short"):
-        detail = str(error.short or error)
-        code = str(getattr(error, "code", "") or "")
-        if code:
-            detail += " (Code %s)" % code
-    elif error:
-        code_match = re.search(r"\(Code ([A-Z][0-9]{2})\)", str(error))
-        detail = str(error)
-        if code_match and code_match.group(1) not in detail[-16:]:
-            detail += " (Code %s)" % code_match.group(1)
-    else:
-        detail = str(error or "")
+    # `error` ist immer der bereits bereinigte Text aus sanitize_error().
+    detail = str(item.get("error") or "")
+    code_match = re.search(r"\(Code ([A-Z][0-9]{2})\)", detail)
+    if code_match and code_match.group(1) not in detail[-16:]:
+        detail += " (Code %s)" % code_match.group(1)
     return "- %s%s" % (item.get("label") or "Schritt",
                        (": " + detail) if detail else "")
 

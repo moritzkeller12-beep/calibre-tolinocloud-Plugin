@@ -790,6 +790,12 @@ class LoginPreflightTests(unittest.TestCase):
         def setToolTip(self, value):
             self.tooltip = value
 
+        def setDefault(self, value):
+            self.is_default = value
+
+        def setFocus(self):
+            self.focused = True
+
     def _ui(self):
         ui_module = ui_module_for(self)
         ui_module.dashboard.hardware_id = lambda: "auto-hw"

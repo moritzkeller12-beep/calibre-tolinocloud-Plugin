@@ -453,8 +453,8 @@ class LiveGrabTests(unittest.TestCase):
                 [fresh])
         self.assertEqual("rotated-browser", refresh)
         self.assertEqual("hw-grab", hardware)
-        # Der Plugin-Client wurde NIE _login (Plugin-POST) aufgerufen:
-        self.assertEqual(1, len(logins))
+        # Der Plugin-Client (und damit der Plugin-POST) wurde nie erzeugt:
+        client_cls.assert_not_called()
 
     def test_exchange_grabbed_token_falls_back_to_plugin_post(self):
         """Eindeutige WAF-403 im Browser -> Plugin-POST."""
@@ -1569,7 +1569,7 @@ class CdpOwnershipTests(unittest.TestCase):
         self.cdp._LAUNCHED.update({
             "process": process, "port": port,
             "profile": profile or tempfile.mkdtemp(prefix="cdp-test-")})
-        return self.cdp._launched_record(port, require_endpoint=False)
+        return self.cdp._verified_owner(port, require_endpoint=False)
 
     def test_browser_websocket_uses_localhost_and_requires_selected_port(self):
         parse = self.cdp._devtools_ws_address

@@ -35,7 +35,8 @@ def _start_port():
 _LAUNCHED = {"process": None, "port": None, "profile": ""}
 
 
-def _launched_record(port=None, require_endpoint=True):
+def _verified_owner(port=None, require_endpoint=True):
+    """This process's browser record, by default only while it answers."""
     process = _LAUNCHED["process"]
     actual_port = _LAUNCHED["port"]
     profile = _LAUNCHED["profile"]
@@ -48,11 +49,6 @@ def _launched_record(port=None, require_endpoint=True):
     if require_endpoint and not _endpoint_answers(record):
         return None
     return record
-
-
-def _verified_owner(port=None):
-    """Return this process's browser only while its chosen port answers."""
-    return _launched_record(port)
 
 
 def _new_profile_dir():
@@ -230,27 +226,9 @@ def _stop_launched_process(process, timeout=2):
 
 def _abandon_failed_launch(process, record):
     """Close the launched browser before removing its temporary profile."""
-    port = _LAUNCHED["port"]
-    if port:
-        live = {"process": process, "port": int(port),
-                "profile": record["profile"]}
-        target = _browser_ws_for_record(live)
-        if target:
-            _send_browser_close(*target, expected_port=port)
-    if not _stop_launched_process(process):
-        return False
-    if port and _endpoint_answers({"port": port}, 0.2):
-        deadline = time.time() + 2
-        while _endpoint_answers({"port": port}, 0.2) and time.time() < deadline:
-            time.sleep(0.1)
-        if _endpoint_answers({"port": port}, 0.2):
-            return False
-    shutil.rmtree(record["profile"], ignore_errors=True)
-    if os.path.exists(record["profile"]):
-        return False
-    if _LAUNCHED["process"] is process:
-        _LAUNCHED.update({"process": None, "port": None, "profile": ""})
-    return True
+    live = {"process": process, "port": int(_LAUNCHED["port"] or 0),
+            "profile": record["profile"]}
+    return _shutdown(live)
 
 
 def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
@@ -325,11 +303,6 @@ def _reader_target(targets, port):
     return None, reader_found
 
 
-def _reader_ws_url(targets, port):
-    """First mytolino page's validated WebSocket on the owned port."""
-    return _reader_target(targets, port)[0]
-
-
 def grab_once_from_grabber(port=None, timeout=12):
     """ONE grab attempt against OUR grabber window (no polling).
 
@@ -343,8 +316,8 @@ def grab_once_from_grabber(port=None, timeout=12):
     if record is None:
         return None
     port = int(record["port"])
-    ws_url = _reader_ws_url(
-        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)
+    ws_url = _reader_target(
+        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)[0]
     if ws_url is None:
         return None
     return _grab_page_tokens(ws_url, timeout, expected_port=port)
@@ -429,8 +402,8 @@ def reader_ws_url(port=None):
     if record is None:
         return None
     port = int(record["port"])
-    return _reader_ws_url(
-        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)
+    return _reader_target(
+        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)[0]
 
 
 def _browser_ws_for_record(record, timeout=2):
@@ -473,24 +446,28 @@ def _endpoint_answers(record, timeout=0.5):
         "http://127.0.0.1:%d/json/version" % port, timeout)))
 
 
-def close_grabber_window(timeout=2, port=None):
-    """Close only the browser started by this module, then remove its profile."""
-    record = _launched_record(port, require_endpoint=False)
-    if record is None:
-        return False
-    if _endpoint_answers(record, timeout):
+def _wait_for_endpoint_exit(record, seconds):
+    """Sleep in small steps while the DevTools endpoint keeps answering."""
+    if not _endpoint_answers(record, 0.2):
+        return
+    deadline = time.time() + max(0.2, seconds)
+    while _endpoint_answers(record, 0.2) and time.time() < deadline:
+        time.sleep(0.1)
+
+
+def _shutdown(record, timeout=2):
+    """Close a launched browser, then remove its temporary profile."""
+    process = record["process"]
+    port = int(record.get("port") or 0)
+    if port and _endpoint_answers(record, timeout):
         target = _browser_ws_for_record(record, timeout)
         if target:
             _send_browser_close(*target, timeout=timeout,
-                                expected_port=record["port"])
-        deadline = time.time() + max(0.2, timeout)
-        while _endpoint_answers(record, 0.2) and time.time() < deadline:
-            time.sleep(0.1)
-    if not _stop_launched_process(record["process"], timeout):
+                                expected_port=port)
+        _wait_for_endpoint_exit(record, timeout)
+    if not _stop_launched_process(process, timeout):
         return False
-    deadline = time.time() + max(0.2, timeout)
-    while _endpoint_answers(record, 0.2) and time.time() < deadline:
-        time.sleep(0.1)
+    _wait_for_endpoint_exit(record, timeout)
     if _endpoint_answers(record, 0.2):
         # A wrapper may have exited before its browser child; never delete
         # a profile while DevTools can still be using it.
@@ -498,9 +475,17 @@ def close_grabber_window(timeout=2, port=None):
     shutil.rmtree(record["profile"], ignore_errors=True)
     if os.path.exists(record["profile"]):
         return False
-    if _LAUNCHED["process"] is record["process"]:
+    if _LAUNCHED["process"] is process:
         _LAUNCHED.update({"process": None, "port": None, "profile": ""})
     return True
+
+
+def close_grabber_window(timeout=2, port=None):
+    """Close only the browser started by this module, then remove its profile."""
+    record = _verified_owner(port, require_endpoint=False)
+    if record is None:
+        return False
+    return _shutdown(record, timeout)
 
 
 def grabber_window_state(port=None, timeout=5):

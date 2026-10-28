@@ -83,6 +83,9 @@ class InventoryDialogSortTests(unittest.TestCase):
             def setSortIndicator(self, column, order):
                 pass
 
+            def setSectionResizeMode(self, column, mode):
+                pass
+
         class FakeTable:
             def __init__(self):
                 self.row_count = -1
@@ -98,6 +101,17 @@ class InventoryDialogSortTests(unittest.TestCase):
 
             def resizeColumnsToContents(self):
                 pass
+
+            def setUpdatesEnabled(self, value):
+                self.updates_enabled = value
+
+            def setRowHidden(self, index, hidden):
+                self.row_hidden = getattr(self, "row_hidden", {})
+                self.row_hidden[index] = hidden
+
+            def setColumnHidden(self, column, hidden):
+                self.hidden = getattr(self, "hidden", {})
+                self.hidden[column] = hidden
 
             def horizontalHeader(self):
                 return FakeHeader()
@@ -146,6 +160,7 @@ class InventoryDialogSortTests(unittest.TestCase):
                         dialog._choice_changed(i, k))
             dialog._sort_column = 0
             dialog._sort_descending = False
+            dialog._technical_visible = False
             dialog.table = FakeTable()
 
             # Klick auf den Titel (Spalte 5): aufsteigend, die Auswahl

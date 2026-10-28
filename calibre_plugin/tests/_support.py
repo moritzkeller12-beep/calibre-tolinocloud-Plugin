@@ -88,6 +88,9 @@ def load_ui_module(get_icons_result, qt_stub=None):
                  "QHBoxLayout", "QTableWidget", "QTableWidgetItem",
                  "QObject", "QInputDialog", "QFileDialog", "QMenu", "Qt"):
         setattr(qt_core, name, type(name, (), {}))
+    qt_core.QHeaderView = type(
+        "QHeaderView", (), {"Stretch": 1, "ResizeToContents": 2})
+    qt_core.Qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1})
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None
     if qt_stub:
