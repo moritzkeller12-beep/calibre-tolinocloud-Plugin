@@ -19,7 +19,7 @@ from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
                       create_custom_columns, custom_column_available,
                       ignore_column_available, read_column_available,
-                      update_read_column, update_tolino_ids)
+                      update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
@@ -50,21 +50,12 @@ def _offer_next_step(dialog):
 
 
 def _persist_sync_result(dialog, state, updates):
-    """Ergebnis speichern und die optionalen Calibre-Spalten aktualisieren."""
+    """Sync-Zustand und Tolino-IDs sichern; Lesestatusspalte bleibt lesend."""
     _persist_run(dialog, state)
     if dialog.sync_column_enabled:
         update_tolino_ids(
             dialog.gui.current_db, updates, enabled=True,
             account_name=_worker_account_name(dialog))
-    read_updates = list(getattr(dialog.worker, "read_updates", None) or ())
-    if read_updates and getattr(dialog, "read_column_enabled", False):
-        try:
-            update_read_column(dialog.gui.current_db, read_updates)
-        except Exception as exc:
-            # Ein misslungener Spalten-Schreibvorgang darf das Ergebnis des
-            # Laufs nicht verschlucken.
-            log_warning("Lesestatus konnte nicht in #tolino_read "
-                        "geschrieben werden: %s" % sanitize_error(exc))
 
 
 def _persist_run(dialog, state):
@@ -886,7 +877,6 @@ class SyncDashboard(QDialog):
             "metadata": dialog.selected_metadata_ids(),
             "read": dialog.selected_read_targets(),
             "unread": dialog.selected_read_unmarks(),
-            "read_sync": dialog.selected_read_sync(),
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
 
@@ -988,8 +978,7 @@ class SyncDashboard(QDialog):
                                  preparation["series_map"],
                                  preparation["selected_read"],
                                  preparation["selected_unread"],
-                                 titles=preparation.get("titles"),
-                                 read_sync=preparation.get("read_sync"))
+                                 titles=preparation.get("titles"))
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress_changed)

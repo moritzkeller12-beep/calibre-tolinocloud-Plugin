@@ -291,8 +291,8 @@ class InventoryDialogSortTests(unittest.TestCase):
                              [row["upload"] for row in rows])
             self.assertEqual([False, False, False, True, False],
                              [row["metadata"] for row in rows])
-            # Die Lese-Marke ist nie Teil der Empfehlung.
-            self.assertEqual([False] * 5, [row["read"] for row in rows])
+            # Empfehlungen lassen die Leseauswahl unangetastet.
+            self.assertEqual([False] * 5, [row.get("read", False) for row in rows])
             self.assertEqual([], dialog.selected_read_targets())
             # Ausdrücklich angehakt zählt sie aber -- nur mit Tolino-ID.
             dialog.read_checks[0].setChecked(True)
@@ -502,9 +502,10 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             read_cell = self._cells_by_title(dialog)
             read_cell["Ungelesen"].setChecked(True)
             dialog.apply_recommended()
+            read_cell = self._cells_by_title(dialog)
             self.assertTrue(read_cell["Gelesen"].isChecked())
-            self.assertFalse(read_cell["Ungelesen"].isChecked())
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertTrue(read_cell["Ungelesen"].isChecked())
+            self.assertEqual(["t-2"], dialog.selected_read_targets())
             self.assertEqual([], dialog.selected_read_unmarks())
         finally:
             ui_module._restore_stubs_for_tests()
@@ -518,7 +519,6 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             cell = self._cells_by_title(dialog)["Gelesen"]
             self.assertTrue(cell.isChecked())
             cell.setChecked(False)
-            cell.clicked.emit()
             self.assertFalse(cell.isChecked())
             self.assertEqual(["t-1"], dialog.selected_read_unmarks())
             self.assertEqual([], dialog.selected_read_targets())
@@ -527,7 +527,6 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             self.assertIn("Synchronisierung starten", dialog.confirm.text())
             # Und wieder an: ein Klick zurueck.
             cell.setChecked(True)
-            cell.clicked.emit()
             self.assertEqual([], dialog.selected_read_unmarks())
             self.assertEqual([], dialog.selected_read_targets())
         finally:
@@ -1163,9 +1162,6 @@ class CloudDeletionPlanTests(unittest.TestCase):
                     return []
 
                 def selected_read_unmarks(self):
-                    return []
-
-                def selected_read_sync(self):
                     return []
 
                 def selected_cloud_deletions(self):

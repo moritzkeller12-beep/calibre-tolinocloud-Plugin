@@ -4,8 +4,8 @@ import re
 from collections.abc import Iterable
 
 TOLINO_COLUMN = "#tolino_id"
-# Optionale Ja/Nein-Spalten: #tolino_ignore nimmt Buecher vom Abgleich aus,
-# #tolino_read spiegelt den Lesestatus in die Bibliothek.
+# Optionale Ja/Nein-Spalten: #tolino_ignore nimmt Buecher vom Abgleich aus;
+# #tolino_read zeigt den lokalen Lesestatus nur informativ an.
 TOLINO_IGNORE_COLUMN = "#tolino_ignore"
 TOLINO_READ_COLUMN = "#tolino_read"
 
@@ -198,19 +198,6 @@ def read_column_available(database):
 def metadata_read_value(metadata):
     """Lesestatus aus ``#tolino_read``: True, False oder None (leer)."""
     return bool_column_value(metadata, TOLINO_READ_COLUMN)
-
-
-def update_read_column(database, updates):
-    """Lesestatus ``(book_id, bool)`` in ``#tolino_read`` schreiben."""
-    if not updates or not read_column_available(database):
-        return 0
-    api = database.new_api
-    values = {book_id: bool(value) for book_id, value in updates
-              if book_id is not None and api.has_id(book_id)}
-    if not values:
-        return 0
-    api.set_field(TOLINO_READ_COLUMN, values)
-    return len(values)
 
 
 def update_tolino_ids(database, updates, enabled=True, account_name=None):

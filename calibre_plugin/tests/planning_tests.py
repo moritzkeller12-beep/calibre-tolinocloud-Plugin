@@ -158,8 +158,7 @@ class SyncPlanTests(unittest.TestCase):
                     preparation = plan_module.plan_actions(
                         dialog, {"preferred_formats": ["EPUB"]}, metadata, {},
                         {"uploads": {1, 2}, "metadata": set(), "read": [],
-                         "unread": [], "read_sync": [],
-                         "cloud_deletions": []})
+                         "unread": [], "cloud_deletions": []})
             self.assertEqual(1, normalize.call_count)
             self.assertEqual(1, preparation["selected_without_action"]["uploads"])
             self.assertEqual(1, len(preparation["skipped_uploads"]))

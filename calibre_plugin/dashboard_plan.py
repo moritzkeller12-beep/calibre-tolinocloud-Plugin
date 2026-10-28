@@ -121,7 +121,6 @@ def plan_actions(dialog, settings, metadata, state, selection):
     series_map = series_map_from_metadata(syncable_metadata(metadata))
     jobs, skipped_uploads = upload_jobs(dialog, settings, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
-    read_sync = read_sync_items(metadata, jobs, selection.get("read_sync"))
     settings["state"] = state
     gaps = selection_gaps(selection, uploads, meta_updates)
     return {
@@ -134,33 +133,9 @@ def plan_actions(dialog, settings, metadata, state, selection):
         "skipped_uploads": skipped_uploads,
         "selected_read": selection["read"],
         "selected_unread": selection["unread"],
-        "read_sync": read_sync,
         "titles": titles,
         "selected_without_action": gaps,
     }
-
-
-def read_sync_items(metadata, jobs, selected=()):
-    """Abgleich mit #tolino_read samt neu hochgeladener Bücher.
-
-    Ein neues Buch hat in tolino noch keinen Lesestatus: ist es in Calibre
-    gelesen, markiert der Lauf die neue Cloud-Kopie nach dem Upload.
-    """
-    items = [dict(item) for item in (selected or ())]
-    known = {item.get("book_uuid") for item in items}
-    for job in jobs or ():
-        local = (metadata.get(job.book_id) or {}).get("calibre_read")
-        if local is None or job.book_uuid in known:
-            continue
-        items.append({"book_id": job.book_id, "book_uuid": job.book_uuid,
-                      "tolino_id": "", "value": bool(local),
-                      "write_calibre": False})
-    return items
-
-
-def calibre_read_updates(preparation):
-    return [item for item in preparation.get("read_sync") or ()
-            if item.get("write_calibre")]
 
 
 def titles_for(metadata, removal_titles=None):
@@ -236,8 +211,7 @@ def planned_actions(preparation, uploads, state):
             + len(preparation.get("meta_updates") or ())
             + open_collections(preparation, state)
             + (1 if preparation.get("selected_read") else 0)
-            + (1 if preparation.get("selected_unread") else 0)
-            + (1 if calibre_read_updates(preparation) else 0))
+            + (1 if preparation.get("selected_unread") else 0))
 
 
 def plan_text(preparation, uploads, state):
@@ -258,9 +232,6 @@ def plan_text(preparation, uploads, state):
         parts.append("%d gelesen" % len(preparation["selected_read"]))
     if preparation.get("selected_unread"):
         parts.append("%d ungelesen" % len(preparation["selected_unread"]))
-    calibre_read = calibre_read_updates(preparation)
-    if calibre_read:
-        parts.append("%d Lesestatus in Calibre" % len(calibre_read))
     return ("Läuft: %s." % ", ".join(parts)
             if parts else "Läuft …")
 

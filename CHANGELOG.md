@@ -1,5 +1,12 @@
 # Änderungen
 
+## 0.1.04
+
+- `#tolino_read` ist nur noch eine informative Calibre-Spalte; Lesestatusänderungen werden ausschließlich im Vergleichsfenster ausgewählt und an das aktuell gewählte Tolino-Konto übertragen.
+- Entfernt wurde der automatische bidirektionale Lesestatus-Abgleich, damit unterschiedliche Calibre- und Cloud-Stände nicht unbemerkt übertragen werden.
+- Der Vergleichsdialog und die Synchronisierung wurden vereinfacht; der Worker führt Metadaten- und Upload-Schritte jetzt in getrennten Phasen aus.
+- CI ergänzt einen PyQt6-Offscreen-Smoke-Test für den Vergleichsdialog mit echten Qt-Widgets.
+
 ## 0.1.03
 
 - Neue optionale Calibre-Spalte `#tolino_ignore` (Ja/Nein): so markierte Bücher lädt der Abgleich nicht hoch und ändert sie nicht — gekaufte Bücher erzeugen damit keine zweite Kopie in der Cloud. Sie bleiben im Vergleich sichtbar (Gruppe «Ignoriert») und ihre Cloud-Kopie wird weiterhin zugeordnet.

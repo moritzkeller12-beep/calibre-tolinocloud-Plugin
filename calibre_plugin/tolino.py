@@ -356,7 +356,6 @@ class TolinoClient:
     def _request(self, url, method="GET", data=None, form=False,
                  authenticated=True, content_type=None, _extra_headers=None):
         retry = {"auth": True, "hardware": True, "waf": 0}
-        retry_request = object()
 
         def decode(raw):
             if not raw:
@@ -394,7 +393,7 @@ class TolinoClient:
                 retry["auth"] = False
                 self.access = None
                 self.login()
-                return retry_request
+                return
 
             if (exc.code == 400 and authenticated
                     and url != self.partner.get("token_url")):
@@ -408,11 +407,11 @@ class TolinoClient:
                         retry["hardware"] = False
                         if self._hw_registered_now:
                             time.sleep(_REGISTER_SETTLE_SECONDS)
-                        return retry_request
+                        return
                 elif self._hw_registered_now:
                     self._hw_registered_now = False
                     time.sleep(_REGISTER_SETTLE_SECONDS)
-                    return retry_request
+                    return
 
             if exc.code in (401, 403):
                 is_waf_retry = (
@@ -423,8 +422,10 @@ class TolinoClient:
                 if is_waf_retry:
                     time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
                     retry["waf"] += 1
-                    return retry_request
+                    return
+
                 self.access = None
+
                 message = (_compact_error_text(self.last_error_text)
                            or "no response detail")
                 raise TolinoAuthError(
@@ -474,10 +475,8 @@ class TolinoClient:
                     self.last_error_text = None
                     raw = response.read()
             except HTTPError as exc:
-                outcome = handle_error(exc, exc.read().decode("utf-8", "replace"))
-                if outcome is retry_request:
-                    continue
-                return outcome
+                handle_error(exc, exc.read().decode("utf-8", "replace"))
+                continue
             except (URLError, OSError, TimeoutError) as exc:
                 _raise_transport_error(exc, (self.refresh, self.access))
             return decode(raw)
