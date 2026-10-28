@@ -2411,7 +2411,7 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertIsNone(emitted.get("failed"))
         entry = worker.state["u1"]
         self.assertEqual("new-1", entry["tolino_id"])
-        self.assertEqual(metadata_fingerprint(changed[1]), entry["meta_fp"])
+        self.assertNotIn("meta_verified_fp", entry)
         self.assertEqual(content_fingerprint(changed[1], "EPUB"),
                          entry["content_fp"])
         self.assertNotIn("fingerprint", entry)
@@ -2454,8 +2454,6 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
         self.assertEqual([(1, "t1")], worker.updates)
-        self.assertEqual(metadata_fingerprint(changed[1]),
-                         worker.state["u1"]["meta_fp"])
         self.assertEqual(metadata_fingerprint(changed[1]),
                          worker.state["u1"]["meta_verified_fp"])
 
@@ -2511,10 +2509,10 @@ class FingerprintCommitTests(unittest.TestCase):
             ui_module, settings, preparation, self._client(upload=failing))
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual(metadata_fingerprint(changed[1]),
-                         worker.state["u1"]["meta_fp"])
-        self.assertEqual(previous["u2"]["meta_fp"],
-                         worker.state["u2"]["meta_fp"])
+        self.assertEqual(content_fingerprint(changed[1], "EPUB"),
+                         worker.state["u1"]["content_fp"])
+        self.assertEqual(previous["u2"]["content_fp"],
+                         worker.state["u2"]["content_fp"])
         self.assertEqual("t2", worker.state["u2"]["tolino_id"])
 
     def test_a_cancel_before_the_second_upload_confirms_nothing_for_it(self):
@@ -2541,12 +2539,12 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["not_started"])
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertEqual(metadata_fingerprint(changed[1]),
-                         worker.state["u1"]["meta_fp"])
+        self.assertEqual(content_fingerprint(changed[1], "EPUB"),
+                         worker.state["u1"]["content_fp"])
         # Das zweite Buch wurde nie begonnen: alter Stand bleibt.
         self.assertEqual("t2", worker.state["u2"]["tolino_id"])
-        self.assertEqual(previous["u2"]["meta_fp"],
-                         worker.state["u2"]["meta_fp"])
+        self.assertEqual(previous["u2"]["content_fp"],
+                         worker.state["u2"]["content_fp"])
 
 class VersionDocumentationTests(unittest.TestCase):
     """README, CHANGELOG und PLUGIN_VERSION bleiben synchron."""

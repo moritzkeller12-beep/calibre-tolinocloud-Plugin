@@ -301,15 +301,17 @@ class SyncDashboard(QDialog):
 
     def account_changed(self, index):
         """Konto in den Einstellungen gewechselt."""
-        if index < 0 or not getattr(self, "account_names", None):
-            return
-        self.switch_account(self.account_select.itemData(index))
+        self._account_selected(index, self.account_select)
 
     def quick_account_changed(self, index):
         """Konto auf der ersten Seite gewechselt."""
+        self._account_selected(index, self.account_quick)
+
+    def _account_selected(self, index, combo):
+        """Gewähltes Konto übernehmen -- ein Weg für beide Comboboxen."""
         if index < 0 or not getattr(self, "account_names", None):
             return
-        self.switch_account(self.account_quick.itemData(index))
+        self.switch_account(combo.itemData(index))
 
     def switch_account(self, name):
         """Konto wechseln – erst sichern, dann das neue laden.

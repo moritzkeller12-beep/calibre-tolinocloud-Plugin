@@ -5,7 +5,8 @@ from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
                         QVBoxLayout, Qt, _set_enabled, plural, start_call)
 from calibre.gui2 import error_dialog, info_dialog
-from .comparison import comparison_group, sort_comparison_rows
+from .comparison import (comparison_group, comparison_sort_key,
+                         sort_comparison_rows)
 from .library import TOLINO_IGNORE_COLUMN, selected_table_rows
 from .tolino import report_error
 
@@ -79,14 +80,9 @@ class InventoryDialog(QDialog):
 
     _SORT_KEYS = (
         # 0 Hochladen / 1 Metadaten: Ausgewähltes zuerst, dann Titel/Autor(en)
-        lambda row: (0 if row.get("upload") else 1,
-                     0 if row.get("metadata") else 1,
-                     str(row.get("title") or "").casefold(),
-                     str(row.get("authors") or "").casefold()),
-        lambda row: (0 if row.get("metadata") else 1,
-                     0 if row.get("upload") else 1,
-                     str(row.get("title") or "").casefold(),
-                     str(row.get("authors") or "").casefold()),
+        comparison_sort_key,
+        lambda row: ((0 if row.get("metadata") else 1,)
+                     + comparison_sort_key(row)[2:]),
         # 2 Lesestatus: gelesene Bücher zuerst
         lambda row: (0 if row.get("read") else 1,
                      str(row.get("title") or "").casefold(),
@@ -667,10 +663,6 @@ class InventoryDialog(QDialog):
             else Qt.AscendingOrder)
         self._rebuild_table(ordered)
 
-    def _set_table_updates(self, enabled):
-        """Disable expensive redraws while populating a large table."""
-        self.table.setUpdatesEnabled(enabled)
-
     def _action_check_specs(self, row):
         """Return enabled state and tooltips for this row's action checks."""
         has_book = row.get("book_id") is not None
@@ -747,7 +739,7 @@ class InventoryDialog(QDialog):
 
     def _rebuild_table(self, rows):
         """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen."""
-        self._set_table_updates(False)
+        self.table.setUpdatesEnabled(False)
         self.rows = list(rows)
         self.checks = []
         self.meta_checks = []
@@ -768,7 +760,7 @@ class InventoryDialog(QDialog):
         self._size_columns()
         self._apply_technical_visibility()
         self._apply_group_filter()
-        self._set_table_updates(True)
+        self.table.setUpdatesEnabled(True)
         self._update_summary()
 
     @staticmethod

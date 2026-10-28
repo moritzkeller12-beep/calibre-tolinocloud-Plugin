@@ -60,27 +60,22 @@ def local_metadata(dialog):
 
 
 def saved_state(dialog):
+    """Gespeicherter Sync-Zustand des Kontos; leer, wenn er unlesbar ist."""
     try:
         return load_state(dialog.values().get("state"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return {}
 
 
-def _ignored(item):
-    """True, wenn das Buch laut Calibre-Spalte vom Abgleich ausgenommen ist."""
-    return bool(isinstance(item, dict) and item.get("ignored"))
+def syncable_metadata(metadata):
+    """Metadaten ohne die in Calibre als «ignoriert» markierten Bücher."""
+    return {book_id: item for book_id, item in (metadata or {}).items()
+            if not (isinstance(item, dict) and item.get("ignored"))}
 
 
 def syncable_book_ids(metadata, book_ids):
     """Ausgewählte Calibre-Nummern ohne die ignorierten Bücher."""
-    return {book_id for book_id in (book_ids or ())
-            if not _ignored((metadata or {}).get(book_id))}
-
-
-def syncable_metadata(metadata):
-    """Metadaten ohne ignorierte Bücher (für Serien und Sammlungen)."""
-    return {book_id: item for book_id, item in (metadata or {}).items()
-            if not _ignored(item)}
+    return set(book_ids or ()) & set(syncable_metadata(metadata))
 
 
 def automatic_action_count(metadata, state):
@@ -168,14 +163,15 @@ def upload_jobs(dialog, settings, metadata, uploads):
         book_uuid = upload.book_uuid
         fmt = upload.format_name
         old_id = upload.old_id
+        title = str((metadata.get(book_id) or {}).get("title") or "")
         try:
             path = safe_format_path(dialog.gui.current_db, book_id, fmt)
             if not os.path.isfile(path):
                 raise ValueError("Datei nicht gefunden: %s" % path)
         except ValueError as exc:
-            title = metadata.get(book_id, {}).get("title") or "ohne Titel"
             skipped_uploads.append(
-                "Buch %s (%s), Format %s: %s" % (book_id, title, fmt, exc))
+                "Buch %s (%s), Format %s: %s"
+                % (book_id, title or "ohne Titel", fmt, exc))
             continue
         cover_path = None
         try:
@@ -192,7 +188,6 @@ def upload_jobs(dialog, settings, metadata, uploads):
             dialog.temp_files.append(cover_path)
         elif cover:
             log_warning("Coverformat unbekannt – Cover wird nicht übertragen.")
-        title = (metadata.get(book_id) or {}).get("title") or ""
         jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path,
                             cover_path, title))
     return jobs, skipped_uploads
@@ -216,7 +211,7 @@ def plan_text(preparation, uploads, state):
     """Summarize concrete actions before starting the worker."""
     parts = []
     if uploads:
-        parts.append("%d Upload%s" % (uploads, "s" if uploads != 1 else ""))
+        parts.append("%d %s" % (uploads, plural(uploads, "Upload", "Uploads")))
     if preparation["removals"]:
         count = len(preparation["removals"])
         parts.append("%d %s" % (count, plural(count, "Löschung", "Löschungen")))

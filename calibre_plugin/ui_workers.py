@@ -380,8 +380,7 @@ class SyncWorker(QObject):
             entry = self.state.get(record.book_uuid)
             metadata = self.metadata_by_uuid.get(record.book_uuid)
             if isinstance(entry, dict) and metadata:
-                entry["meta_fp"] = metadata_fingerprint(metadata)
-                entry["meta_verified_fp"] = entry["meta_fp"]
+                entry["meta_verified_fp"] = metadata_fingerprint(metadata)
             # Keep the confirmed Tolino-ID mapping current.
             self.updates.append((record.book_id, record.tolino_id))
             changed = True
@@ -413,7 +412,7 @@ class SyncWorker(QObject):
             if metadata:
                 entry["content_fp"] = content_fingerprint(
                     metadata, job.format_name)
-                entry["meta_fp"] = metadata_fingerprint(metadata)
+                # Ein Upload bestätigt die Metadaten nicht per Read-back.
                 entry.pop("meta_verified_fp", None)
             self.updates.append((job.book_id, new_id))
             self._finish_operation(operation, OP_SUCCEEDED)
