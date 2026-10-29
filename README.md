@@ -7,7 +7,7 @@ Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino
 
 ## Installation
 
-1. [Plugin-ZIP herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/0.1.04/tolino_cloud_sync.zip).
+1. [Plugin-ZIP herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/main/tolino_cloud_sync.zip).
 2. In Calibre: **Einstellungen → Plugins → Plugin aus Datei laden** und ZIP auswählen.
 3. Calibre neu starten.
 
