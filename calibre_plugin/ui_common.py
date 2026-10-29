@@ -23,6 +23,20 @@ except ImportError:
                          QTableWidgetItem, QObject, QInputDialog,
                          QFileDialog, Qt, Signal as pyqtSignal)
 
+def qt_enum(owner, scope, name):
+    """Qt-Enum-Wert in der Schreibweise, die Qt 5 und Qt 6 verstehen.
+
+    PyQt6 (Calibre 6 und neuer) kennt nur die vollständige Form
+    ``QHeaderView.ResizeMode.Stretch``; die Kurzform ohne Enum-Klasse gibt
+    es dort nicht mehr. PyQt5 kennt beide. Fehlt die Enum-Klasse (alte
+    Bindungen, Test-Stubs), wird die Kurzform genommen.
+    """
+    value = getattr(getattr(owner, scope, None), name, None)
+    if value is None:
+        value = getattr(owner, name)
+    return value
+
+
 # Weitergegeben an die anderen UI-Module (und teilweise nur dort benutzt):
 # die Liste ist absichtlich kurz. Fruehere Fassungen importierten hier das
 # halbe sync-/tolino-Modul, ohne es zu benutzen.
@@ -36,7 +50,7 @@ __all__ = [
     "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QMenu",
     "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QThread", "QVBoxLayout", "Qt", "SyncJob",
+    "QThread", "QVBoxLayout", "Qt", "SyncJob", "qt_enum",
     "_ORPHANED_THREADS", "_apply_busy", "_dialog_busy",
     "_display_value", "_format_signatures", "_login_failure_guidance",
     "_metadata_value", "_stop_thread", "plural",
