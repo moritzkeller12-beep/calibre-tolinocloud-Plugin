@@ -20,8 +20,8 @@ class SyncWorker(QObject):
     failed = pyqtSignal(str)
 
     def __init__(self, settings, jobs, removals, meta_updates=None,
-                 series_map=None, read_marks=None, read_unmarks=None,
-                 titles=None):
+                 series_map=None, read_changes=None, titles=None,
+                 state=None):
         QObject.__init__(self)
         # Unveraenderlicher Kontokontext: Jede Persistenz (Tokenrotation,
         # Zustand, tolino-ID) gehoert zu dem Konto dieses Laufs.
@@ -34,14 +34,17 @@ class SyncWorker(QObject):
         self.removals = list(removals or ())
         self.meta_updates = list(meta_updates or ())
         self.series_map = dict(series_map or {})
-        # tolino-IDs, die in der Cloud als gelesen markiert werden sollen.
-        # Leer heisst: Lesestatus bleibt unangetastet.
-        self.read_marks = [str(item) for item in (read_marks or ())
-                           if str(item or "").strip()]
-        # tolino-IDs, deren Lesestatus auf ungelesen gesetzt wird. Ebenfalls
-        # leer = Lesestatus bleibt unangetastet.
-        self.read_unmarks = [str(item) for item in (read_unmarks or ())
-                             if str(item or "").strip()]
+        # (tolino-ID, Calibre-Nummer, gelesen?) je ausdrücklich gewählter
+        # Änderung aus dem Vergleichsfenster. Leer heisst: Lesestatus bleibt
+        # unangetastet und die Spalte unverändert.
+        self.read_changes = [
+            (str(tolino_id), book_id, bool(finished))
+            for tolino_id, book_id, finished in (read_changes or ())
+            if str(tolino_id or "").strip()]
+        self.read_marks = [tolino_id for tolino_id, _id, finished
+                           in self.read_changes if finished]
+        self.read_unmarks = [tolino_id for tolino_id, _id, finished
+                             in self.read_changes if not finished]
         # Titel für sichtbare Texte: Schlüssel sind Kennung und tolino-ID.
         # Ohne Titel steht «Buch <Nummer>» -- nie eine UUID.
         self.titles = {str(key): str(value)
@@ -53,8 +56,13 @@ class SyncWorker(QObject):
             if isinstance(item, dict) and item.get("uuid")
         }
         self.cancelled = False
-        self.state = load_state(self.settings.get("state"))
+        # Eine private Kopie je Lauf: Uploads und Löschungen schreiben in
+        # dasselbe Objekt, das `_persist_state` sichert.
+        self.state = (copy.deepcopy(state) if isinstance(state, dict)
+                      else load_state(self.settings.get("state")))
         self.updates = []
+        # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
+        self.read_updates = []
         self.operations = []
         self.outcome = {
             "uploaded": 0, "updated": 0, "deleted": 0,
@@ -68,15 +76,15 @@ class SyncWorker(QObject):
         self.cancelled = True
 
     def _label(self, book_uuid, book_id=None, title=""):
-        """Sichtbarer Name eines Buchs: Titel, sonst «Buch <Nummer>»."""
-        text = str(title or "").strip()
-        if not text:
-            text = self.titles.get(str(book_uuid), "")
-        entry = None
-        if isinstance(self.state, dict):
-            entry = self.state.get(str(book_uuid))
-        if not text and isinstance(entry, dict):
-            text = str(entry.get("title") or "")
+        """Sichtbarer Name eines Buchs: Titel, sonst «Buch <Nummer>».
+
+        Titel kommen aus dem Plan (`titles_for`); der Zustand liefert nur
+        noch die Calibre-Nummer, wenn der Aufrufer keine kennt.
+        """
+        text = (str(title or "").strip()
+                or self.titles.get(str(book_uuid), ""))
+        entry = (self.state.get(str(book_uuid))
+                 if isinstance(self.state, dict) else None)
         if book_id is None and isinstance(entry, dict):
             book_id = entry.get("calibre_id")
         return display_title(text, book_id)
@@ -274,6 +282,12 @@ class SyncWorker(QObject):
                                    "Erledigt: %s" % self._label(book_uuid))
         return done
 
+    def _record_read_updates(self, finished):
+        """Bestätigten Lesestatus für die Calibre-Spalte vormerken."""
+        self.read_updates.extend(
+            (book_id, finished) for _tolino, book_id, state
+            in self.read_changes if state is finished and book_id is not None)
+
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
                         done, total):
         """Ausgewählten Lesestatus übertragen."""
@@ -301,6 +315,7 @@ class SyncWorker(QObject):
                 self._count_failure(operation, exc, client)
             else:
                 self._finish_operation(operation, OP_SUCCEEDED)
+                self._record_read_updates(finished)
                 self._refresh_counts()
                 self.progress.emit(done, total, done_text)
             done += 1
@@ -557,12 +572,6 @@ class PrepareWorker(QObject):
                 return
             self.progress.emit("Lade Cloud-Bestand …")
             inventory = client.inventory()
-
-            # Eine unbekannte Hülle darf nie als leere Bibliothek gelten.
-            if not getattr(client, "inventory_ok", True):
-                raise TolinoApiError(
-                    "Die Cloud-Antwort enthält kein PublicationInventory.",
-                    code="N02")
             read_known = True
             try:
                 read_ids = client.read_ids()
@@ -578,12 +587,13 @@ class PrepareWorker(QObject):
             if self._stop_requested():
                 return
             self.progress.emit("Vergleiche Bibliothek …")
+            columns = dict(self.settings.get("columns") or {})
             comparison = compare_inventory(
                 self.metadata, state, inventory,
                 self.settings.get("preferred_formats", ()),
-                use_metadata_ids=self.settings.get("sync_column_enabled", True),
+                use_metadata_ids=columns.get("id", True),
                 read_ids=read_ids,
-                read_column=bool(self.settings.get("read_column_enabled")))
+                read_column=bool(columns.get("read")))
             for row in comparison:
                 stale_id = str(row.get("stale_cloud_id") or "").strip()
                 book_uuid = str(row.get("uuid") or "").strip()

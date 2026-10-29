@@ -309,7 +309,6 @@ class TolinoClient:
         # Ein Lesevorgang der sync-data reicht, bis etwas geschrieben wird:
         # Lese-Status und Sammlungen brauchen dieselben Daten.
         self._sync_cache = None
-        self.inventory_ok = True
 
     def login(self):
         # A valid access token avoids spending the rotating refresh token twice.
@@ -555,11 +554,19 @@ class TolinoClient:
             return decode(raw)
 
     def inventory(self):
-        """Read the PublicationInventory form used by Tolino's API."""
-        records, problems, self.inventory_ok = parse_inventory(
+        """Read the PublicationInventory form used by Tolino's API.
+
+        Eine unbekannte Hülle ist ein Fehler, keine leere Bibliothek: sonst
+        sähe der Vergleich eine Bibliothek ohne Bücher und plante Duplikate.
+        """
+        records, problems, ok = parse_inventory(
             self._request(BASE_URL + "/inventory/delta?strip=true"))
         if problems:
             log_warning("Tolino-Inventar: %s" % "; ".join(problems))
+        if not ok:
+            raise TolinoApiError(
+                "Die Cloud-Antwort enthält kein PublicationInventory.",
+                code="N02")
         return records
 
     @staticmethod

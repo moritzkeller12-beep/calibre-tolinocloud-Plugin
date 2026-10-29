@@ -186,6 +186,18 @@ def create_custom_columns(database, labels=None):
     return created
 
 
+def column_state(database):
+    """Welche tolino-Spalten es gibt -- einmal je Lauf gefragt.
+
+    Ein Dict statt zweier Flags und wiederholter Datenbankabfragen: der
+    Lauf reicht es an den Worker weiter und schreibt nur in vorhandene
+    Spalten.
+    """
+    return {"id": custom_column_available(database),
+            "read": read_column_available(database),
+            "ignore": ignore_column_available(database)}
+
+
 def read_column_available(database):
     """True, wenn Calibre die Ja/Nein-Spalte ``#tolino_read`` kennt.
 
@@ -193,6 +205,26 @@ def read_column_available(database):
     Zahlenfeld würde ``True``/``False`` als fremden Wert speichern.
     """
     return bool_column_available(database, TOLINO_READ_COLUMN)
+
+
+def update_read_status(database, updates, enabled=True):
+    """Bestätigten Cloud-Lesestatus in ``#tolino_read`` spiegeln.
+
+    Die Spalte bleibt informativ: geschrieben wird nur, was tolino nach einem
+    Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung.
+    """
+    if not enabled or not updates or not read_column_available(database):
+        return 0
+    api = database.new_api
+    values = {}
+    for book_id, finished in updates:
+        if book_id is None or not api.has_id(book_id):
+            continue
+        values[book_id] = bool(finished)
+    if not values:
+        return 0
+    api.set_field(TOLINO_READ_COLUMN, values)
+    return len(values)
 
 
 def update_tolino_ids(database, updates, enabled=True, account_name=None):

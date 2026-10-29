@@ -124,21 +124,73 @@ def _same_comparison_fields(metadata, remote):
     return True
 
 
+class ReadState(dict):
+    """Lesestatus einer Vergleichszeile.
+
+    Ein Typ statt vier loser Schlüssel: ``known`` (Cloud-Antwort lesbar?),
+    ``cloud`` (Stand in tolino), ``chosen`` (Auswahl im Fenster) und
+    ``local`` (Calibre-Spalte, reine Anzeige). Als Dict bleiben die alten
+    Schlüssel lesbar, damit gespeicherte Zeilen und Tests weiterlaufen.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, known=True, cloud=False, chosen=None, local=None):
+        super().__init__(
+            read_known=bool(known),
+            read_in_cloud=bool(cloud),
+            read=bool(cloud) if chosen is None else bool(chosen),
+            read_local=local)
+
+    @classmethod
+    def from_row(cls, row):
+        """Aus einer Zeile lesen -- egal ob schon typisiert oder als Dict."""
+        state = row.get("read")
+        if isinstance(state, cls):
+            return state
+        return cls(known=row.get("read_known", True) is not False,
+                   cloud=row.get("read_in_cloud"),
+                   chosen=row.get("read"),
+                   local=row.get("read_local"))
+
+    known = property(lambda self: bool(self["read_known"]))
+    cloud = property(lambda self: bool(self["read_in_cloud"]))
+
+    def _get_chosen(self):
+        return bool(self["read"])
+
+    def _set_chosen(self, value):
+        self["read"] = bool(value)
+
+    chosen = property(_get_chosen, _set_chosen)
+
+    def _get_local(self):
+        return self["read_local"]
+
+    def _set_local(self, value):
+        self["read_local"] = value
+
+    local = property(_get_local, _set_local)
+
+    @property
+    def changed(self):
+        """Übertragen wird nur eine Änderung -- und nur bei bekanntem Stand."""
+        return self.known and self.chosen != self.cloud
+
+    def __bool__(self):
+        return self.chosen
+
+
 def _read_flags(tolino_id, read_known, read_ids):
-    """Die vier zusammengehoerigen Lesestatus-Felder einer Zeile."""
+    """Lesestatus einer Zeile: Cloud-Stand und Auswahl in einem Objekt."""
     is_read = read_known and bool(tolino_id) and str(tolino_id) in read_ids
-    return {
-        "read_known": read_known,
-        "read_in_cloud": is_read,
-        "read": is_read,
-    }
+    return {"read": ReadState(known=read_known, cloud=is_read)}
 
 
 def _column_read_info(metadata):
-    """Return the Calibre read mark for display only; never a sync target."""
+    """Calibre-Lesestatus für die Anzeige -- nie Ziel einer Übertragung."""
     local = metadata.get("calibre_read")
-    return {"read_column": True,
-            "read_local": None if local is None else bool(local)}
+    return None if local is None else bool(local)
 
 
 class _RemoteIndex:
@@ -358,7 +410,8 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                                               file_changed)),
     }
     if read_column:
-        row.update(_column_read_info(metadata))
+        row["read_column"] = True
+        row["read"].local = _column_read_info(metadata)
     return row
 
 

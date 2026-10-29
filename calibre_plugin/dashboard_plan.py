@@ -43,10 +43,10 @@ def local_metadata(dialog):
             "last_modified": str(_metadata_value(item, "last_modified")),
             "tolino_id": (metadata_tolino_id(
                 item, getattr(dialog, "account_name", ""))
-                          if dialog.sync_column_enabled else ""),
+                          if (dialog.columns or {}).get("id") else ""),
             "series": str(_metadata_value(item, "series") or "").strip(),
         }
-        if getattr(dialog, "read_column_enabled", False):
+        if (dialog.columns or {}).get("read"):
             metadata[book_id]["calibre_read"] = bool_column_value(
                 item, TOLINO_READ_COLUMN)
     values = dialog.values()
@@ -127,8 +127,7 @@ def plan_actions(dialog, settings, metadata, state, selection):
         "series_map": series_map,
         "collections": len(plan_collection_updates(series_map, state)),
         "skipped_uploads": skipped_uploads,
-        "selected_read": selection["read"],
-        "selected_unread": selection["unread"],
+        "read_changes": selection["read_changes"],
         "titles": titles,
         "selected_without_action": gaps,
     }
@@ -188,32 +187,50 @@ def upload_jobs(dialog, metadata, uploads):
     return jobs, skipped_uploads
 
 
+def plan_counts(preparation, uploads):
+    """Zahlen des Laufs -- eine Regel für Plan, Text und Fortschritt."""
+    changes = preparation.get("read_changes") or ()
+    marked = sum(1 for _tolino, _book, finished in changes if finished)
+    unmarked = len(changes) - marked
+    counts = {
+        "uploads": int(uploads),
+        "removals": len(preparation.get("removals") or ()),
+        "metadata": len(preparation.get("meta_updates") or ()),
+        "collections": int(preparation.get("collections") or 0),
+        "read": marked,
+        "unread": unmarked,
+    }
+    # Lesestatus kostet je Richtung einen Schritt, nicht je Buch.
+    counts["steps"] = (counts["uploads"] + counts["removals"]
+                       + counts["metadata"] + counts["collections"]
+                       + (1 if marked else 0) + (1 if unmarked else 0))
+    return counts
+
+
 def planned_actions(preparation, uploads):
-    return (int(uploads) + len(preparation["removals"])
-            + len(preparation.get("meta_updates") or ())
-            + int(preparation.get("collections") or 0)
-            + (1 if preparation.get("selected_read") else 0)
-            + (1 if preparation.get("selected_unread") else 0))
+    """Zahl der Schritte, die der Lauf abarbeitet."""
+    return plan_counts(preparation, uploads)["steps"]
 
 
 def plan_text(preparation, uploads):
     """Summarize concrete actions before starting the worker."""
+    counts = plan_counts(preparation, uploads)
     parts = []
-    if uploads:
-        parts.append("%d %s" % (uploads, plural(uploads, "Upload", "Uploads")))
-    if preparation["removals"]:
-        count = len(preparation["removals"])
-        parts.append("%d %s" % (count, plural(count, "Löschung", "Löschungen")))
-    if preparation.get("meta_updates"):
-        count = len(preparation["meta_updates"])
-        parts.append("%d Metadaten" % count)
-    collections = int(preparation.get("collections") or 0)
-    if collections:
-        parts.append("%d Sammlungen" % collections)
-    if preparation.get("selected_read"):
-        parts.append("%d gelesen" % len(preparation["selected_read"]))
-    if preparation.get("selected_unread"):
-        parts.append("%d ungelesen" % len(preparation["selected_unread"]))
+    if counts["uploads"]:
+        parts.append("%d %s" % (counts["uploads"],
+                                plural(counts["uploads"], "Upload", "Uploads")))
+    if counts["removals"]:
+        parts.append("%d %s" % (counts["removals"],
+                                plural(counts["removals"], "Löschung",
+                                       "Löschungen")))
+    if counts["metadata"]:
+        parts.append("%d Metadaten" % counts["metadata"])
+    if counts["collections"]:
+        parts.append("%d Sammlungen" % counts["collections"])
+    if counts["read"]:
+        parts.append("%d gelesen" % counts["read"])
+    if counts["unread"]:
+        parts.append("%d ungelesen" % counts["unread"])
     return ("Läuft: %s." % ", ".join(parts)
             if parts else "Läuft …")
 

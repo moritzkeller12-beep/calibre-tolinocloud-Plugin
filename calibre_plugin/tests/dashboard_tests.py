@@ -199,8 +199,8 @@ class ColumnSetupButtonTests(unittest.TestCase):
         cls = ui_module.dashboard.SyncDashboard
         dashboard = type("Dashboard", (), {})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = False
-        dashboard.read_column_enabled = False
+        dashboard.columns = {"id": False}
+        dashboard.columns = {"id": False, "read": False}
         dashboard.update_status = lambda: calls.append("status")
         for name in ("create_columns", "_refresh_column_flags"):
             setattr(dashboard, name, getattr(cls, name).__get__(dashboard))
@@ -218,10 +218,9 @@ class ColumnSetupButtonTests(unittest.TestCase):
 
         with patch("calibre_plugin.ui_dashboard.create_custom_columns",
                    fake_create), \
-             patch("calibre_plugin.ui_dashboard.custom_column_available",
-                   lambda _db: True), \
-             patch("calibre_plugin.ui_dashboard.read_column_available",
-                   lambda _db: True), \
+             patch("calibre_plugin.ui_dashboard.column_state",
+                   lambda _db: {"id": True, "read": True,
+                                "ignore": True}), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             dashboard.create_columns("tolino_ignore")
@@ -229,8 +228,8 @@ class ColumnSetupButtonTests(unittest.TestCase):
         self.assertEqual([["tolino_ignore"]], seen)
         self.assertIn("#tolino_ignore", boxes[0][2])
         self.assertIn("neu starten", boxes[0][2])
-        self.assertTrue(dashboard.sync_column_enabled)
-        self.assertTrue(dashboard.read_column_enabled)
+        self.assertTrue(dashboard.columns.get("id"))
+        self.assertTrue(dashboard.columns.get("read"))
         self.assertEqual(["status"], calls)
 
     def test_an_existing_column_says_so_and_changes_nothing(self):
@@ -246,7 +245,7 @@ class ColumnSetupButtonTests(unittest.TestCase):
         self.assertIn("schon vorhanden", boxes[0][2])
         self.assertIn("#tolino_read", boxes[0][2])
         self.assertEqual([], calls)
-        self.assertFalse(dashboard.read_column_enabled)
+        self.assertFalse(dashboard.columns.get("read"))
 
     def test_a_refused_creation_is_reported_instead_of_crashing(self):
         from unittest.mock import patch

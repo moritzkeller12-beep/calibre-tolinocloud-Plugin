@@ -16,9 +16,9 @@ from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      load_state, save_account, save_credentials,
                      save_settings, set_active_account, settings)
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
-                      create_custom_columns, custom_column_available,
-                      ignore_column_available, read_column_available,
-                      update_tolino_ids)
+                      create_custom_columns, column_state,
+                      ignore_column_available,
+                      update_read_status, update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
@@ -86,12 +86,17 @@ def _running_text(dialog):
 
 
 def _persist_sync_result(dialog, state, updates):
-    """Sync-Zustand und Tolino-IDs sichern; Lesestatusspalte bleibt lesend."""
+    """Sync-Zustand, Tolino-IDs und bestätigten Lesestatus sichern."""
     _persist_run(dialog, state)
-    if dialog.sync_column_enabled:
+    if dialog.columns.get("id"):
         update_tolino_ids(
             dialog.gui.current_db, updates, enabled=True,
             account_name=_worker_account_name(dialog))
+    if dialog.columns.get("read"):
+        worker = getattr(dialog, "worker", None)
+        update_read_status(
+            dialog.gui.current_db,
+            list(getattr(worker, "read_updates", ()) or ()))
 
 
 def _persist_run(dialog, state):
@@ -138,8 +143,8 @@ class SyncDashboard(QDialog):
         self.login_worker = None
         self.prepare_thread = None
         self.prepare_worker = None
-        self.sync_column_enabled = False
-        self.read_column_enabled = False
+        # Welche tolino-Spalten die Bibliothek hat (id/read/ignore).
+        self.columns = {}
         self.account_name = ""
         self.setWindowTitle("tolino Cloud Sync")
         self.setMinimumWidth(560)
@@ -300,8 +305,7 @@ class SyncDashboard(QDialog):
         try:
             # Die Spalte selbst entscheidet -- frueher konnte eine
             # Einstellung sie zusaetzlich abschalten.
-            self.sync_column_enabled = custom_column_available(database)
-            self.read_column_enabled = read_column_available(database)
+            self.columns = column_state(database)
         except Exception as exc:
             log_warning("Spaltenstatus konnte nicht gelesen werden: %s"
                         % sanitize_error(exc))
@@ -727,10 +731,8 @@ class SyncDashboard(QDialog):
                 status.setText("Nicht angemeldet.")
             return
         self._save_visible_account(settings)
-        self.sync_column_enabled = custom_column_available(self.gui.current_db)
-        settings["sync_column_enabled"] = self.sync_column_enabled
-        self.read_column_enabled = read_column_available(self.gui.current_db)
-        settings["read_column_enabled"] = self.read_column_enabled
+        self.columns = column_state(self.gui.current_db)
+        settings["columns"] = self.columns
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
             metadata = _dashboard_plan.local_metadata(self)
@@ -872,8 +874,7 @@ class SyncDashboard(QDialog):
         return {
             "uploads": dialog.selected_upload_ids(),
             "metadata": dialog.selected_metadata_ids(),
-            "read": dialog.selected_read_targets(),
-            "unread": dialog.selected_read_unmarks(),
+            "read_changes": dialog.selected_read_changes(),
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
 
@@ -969,9 +970,9 @@ class SyncDashboard(QDialog):
         worker = SyncWorker(settings, jobs, preparation["removals"],
                             preparation["meta_updates"],
                             preparation["series_map"],
-                            preparation["selected_read"],
-                            preparation["selected_unread"],
-                            titles=preparation.get("titles"))
+                            read_changes=preparation.get("read_changes"),
+                            titles=preparation.get("titles"),
+                            state=state)
         worker.progress.connect(self.progress_changed)
         worker.completed.connect(self.sync_completed)
         worker.failed.connect(self.sync_failed)

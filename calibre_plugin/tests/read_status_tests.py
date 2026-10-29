@@ -3,7 +3,13 @@ import unittest
 from ._support import compare_inventory
 from .dialogs_tests import _QtDialogTest
 from ..library import (TOLINO_READ_COLUMN, bool_column_value,
-                       read_column_available)
+                       read_column_available, update_read_status)
+
+
+def _read_ids(dialog, finished):
+    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+    return [tolino_id for tolino_id, _book, state
+            in dialog.selected_read_changes() if state is finished]
 
 
 class ReadColumnLibraryTests(unittest.TestCase):
@@ -30,6 +36,52 @@ class ReadColumnLibraryTests(unittest.TestCase):
         self.assertIsNone(bool_column_value({}, TOLINO_READ_COLUMN))
 
 
+class ReadColumnWriteBackTests(unittest.TestCase):
+    """Nach einem Lauf spiegelt sich der bestätigte Status in #tolino_read."""
+
+    @staticmethod
+    def _db(known, fields=None):
+        if fields is None:
+            fields = {TOLINO_READ_COLUMN: {"datatype": "bool"}}
+
+        class Api:
+            def __init__(self):
+                self.label = None
+                self.values = {}
+
+            @staticmethod
+            def has_id(book_id):
+                return book_id in known
+
+            def set_field(self, label, mapping):
+                self.label = label
+                self.values = dict(mapping)
+
+        api = Api()
+
+        class Db:
+            field_metadata = fields
+            new_api = api
+
+        return Db()
+
+    def test_confirmed_states_are_written_to_the_column(self):
+        db = self._db({1: None, 2: None})
+        self.assertEqual(2, update_read_status(db, [(1, False), (2, True)]))
+        self.assertEqual(TOLINO_READ_COLUMN, db.new_api.label)
+        self.assertEqual({1: False, 2: True}, db.new_api.values)
+
+    def test_unknown_books_are_skipped(self):
+        db = self._db({1: None})
+        self.assertEqual(1, update_read_status(db, [(1, True), (2, False)]))
+        self.assertEqual({1: True}, db.new_api.values)
+
+    def test_without_the_column_nothing_is_written(self):
+        db = self._db({1: None}, fields={})
+        self.assertEqual(0, update_read_status(db, [(1, False)]))
+        self.assertEqual({}, db.new_api.values)
+
+
 class ReadColumnComparisonTests(unittest.TestCase):
     INVENTORY = {"PublicationInventory": {"edata": [
         {"deliverableId": "t-1", "title": "Eins", "author": "A"},
@@ -53,7 +105,7 @@ class ReadColumnComparisonTests(unittest.TestCase):
         rows = compare_inventory(metadata, state, self.INVENTORY,
                                  ["EPUB"], read_ids=set(), read_column=True)
         by_title = {row["title"]: row for row in rows}
-        self.assertTrue(by_title["Eins"]["read_local"])
+        self.assertTrue(by_title["Eins"]["read"].local)
         self.assertFalse(by_title["Eins"]["read"])
         self.assertEqual("unchanged", by_title["Eins"]["group"])
         self.assertFalse(by_title["Zwei"]["read"])
@@ -67,7 +119,7 @@ class ReadColumnComparisonTests(unittest.TestCase):
         by_title = {row["title"]: row for row in rows}
         self.assertFalse(by_title["Eins"]["read"])
         self.assertTrue(by_title["Zwei"]["read"])
-        self.assertIsNone(by_title["Zwei"]["read_local"])
+        self.assertIsNone(by_title["Zwei"]["read"].local)
 
     def test_without_the_column_no_calibre_display_value_is_added(self):
         metadata = self._metadata((True, None))
@@ -106,8 +158,8 @@ class ReadColumnDialogTests(_QtDialogTest):
         ui_module = self._ui()
         self._messages(ui_module)
         dialog = ui_module.dialogs.InventoryDialog(self._rows())
-        self.assertEqual([], dialog.selected_read_targets())
-        self.assertEqual([], dialog.selected_read_unmarks())
+        self.assertEqual([], _read_ids(dialog, True))
+        self.assertEqual([], _read_ids(dialog, False))
         note = dialog._read_note(self._rows()[0])
         self.assertEqual("Calibre-Lesestatus: gelesen.", note)
         self.assertEqual(0, dialog.selected_work_count())
@@ -118,8 +170,8 @@ class ReadColumnDialogTests(_QtDialogTest):
         dialog = ui_module.dialogs.InventoryDialog(self._rows())
         index, cell = self._cell(dialog, "Calibre only")
         cell.setChecked(True)
-        self.assertEqual(["t-1"], dialog.selected_read_targets())
-        self.assertEqual([], dialog.selected_read_unmarks())
+        self.assertEqual(["t-1"], _read_ids(dialog, True))
+        self.assertEqual([], _read_ids(dialog, False))
         self.assertEqual(1, dialog.selected_work_count())
 
     def test_recommendations_do_not_change_read_selection_from_calibre(self):
@@ -127,8 +179,8 @@ class ReadColumnDialogTests(_QtDialogTest):
         self._messages(ui_module)
         dialog = ui_module.dialogs.InventoryDialog(self._rows())
         dialog.apply_recommended()
-        self.assertEqual([], dialog.selected_read_targets())
-        self.assertEqual([], dialog.selected_read_unmarks())
+        self.assertEqual([], _read_ids(dialog, True))
+        self.assertEqual([], _read_ids(dialog, False))
 
     def test_unknown_cloud_status_cannot_be_changed(self):
         ui_module = self._ui()
@@ -137,8 +189,8 @@ class ReadColumnDialogTests(_QtDialogTest):
                    read=True, read_in_cloud=True)
         dialog = ui_module.dialogs.InventoryDialog([row])
         self.assertFalse(dialog.read_checks[0].enabled)
-        self.assertEqual([], dialog.selected_read_targets())
-        self.assertEqual([], dialog.selected_read_unmarks())
+        self.assertEqual([], _read_ids(dialog, True))
+        self.assertEqual([], _read_ids(dialog, False))
 
 
 

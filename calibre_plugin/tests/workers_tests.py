@@ -16,6 +16,17 @@ from unittest.mock import patch
 # Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
+def _changes(read_marks=(), read_unmarks=()):
+    """Lesestatus-Änderungen als (tolino-ID, Calibre-Nummer, gelesen?)."""
+    return ([(tolino_id, None, True) for tolino_id in read_marks or ()]
+            + [(tolino_id, None, False) for tolino_id in read_unmarks or ()])
+
+
+def _read_ids(dialog, finished):
+    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+    return [tolino_id for tolino_id, _book, state
+            in dialog.selected_read_changes() if state is finished]
+
 
 class CloudDeletionWorkerTests(unittest.TestCase):
     """Der Worker führt ausdrücklich markierte Cloud-Löschungen direkt aus."""
@@ -50,7 +61,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
                  patch("calibre_plugin.ui_workers.save_account",
                        lambda *args, **kwargs: None):
                 worker = ui_module.workers.SyncWorker(
-                    settings, [], [("u-1", "t-1")], [], {}, [], [])
+                    settings, [], [("u-1", "t-1")], [], {})
                 worker.completed.connect(
                     lambda *args: emitted.update(completed=args))
                 worker.failed.connect(
@@ -99,7 +110,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                    lambda *args: credentials.append(args)):
             worker = ui_module.workers.SyncWorker(
                 settings, jobs, removals, meta_updates, series_map or {},
-                read_marks, read_unmarks)
+                _changes(read_marks, read_unmarks))
             worker.progress.connect(
                 lambda *args: emitted["progress"].append(args))
             worker.completed.connect(
@@ -651,7 +662,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.account_name = "B"
         dashboard.refresh = FakeField("tok-B")
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = True
+        dashboard.columns = {"id": True, "read": False}
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
@@ -687,7 +698,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
                                            "setText": lambda self, v: None})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = False
+        dashboard.columns = {"id": False, "read": False}
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
@@ -745,7 +756,7 @@ class PrepareWorkerTests(unittest.TestCase):
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw-A", "refresh_token": "tok-A", "state": {},
                     "preferred_formats": ["EPUB"],
-                    "sync_column_enabled": False}
+                    "columns": {"id": False}}
         payloads = []
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
              patch("calibre_plugin.config.account_by_name", lambda _name: None), \
@@ -813,13 +824,13 @@ class PrepareWorkerTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot"
                 self.hardware = "hw"
-                self.inventory_ok = False
-
             def login(self):
                 return "rot"
 
             def inventory(self):
-                return []
+                raise ui_module.workers.TolinoApiError(
+                    "Die Cloud-Antwort enthält kein PublicationInventory.",
+                    code="N02")
 
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
             worker = ui_module.workers.PrepareWorker(
@@ -840,7 +851,6 @@ class PrepareWorkerTests(unittest.TestCase):
         payloads = []
 
         class FakeClient:
-            inventory_ok = True
             refresh = "rot"
             hardware = "hw"
 
@@ -875,7 +885,6 @@ class PrepareWorkerTests(unittest.TestCase):
         payloads = []
 
         class FakeClient:
-            inventory_ok = True
             refresh = "rot"
             hardware = "hw"
 
@@ -913,7 +922,6 @@ class PrepareWorkerTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot"
                 self.hardware = "hw"
-                self.inventory_ok = True
 
             def login(self):
                 return "rot"
@@ -1412,7 +1420,6 @@ class InventorySchemaTests(unittest.TestCase):
                                                          "ebook": []}})
         records = client.inventory()
         self.assertEqual([], records)
-        self.assertTrue(client.inventory_ok)
 
     def test_confirmed_records_are_extracted(self):
         data = {"PublicationInventory": {
@@ -1452,12 +1459,12 @@ class InventorySchemaTests(unittest.TestCase):
                      {"PublicationInventory": 17}):
             with self.subTest(data=data):
                 client = self._client(data)
-                self.assertEqual([], client.inventory())
-                self.assertFalse(client.inventory_ok)
+                with self.assertRaises(TolinoApiError):
+                    client.inventory()
         # Der Grund nennt die gesehenen Felder -- nie deren Werte.
         client = self._client({"unexpected": "shape"})
-        client.inventory()
-        self.assertFalse(client.inventory_ok)
+        with self.assertRaises(TolinoApiError):
+            client.inventory()
 
     def test_a_record_without_any_id_blocks_only_the_deletion(self):
         client = self._client({"PublicationInventory": {"edata": [
@@ -1528,25 +1535,25 @@ class ReadStatusUnknownTests(unittest.TestCase):
 
     def test_failed_fetch_marks_the_status_unknown(self):
         row = self._rows(None)[0]
-        self.assertFalse(row["read_known"])
-        self.assertFalse(row["read_in_cloud"])
+        self.assertFalse(row["read"].known)
+        self.assertFalse(row["read"].cloud)
         self.assertFalse(row["read"])
 
     def test_unknown_is_not_the_same_as_nothing_read(self):
         row = self._rows(()) [0]
-        self.assertTrue(row["read_known"])
-        self.assertFalse(row["read_in_cloud"])
+        self.assertTrue(row["read"].known)
+        self.assertFalse(row["read"].cloud)
 
     def test_a_known_read_state_still_prechecks(self):
         row = self._rows({"t1"})[0]
-        self.assertTrue(row["read_known"])
-        self.assertTrue(row["read_in_cloud"])
+        self.assertTrue(row["read"].known)
+        self.assertTrue(row["read"].cloud)
 
     def test_cloud_only_rows_are_unknown_too(self):
         rows = compare_inventory(
             {}, {}, [{"id": "t9", "title": "Nur Cloud"}], ["EPUB"],
             read_ids=None)
-        self.assertFalse(rows[0]["read_known"])
+        self.assertFalse(rows[0]["read"].known)
 
     def test_prepare_worker_reports_an_unknown_read_state(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -1572,7 +1579,7 @@ class ReadStatusUnknownTests(unittest.TestCase):
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw", "refresh_token": "tok-A", "state": {},
                     "preferred_formats": ["EPUB"],
-                    "sync_column_enabled": False}
+                    "columns": {"id": False}}
         try:
             with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                  patch("calibre_plugin.ui_workers.log_warning",
@@ -1610,8 +1617,8 @@ class ReadStatusUnknownTests(unittest.TestCase):
                           dialog.table.items[(0, 7)])
             self.assertIn("Lesestatus unbekannt", dialog.note.text())
             # Nichts wird als Änderung gezählt oder zurückgeschrieben.
-            self.assertEqual([], dialog.selected_read_targets())
-            self.assertEqual([], dialog.selected_read_unmarks())
+            self.assertEqual([], _read_ids(dialog, True))
+            self.assertEqual([], _read_ids(dialog, False))
             self.assertFalse(dialog._set_row_choice(0, "read", True))
         finally:
             ui_module._restore_stubs_for_tests()

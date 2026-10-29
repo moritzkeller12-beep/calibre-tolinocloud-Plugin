@@ -157,8 +157,7 @@ class SyncPlanTests(unittest.TestCase):
                                   return_value=([], [])):
                     preparation = plan_module.plan_actions(
                         dialog, {"preferred_formats": ["EPUB"]}, metadata, {},
-                        {"uploads": {1, 2}, "metadata": set(), "read": [],
-                         "unread": [], "cloud_deletions": []})
+                        {"uploads": {1, 2}, "metadata": set(), "read_changes": [], "cloud_deletions": []})
             self.assertEqual(1, normalize.call_count)
             self.assertEqual(1, preparation["selected_without_action"]["uploads"])
             self.assertEqual(1, len(preparation["skipped_uploads"]))
@@ -253,7 +252,7 @@ class SyncPlanTests(unittest.TestCase):
 
         class Dialog:
             gui = type("Gui", (), {"current_db": Db()})()
-            sync_column_enabled = False
+            columns = {"id": False}
 
             @staticmethod
             def values():
@@ -1800,8 +1799,7 @@ class ConservativeMatchingTests(unittest.TestCase):
                 plan_actions(
                     object(), {"preferred_formats": ["EPUB"]}, metadata,
                     dict(state),
-                    {"uploads": [1, 2], "metadata": [1], "read": [],
-                     "unread": [], "cloud_deletions": []})
+                    {"uploads": [1, 2], "metadata": [1], "read_changes": [], "cloud_deletions": []})
             return [record[0] for record in seen]
 
         self.assertEqual([2], planned(True))
@@ -1963,7 +1961,7 @@ class ReadStateComparisonTests(unittest.TestCase):
     def test_matching_book_carries_the_cloud_read_state(self):
         rows = self._rows({"t-1"})
         matched = next(row for row in rows if row["book_id"] == 1)
-        self.assertTrue(matched["read_in_cloud"])
+        self.assertTrue(matched["read"].cloud)
         self.assertTrue(matched["read"])
         self.assertEqual("t-1", matched["tolino_id"])
 
@@ -1971,12 +1969,12 @@ class ReadStateComparisonTests(unittest.TestCase):
         rows = self._rows({"t-9"})
         only_cloud = next(row for row in rows if row["tolino_id"] == "t-9")
         self.assertEqual("only_tolino", only_cloud["status"])
-        self.assertTrue(only_cloud["read_in_cloud"])
+        self.assertTrue(only_cloud["read"].cloud)
         self.assertTrue(only_cloud["read"])
 
     def test_without_read_ids_nothing_is_prechecked(self):
         for row in self._rows(()):
-            self.assertFalse(row["read_in_cloud"])
+            self.assertFalse(row["read"].cloud)
             self.assertFalse(row["read"])
 
 class FileChangeIntegrityTests(unittest.TestCase):
@@ -2212,7 +2210,7 @@ class PrepareStateCopyTests(unittest.TestCase):
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw-A", "refresh_token": "tok-A", "state": stored,
                     "preferred_formats": ["EPUB"],
-                    "sync_column_enabled": False}
+                    "columns": {"id": False}}
         try:
             with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
              patch("calibre_plugin.config.account_by_name",
@@ -2300,7 +2298,7 @@ class FingerprintCommitTests(unittest.TestCase):
     @staticmethod
     def _selection(uploads=(), metadata=()):
         return {"uploads": list(uploads), "metadata": list(metadata),
-                "read": [], "unread": [], "cloud_deletions": [],
+                "read_changes": [], "cloud_deletions": [],
                 }
 
     @staticmethod
@@ -2373,7 +2371,7 @@ class FingerprintCommitTests(unittest.TestCase):
             worker = ui_module.workers.SyncWorker(
                 settings, preparation["jobs"], preparation["removals"],
                 preparation["meta_updates"], preparation["series_map"],
-                preparation["selected_read"], preparation["selected_unread"],
+                read_changes=preparation["read_changes"],
                 titles=preparation.get("titles"))
             if holder is not None:
                 holder["worker"] = worker

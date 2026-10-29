@@ -1205,7 +1205,7 @@ class SyncDataResponseShapeTests(unittest.TestCase):
                                  inventory, ["EPUB"],
                                  read_ids=client.read_ids())
         row = rows[0]
-        self.assertTrue(row["read_in_cloud"])
+        self.assertTrue(row["read"].cloud)
         self.assertTrue(row["read"])
         self.assertEqual(self.PUB, row["tolino_id"])
 

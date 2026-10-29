@@ -23,6 +23,12 @@ def _marked_rows(indexes):
                  lambda _table: list(indexes))
 
 
+def _read_ids(dialog, finished):
+    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+    return [tolino_id for tolino_id, _book, state
+            in dialog.selected_read_changes() if state is finished]
+
+
 class _QtDialogTest(unittest.TestCase):
     """Vergleichsfenster mit vollem Qt-Stub; räumt nach jedem Test auf."""
 
@@ -306,16 +312,17 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertEqual([False, False, False, True, False],
                              [row["metadata"] for row in rows])
             # Empfehlungen lassen die Leseauswahl unangetastet.
-            self.assertEqual([False] * 5, [row.get("read", False) for row in rows])
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual([False] * 5,
+                             [dialog._read_state(row).chosen for row in rows])
+            self.assertEqual([], _read_ids(dialog, True))
             # Ausdrücklich angehakt zählt sie aber -- nur mit Tolino-ID.
             dialog.read_checks[0].setChecked(True)
             dialog.read_checks[4].setChecked(True)
-            self.assertEqual(["c1", "c9"], dialog.selected_read_targets())
+            self.assertEqual(["c1", "c9"], _read_ids(dialog, True))
             dialog.clear_all_selection()
             self.assertEqual(set(), dialog.selected_upload_ids())
             self.assertEqual(set(), dialog.selected_metadata_ids())
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual([], _read_ids(dialog, True))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -485,12 +492,12 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             self.assertIn("in tolino", read_cell["Nur lokal"].tooltip)
             # Nur echte Änderungen gehen an die Cloud -- und ohne Klick
             # wird nichts ungelesen.
-            self.assertEqual([], dialog.selected_read_targets())
-            self.assertEqual([], dialog.selected_read_unmarks())
+            self.assertEqual([], _read_ids(dialog, True))
+            self.assertEqual([], _read_ids(dialog, False))
             read_cell["Ungelesen"].setChecked(True)
             read_cell["Auch ungelesen"].setChecked(True)
             self.assertEqual({"t-2", "t-3"},
-                             set(dialog.selected_read_targets()))
+                             set(_read_ids(dialog, True)))
             dialog._update_summary()
             self.assertIn("2 Lesestatus", dialog.summary.text())
         finally:
@@ -509,8 +516,8 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             read_cell = self._cells_by_title(dialog)
             self.assertTrue(read_cell["Gelesen"].isChecked())
             self.assertTrue(read_cell["Ungelesen"].isChecked())
-            self.assertEqual(["t-2"], dialog.selected_read_targets())
-            self.assertEqual([], dialog.selected_read_unmarks())
+            self.assertEqual(["t-2"], _read_ids(dialog, True))
+            self.assertEqual([], _read_ids(dialog, False))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -524,15 +531,15 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             self.assertTrue(cell.isChecked())
             cell.setChecked(False)
             self.assertFalse(cell.isChecked())
-            self.assertEqual(["t-1"], dialog.selected_read_unmarks())
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual(["t-1"], _read_ids(dialog, False))
+            self.assertEqual([], _read_ids(dialog, True))
             dialog._update_summary()
             self.assertIn("1 Lesestatus", dialog.summary.text())
             self.assertIn("Synchronisierung starten", dialog.confirm.text())
             # Und wieder an: ein Klick zurueck.
             cell.setChecked(True)
-            self.assertEqual([], dialog.selected_read_unmarks())
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual([], _read_ids(dialog, False))
+            self.assertEqual([], _read_ids(dialog, True))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -547,13 +554,13 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             cell.clicked.emit()   # in einem Klick abwaehlen
             dialog._sort_by_column(0)
             dialog._sort_by_column(0)
-            self.assertEqual(["t-1"], dialog.selected_read_unmarks())
+            self.assertEqual(["t-1"], _read_ids(dialog, False))
             rebuilt = self._cells_by_title(dialog)["Gelesen"]
             self.assertFalse(rebuilt.isChecked())
             # Ein Klick hakt sie wieder an.
             rebuilt.setChecked(True)
             rebuilt.clicked.emit()
-            self.assertEqual([], dialog.selected_read_unmarks())
+            self.assertEqual([], _read_ids(dialog, False))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -569,7 +576,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             # Das gelesene Buch hat schon seine Marke, „Nur lokal“ keine
             # Cloud-Kopie -- nur die zwei ungelesenen Cloud-Bücher bleiben.
             self.assertEqual({"t-2", "t-3"},
-                             set(dialog.selected_read_targets()))
+                             set(_read_ids(dialog, True)))
             self.assertEqual([], calls)
         finally:
             ui_module._restore_stubs_for_tests()
@@ -583,7 +590,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
                            if not row["tolino_id"]]
             dialog.table = self._marked_table(local_index)
             dialog.mark_read_for_marked_rows()
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual([], _read_ids(dialog, True))
             self.assertTrue(any("nichts geändert" in text.casefold()
                                 for text in calls))
         finally:
@@ -597,7 +604,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             dialog.table = self._marked_table([])
             dialog.mark_read_for_marked_rows()
             self.assertTrue(any("Strg" in text for text in calls), calls)
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual([], _read_ids(dialog, True))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -629,8 +636,8 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             dialog.table = self._marked_table(range(len(dialog.rows)))
             dialog.clear_read_for_marked_rows()
             # Nur das in der Cloud gelesene Buch lässt sich zurücksetzen.
-            self.assertEqual({"t-1"}, set(dialog.selected_read_unmarks()))
-            self.assertEqual([], dialog.selected_read_targets())
+            self.assertEqual({"t-1"}, set(_read_ids(dialog, False)))
+            self.assertEqual([], _read_ids(dialog, True))
             row = next(item for item in dialog.rows
                        if item["tolino_id"] == "t-1")
             self.assertFalse(row["read"])
@@ -1110,7 +1117,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
 
     @staticmethod
     def _selection(deletions=()):
-        return {"uploads": [], "metadata": [], "read": [], "unread": [],
+        return {"uploads": [], "metadata": [], "read_changes": [],
                 "cloud_deletions": list(deletions)}
 
     def test_marked_deletion_is_planned_after_explicit_selection(self):
@@ -1162,10 +1169,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
                 def selected_metadata_ids(self):
                     return []
 
-                def selected_read_targets(self):
-                    return []
-
-                def selected_read_unmarks(self):
+                def selected_read_changes(self):
                     return []
 
                 def selected_cloud_deletions(self):

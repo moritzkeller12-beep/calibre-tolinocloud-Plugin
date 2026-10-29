@@ -133,7 +133,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         library = type("Library", (), {"new_api": type("Api", (), attrs)()})()
         dashboard.gui = type("Gui", (), {"current_db": library})()
         dashboard.values = lambda: settings
-        dashboard.sync_column_enabled = False
+        dashboard.columns = {"id": False}
         return dashboard
 
     def _books(self, library=None):

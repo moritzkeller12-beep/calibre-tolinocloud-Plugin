@@ -20,6 +20,12 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                              QVBoxLayout)
 
 
+def _read_ids(dialog, finished):
+    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+    return [tolino_id for tolino_id, _book, state
+            in dialog.selected_read_changes() if state is finished]
+
+
 class _TableWidget(QTableWidget):
     SelectRows = QAbstractItemView.SelectionBehavior.SelectRows
     ExtendedSelection = QAbstractItemView.SelectionMode.ExtendedSelection
@@ -85,17 +91,17 @@ class InventoryDialogQtTests(unittest.TestCase):
         }])
         check = dialog.read_checks[0]
         self.assertFalse(check.isChecked())
-        self.assertEqual([], dialog.selected_read_targets())
-        self.assertEqual([], dialog.selected_read_unmarks())
+        self.assertEqual([], _read_ids(dialog, True))
+        self.assertEqual([], _read_ids(dialog, False))
         self.assertIn("Calibre-Lesestatus: gelesen", dialog.table.item(0, 7).text())
 
         check.setChecked(True)
-        self.assertEqual(["cloud-1"], dialog.selected_read_targets())
-        self.assertEqual([], dialog.selected_read_unmarks())
+        self.assertEqual(["cloud-1"], _read_ids(dialog, True))
+        self.assertEqual([], _read_ids(dialog, False))
 
         check.setChecked(False)
-        self.assertEqual([], dialog.selected_read_targets())
-        self.assertEqual([], dialog.selected_read_unmarks())
+        self.assertEqual([], _read_ids(dialog, True))
+        self.assertEqual([], _read_ids(dialog, False))
         dialog.close()
 
     def test_explicit_unread_selection_changes_only_the_cloud_target(self):
@@ -106,9 +112,9 @@ class InventoryDialogQtTests(unittest.TestCase):
             "read_local": False, "read_column": True,
         }])
         dialog.read_checks[0].setChecked(False)
-        self.assertEqual([], dialog.selected_read_targets())
-        self.assertEqual(["cloud-2"], dialog.selected_read_unmarks())
-        self.assertFalse(dialog.rows[0]["read_local"])
+        self.assertEqual([], _read_ids(dialog, True))
+        self.assertEqual(["cloud-2"], _read_ids(dialog, False))
+        self.assertFalse(dialog.rows[0]["read"].local)
         dialog.close()
 
 
