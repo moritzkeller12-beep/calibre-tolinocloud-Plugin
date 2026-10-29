@@ -3,7 +3,7 @@
 Alle UI-Module beziehen Qt-Namen und geteilte Helfer von hier, damit ein
 Qt-Stub in den Tests nur an einer Stelle greift.
 """
-import os
+import functools
 import re
 
 try:
@@ -27,8 +27,8 @@ except ImportError:
 # Weitergegeben an die anderen UI-Module (und teilweise nur dort benutzt):
 # die Liste ist absichtlich kurz. Fruehere Fassungen importierten hier das
 # halbe sync-/tolino-Modul, ohne es zu benutzen.
-from .identifiers import display_title
-from .library import safe_format_path
+from .planning_values import (SyncJob, display_value, format_signatures,
+                              metadata_value, plural)
 
 # Namen, die andere UI-Module und die Tests ueber dieses Modul beziehen.
 __all__ = [
@@ -39,12 +39,14 @@ __all__ = [
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
     "QThread", "QVBoxLayout", "Qt", "SyncJob",
     "_THREADS", "_apply_busy", "_dialog_busy",
-    "_display_value", "_format_signatures", "_login_failure_guidance",
-    "button", "dialog_code", "header_mode", "start_worker",
-    "_metadata_value", "_stop_thread", "plural",
+    "_login_failure_guidance",
+    "button", "dialog_code", "display_value", "echo_mode",
+    "format_signatures", "gui_guard", "header_mode", "metadata_value",
+    "plural", "selection_behavior", "selection_mode", "sort_order",
+    "start_worker", "_stop_thread",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
     "_keep_thread_alive", "_thread_running",
-    "pyqtSignal", "safe_format_path",
+    "pyqtSignal",
     "sync_result_detail",
     "sync_result_text",
 ]
@@ -76,66 +78,40 @@ def dialog_code(name):
     return _qt_value(QDialog, name, "DialogCode")
 
 
-def _metadata_value(item, name, default=""):
-    try:
-        return getattr(item, name)
-    except AttributeError:
-        try:
-            return item.get(name, default)
-        except AttributeError:
-            return default
+def selection_behavior(name):
+    """Auswahlverhalten einer Tabelle (Qt5 unskopiert, Qt6 als Enum)."""
+    return _qt_value(QTableWidget, name, "SelectionBehavior")
 
 
-def plural(n, singular, plural_form):
-    """Return the requested German noun form for a count."""
-    return singular if int(n) == 1 else plural_form
+def selection_mode(name):
+    """Auswahlmodus einer Tabelle (Strg-/Shift-Klick)."""
+    return _qt_value(QTableWidget, name, "SelectionMode")
 
 
-def _display_value(value):
-    if isinstance(value, (list, tuple, set)):
-        return ", ".join(str(x) for x in value)
-    if isinstance(value, dict):
-        return ", ".join("%s: %s" % (key, val) for key, val in sorted(value.items()))
-    return str(value or "")
+def echo_mode(name):
+    """Anzeigemodus eines Eingabefelds (z. B. Password)."""
+    return _qt_value(QLineEdit, name, "EchoMode")
 
 
-def _format_signatures(database, book_id, formats):
-    """size:mtime je Format-Datei – das billige Content-Signal.
+def sort_order(name):
+    """Sortierreihenfolge einer Tabellenspalte."""
+    return _qt_value(Qt, name, "SortOrder")
 
-    Ersetzt eine Datei, ändern sich Grösse und mtime; eine reine
-    Metadatenänderung in Calibre berührt die Datei nicht.
+
+def gui_guard(function):
+    """GUI-Slot ausführen; ein bereits zerstörtes Fenster ist kein Fehler.
+
+    Qt wirft RuntimeError, wenn ein Slot nach dem Schliessen des Fensters
+    noch ein Widget anfasst. Das ist während des Calibre-Shutdowns normal
+    und darf keinen Traceback im Log hinterlassen.
     """
-    signatures = {}
-    for fmt in formats:
+    @functools.wraps(function)
+    def guarded(*args, **kwargs):
         try:
-            stat = os.stat(safe_format_path(database, book_id, fmt))
-        except (ValueError, OSError):
-            continue
-        signatures[fmt] = "%d:%d" % (stat.st_size, int(stat.st_mtime * 1000))
-    return signatures
-
-
-class SyncJob:
-    # `title` gehoert dazu: Fortschritt und Bericht nennen den
-    # Titel, nicht die Kennung. Der Standardwert haelt aeltere Aufrufer
-    # (und Tests) unveraendert am Laufen.
-    __slots__ = ("book_id", "book_uuid", "format_name", "old_id", "path",
-                 "cover", "title")
-
-    def __init__(self, book_id, book_uuid, format_name, old_id, path,
-                 cover, title=""):
-        self.book_id = book_id
-        self.book_uuid = book_uuid
-        self.format_name = format_name
-        self.old_id = old_id
-        self.path = path
-        # Cover-Bytes statt einer Temp-Datei: kein Aufraeumen noetig.
-        self.cover = cover
-        self.title = title
-
-    def label(self):
-        """Sichtbarer Name des Buchs: Titel, sonst «Buch <Nummer>»."""
-        return display_title(self.title, self.book_id)
+            return function(*args, **kwargs)
+        except RuntimeError:
+            return None
+    return guarded
 
 
 CANCEL_MESSAGE = "Abgebrochen."
@@ -190,6 +166,9 @@ def start_call(dialog, call, on_done, on_failed):
     thread.finished.connect(thread.deleteLater)
     _keep_thread_alive(thread)
     dialog._call_thread = thread
+    # Der Worker muss den Dialog ueberleben: ohne diese Referenz kann Qt ihn
+    # vor dem Thread-Start einsammeln, und der Dialog bleibt gesperrt.
+    dialog._call_worker = worker
     thread.start()
     return thread
 

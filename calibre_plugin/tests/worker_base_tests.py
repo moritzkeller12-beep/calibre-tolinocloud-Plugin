@@ -3,6 +3,7 @@
 from . import ui_base_tests
 import unittest
 from unittest.mock import patch
+from ..run_context import RunContext
 from ._support import start_cdp_stubs, stop_cdp_stubs
 
 
@@ -79,7 +80,8 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
         try:
             with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
                 worker = ui_module.workers.SyncWorker(
-                    settings, [], [], [], series_map, read_changes)
+                    RunContext.from_values(settings), [], [], [], series_map,
+                    read_changes, state=settings.get("state"))
                 calls["worker"] = worker
                 worker.progress.connect(
                     lambda *args: calls["progress"].append(args))
@@ -106,8 +108,8 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
                             for _done, _total, text in calls["progress"]))
         # Beide Zuordnungen sind jetzt gemerkt -- auch die schon vorhandene.
         # Diesen Zustand bekommt das Dashboard und speichert ihn.
-        self.assertEqual(["Adamsberg"], state["u1"]["collections"])
-        self.assertEqual(["Neu"], state["u2"]["collections"])
+        # Der Worker arbeitet auf einer eigenen Kopie; der Lauf liefert den
+        # fortgeschriebenen Zustand über `completed` zurück.
         emitted = calls["completed"][0]
         self.assertEqual(["Adamsberg"], emitted["u1"]["collections"])
         self.assertEqual(["Neu"], emitted["u2"]["collections"])
@@ -197,7 +199,8 @@ class SyncWorkerStateTests(unittest.TestCase):
         settings = {"partner_id": 4, "state": {"alt": {"tolino_id": "t-alt"}}}
         try:
             worker = ui_module.workers.SyncWorker(
-                settings, [], [], state={"neu": {"tolino_id": "t-neu"}})
+                RunContext.from_values(settings), [], [],
+                state={"neu": {"tolino_id": "t-neu"}})
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual({"neu": {"tolino_id": "t-neu"}}, worker.state)

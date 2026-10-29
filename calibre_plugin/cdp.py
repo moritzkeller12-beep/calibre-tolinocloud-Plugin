@@ -73,6 +73,47 @@ def _ws_parts(ws_url):
         raise ValueError("invalid DevTools websocket URL") from exc
 
 
+def _open_target(ws_url, timeout):
+    """Eine DevTools-WebSocket-Verbindung zum eigenen Fenster öffnen."""
+    port, ws_path = _ws_parts(ws_url)
+    return _Ws.connect("127.0.0.1", port, ws_path, timeout=timeout)
+
+
+def _evaluate_message(ws, expression, timeout, await_promise, message_id):
+    """Eine Runtime.evaluate-Anfrage über eine bereits offene Verbindung.
+
+    Rückgabe wie ``_evaluate_raw_in_target``; der Aufrufer besitzt die
+    Verbindung und schliesst sie. So braucht eine Reihe von Ausdrücken
+    (z. B. alle IndexedDB-Datenbanken) nur EINEN WebSocket.
+    """
+    ws.send_json({"id": message_id, "method": "Runtime.evaluate",
+                  "params": {"expression": expression,
+                             "returnByValue": True,
+                             "awaitPromise": bool(await_promise)}})
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        message = ws.recv_json(timeout=max(1, deadline - time.time()))
+        if message.get("id") != message_id:
+            continue
+        if "error" in message:
+            return {"ok": False, "value": None,
+                    "exception": str(message.get("error"))[:200]}
+        result = (message.get("result") or {}).get("result") or {}
+        details = (message.get("result") or {}).get("exceptionDetails")
+        if details:
+            text = str((details.get("exception") or {}).get("description")
+                       or details.get("text") or "page error")
+            return {"ok": False, "value": None, "exception": text[:300]}
+        if result.get("type") == "string":
+            return {"ok": True, "value": result.get("value"),
+                    "exception": None}
+        if "value" in result:
+            return {"ok": True, "value": result.get("value"),
+                    "exception": None}
+        return {"ok": False, "value": None, "exception": "no value returned"}
+    return {"ok": False, "value": None, "exception": "evaluate timeout"}
+
+
 def _evaluate_raw_in_target(ws_url, expression, timeout=10,
                             await_promise=False):
     """Like _evaluate_in_target but returns CDP's full result dict.
@@ -82,39 +123,11 @@ def _evaluate_raw_in_target(ws_url, expression, timeout=10,
     an in-page fetch whose failure text matters) use this variant.
     """
     try:
-        port, ws_path = _ws_parts(ws_url)
-        ws = _Ws.connect("127.0.0.1", port, ws_path, timeout=timeout)
+        ws = _open_target(ws_url, timeout)
     except (OSError, ValueError):
         return {"ok": False, "value": None, "exception": "connect failed"}
     try:
-        ws.send_json({"id": 1, "method": "Runtime.evaluate", "params": {
-            "expression": expression, "returnByValue": True,
-            "awaitPromise": bool(await_promise),
-        }})
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            message = ws.recv_json(timeout=max(1, deadline - time.time()))
-            if message.get("id") != 1:
-                continue
-            if "error" in message:
-                return {"ok": False, "value": None,
-                        "exception": str(message.get("error"))[:200]}
-            result = (message.get("result") or {}).get("result") or {}
-            details = (message.get("result") or {}).get("exceptionDetails")
-            if details:
-                text = str((details.get("exception") or {}).get("description")
-                           or details.get("text") or "page error")
-                return {"ok": False, "value": None,
-                        "exception": text[:300]}
-            if result.get("type") == "string":
-                return {"ok": True, "value": result.get("value"),
-                        "exception": None}
-            if "value" in result:
-                return {"ok": True, "value": result.get("value"),
-                        "exception": None}
-            return {"ok": False, "value": None,
-                    "exception": "no value returned"}
-        return {"ok": False, "value": None, "exception": "evaluate timeout"}
+        return _evaluate_message(ws, expression, timeout, await_promise, 1)
     except OSError as exc:
         return {"ok": False, "value": None, "exception": str(exc)[:200]}
     finally:
@@ -237,17 +250,33 @@ def read_idb_tokens(ws_url, db_names, timeout=10):
     scan already ran in the main grab).
     """
     merged = {"refresh": [], "hardware": []}
-    for name in db_names or []:
-        if not name or not str(name).strip():
-            continue
-        result = _evaluate_in_target(ws_url, idb_expression(name), timeout,
-                                     await_promise=True)
-        if not result:
-            continue
-        for bucket in ("refresh", "hardware"):
-            for value in result.get(bucket) or []:
-                if value not in merged[bucket]:
-                    merged[bucket].append(value)
+    names = [name for name in db_names or [] if str(name or "").strip()]
+    if not names:
+        return merged
+    try:
+        ws = _open_target(ws_url, timeout)
+    except (OSError, ValueError):
+        return merged
+    try:
+        for index, name in enumerate(names, 1):
+            result = _evaluate_message(ws, idb_expression(name), timeout,
+                                       True, index)
+            if not result.get("ok"):
+                continue
+            try:
+                parsed = json.loads(result.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            for bucket in ("refresh", "hardware"):
+                for value in parsed.get(bucket) or ():
+                    if value not in merged[bucket]:
+                        merged[bucket].append(value)
+    except OSError:
+        return merged
+    finally:
+        ws.close()
     return merged
 
 

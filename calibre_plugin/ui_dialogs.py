@@ -3,8 +3,10 @@ import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QHBoxLayout, QLabel, QMessageBox,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, Qt, _set_enabled, header_mode, plural,
+                        QVBoxLayout, _set_enabled, header_mode,
+                        selection_behavior, selection_mode, sort_order,
                         start_call)
+from .planning_values import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import (ReadState, comparison_group, comparison_sort_key,
                          sort_comparison_rows)
@@ -232,12 +234,10 @@ class InventoryDialog(QDialog):
         """Tabelle samt Kopfzeilen-Tooltips und Sortierung aufbauen."""
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionBehavior(selection_behavior("SelectRows"))
         # Strg-/Shift-Klick und Strg+A werden in Tooltips und Menue
-        # versprochen -- ohne ExtendedSelection waere das falsch.
-        selection_mode = getattr(QTableWidget, "ExtendedSelection", None)
-        if selection_mode is not None:
-            self.table.setSelectionMode(selection_mode)
+        # versprochen -- Qt6 kennt den Modus nur als skopiertes Enum.
+        self.table.setSelectionMode(selection_mode("ExtendedSelection"))
         header_tooltips = (
             "Buchdatei in die Cloud hochladen.",
             "Titel, Autor und ISBN ohne Upload aktualisieren.",
@@ -262,7 +262,7 @@ class InventoryDialog(QDialog):
         self._sort_descending = False
         table_header = self.table.horizontalHeader()
         table_header.setSortIndicatorShown(True)
-        table_header.setSortIndicator(0, Qt.AscendingOrder)
+        table_header.setSortIndicator(0, sort_order("AscendingOrder"))
         table_header.sectionClicked.connect(self._sort_by_column)
         self._rebuild_table(self.rows)
         layout.addWidget(self.table)
@@ -453,17 +453,19 @@ class InventoryDialog(QDialog):
                 if row.get("delete_cloud") and row.get("tolino_id")
                 and not row.get("ignored")]
 
+    def _selected_book_ids(self, key):
+        """Bücher, deren Aktion ``key`` (upload/metadata) gewählt ist."""
+        return {row["book_id"] for row in self.rows
+                if row.get(key) and not row.get("ignored")
+                and row.get("book_id") is not None}
+
     def selected_upload_ids(self):
         """Bücher, deren Datei hochgeladen werden soll."""
-        return {row["book_id"] for row in self.rows
-                if row.get("upload") and not row.get("ignored")
-                and row.get("book_id") is not None}
+        return self._selected_book_ids("upload")
 
     def selected_metadata_ids(self):
         """Bücher, deren Cloud-Metadaten aktualisiert werden sollen."""
-        return {row["book_id"] for row in self.rows
-                if row.get("metadata") and not row.get("ignored")
-                and row.get("book_id") is not None}
+        return self._selected_book_ids("metadata")
 
     def selected_read_changes(self):
         """(tolino-ID, Calibre-Nummer, gelesen?) der offenen Änderungen.
@@ -620,7 +622,10 @@ class InventoryDialog(QDialog):
         if row.get("delete_cloud") or row.get("ignored"):
             return False
         if key == "upload":
-            return row.get("book_id") is not None
+            # Ohne Upload-Format ist das Kaestchen gesperrt -- eine
+            # Sammelaktion darf es deshalb auch nicht einschalten.
+            return (row.get("book_id") is not None
+                    and row.get("has_preferred_format", True))
         if key == "metadata":
             return row.get("book_id") is not None and bool(row.get("tolino_id"))
         if key == "read":
@@ -663,9 +668,8 @@ class InventoryDialog(QDialog):
         ordered = sorted(self.rows, key=self._SORT_KEYS[column],
                          reverse=self._sort_descending)
         self.table.horizontalHeader().setSortIndicator(
-            column,
-            Qt.DescendingOrder if self._sort_descending
-            else Qt.AscendingOrder)
+            column, sort_order("DescendingOrder" if self._sort_descending
+                               else "AscendingOrder"))
         self._rebuild_table(ordered)
 
     def _action_check_specs(self, row):
@@ -727,7 +731,7 @@ class InventoryDialog(QDialog):
     def _row_display_values(self, row, has_book, in_cloud):
         """Render explanation and the non-action cells for one comparison row."""
         explanation = str(row.get("explanation", "") or "")
-        if in_cloud and not ReadState.from_row(row).known:
+        if in_cloud and not self._read_state(row).known:
             explanation = (explanation + " Lesestatus unbekannt.").strip()
         elif in_cloud and has_book and row.get("read_column"):
             note = self._read_note(row)
@@ -745,33 +749,37 @@ class InventoryDialog(QDialog):
     def _rebuild_table(self, rows):
         """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen."""
         self.table.setUpdatesEnabled(False)
-        # Zeilen sind die einzige Quelle -- auch wenn ein Aufrufer oder Test
-        # sie als rohes Dict übergibt.
-        self.rows = [dict(row, read=ReadState.from_row(row)) for row in rows]
-        self.checks = []
-        self.meta_checks = []
-        self.read_checks = []
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(self.rows))
-        for row_index, row in enumerate(self.rows):
-            has_book = row.get("book_id") is not None
-            in_cloud = bool(row.get("tolino_id"))
-            self._build_action_checks(row_index, row)
-            values = self._row_display_values(row, has_book, in_cloud)
-            for column, value in enumerate(values, 3):
-                self.table.setItem(
-                    row_index, column, QTableWidgetItem(str(value or "")))
-        self.table.resizeColumnsToContents()
-        self._size_columns()
-        self._apply_technical_visibility()
-        self._apply_group_filter()
-        self.table.setUpdatesEnabled(True)
+        try:
+            # Zeilen sind die einzige Quelle -- auch wenn ein Aufrufer oder
+            # Test sie als rohes Dict übergibt.
+            self.rows = [dict(row, read=ReadState.from_row(row))
+                         for row in rows]
+            self.checks = []
+            self.meta_checks = []
+            self.read_checks = []
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(self.rows))
+            for row_index, row in enumerate(self.rows):
+                has_book = row.get("book_id") is not None
+                in_cloud = bool(row.get("tolino_id"))
+                self._build_action_checks(row_index, row)
+                values = self._row_display_values(row, has_book, in_cloud)
+                for column, value in enumerate(values, 3):
+                    self.table.setItem(
+                        row_index, column, QTableWidgetItem(str(value or "")))
+            self.table.resizeColumnsToContents()
+            self._size_columns()
+            self._apply_technical_visibility()
+            self._apply_group_filter()
+        finally:
+            # Auch ein Fehler beim Aufbau darf die Tabelle nicht dauerhaft
+            # unsichtbar lassen (setUpdatesEnabled bleibt sonst aus).
+            self.table.setUpdatesEnabled(True)
         self._update_summary()
 
-    @staticmethod
-    def _read_note(row):
+    def _read_note(self, row):
         """Informative Calibre-Spaltenanzeige ohne Einfluss auf Auswahl."""
-        local = ReadState.from_row(row).local
+        local = self._read_state(row).local
         if local is None:
             return "Calibre-Lesestatus: leer."
         return "Calibre-Lesestatus: %s." % (
@@ -801,15 +809,48 @@ class InventoryDialog(QDialog):
             visible = selected is None or row.get("group") == selected
             self.table.setRowHidden(index, not visible)
 
+    def _selection_counts(self):
+        """Alle Zahlen der Zusammenfassung in EINEM Durchlauf über die Zeilen.
+
+        Frueher zaehlten vier Methoden dieselben Zeilen je sechsmal -- bei
+        jedem Klick und nach jedem Neuaufbau.
+        """
+        uploads, metadata = set(), set()
+        marked_read = marked_unread = deletions = undecided = 0
+        review_groups = ("review", "duplicate_tolino", "not_matchable")
+        for row in self.rows:
+            if row.get("group") in review_groups:
+                undecided += 1
+            if row.get("ignored"):
+                continue
+            if row.get("delete_cloud") and row.get("tolino_id"):
+                deletions += 1
+            book_id = row.get("book_id")
+            if book_id is not None and row.get("upload"):
+                uploads.add(book_id)
+            if book_id is not None and row.get("metadata"):
+                metadata.add(book_id)
+            if not row.get("tolino_id") or row.get("delete_cloud"):
+                continue
+            state = self._read_state(row)
+            if not state.changed:
+                continue
+            if state.chosen:
+                marked_read += 1
+            else:
+                marked_unread += 1
+        return {"uploads": len(uploads), "metadata": len(metadata),
+                "read": marked_read, "unread": marked_unread,
+                "deletions": deletions, "undecided": undecided}
+
     def _update_summary(self, *_args):
         """Kurzzeile: wie viele Aktionen gerade ausgewählt sind."""
-        uploads = len(self.selected_upload_ids())
-        metadata = len(self.selected_metadata_ids())
-        read_changes = self.selected_read_changes()
-        marked_read = sum(1 for _tolino, _book, finished in read_changes
-                          if finished)
-        marked_unread = len(read_changes) - marked_read
-        deletions = len(self.selected_cloud_deletions())
+        counts = self._selection_counts()
+        uploads = counts["uploads"]
+        metadata = counts["metadata"]
+        marked_read = counts["read"]
+        marked_unread = counts["unread"]
+        deletions = counts["deletions"]
         changes = marked_read + marked_unread
         summary = getattr(self, "summary", None)
         if summary is not None:
@@ -824,7 +865,7 @@ class InventoryDialog(QDialog):
             if deletions:
                 summary_text += " · %d %s" % (
                     deletions, plural(deletions, "Löschung", "Löschungen"))
-            undecided = self._undecided_count()
+            undecided = counts["undecided"]
             if undecided:
                 summary_text += (
                     " · %d %s unklar («Zu prüfen», nicht vorausgewählt)"

@@ -1,9 +1,11 @@
 """Hintergrund-Worker für Vorbereitung, Synchronisierung und Anmeldung."""
 import copy
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
-                        OP_SUCCEEDED, QObject, plural, pyqtSignal)
+                        OP_SUCCEEDED, QObject, pyqtSignal)
+from .planning_values import plural
 from .token_vault import make_client
-from .config import CredentialStore, save_account
+from .config import (CredentialStore, clear_state_journal, journal_state,
+                     merge_state_journal, save_account)
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
@@ -19,17 +21,17 @@ class SyncWorker(QObject):
     completed = pyqtSignal(object, object)
     failed = pyqtSignal(str)
 
-    def __init__(self, settings, jobs, removals, meta_updates=None,
+    def __init__(self, context, jobs, removals, meta_updates=None,
                  series_map=None, read_changes=None, titles=None,
-                 state=None):
+                 metadata=None, state=None):
         QObject.__init__(self)
-        # Unveraenderlicher Kontokontext: Jede Persistenz (Tokenrotation,
-        # Zustand, tolino-ID) gehoert zu dem Konto dieses Laufs.
-        self.settings = dict(settings)
-        self.account_name = str(self.settings.get("account_name") or "")
-        # Der Store aktualisiert denselben Snapshot, den der Lauf verwendet,
-        # und speichert unter dem beim Start erfassten Kontonamen.
-        self.store = CredentialStore(self.settings, self.account_name)
+        # Eigene Kopie: Jede Persistenz (Tokenrotation, Zustand, tolino-ID)
+        # gehoert zu dem beim Start erfassten Konto dieses Laufs.
+        self.context = context.clone()
+        self.account_name = self.context.account_name
+        # Der Store aktualisiert denselben Snapshot, den der Lauf verwendet.
+        self.store = CredentialStore(self.context.credentials,
+                                     self.account_name)
         self.jobs = list(jobs or ())
         self.removals = list(removals or ())
         self.meta_updates = list(meta_updates or ())
@@ -52,18 +54,33 @@ class SyncWorker(QObject):
                        if value}
         self.metadata_by_uuid = {
             str(item["uuid"]): item
-            for item in (self.settings.get("metadata") or {}).values()
+            for item in (metadata or {}).values()
             if isinstance(item, dict) and item.get("uuid")
         }
         self.cancelled = False
         # Eine private Kopie je Lauf: Uploads und Löschungen schreiben in
         # dasselbe Objekt, das `_persist_state` sichert.
-        self.state = (copy.deepcopy(state) if isinstance(state, dict)
-                      else load_state(self.settings.get("state")))
+        self.state = copy.deepcopy(state) if isinstance(state, dict) else {}
+        # Ein Journalrest eines abgebrochenen Laufs zaehlt vor jedem
+        # Vergleich: nur so bleibt die Tolino-ID eines fertigen Uploads
+        # bekannt und wird nicht ein zweites Mal hochgeladen.
+        try:
+            merge_state_journal(self.state, self.account_name)
+        except Exception as exc:
+            log_warning("Teilstand konnte nicht geladen werden: %s"
+                        % sanitize_error(exc))
+        self._journal_dirty = False
         self.updates = []
         # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
         self.read_updates = []
         self.operations = []
+        # Fortlaufende Zählung je Status und Art: `_refresh_counts` gibt sie
+        # nur noch aus, statt bei jedem Schritt alle Operationen zu zählen
+        # (das war O(n²) ueber den ganzen Lauf).
+        self._status_counts = {OP_SUCCEEDED: 0, OP_SKIPPED: 0,
+                               OP_FAILED: 0, OP_NOT_STARTED: 0}
+        self._kind_counts = {"upload": 0, "metadata": 0, "read": 0,
+                             "unread": 0, "collection": 0, "delete": 0}
         self.outcome = {
             "uploaded": 0, "updated": 0, "deleted": 0,
             "metadata": 0, "read_marked": 0, "read_unmarked": 0,
@@ -94,25 +111,32 @@ class SyncWorker(QObject):
     def _add_operation(self, kind, label, status=OP_NOT_STARTED, **extra):
         operation = dict(extra, kind=kind, label=label, status=status)
         self.operations.append(operation)
+        self._status_counts[status] = self._status_counts.get(status, 0) + 1
         return operation
 
-    @staticmethod
-    def _finish_operation(operation, status, **extra):
-        if operation is not None:
-            operation.update(extra)
-            operation["status"] = status
+    def _finish_operation(self, operation, status, **extra):
+        """Statuswechsel zählen -- ohne erneuten Durchlauf über alles."""
+        if operation is None:
+            return
+        previous = operation.get("status")
+        operation.update(extra)
+        operation["status"] = status
+        if previous == status:
+            return
+        self._status_counts[previous] = max(
+            0, self._status_counts.get(previous, 0) - 1)
+        self._status_counts[status] = self._status_counts.get(status, 0) + 1
+        count = int(operation.get("count") or 1)
+        kind = operation.get("kind")
+        if previous == OP_SUCCEEDED:
+            self._kind_counts[kind] = max(
+                0, self._kind_counts.get(kind, 0) - count)
+        if status == OP_SUCCEEDED:
+            self._kind_counts[kind] = self._kind_counts.get(kind, 0) + count
 
     def _refresh_counts(self):
-        counts = {OP_SUCCEEDED: 0, OP_SKIPPED: 0,
-                  OP_FAILED: 0, OP_NOT_STARTED: 0}
-        kinds = {"upload": 0, "metadata": 0, "read": 0, "unread": 0,
-                 "collection": 0, "delete": 0}
-        for operation in self.operations:
-            status = operation["status"]
-            kind = operation["kind"]
-            counts[status] = counts.get(status, 0) + 1
-            if status == OP_SUCCEEDED and kind in kinds:
-                kinds[kind] += int(operation.get("count") or 1)
+        counts = self._status_counts
+        kinds = self._kind_counts
         self.outcome.update({
             "uploaded": kinds["upload"],
             "updated": kinds["metadata"] + kinds["read"] + kinds["unread"]
@@ -165,12 +189,37 @@ class SyncWorker(QObject):
         """
         return isinstance(exc, TolinoAuthError)
 
-    def _persist_state(self):
-        """Save verified partial state under the CAPTURED account only.
+    def _step(self, client, checkpoint, operation, text, action, done, total,
+              finish=None):
+        """Einen Schritt ausfuehren: Abbruch pruefen, melden, zaehlen.
 
-        Called after every irreversible remote action. If a later cover /
-        delete / metadata step fails, the tolino-ID of the finished upload is
-        already on disk and the next run does not upload a duplicate.
+        `action` laeuft genau einmal. Ein Fehler wird am Schritt gezaehlt
+        (fatale Fehler gehen weiter nach oben) und der Aufrufer entscheidet,
+        ob der Lauf weitergeht. `finish` verbucht den Erfolg mit dem Ergebnis
+        von `action`; ohne Angabe gilt der Schritt als gelungen.
+        Rueckgabe: ``(ok, Ergebnis)``.
+        """
+        checkpoint()
+        self.progress.emit(done, total, text)
+        try:
+            result = action()
+        except Exception as exc:
+            self._count_failure(operation, exc, client)
+            return False, None
+        if finish is None:
+            self._finish_operation(operation, OP_SUCCEEDED)
+        else:
+            finish(result)
+        self._refresh_counts()
+        return True, result
+
+    def _persist_state(self):
+        """Den ganzen Zustand des Kontos sichern und das Journal leeren.
+
+        Laeuft einmal je Phase und am Laufende. Die Reihenfolge ist wichtig:
+        erst der volle Schnappschuss, dann das Journal loeschen -- bricht der
+        Lauf dazwischen ab, wird der Eintrag beim naechsten Start erneut
+        angewandt und ist dann bereits enthalten.
         """
         if not self.account_name:
             return
@@ -180,6 +229,35 @@ class SyncWorker(QObject):
         except Exception as exc:
             log_warning("Teilstand konnte nicht gespeichert werden: %s"
                         % sanitize_error(exc))
+            return
+        self._journal_dirty = False
+        if not clear_state_journal(self.account_name):
+            # Beim naechsten Vollschreiben erneut versuchen; bis dahin ist
+            # das Journal harmlos, weil seine Eintraege schon gespeichert sind.
+            self._journal_dirty = True
+            log_warning("Zustandsjournal konnte nicht geleert werden.")
+
+    def _journal_state(self, book_uuid):
+        """Einen Eintrag sofort sichern, ohne das ganze JSON zu schreiben.
+
+        Eine Tolino-ID ist nach dem Upload nicht mehr rueckgaengig zu machen;
+        sie muss vor dem naechsten Schritt auf der Platte stehen. Ohne
+        Journalpfad (Tests, eingebettete Nutzung) bleibt der volle
+        Konto-Schnappschuss der sichere Weg.
+        """
+        key = str(book_uuid or "")
+        if not key or not self.account_name:
+            return
+        try:
+            written = journal_state(self.account_name,
+                                    {key: self.state.get(key)})
+        except Exception as exc:
+            written = False
+            log_warning("Teilstand konnte nicht gesichert werden: %s"
+                        % sanitize_error(exc))
+        self._journal_dirty = bool(written)
+        if not written:
+            self._persist_state()
 
     def run(self):
         self._run()
@@ -248,25 +326,28 @@ class SyncWorker(QObject):
                 operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
                 **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
             if deleted:
-                self._persist_state()
+                self._journal_state(job.book_uuid)
 
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
+        changed = False
         for book_uuid, tolino_id, operation in delete_ops:
-            checkpoint()
-            self.progress.emit(
-                done, total, "Lösche aus tolino: %s"
+            def finish(deleted):
+                self._finish_operation(
+                    operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
+                    **({} if deleted else {
+                        "reason": "nicht mehr in der Cloud"}))
+
+            ok, deleted = self._step(
+                client, checkpoint, operation,
+                "Lösche aus tolino: %s"
                 % self._label(book_uuid, None,
-                              self.titles.get(str(tolino_id), "")))
-            try:
-                deleted = self._delete_or_skip(client, tolino_id)
-            except Exception as exc:
-                self._count_failure(operation, exc, client)
+                              self.titles.get(str(tolino_id), "")),
+                lambda: self._delete_or_skip(client, tolino_id),
+                done, total, finish=finish)
+            if not ok:
                 done += 1
                 continue
-            self._finish_operation(
-                operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
-                **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
             entry = state.get(book_uuid)
             recorded = (str(entry.get("tolino_id") or "")
                         if isinstance(entry, dict) else "")
@@ -274,12 +355,14 @@ class SyncWorker(QObject):
                 if isinstance(entry, dict) and entry.get("calibre_id") is not None:
                     self.updates.append((entry.get("calibre_id"), ""))
                 state.pop(book_uuid, None)
-            self._persist_state()
+                changed = True
+            self._journal_state(book_uuid)
             done += 1
-            self._refresh_counts()
             if deleted:
                 self.progress.emit(done, total,
                                    "Erledigt: %s" % self._label(book_uuid))
+        if changed:
+            self._persist_state()
         return done
 
     def _record_read_updates(self, finished):
@@ -300,23 +383,15 @@ class SyncWorker(QObject):
         for operation, book_ids, finished, start_text, done_text in actions:
             if operation is None:
                 continue
-            if not book_ids:
-                # Nur für Uploads geplant, die nicht geklappt haben.
-                self._finish_operation(operation, OP_SKIPPED,
-                                       reason="kein Buch hochgeladen")
-                done += 1
-                continue
+            # `read_op`/`unread_op` entstehen nur bei nicht leeren Listen --
+            # eine leere Auswahl kann hier also nicht mehr auftreten.
             operation["count"] = len(book_ids)
-            checkpoint()
-            self.progress.emit(done, total, start_text)
-            try:
-                client.mark_read_many(book_ids, finished=finished)
-            except Exception as exc:
-                self._count_failure(operation, exc, client)
-            else:
-                self._finish_operation(operation, OP_SUCCEEDED)
+            ok, _result = self._step(
+                client, checkpoint, operation, start_text,
+                lambda: client.mark_read_many(book_ids, finished=finished),
+                done, total)
+            if ok:
                 self._record_read_updates(finished)
-                self._refresh_counts()
                 self.progress.emit(done, total, done_text)
             done += 1
         return done
@@ -352,24 +427,23 @@ class SyncWorker(QObject):
                 self._refresh_counts()
                 continue
 
-            self.progress.emit(done, total,
-                               "Serie in der Cloud: %s" % series)
-            try:
-                revision = client.add_to_collection(
-                    tolino_id, series, revision=revision)
-            except Exception as exc:
-                self._count_failure(operation, exc, client)
+            ok, new_revision = self._step(
+                client, checkpoint, operation,
+                "Serie in der Cloud: %s" % series,
+                lambda: client.add_to_collection(
+                    tolino_id, series, revision=revision),
+                done, total)
+            if not ok:
                 # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
                 revision = None
                 done += 1
                 continue
 
+            revision = new_revision
             known.add((tolino_id, series))
             remember_collection(self.state, book_uuid, series)
-            self._finish_operation(operation, OP_SUCCEEDED)
             changed = True
             done += 1
-            self._refresh_counts()
         if changed:
             self._persist_state()
         self.progress.emit(done, total, "Serien geprüft")
@@ -379,20 +453,16 @@ class SyncWorker(QObject):
         """Apply selected metadata patches and persist their confirmed state."""
         changed = False
         for record, operation in operations:
-            checkpoint()
-            self.progress.emit(
-                done, total,
+            ok, _result = self._step(
+                client, checkpoint, operation,
                 "Metadaten: %s" % self._label(
                     record.book_uuid, record.book_id,
-                    (record.fields or {}).get("title")))
-            try:
-                client.update_metadata(record.tolino_id, record.fields)
-            except Exception as exc:
-                self._count_failure(operation, exc, client)
+                    (record.fields or {}).get("title")),
+                lambda: client.update_metadata(record.tolino_id, record.fields),
+                done, total)
+            if not ok:
                 done += 1
                 continue
-            self._finish_operation(operation, OP_SUCCEEDED)
-            self._refresh_counts()
             entry = self.state.get(record.book_uuid)
             metadata = self.metadata_by_uuid.get(record.book_uuid)
             if isinstance(entry, dict) and metadata:
@@ -408,14 +478,13 @@ class SyncWorker(QObject):
 
     def _run_uploads(self, client, operations, checkpoint, done, total):
         """Upload selected books and preserve each successful partial result."""
+        changed = False
         for job, operation in operations:
-            checkpoint()
-            self.progress.emit(done, total, "Lade hoch: %s (%s)" %
-                               (job.label(), job.format_name))
-            try:
-                new_id = client.upload(job.path)
-            except Exception as exc:
-                self._count_failure(operation, exc, client)
+            ok, new_id = self._step(
+                client, checkpoint, operation,
+                "Lade hoch: %s (%s)" % (job.label(), job.format_name),
+                lambda: client.upload(job.path), done, total)
+            if not ok:
                 done += 1
                 self.progress.emit(done, total, "Fehlgeschlagen: %s"
                                    % job.label())
@@ -431,9 +500,10 @@ class SyncWorker(QObject):
                 # Ein Upload bestätigt die Metadaten nicht per Read-back.
                 entry.pop("meta_verified_fp", None)
             self.updates.append((job.book_id, new_id))
-            self._finish_operation(operation, OP_SUCCEEDED)
-            # Persist immediately so a later failure cannot lose this mapping.
-            self._persist_state()
+            # Kleines Journal statt des ganzen Kontos: eine spaetere Stoerung
+            # darf diese Zuordnung nicht verlieren.
+            self._journal_state(job.book_uuid)
+            changed = True
             if job.cover:
                 try:
                     client.upload_cover(new_id, job.cover,
@@ -445,8 +515,9 @@ class SyncWorker(QObject):
                     self._count_failure(cover_op, exc, client)
             self._remove_replaced_copy(client, job)
             done += 1
-            self._refresh_counts()
             self.progress.emit(done, total, "Hochgeladen: %s" % job.label())
+        if changed:
+            self._persist_state()
         return done
 
     def _run(self):
@@ -491,6 +562,8 @@ class SyncWorker(QObject):
             done = self._run_collections(
                 client, collection_ops, checkpoint, done, total)
             self._refresh_counts()
+            if self._journal_dirty:
+                self._persist_state()
             self.completed.emit(state, self.updates)
         except _SyncCancelled:
             return
@@ -520,22 +593,25 @@ class PrepareWorker(QObject):
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, settings, metadata, lock_timeout=5):
+    def __init__(self, context, metadata, state=None, lock_timeout=5):
         QObject.__init__(self)
-        self.settings = dict(settings)
+        self.context = context.clone()
         self.metadata = metadata
+        # Ausgangszustand des Kontos; der Worker kopiert ihn vor dem
+        # Vergleich, damit nichts Unbestaetigtes in den Einstellungen landet.
+        self.state = state
         # Wartezeit auf eine laufende Keep-alive-Rotation, bevor der Lauf
         # mit «Anmeldung wird gerade erneuert» abbricht.
         self.lock_timeout = lock_timeout
-        self.account_name = str(self.settings.get("account_name") or "")
+        self.account_name = self.context.account_name
         # Der Store aktualisiert denselben Snapshot, den Vergleich und Sync
         # weiterverwenden.
-        self.store = CredentialStore(self.settings, self.account_name)
-        # Der ausgetauschte Token verschwindet nach der Rotation aus
-        # settings; fuer die Redaktion alter Fehlertexte bleibt er
+        self.store = CredentialStore(self.context.credentials,
+                                     self.account_name)
+        # Der ausgetauschte Token verschwindet nach der Rotation aus dem
+        # Kontext; fuer die Redaktion alter Fehlertexte bleibt er
         # trotzdem ein Geheimnis.
-        self.initial_refresh_token = str(
-            self.settings.get("refresh_token") or "")
+        self.initial_refresh_token = self.context.refresh_token
         self.cancelled = False
 
     def cancel(self):
@@ -559,7 +635,12 @@ class PrepareWorker(QObject):
             # Vergleich schreibt tolino-IDs hinein. Ohne die Kopie landeten
             # diese Schreibvorgaenge im Speicher von PREFERENCES, bevor der
             # Lauf bestaetigt oder gespeichert wurde.
-            state = copy.deepcopy(load_state(self.settings.get("state")))
+            state = copy.deepcopy(load_state(self.state))
+            try:
+                merge_state_journal(state, self.account_name)
+            except Exception as exc:
+                log_warning("Teilstand konnte nicht geladen werden: %s"
+                            % sanitize_error(exc))
             # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
             # wenn Calibre spaeter eine echte UUID liefert.
             migrated = migrate_state_keys(self.metadata, state)
@@ -581,16 +662,15 @@ class PrepareWorker(QObject):
                 read_ids = None
                 read_known = False
                 secrets = (self.initial_refresh_token,
-                           str(self.settings.get("refresh_token") or ""))
+                           self.context.refresh_token)
                 log_warning("Lesestatus konnte nicht geladen werden: "
                             + sanitize_error(exc, secrets))
             if self._stop_requested():
                 return
             self.progress.emit("Vergleiche Bibliothek …")
-            columns = dict(self.settings.get("columns") or {})
+            columns = self.context.columns
             comparison = compare_inventory(
-                self.metadata, state, inventory,
-                self.settings.get("preferred_formats", ()),
+                self.metadata, state, inventory, self.context.preferred_formats,
                 use_metadata_ids=columns.get("id", True),
                 read_ids=read_ids,
                 read_column=bool(columns.get("read")))
@@ -605,13 +685,12 @@ class PrepareWorker(QObject):
             if self._stop_requested():
                 return
             self.ready.emit({
-                "settings": self.settings,
+                "context": self.context,
                 "metadata": self.metadata,
                 "state": state,
                 "comparison": comparison,
                 "read_status_known": read_known,
                 "hardware": client.hardware,
-                "account_name": self.account_name,
             })
         except Exception as exc:
             if self.cancelled:
@@ -619,6 +698,5 @@ class PrepareWorker(QObject):
                 return
             self.failed.emit(report_error(
                 exc, "Vorbereitung",
-                (self.initial_refresh_token,
-                 self.settings.get("refresh_token"),
+                (self.initial_refresh_token, self.context.refresh_token,
                  getattr(client, "access", None))))

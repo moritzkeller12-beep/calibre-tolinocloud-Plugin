@@ -1,9 +1,10 @@
 """Comparison planning and action summaries for the sync dashboard."""
 import os
 
-from .ui_common import (SyncJob, _display_value, _format_signatures,
-                        _metadata_value, plural)
-from .identifiers import book_uuid, state_key_for, valid_book_uuid
+from .planning_values import (SyncJob, display_value, format_signatures,
+                              metadata_value, plural)
+from .identifiers import (book_uuid, state_keys_by_book_id,
+                          valid_book_uuid)
 from .library import (TOLINO_READ_COLUMN, bool_column_value, cover_bytes,
                       image_suffix, metadata_ignored, metadata_tolino_id,
                       normalize_formats, safe_format_path)
@@ -15,57 +16,47 @@ from .tolino import log_warning
 NOTHING_TO_DO_TEXT = "Es war nichts zu übertragen."
 
 
-def local_metadata(dialog):
+def local_metadata(dialog, context, state=None):
     """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
     metadata = {}
-    state = saved_state(dialog)
+    state = load_state(state)
+    state_keys = state_keys_by_book_id(state)
     database = dialog.gui.current_db
     for book_id in database.new_api.all_book_ids():
         item = database.new_api.get_metadata(book_id)
         identifier = book_uuid(item)
         if not identifier:
-            identifier = (state_key_for(state, book_id)
+            identifier = (state_keys.get(book_id)
                           or "calibre-%s" % book_id)
-        identifiers = _metadata_value(item, "identifiers", {}) or {}
-        isbn = (_metadata_value(item, "isbn", "")
+        identifiers = metadata_value(item, "identifiers", {}) or {}
+        isbn = (metadata_value(item, "isbn", "")
                 or (identifiers.get("isbn", "")
                     if isinstance(identifiers, dict) else ""))
         metadata[book_id] = {
             "uuid": identifier,
-            "title": _metadata_value(item, "title"),
+            "title": metadata_value(item, "title"),
             # Vom Abgleich ausgenommen: gekaufte Bücher sollen nicht erneut
             # in die Cloud geladen werden.
             "ignored": metadata_ignored(item),
-            "authors": _display_value(_metadata_value(
-                item, "authors", _metadata_value(item, "author"))),
-            "isbn": _display_value(isbn),
-            "formats": _metadata_value(item, "formats"),
-            "last_modified": str(_metadata_value(item, "last_modified")),
-            "tolino_id": (metadata_tolino_id(
-                item, getattr(dialog, "account_name", ""))
-                          if (dialog.columns or {}).get("id") else ""),
-            "series": str(_metadata_value(item, "series") or "").strip(),
+            "authors": display_value(metadata_value(
+                item, "authors", metadata_value(item, "author"))),
+            "isbn": display_value(isbn),
+            "formats": metadata_value(item, "formats"),
+            "last_modified": str(metadata_value(item, "last_modified")),
+            "tolino_id": (metadata_tolino_id(item, context.account_name)
+                          if context.columns.get("id") else ""),
+            "series": str(metadata_value(item, "series") or "").strip(),
         }
-        if (dialog.columns or {}).get("read"):
+        if context.columns.get("read"):
             metadata[book_id]["calibre_read"] = bool_column_value(
                 item, TOLINO_READ_COLUMN)
-    values = dialog.values()
-    preferred_formats = normalize_formats(
-        values.get("preferred_formats", ()))
+    preferred_formats = normalize_formats(context.preferred_formats)
     for book_id, item in metadata.items():
         item["formats"] = normalize_formats(item["formats"])
         preferred = [fmt for fmt in preferred_formats if fmt in item["formats"]]
-        item["format_signatures"] = _format_signatures(
+        item["format_signatures"] = format_signatures(
             dialog.gui.current_db, book_id, preferred)
     return metadata
-
-
-def saved_state(dialog):
-    """Gespeicherter Sync-Zustand des Kontos; leer, wenn er unlesbar ist."""
-    try:
-        return load_state(dialog.values().get("state"))
-    except (AttributeError, TypeError, ValueError):
-        return {}
 
 
 def syncable_metadata(metadata):
@@ -88,9 +79,9 @@ def automatic_action_count(metadata, state):
         series_map_from_metadata(syncable_metadata(metadata)), state))
 
 
-def plan_actions(dialog, settings, metadata, state, selection):
+def plan_actions(dialog, context, metadata, state, selection):
     """Turn the confirmed selection into concrete jobs and next state."""
-    preferred = normalize_formats(settings["preferred_formats"])
+    preferred = normalize_formats(context.preferred_formats)
     # Ignorierte Bücher fallen hier endgültig heraus -- unabhängig davon,
     # was die Auswahl enthält.
     requested_uploads = syncable_book_ids(metadata, selection["uploads"])
@@ -116,7 +107,6 @@ def plan_actions(dialog, settings, metadata, state, selection):
     series_map = series_map_from_metadata(syncable_metadata(metadata))
     jobs, skipped_uploads = upload_jobs(dialog, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
-    settings["state"] = state
     gaps = selection_gaps(selection, uploads, meta_updates)
     return {
         "jobs": jobs,

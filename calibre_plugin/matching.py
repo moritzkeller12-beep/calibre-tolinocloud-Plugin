@@ -33,8 +33,19 @@ _AUTHOR_SEPARATORS = re.compile(r"[\W_]+")
 _AUTHOR_FILLER = {"and", "und", "et", "y", "with", "mit"}
 
 
-def author_tokens(value):
-    """Return stable, sorted name tokens; accepts list-like metadata too."""
+def _has_umlaut(value):
+    """True, wenn der Text einen echten Umlaut enthält (nicht «ue»)."""
+    text = str(value or "").casefold()
+    return any(character in text for character in ("ä", "ö", "ü"))
+
+
+def author_tokens(value, transliterate=True):
+    """Return stable, sorted name tokens; accepts list-like metadata too.
+
+    ``transliterate`` schaltet zusätzlich ae→a, oe→o, ue→u ein. Der Ersatz
+    ist mehrdeutig («Joe» und «Jo» ergäben beide «jo»), deshalb wird er nur
+    verglichen, wenn eine Schreibweise tatsächlich einen Umlaut enthält.
+    """
     text = str(value or "").casefold()
     for umlaut, plain in (("\u00df", "ss"), ("\u00e4", "a"), ("\u00f6", "o"),
                           ("\u00fc", "u"), ("\u0142", "l"), ("\u00f8", "o")):
@@ -42,17 +53,15 @@ def author_tokens(value):
     text = unicodedata.normalize("NFKD", text)
     text = "".join(character for character in text
                    if not unicodedata.combining(character))
-    text = text.replace("ae", "a").replace("oe", "o").replace("ue", "u")
+    if transliterate:
+        text = text.replace("ae", "a").replace("oe", "o").replace("ue", "u")
     tokens = [token for token in _AUTHOR_SEPARATORS.split(text) if token]
     return tuple(sorted({token for token in tokens
                          if token not in _AUTHOR_FILLER}))
 
 
-def authors_match(left, right):
-    """Match names across order, accent and initial/full-name differences."""
-    left_tokens, right_tokens = author_tokens(left), author_tokens(right)
-    if not left_tokens or not right_tokens:
-        return False
+def _tokens_match(left_tokens, right_tokens):
+    """Token-Vergleich: Reihenfolge, Initialen und Teilnamen."""
     if left_tokens == right_tokens:
         return True
 
@@ -72,6 +81,24 @@ def authors_match(left, right):
     return (consistent(set(left_tokens) - set(right_tokens), set(right_tokens))
             and consistent(set(right_tokens) - set(left_tokens),
                            set(left_tokens)))
+
+
+def authors_match(left, right):
+    """Match names across order, accent and initial/full-name differences.
+
+    Zuerst ohne ae/oe/ue-Ersatz («Joe» ≠ «Jo»); nur wenn eine Seite einen
+    echten Umlaut hat, wird zusätzlich die ersetzte Schreibweise verglichen
+    («Müller» = «Mueller»).
+    """
+    left_tokens = author_tokens(left, transliterate=False)
+    right_tokens = author_tokens(right, transliterate=False)
+    if not left_tokens or not right_tokens:
+        return False
+    if _tokens_match(left_tokens, right_tokens):
+        return True
+    if _has_umlaut(left) or _has_umlaut(right):
+        return _tokens_match(author_tokens(left), author_tokens(right))
+    return False
 
 
 def normalized_authors(value):

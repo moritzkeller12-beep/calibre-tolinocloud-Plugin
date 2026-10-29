@@ -11,34 +11,17 @@ if importlib.util.find_spec("PyQt6") is None:  # die CI installiert PyQt6
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
-                             QComboBox, QDialog, QFileDialog, QFormLayout,
-                             QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
-                             QLabel,
-                             QLineEdit, QMenu, QMessageBox, QProgressBar,
-                             QPushButton, QTableWidget, QTableWidgetItem,
-                             QVBoxLayout)
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                             QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+                             QHeaderView, QInputDialog, QLabel, QLineEdit,
+                             QMenu, QMessageBox, QProgressBar, QPushButton,
+                             QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 
 def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
     return [tolino_id for tolino_id, _book, state
             in dialog.selected_read_changes() if state is finished]
-
-
-class _TableWidget(QTableWidget):
-    SelectRows = QAbstractItemView.SelectionBehavior.SelectRows
-    ExtendedSelection = QAbstractItemView.SelectionMode.ExtendedSelection
-
-
-class _HeaderView(QHeaderView):
-    Stretch = QHeaderView.ResizeMode.Stretch
-    ResizeToContents = QHeaderView.ResizeMode.ResizeToContents
-
-
-class _QtCompat:
-    AscendingOrder = Qt.SortOrder.AscendingOrder
-    DescendingOrder = Qt.SortOrder.DescendingOrder
 
 
 def _install_calibre_qt_shim():
@@ -50,12 +33,12 @@ def _install_calibre_qt_shim():
         "QComboBox": QComboBox, "QDialog": QDialog,
         "QFileDialog": QFileDialog, "QFormLayout": QFormLayout,
         "QGroupBox": QGroupBox, "QHBoxLayout": QHBoxLayout,
-        "QHeaderView": _HeaderView, "QInputDialog": QInputDialog,
+        "QHeaderView": QHeaderView, "QInputDialog": QInputDialog,
         "QLabel": QLabel,
         "QLineEdit": QLineEdit, "QMenu": QMenu, "QMessageBox": QMessageBox,
         "QProgressBar": QProgressBar, "QPushButton": QPushButton,
-        "QTableWidget": _TableWidget, "QTableWidgetItem": QTableWidgetItem,
-        "QVBoxLayout": QVBoxLayout, "Qt": _QtCompat,
+        "QTableWidget": QTableWidget, "QTableWidgetItem": QTableWidgetItem,
+        "QVBoxLayout": QVBoxLayout, "Qt": Qt,
         "pyqtSignal": pyqtSignal,
     }
     for name, value in names.items():

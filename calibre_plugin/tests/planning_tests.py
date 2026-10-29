@@ -6,6 +6,8 @@ import ast
 import json
 import re
 import runpy
+import subprocess
+import sys
 import time
 import calibre_plugin.token_vault as vault_module
 import unittest
@@ -36,6 +38,7 @@ from ..matching import (author_tokens, authors_match, normalize_isbn,
                         normalize_match_text,
                         normalized_authors)
 from ..config import load_state
+from ..run_context import RunContext
 from ..partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
                         WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS,
                         WEBREADER_URL)
@@ -51,6 +54,22 @@ from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
 # Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
+
+class QtFreePlanningTests(unittest.TestCase):
+    """Die Planung ist ohne Qt-Stubs importierbar (eigener Prozess)."""
+
+    def test_dashboard_plan_imports_without_qt(self):
+        """Ein frischer Interpreter lädt dashboard_plan ohne qt.core."""
+        root = Path(__file__).resolve().parent.parent.parent
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import sys\n"
+             "import calibre_plugin.dashboard_plan\n"
+             "assert 'qt.core' not in sys.modules, 'Qt wurde geladen'\n"
+             "assert 'PyQt6' not in sys.modules, 'PyQt wurde geladen'\n"],
+            cwd=str(root), capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
 
 class SyncPlanTests(unittest.TestCase):
     def setUp(self):
@@ -142,29 +161,27 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual([], uploads)
 
     def test_upload_planner_filters_formats_without_rechecking_them(self):
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        try:
-            plan_module = ui_module.dashboard._dashboard_plan
-            metadata = {
-                1: {"uuid": "u1", "title": "EPUB verfügbar", "formats": ["EPUB"]},
-                2: {"uuid": "u2", "title": "Nur PDF", "formats": ["PDF"]},
-            }
-            dialog = type("Dialog", (), {})()
-            with patch.object(plan_module, "normalize_formats",
-                              wraps=normalize_formats) as normalize:
-                with patch.object(plan_module, "upload_jobs",
-                                  return_value=([], [])):
-                    preparation = plan_module.plan_actions(
-                        dialog, {"preferred_formats": ["EPUB"]}, metadata, {},
-                        {"uploads": {1, 2}, "metadata": set(), "read_changes": [], "cloud_deletions": []})
-            self.assertEqual(1, normalize.call_count)
-            self.assertEqual(1, preparation["selected_without_action"]["uploads"])
-            self.assertEqual(1, len(preparation["skipped_uploads"]))
-            self.assertIn("Nur PDF", preparation["skipped_uploads"][0])
-            self.assertIn("EPUB", preparation["skipped_uploads"][0])
-        finally:
-            ui_module._restore_stubs_for_tests()
+        # Planung braucht keine Qt-Stubs mehr.
+        from .. import dashboard_plan as plan_module
+        metadata = {
+            1: {"uuid": "u1", "title": "EPUB verfügbar", "formats": ["EPUB"]},
+            2: {"uuid": "u2", "title": "Nur PDF", "formats": ["PDF"]},
+        }
+        dialog = type("Dialog", (), {})()
+        with patch.object(plan_module, "normalize_formats",
+                          wraps=normalize_formats) as normalize:
+            with patch.object(plan_module, "upload_jobs",
+                              return_value=([], [])):
+                preparation = plan_module.plan_actions(
+                    dialog, RunContext(preferred_formats=("EPUB",)),
+                    metadata, {},
+                    {"uploads": {1, 2}, "metadata": set(),
+                     "read_changes": [], "cloud_deletions": []})
+        self.assertEqual(1, normalize.call_count)
+        self.assertEqual(1, preparation["selected_without_action"]["uploads"])
+        self.assertEqual(1, len(preparation["skipped_uploads"]))
+        self.assertIn("Nur PDF", preparation["skipped_uploads"][0])
+        self.assertIn("EPUB", preparation["skipped_uploads"][0])
 
     def test_selected_rows_handles_qmodelindex_and_short_values(self):
         class Index:
@@ -242,10 +259,8 @@ class SyncPlanTests(unittest.TestCase):
             safe_format_path(Database(), 2, "../EPUB")
 
     def test_local_metadata_reads_isbn_from_calibre_identifiers(self):
-        from ._support import load_ui_module
-        ui_module = load_ui_module(lambda *args, **kwargs: None)
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        local_metadata = ui_module.dashboard._dashboard_plan.local_metadata
+        # Direkter Import: dashboard_plan ist Qt-frei.
+        from ..dashboard_plan import local_metadata
 
         class Db:
             field_metadata = {}
@@ -272,14 +287,12 @@ class SyncPlanTests(unittest.TestCase):
                 return metadata
 
         Dialog.gui.current_db.new_api = Api()
-        result = local_metadata(Dialog())
+        context = RunContext.from_values(Dialog.values(), Dialog.columns)
+        result = local_metadata(Dialog(), context, {})
         self.assertEqual("9783161484100", result[1]["isbn"])
 
     def test_upload_job_skips_cover_when_cover_read_raises_os_error(self):
-        from ._support import load_ui_module
-        ui_module = load_ui_module(lambda *args, **kwargs: None)
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        dashboard_plan = ui_module.dashboard._dashboard_plan
+        from .. import dashboard_plan
         class DatabaseAPI:
             @staticmethod
             def has_id(_book_id):
@@ -640,8 +653,8 @@ class SyncPlanTests(unittest.TestCase):
         }
         rows = compare_inventory(
             metadata, {},
-            [{"id": "t1", "title": "Remote title", "authors": "Author",
-              "isbn": "9783161484100"}, {"id": "t2", "title": "Cloud only"}],
+            [{"deliverableId": "t1", "title": "Remote title", "authors": "Author",
+              "isbn": "9783161484100"}, {"deliverableId": "t2", "title": "Cloud only"}],
             ["EPUB"],
         )
         self.assertEqual("changed", rows[0]["status"])
@@ -864,7 +877,7 @@ class SyncPlanTests(unittest.TestCase):
                         "authors": "Andere", "formats": ["EPUB"]}}
         state = {}
         rows = compare_inventory(
-            metadata, state, [{"id": "t1", "title": "DER Überblick - Band 2.pdf"}],
+            metadata, state, [{"deliverableId": "t1", "title": "DER Überblick - Band 2.pdf"}],
             ["EPUB"],
         )
         self.assertEqual("review", rows[0]["status"])
@@ -885,7 +898,7 @@ class SyncPlanTests(unittest.TestCase):
         state = {}
         rows = compare_inventory(
             metadata, state,
-            [{"id": "t1", "title": "the book"}, {"id": "t2", "title": "THE BOOK"}],
+            [{"deliverableId": "t1", "title": "the book"}, {"deliverableId": "t2", "title": "THE BOOK"}],
             ["EPUB"],
         )
         self.assertEqual({"review"}, {row["status"] for row in rows})
@@ -1418,20 +1431,19 @@ class SyncPlanTests(unittest.TestCase):
         login.assert_called_once()
         self.assertEqual("tok-rotated", creds["refresh_token"])
 
-    def test_rotation_persister_writes_each_new_value_exactly_once(self):
-        """Login darf denselben Token zweimal melden; gespeichert wird einmal."""
+    def test_a_rotation_without_a_token_keeps_the_stored_login(self):
+        """Eine Antwort ohne refresh_token darf den Zugang nicht ausleeren."""
         saved = []
-        persist = vault_module.TOKEN_VAULT._callback_for_value("old", saved.append)
-        persist("new")
-        persist("new")
-        persist("newer")
-        persist(None)
-        persist("old")
-        self.assertEqual(["new", "newer", "old"], saved)
-        # Ohne Speicherfunktion bleibt die Rotation trotzdem nutzbar.
-        no_store = vault_module.TOKEN_VAULT._callback_for_value("a", None)
-        no_store("b")
-        no_store("b")
+        store = vault_module.CredentialStore(
+            {"refresh_token": "alt", "hardware_id": "hw"}, "konto")
+        with patch("calibre_plugin.config.save_credentials",
+                   lambda *args: saved.append(args)):
+            store.save_refresh(None)
+            store.save_refresh("")
+            self.assertEqual("alt", store.refresh_token)
+            store.save_refresh("neu")
+        self.assertEqual("neu", store.refresh_token)
+        self.assertEqual([("konto", "neu", "hw")], saved)
 
     def test_keepalive_refresh_skips_when_there_is_nothing_to_do(self):
         """Ohne Token und bei laufender Rotation passiert nichts."""
@@ -1758,7 +1770,7 @@ class ConservativeMatchingTests(unittest.TestCase):
         """Die gekaufte Cloud-Kopie taucht nicht zusätzlich als Prüffall auf."""
         rows = compare_inventory(
             self._metadata(ignored=True), {},
-            [{"id": "t1", "title": "Titel", "authors": "Autor"}], ["EPUB"])
+            [{"deliverableId": "t1", "title": "Titel", "authors": "Autor"}], ["EPUB"])
         self.assertEqual(1, len(rows))
         self.assertEqual("t1", rows[0]["tolino_id"])
         self.assertTrue(rows[0]["ignored"])
@@ -1797,7 +1809,8 @@ class ConservativeMatchingTests(unittest.TestCase):
                        side_effect=lambda _dialog, _metadata, uploads:
                        (seen.extend(uploads) or [], [])):
                 plan_actions(
-                    object(), {"preferred_formats": ["EPUB"]}, metadata,
+                    object(), RunContext(preferred_formats=("EPUB",)),
+                    metadata,
                     dict(state),
                     {"uploads": [1, 2], "metadata": [1], "read_changes": [], "cloud_deletions": []})
             return [record[0] for record in seen]
@@ -1834,7 +1847,7 @@ class ConservativeMatchingTests(unittest.TestCase):
     def test_same_title_different_author_is_only_a_review(self):
         rows = compare_inventory(
             self._metadata(authors="Autor A"), {},
-            [{"id": "t1", "title": "Titel", "authors": "Autor B"}], ["EPUB"])
+            [{"deliverableId": "t1", "title": "Titel", "authors": "Autor B"}], ["EPUB"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("title_only", rows[0]["match_reason"])
         self.assertNotEqual("new_in_calibre", rows[0]["status"])
@@ -1842,7 +1855,7 @@ class ConservativeMatchingTests(unittest.TestCase):
     def test_same_title_different_valid_isbn_is_review(self):
         rows = compare_inventory(
             self._metadata(authors="Autor", isbn="9783161484100"), {},
-            [{"id": "t1", "title": "Titel", "authors": "Autor",
+            [{"deliverableId": "t1", "title": "Titel", "authors": "Autor",
               "isbn": "9780306406157"}], ["EPUB"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("conflict", rows[0]["match_reason"])
@@ -1854,7 +1867,7 @@ class ConservativeMatchingTests(unittest.TestCase):
     def test_unique_title_and_author_match_identically(self):
         rows = compare_inventory(
             self._metadata(title="Der Fall", authors="Donna Leon"), {},
-            [{"id": "t1", "title": "der fall", "authors": "Donna  Leon"}],
+            [{"deliverableId": "t1", "title": "der fall", "authors": "Donna  Leon"}],
             ["EPUB"])
         self.assertEqual("identical", rows[0]["status"])
         self.assertEqual("title_author", rows[0]["match_reason"])
@@ -1863,8 +1876,8 @@ class ConservativeMatchingTests(unittest.TestCase):
     def test_duplicate_isbn_is_ambiguous(self):
         rows = compare_inventory(
             self._metadata(isbn="9783161484100"), {},
-            [{"id": "t1", "title": "A", "isbn": "9783161484100"},
-             {"id": "t2", "title": "B", "isbn": "978-3-16-148410-0"}],
+            [{"deliverableId": "t1", "title": "A", "isbn": "9783161484100"},
+             {"deliverableId": "t2", "title": "B", "isbn": "978-3-16-148410-0"}],
             ["EPUB"])
         local = rows[0]
         self.assertEqual("review", local["status"])
@@ -1877,8 +1890,8 @@ class ConservativeMatchingTests(unittest.TestCase):
         state = {"u1": {"tolino_id": "t-known"}}
         rows = compare_inventory(
             self._metadata(title="Neuer Titel", authors="Neu"), state,
-            [{"id": "t-other", "title": "Anderes"},
-             {"id": "t-known", "title": "Alter Titel", "authors": "Alt"}],
+            [{"deliverableId": "t-other", "title": "Anderes"},
+             {"deliverableId": "t-known", "title": "Alter Titel", "authors": "Alt"}],
             ["EPUB"], use_metadata_ids=False)
         self.assertEqual("t-known", rows[0]["tolino_id"])
         self.assertEqual("conflict", rows[0]["match_reason"])
@@ -1887,7 +1900,7 @@ class ConservativeMatchingTests(unittest.TestCase):
 
     def test_matching_always_uses_isbn_or_title_and_author_pair(self):
         metadata = self._metadata(title="Gleich", authors="Autor")
-        inventory = [{"id": "t1", "title": "Gleich", "authors": "Autor"}]
+        inventory = [{"deliverableId": "t1", "title": "Gleich", "authors": "Autor"}]
         rows = compare_inventory(metadata, {}, inventory, ["EPUB"])
         self.assertEqual("identical", rows[0]["status"])
         self.assertEqual("title_author", rows[0]["match_reason"])
@@ -1896,14 +1909,14 @@ class ConservativeMatchingTests(unittest.TestCase):
             title="Anders", authors="Andere", isbn="9783161484100")
         rows = compare_inventory(
             isbn_metadata, {},
-            [{"id": "t2", "title": "Titel", "isbn": "9783161484100"}],
+            [{"deliverableId": "t2", "title": "Titel", "isbn": "9783161484100"}],
             ["EPUB"])
         self.assertEqual("isbn", rows[0]["match_reason"])
 
     def test_isbn_checksum_is_required_for_isbn_matching(self):
         invalid = compare_inventory(
             self._metadata(isbn="978-1-2"), {},
-            [{"id": "t1", "title": "Anders", "authors": "Anders",
+            [{"deliverableId": "t1", "title": "Anders", "authors": "Anders",
               "isbn": "97812"}], ["EPUB"])
         self.assertNotEqual("isbn", invalid[0]["match_reason"])
         from ..comparison import is_valid_isbn
@@ -2158,7 +2171,7 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
         # statt eine zweite Cloud-Kopie anzunehmen.
         rows = compare_inventory(
             later, current,
-            [{"id": "t1", "title": "Nur PDF", "authors": "Autor"}], ["EPUB"])
+            [{"deliverableId": "t1", "title": "Nur PDF", "authors": "Autor"}], ["EPUB"])
         self.assertEqual("t1", rows[0]["tolino_id"])
         self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
@@ -2215,7 +2228,8 @@ class PrepareStateCopyTests(unittest.TestCase):
             with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
              patch("calibre_plugin.config.account_by_name",
                    return_value={}):
-                worker = ui_module.workers.PrepareWorker(settings, metadata)
+                worker = ui_module.workers.PrepareWorker(
+                    RunContext.from_values(settings), metadata, state=stored)
                 worker.ready.connect(payloads.append)
                 worker.failed.connect(payloads.append)
                 worker.run()
@@ -2332,7 +2346,8 @@ class FingerprintCommitTests(unittest.TestCase):
     def _prepare(self, ui_module, metadata, previous, selection):
         settings = self._settings(previous)
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-            self._dashboard(ui_module), settings, metadata, previous, selection)
+            self._dashboard(ui_module), RunContext.from_values(settings),
+            metadata, previous, selection)
         return settings, preparation
 
     @staticmethod
@@ -2361,7 +2376,6 @@ class FingerprintCommitTests(unittest.TestCase):
     @staticmethod
     def _run_worker(ui_module, settings, preparation, client, holder=None):
         emitted = {}
-        settings["metadata"] = preparation.get("metadata", {})
         with patch("calibre_plugin.token_vault.TolinoClient",
                    lambda *args, **kwargs: client), \
              patch("calibre_plugin.ui_workers.save_account",
@@ -2369,10 +2383,13 @@ class FingerprintCommitTests(unittest.TestCase):
              patch("calibre_plugin.config.save_credentials",
                    lambda *args, **kwargs: None):
             worker = ui_module.workers.SyncWorker(
-                settings, preparation["jobs"], preparation["removals"],
-                preparation["meta_updates"], preparation["series_map"],
+                RunContext.from_values(settings), preparation["jobs"],
+                preparation["removals"], preparation["meta_updates"],
+                preparation["series_map"],
                 read_changes=preparation["read_changes"],
-                titles=preparation.get("titles"))
+                titles=preparation.get("titles"),
+                metadata=preparation.get("metadata", {}),
+                state=settings.get("state"))
             if holder is not None:
                 holder["worker"] = worker
             worker.completed.connect(

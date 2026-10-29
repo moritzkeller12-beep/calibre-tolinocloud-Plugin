@@ -187,9 +187,6 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.section_modes[column] = mode
 
         class Table(Widget):
-            SelectRows = "SelectRows"
-            ExtendedSelection = "ExtendedSelection"
-
             def setSelectionMode(self, mode):
                 self.selection_mode = mode
 
@@ -272,8 +269,11 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def currentData(self):
                 return self.items[self.index][1] if self.items else None
 
-        class SelectRows:
-            pass
+        # Qt6-Form: nur die skopierten Enums, keine unskopierten Aliase.
+        Table.SelectionBehavior = type(
+            "SelectionBehavior", (), {"SelectRows": "SelectRows"})
+        Table.SelectionMode = type(
+            "SelectionMode", (), {"ExtendedSelection": "ExtendedSelection"})
 
         class Object:
             def __init__(self, *args, **_kwargs):
@@ -328,8 +328,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 store = instance.__dict__.setdefault("_signals", {})
                 return store.setdefault(self.name, Signal())
 
-        qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1,
-                             "SelectRows": SelectRows})
+        qt = type("Qt", (), {
+            "SortOrder": type("SortOrder", (),
+                              {"AscendingOrder": 0, "DescendingOrder": 1})})
         return {
             "Qt": qt,
             "QDialog": Dialog,

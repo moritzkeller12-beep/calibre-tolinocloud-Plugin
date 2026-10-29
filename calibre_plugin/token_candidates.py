@@ -1,5 +1,6 @@
 """Decode and normalize token candidates read from Tolino's Web Reader."""
 import base64
+import functools
 import json
 import re
 import time
@@ -167,8 +168,13 @@ def _hardware_from_reader_blob(value):
     return ""
 
 
+@functools.lru_cache(maxsize=256)
 def _unwrap_refresh_candidate(token, max_depth=3):
-    """Recover the JWT behind a wrapped, undatable candidate."""
+    """Recover the JWT behind a wrapped, undatable candidate.
+
+    Die Poll-Schleife sieht dieselben Blobs alle paar Sekunden erneut; die
+    Entschlüsselung ist rein und darf deshalb zwischengespeichert werden.
+    """
     text = str(token or "")
     if not text or _jwt_shaped(text):
         return text

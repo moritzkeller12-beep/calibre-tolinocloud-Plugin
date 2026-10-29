@@ -34,18 +34,18 @@ class SessionCheckWorker(QObject):
     invalid = pyqtSignal(str)
     busy = pyqtSignal(str)
 
-    def __init__(self, settings):
+    def __init__(self, context):
         QObject.__init__(self)
-        self.settings = settings
+        self.context = context
 
     def run(self):
-        values = self.settings
         try:
-            store = CredentialStore(values, values.get("account_name"))
+            store = CredentialStore(self.context.credentials,
+                                    self.context.account_name)
             status, detail = check_stored_login(store)
         except Exception as exc:
             self.invalid.emit(report_error(
-                exc, "Zugangsprüfung", (values["refresh_token"],)))
+                exc, "Zugangsprüfung", self.context.secrets()))
             return
         if status == "valid":
             self.valid.emit()

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from . import ui_base_tests
 from .. import config
+from ..run_context import RunContext
 from ._support import compare_inventory, start_cdp_stubs, stop_cdp_stubs
 from unittest.mock import patch
 
@@ -93,7 +94,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             # Tests pruefen die Uebergabe, nicht die Anzeige.
             def __init__(self, settings, jobs, removals, meta_updates=None,
                          series_map=None, read_changes=None,
-                         titles=None, state=None):
+                         titles=None, metadata=None, state=None):
                 self.arguments = (settings, jobs, removals, meta_updates,
                                   series_map, read_changes)
                 self.titles = titles
@@ -123,17 +124,18 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             metadata = {1: {"title": "A"}}
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "local_metadata",
-                              side_effect=lambda _dashboard:
+                              side_effect=lambda *_args:
                               (seen.append(("metadata",)) or metadata)):
                 dashboard._start_prepare_worker = (
-                    lambda given, meta: seen.append(("prepare", given, meta)))
+                    lambda *args: seen.append(("prepare",) + args))
                 dashboard.start_sync()
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(["metadata", "prepare"], [item[0] for item in seen])
-        self.assertIs(settings, seen[1][1])
+        context = seen[1][1]
+        self.assertEqual("token-1", context.refresh_token)
         self.assertIs(metadata, seen[1][2])
-        self.assertTrue(settings["columns"]["id"])
+        self.assertTrue(context.columns["id"])
 
     def test_sync_column_availability_accepts_calibre_field_metadata(self):
         ui_module = self._ui_module()
@@ -198,7 +200,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                         dashboard._start_prepare_worker = lambda *_args: None
                         dashboard.start_sync()
                     self.assertIs(expected, dashboard.columns.get("id"))
-                    self.assertIs(expected, settings["columns"]["id"])
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
@@ -225,13 +226,14 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             settings = self._settings()
             dashboard = self._dashboard(ui_module, settings)
 
-            def boom(_dashboard):
+            def boom(*_args):
                 raise RuntimeError("kaputt")
 
             dashboard._show_prepare_error = lambda exc, given: errors.append(
                 (exc, given))
             started = []
-            dashboard._start_prepare_worker = lambda given, meta: started.append(meta)
+            dashboard._start_prepare_worker = lambda *args: started.append(
+                args[1])
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "local_metadata", side_effect=boom):
                 dashboard.start_sync()
@@ -253,13 +255,12 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_thread = None
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
-            dashboard._client_for = lambda given: object()
             dashboard._confirm_comparison = (
                 lambda comp, given, client_factory=None, automatic=0: None)
             started = []
             dashboard._start_sync_worker = lambda *args: started.append(args)
             dashboard._prepare_ready({
-                "account_name": "konto", "settings": settings,
+                "context": RunContext.from_values(settings),
                 "metadata": {}, "state": {}, "comparison": [],
                 "refresh": "tok", "hardware": "hw",
             })
@@ -309,10 +310,13 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             # Offene Serien-Zuordnung: das Buch hat eine Tolino-ID und noch
             # keinen gemerkten Sammlungs-Eintrag.
             dashboard._start_sync_worker(
-                settings, preparation, {"uuid-serie": {"tolino_id": "t-serie"}})
+                RunContext.from_values(settings), preparation,
+                {"uuid-serie": {"tolino_id": "t-serie"}})
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual(settings, dashboard.worker.arguments[0])
+        passed = dashboard.worker.arguments[0]
+        self.assertEqual("token-1", passed.refresh_token)
+        self.assertEqual("hw-1", passed.hardware_id)
         self.assertEqual(jobs, dashboard.worker.arguments[1])
         self.assertEqual(["remove-1"], dashboard.worker.arguments[2])
         self.assertEqual([("uuid-1", 7)], dashboard.worker.arguments[3])
@@ -346,7 +350,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_thread = None
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
-            dashboard._client_for = lambda given: object()
             dashboard._confirm_comparison = (
                 lambda comp, given, client_factory=None, automatic=0: {
                     "uploads": [], "metadata": [], "read_changes": [],
@@ -354,24 +357,24 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 })
             started = []
             dashboard._start_sync_worker = (
-                lambda given, prep, state=None: started.append(dict(given)))
+                lambda given, prep, state=None: started.append(given))
 
             def plan(_dashboard, given, _metadata, _state, _selection):
-                self.assertNotEqual("tok-rotated", given.get("refresh_token", ""))
+                self.assertNotEqual("tok-rotated", given.refresh_token)
                 return _preparation()
 
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "plan_actions", side_effect=plan):
                 dashboard._prepare_ready({
-                    "account_name": "konto", "settings": settings,
+                    "context": RunContext.from_values(settings),
                     "metadata": {}, "state": {}, "comparison": [],
                     "refresh": "tok-rotated", "hardware": "hw-rotated",
                 })
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
-        self.assertEqual("token-1", started[0]["refresh_token"])
-        self.assertEqual("hw-rotated", started[0]["hardware_id"])
+        self.assertEqual("token-1", started[0].refresh_token)
+        self.assertEqual("hw-rotated", started[0].hardware_id)
 
     def test_skipped_uploads_are_reported_before_the_run(self):
         ui_module = self._ui_module()
@@ -538,38 +541,51 @@ class NoSilentDeadEndTests(unittest.TestCase):
         ui_module.dashboard.info_dialog = (
             lambda *args, **kwargs: infos.append(args))
         dashboard = self._planning_dashboard(ui_module)
-        dashboard._start_sync_worker(dashboard.values(), _preparation())
+        dashboard._start_sync_worker(RunContext.from_values(dashboard.values()),
+                                     _preparation())
         self.assertIsNone(dashboard.thread)
         self.assertIsNone(getattr(dashboard, "worker", None))
         self.assertEqual(1, len(infos))
         self.assertEqual("Nichts zu tun", infos[0][1])
         self.assertIn("nichts zu übertragen", infos[0][2].casefold())
 
-    def test_the_sync_worker_starts_with_the_stored_token(self):
+    def test_the_sync_worker_adopts_the_stored_token_at_login(self):
         """Zwischen Vergleichsfenster und Start kann der Keep-alive den
         Token rotiert haben. Der Worker muss den GESPEICHERTEN nehmen --
-        sonst loest er einen verbrauchten Token ein (A02)."""
+        sonst loest er einen verbrauchten Token ein (A02).
+
+        Das passiert an EINER Stelle: `make_client` ruft `freshest`, nicht
+        schon der Aufrufer des Workers.
+        """
         ui_module = self._ui_module()
         settings = dict(StartSyncOrchestrationTests._settings(),
                         account_name="konto", refresh_token="alt-token",
                         hardware_id="hw-alt")
         dashboard = self._planning_dashboard(ui_module)
+        dashboard._start_sync_worker(
+            RunContext.from_values(settings),
+            _preparation(jobs=["job-1"]))
+        self.assertEqual(1, dashboard.thread.starts)
+        passed = dashboard.worker.arguments[0]
+        # Der GUI-Snapshot wird unveraendert weitergereicht ...
+        self.assertEqual("alt-token", passed.refresh_token)
+        self.assertEqual("hw-alt", passed.hardware_id)
+        # ... und der Login des Workers uebernimmt den gespeicherten Zugang.
         with patch("calibre_plugin.config.account_by_name",
                    lambda name: {"name": "konto", "refresh_token": "neu-token",
                                  "hardware_id": "hw-neu"}):
-            dashboard._start_sync_worker(
-                settings, _preparation(jobs=["job-1"]))
-        self.assertEqual(1, dashboard.thread.starts)
-        passed = dashboard.worker.arguments[0]
-        self.assertEqual("neu-token", passed["refresh_token"])
-        self.assertEqual("hw-neu", passed["hardware_id"])
-        self.assertEqual("neu-token", settings["refresh_token"])
+            worker = ui_module.workers.SyncWorker(passed, [], [])
+            self.assertEqual("neu-token",
+                             worker.store.freshest()["refresh_token"])
+        self.assertEqual("neu-token",
+                         worker.context.credentials["refresh_token"])
+        self.assertEqual("hw-neu", worker.context.credentials["hardware_id"])
 
     def test_the_plan_is_named_before_the_run_starts(self):
         ui_module = self._ui_module()
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
-            dashboard.values(),
+            RunContext.from_values(dashboard.values()),
             _preparation(jobs=["job-1", "job-2"]))
         self.assertEqual(1, dashboard.thread.starts)
         self.assertIn("2", dashboard.progress_label.text_value)
@@ -620,7 +636,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual({1}, set(selection["uploads"]))
         self.assertEqual(set(), set(selection["metadata"]))
         preparation = dashboard_plan.plan_actions(
-            dashboard, settings, metadata, state, selection)
+            dashboard, RunContext.from_values(settings), metadata, state,
+            selection)
         self.assertEqual(1, len(preparation["jobs"]))
         self.assertEqual([], preparation["skipped_uploads"])
         self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
@@ -638,7 +655,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
         })()
         dashboard.update_status = lambda: None
         StartSyncOrchestrationTests._install_fake_qt(ui_module)
-        dashboard._start_sync_worker(settings, preparation)
+        dashboard._start_sync_worker(RunContext.from_values(settings),
+                                     preparation)
         self.assertEqual(1, dashboard.thread.starts)
         self.assertIn("Läuft: 1 Upload",
                       dashboard.progress_label.text_value)
@@ -650,7 +668,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = self._dashboard(ui_module,
                                     StartSyncOrchestrationTests._settings())
         dashboard._show_prepare_error = lambda exc, given: errors.append(exc)
-        dashboard._client_for = lambda given: object()
 
         def boom(*_args, **_kwargs):
             raise RuntimeError("Fenster kaputt")
@@ -659,7 +676,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
         started = []
         dashboard._start_sync_worker = lambda *args: started.append(args)
         dashboard._prepare_ready({
-            "account_name": "konto", "settings": dashboard.values(),
+            "context": RunContext.from_values(
+                dashboard.values(), dashboard.columns),
             "metadata": {}, "state": {}, "comparison": [],
             "refresh": "tok", "hardware": "hw",
         })
@@ -755,12 +773,12 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
         dashboard = self._dashboard(ui_module, settings)
         state = {"u1": {"tolino_id": "t-9", "calibre_id": 1}}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-            dashboard, settings, self._metadata(), state,
-            self._selection(metadata={1}))
+            dashboard, RunContext.from_values(settings), self._metadata(),
+            state, self._selection(metadata={1}))
         self.assertEqual([], preparation["jobs"])
         self.assertEqual(1, len(preparation["meta_updates"]))
         self.assertEqual("t-9", preparation["meta_updates"][0][2])
-        self.assertEqual("t-9", settings["state"]["u1"]["tolino_id"])
+
         self.assertEqual("Broken Homes", preparation["titles"]["u1"])
 
 class ReplacementConfirmationTests(unittest.TestCase):
@@ -801,7 +819,7 @@ class ReplacementConfirmationTests(unittest.TestCase):
 
         ui_module.dashboard.QMessageBox = Box
         dashboard._start_sync_worker(
-            settings, _preparation(jobs=jobs))
+            RunContext.from_values(settings), _preparation(jobs=jobs))
         return dashboard, asked
 
     def test_no_means_no_run(self):
@@ -853,12 +871,13 @@ class DroppedSelectionCountTests(unittest.TestCase):
         selection = {"uploads": {1}, "metadata": set(), "read_changes": [],
                      "cloud_deletions": []}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-            dashboard, settings, metadata, {}, selection)
+            dashboard, RunContext.from_values(settings), metadata, {},
+            selection)
         self.assertEqual([], preparation["jobs"])
         self.assertEqual(1, len(preparation["skipped_uploads"]))
         self.assertIn("PDF only", preparation["skipped_uploads"][0])
         self.assertIn("EPUB", preparation["skipped_uploads"][0])
-        self.assertNotIn("u1", settings["state"])
+
 
 class VisibleResultTests(unittest.TestCase):
     """Calibre zeigt ein info_dialog nur mit show=True – sonst nie.
@@ -986,8 +1005,9 @@ class EmptyRunAccountingTests(unittest.TestCase):
         selection = {"uploads": {1}, "metadata": {1}, "read_changes": [],
                      "cloud_deletions": []}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-            dashboard, StartSyncOrchestrationTests._settings(), metadata, {},
-            selection)
+            dashboard,
+            RunContext.from_values(StartSyncOrchestrationTests._settings()),
+            metadata, {}, selection)
         self.assertEqual([], preparation["jobs"])
         self.assertEqual([], preparation["meta_updates"])
         self.assertEqual(

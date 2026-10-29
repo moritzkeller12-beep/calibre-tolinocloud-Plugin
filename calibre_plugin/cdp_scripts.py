@@ -16,7 +16,11 @@ _TOKEN_SCAN_HELPERS = r"""
   function walk(value, depth, seen) {
     if (!value || depth > 6) return;
     if (typeof value === 'string') {
-      if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
+      // Nur ein echter JWT ist ein Refresh-Kandidat: ein dreiteiliger
+      // Hostname (webreader.mytolino.com) ist keiner. Dieselbe Schwelle
+      // wie in _jwt_shaped (80 Zeichen).
+      if (value.length >= 80 &&
+          /^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
         push(value, 'refresh');
         return;
       }

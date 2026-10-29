@@ -3,7 +3,8 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
                         QLabel, QLineEdit, QMessageBox, QProgressBar,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
-                        _dialog_busy, button, start_worker,
+                        _dialog_busy, button, echo_mode, gui_guard,
+                        start_worker,
                         dialog_code,
                         _login_failure_guidance,
                         _stop_thread, _thread_running, _worker_account_name,
@@ -13,8 +14,10 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
 from calibre.gui2 import error_dialog, info_dialog
 from .token_vault import make_client
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
-                     load_state, save_account, save_credentials,
-                     save_settings, set_active_account, settings)
+                     clear_state_journal, load_state, merge_state_journal,
+                     save_account, save_credentials, save_settings,
+                     set_active_account, settings)
+from .run_context import RunContext
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
                       create_custom_columns, column_state,
                       ignore_column_available,
@@ -58,6 +61,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(bottom)
 
 
+@gui_guard
 def _offer_next_step(dialog):
     """Nach der Anmeldung ist der Hauptknopf der naechste Schritt.
 
@@ -69,11 +73,8 @@ def _offer_next_step(dialog):
     primary = getattr(dialog, "primary", None)
     if primary is None:
         return
-    try:
-        primary.setDefault(True)
-        primary.setFocus()
-    except RuntimeError:
-        pass  # Fenster wurde bereits geschlossen
+    primary.setDefault(True)
+    primary.setFocus()
 
 
 def _running_text(dialog):
@@ -105,6 +106,8 @@ def _persist_run(dialog, state):
     try:
         if account_name:
             save_account(account_name, {"state": state}, active=account_name)
+            if not clear_state_journal(account_name):
+                log_warning("Zustandsjournal konnte nicht geleert werden.")
     except Exception as exc:
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s" % sanitize_error(exc))
@@ -254,7 +257,7 @@ class SyncDashboard(QDialog):
         self.account_remove.clicked.connect(self.remove_account)
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
-        self.refresh.setEchoMode(QLineEdit.Password)
+        self.refresh.setEchoMode(echo_mode("Password"))
         # Das Feld zeigt den Token nicht an: das Konto ist die Quelle, ein
         # leeres Feld heisst «gespeicherten Zugang behalten».
         self.refresh.setPlaceholderText(
@@ -530,6 +533,11 @@ class SyncDashboard(QDialog):
         """The account this dialog shows – never a different 'active' one."""
         return account_by_name(getattr(self, "account_name", None))
 
+    def run_context(self, values=None):
+        """Konto und Optionen des Laufs als expliziter Kontext."""
+        values = self.values() if values is None else values
+        return RunContext.from_values(values, self.columns)
+
     def values(self):
         """Sichtbare Werte des Kontos; der Token nur, wenn eingetippt wurde.
 
@@ -574,143 +582,129 @@ class SyncDashboard(QDialog):
         """
         if self._login_running():
             return  # eine Prüfung oder Anmeldung läuft bereits
-        settings = self.values()
+        values = self.values()
         if self._typed_refresh():
             # Von Hand eingetippt: erst ins Konto speichern, dann pruefen --
             # danach ist das Feld wieder leer.
             self.store_refresh(self._typed_refresh())
             self.refresh.setText("")
-            settings = self.values()
+            values = self.values()
+        context = RunContext.from_values(values, self.columns)
         if self._effective_refresh():
-            self._check_stored_login(settings)
+            self._check_stored_login(context)
             return
-        self._start_login_window(settings)
+        self._start_login_window(context)
 
-    def _check_stored_login(self, settings):
+    def _check_stored_login(self, context):
         """Gespeicherte Anmeldung im Hintergrund prüfen."""
         _apply_busy(self, True)
         self.primary.setEnabled(False)
         self.status.setText("Anmeldung wird geprüft …")
-        worker = SessionCheckWorker(settings)
+        worker = SessionCheckWorker(context)
         worker.valid.connect(self.login_still_valid)
         worker.invalid.connect(self.login_rejected)
         worker.busy.connect(self.login_check_busy)
         start_worker(self, worker, QThread(), "login_thread", "login_worker",
                      (worker.valid, worker.invalid, worker.busy))
 
+    @gui_guard
     def login_still_valid(self):
         """Prüfung bestanden: Anmeldung bleibt gültig."""
-        try:
-            self._login_cleanup()
-            self.status.setText("Angemeldet.")
-            _offer_next_step(self)
-        except RuntimeError:
-            pass  # dialog already destroyed (Calibre shutdown)
+        self._login_cleanup()
+        self.status.setText("Angemeldet.")
+        _offer_next_step(self)
 
+    @gui_guard
     def login_rejected(self, message=""):
         """Prüfung fehlgeschlagen: jetzt das Anmeldefenster öffnen.
 
         Der technische Grund landet im Log statt im Fenster: die Box bleibt
         eine Zeile und die Fehlermeldung knapp.
         """
-        try:
-            self._login_cleanup()
-            settings = self.values()
-        except RuntimeError:
-            return  # dialog already destroyed (Calibre shutdown)
+        self._login_cleanup()
+        context = self.run_context()
         log_warning("Anmeldung abgelehnt: " + str(message))
         self.status.setText("Anmeldung abgelaufen – bitte neu anmelden.")
-        self._start_login_window(settings)
+        self._start_login_window(context)
 
+    @gui_guard
     def login_check_busy(self, _reason=""):
         """Anmeldung wird gerade geprüft; keine zweite Prüfung starten."""
-        try:
-            self._login_cleanup()
-            self.status.setText("Die Anmeldung wird gerade erneuert, bitte kurz warten.")
-        except RuntimeError:
-            pass  # dialog already destroyed (Calibre shutdown)
+        self._login_cleanup()
+        self.status.setText("Die Anmeldung wird gerade erneuert, bitte kurz warten.")
 
-    def _start_login_window(self, settings):
+    def _start_login_window(self, context):
         """Das eigene Anmeldefenster öffnen und die Anmeldung übernehmen."""
         if self._login_running():
             return  # a sign-in attempt is already running
-        partner_id = settings["partner_id"]
         _apply_busy(self, True)
         self.primary.setEnabled(False)
         self.status.setText(
             "Bitte im Browserfenster anmelden, bis die Bücherliste erscheint.")
-        worker = BrowserLoginWorker(partner_id, settings["hardware_id"])
+        worker = BrowserLoginWorker(context.partner_id, context.hardware_id)
         worker.progress.connect(self._login_progress)
         worker.completed.connect(self.login_completed)
         worker.failed.connect(self.login_failed)
         start_worker(self, worker, QThread(), "login_thread", "login_worker",
                      (worker.completed, worker.failed))
 
+    @gui_guard
     def login_completed(self, refresh, hardware):
-        try:
-            self._login_cleanup()
-            if hardware:
-                self.hardware.setText(str(hardware))
-            self.store_refresh(refresh, str(hardware or ""))
-            # Erfolg steht in der Statuszeile -- kein zusaetzlicher modaler
-            # Dialog fuer den Normalfall.
-            self.status.setText("Angemeldet.")
-            # Der Grabber schliesst sein Fenster bereits. Die UI fragt nur
-            # den Zustand ab; ein fehlender Besitzsatz heisst nicht «offen».
-            if _verified_owner():
-                self.status.setText(
-                    "Angemeldet. Das Anmeldefenster ist noch offen.")
-            _offer_next_step(self)
-        except RuntimeError:
-            pass  # dialog already destroyed (Calibre shutdown)
+        self._login_cleanup()
+        if hardware:
+            self.hardware.setText(str(hardware))
+        self.store_refresh(refresh, str(hardware or ""))
+        # Erfolg steht in der Statuszeile -- kein zusaetzlicher modaler
+        # Dialog fuer den Normalfall.
+        self.status.setText("Angemeldet.")
+        # Der Grabber schliesst sein Fenster bereits. Die UI fragt nur
+        # den Zustand ab; ein fehlender Besitzsatz heisst nicht «offen».
+        if _verified_owner():
+            self.status.setText(
+                "Angemeldet. Das Anmeldefenster ist noch offen.")
+        _offer_next_step(self)
 
+    @gui_guard
     def login_failed(self, error):
         """Fehlgeschlagene Anmeldung: Ursache + naechster Schritt nennen."""
-        try:
-            self._login_cleanup()
-            # Technische Details (inkl. Traceback) nur ins Log.
-            # Der sichtbare Zugang ist ein bekanntes Geheimnis: er darf
-            # weder im Dialog noch im Log auftauchen.
-            secrets = self._secret_tokens()
-            if isinstance(error, BaseException):
-                detail = report_error(error, "Anmeldefenster", secrets)
-            else:
-                detail = sanitize_error(error, secrets)
-            log_warning("Anmeldung nicht abgeschlossen: " + detail)
-            title, step = _login_failure_guidance(error)
-            code = str(getattr(error, "code", "") or "")
-            if code:
-                title = "%s (Code %s)" % (title, code)
-            self.status.setText("Anmeldung fehlgeschlagen.")
-            QMessageBox.warning(self, title, step)
-        except RuntimeError:
-            pass  # dialog already destroyed (Calibre shutdown)
+        self._login_cleanup()
+        # Technische Details (inkl. Traceback) nur ins Log.
+        # Der sichtbare Zugang ist ein bekanntes Geheimnis: er darf
+        # weder im Dialog noch im Log auftauchen.
+        secrets = self._secret_tokens()
+        if isinstance(error, BaseException):
+            detail = report_error(error, "Anmeldefenster", secrets)
+        else:
+            detail = sanitize_error(error, secrets)
+        log_warning("Anmeldung nicht abgeschlossen: " + detail)
+        title, step = _login_failure_guidance(error)
+        code = str(getattr(error, "code", "") or "")
+        if code:
+            title = "%s (Code %s)" % (title, code)
+        self.status.setText("Anmeldung fehlgeschlagen.")
+        QMessageBox.warning(self, title, step)
 
+    @gui_guard
     def _login_progress(self, text):
         """Live-Hinweise des Browser-Grabs in der Statuszeile zeigen."""
-        try:
-            self.status.setText(str(text))
-        except RuntimeError:
-            pass  # dialog already destroyed (Calibre shutdown)
+        self.status.setText(str(text))
 
+    @gui_guard
     def _login_cleanup(self):
         self.login_thread = None
         self.login_worker = None
-        try:
-            _apply_busy(self, False)
-            self.update_status()
-        except RuntimeError:
-            pass  # dialog already destroyed
+        # `update_status` sperrt bzw. gibt die Bedienelemente selbst frei.
+        self.update_status()
 
     @staticmethod
-    def _worker_client(settings):
-        """Client aus einem GUI-seitig erfassten Snapshot bauen."""
-        store = CredentialStore(settings, settings.get("account_name"))
+    def _worker_client(context):
+        """Client aus dem Lauf-Kontext bauen."""
+        store = CredentialStore(context.credentials, context.account_name)
         return make_client(store)
 
-    def _show_prepare_error(self, exc, settings):
+    def _show_prepare_error(self, exc, context):
         """Nur den kurzen Fehlertext zeigen; technische Details protokollieren."""
-        secrets = (settings.get("refresh_token"),)
+        secrets = context.secrets()
         message = report_error(exc, "Vorbereitung", secrets)
         error_dialog(self, "Vergleich fehlgeschlagen",
                      message + " Es wurde nichts geändert.", show=True)
@@ -724,24 +718,30 @@ class SyncDashboard(QDialog):
         """
         if self.thread is not None or getattr(self, "prepare_thread", None) is not None:
             return
-        settings = self.values()
+        values = self.values()
         if not self._effective_refresh():
             status = getattr(self, "status", None)
             if status is not None:
                 status.setText("Nicht angemeldet.")
             return
-        self._save_visible_account(settings)
+        self._save_visible_account(values)
         self.columns = column_state(self.gui.current_db)
-        settings["columns"] = self.columns
+        context = RunContext.from_values(values, self.columns)
+        state = load_state(values.get("state"))
+        try:
+            merge_state_journal(state, context.account_name)
+        except Exception as exc:
+            log_warning("Teilstand konnte nicht geladen werden: %s"
+                        % sanitize_error(exc))
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
-            metadata = _dashboard_plan.local_metadata(self)
+            metadata = _dashboard_plan.local_metadata(self, context, state)
         except Exception as exc:
-            self._show_prepare_error(exc, settings)
+            self._show_prepare_error(exc, context)
             return
-        self._start_prepare_worker(settings, metadata)
+        self._start_prepare_worker(context, metadata, state)
 
-    def _start_prepare_worker(self, settings, metadata):
+    def _start_prepare_worker(self, context, metadata, state):
         """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
         _apply_busy(self, True)
         self.status.setText("Vergleich läuft …")
@@ -749,7 +749,7 @@ class SyncDashboard(QDialog):
         self.progress.setVisible(True)
         self.progress_label.setVisible(True)
         self.progress_label.setText("Verbinde mit tolino …")
-        worker = PrepareWorker(settings, metadata)
+        worker = PrepareWorker(context, metadata, state)
         worker.progress.connect(self._prepare_progress)
         worker.ready.connect(self._prepare_ready)
         worker.failed.connect(self._prepare_failed)
@@ -757,11 +757,9 @@ class SyncDashboard(QDialog):
                      "prepare_worker", (worker.ready, worker.failed))
         self.update_status()
 
+    @gui_guard
     def _prepare_progress(self, text):
-        try:
-            self.progress_label.setText(str(text))
-        except RuntimeError:
-            pass  # dialog already destroyed
+        self.progress_label.setText(str(text))
 
     def _finish_prepare(self):
         """Vorbereitungs-Thread sauber abräumen (ohne unbegrenzt zu warten)."""
@@ -773,7 +771,6 @@ class SyncDashboard(QDialog):
         self.progress_label.setText("Bereit")
         self.progress_label.setVisible(False)
         _stop_thread(thread, timeout_ms=2000)
-        _apply_busy(self, False)
         self.update_status()
 
     def _prepare_failed(self, message):
@@ -790,16 +787,17 @@ class SyncDashboard(QDialog):
 
     def _prepare_ready(self, payload):
         """Vergleich anzeigen (GUI-Thread) und den Sync starten."""
-        account_name = str(payload.get("account_name") or "")
-        settings = payload["settings"]
+        context = payload["context"]
+        account_name = context.account_name
         metadata = payload["metadata"]
         state = payload["state"]
         self._finish_prepare()
+
         # Nur die Hardware-ID gehört nach dem Vergleich in die Einstellungen.
         # Der Token wird durch den Client-Callback beim Rotieren gespeichert.
         hardware = getattr(self, "hardware", None)
         if payload.get("hardware"):
-            settings["hardware_id"] = str(payload["hardware"])
+            context.hardware_id = str(payload["hardware"])
         if (payload.get("hardware") and hardware is not None
                 and self.account_name == account_name):
             hardware.setText(str(payload["hardware"]))
@@ -809,23 +807,23 @@ class SyncDashboard(QDialog):
             log_warning("Lesestatus unbekannt – er bleibt unverändert.")
         try:
             selection = self._confirm_comparison(
-                payload["comparison"], settings,
-                client_factory=lambda: self._worker_client(settings),
+                payload["comparison"], context,
+                client_factory=lambda: self._worker_client(context),
                 automatic=_dashboard_plan.automatic_action_count(metadata, state))
             if selection is None:
                 return
             preparation = _dashboard_plan.plan_actions(
-                self, settings, metadata, state, selection)
+                self, context, metadata, state, selection)
             if preparation["removals"] and not self._confirm_deletions(
                     preparation["removals"], state,
                     preparation.get("removal_titles")):
                 return
-            self._start_sync_worker(settings, preparation, state)
+            self._start_sync_worker(context, preparation, state)
         except Exception as exc:
             # Ein Fehler NACH dem Vergleichsfenster darf nicht als
             # Traceback im Slot verschwinden: der Nutzer sähe sonst nur ein
             # geschlossenes Fenster und keinen einzigen Upload.
-            self._show_prepare_error(exc, settings)
+            self._show_prepare_error(exc, context)
 
     def _confirm_deletions(self, removals, state, titles=None):
         """Ausdrücklich markierte Cloud-Kopien vor dem Löschen bestätigen.
@@ -851,13 +849,13 @@ class SyncDashboard(QDialog):
             button("Yes") | button("No"), button("No"))
         return answer == button("Yes")
 
-    def _confirm_comparison(self, comparison, settings, client_factory=None,
+    def _confirm_comparison(self, comparison, context, client_factory=None,
                             automatic=0):
         """Bestätigungsfenster zeigen; None, wenn es abgebrochen wurde."""
         dialog = InventoryDialog(
             comparison, self,
             client_factory=(client_factory or
-                            (lambda: self._worker_client(settings))),
+                            (lambda: self._worker_client(context))),
             options={
                 "collections": True,
                 "automatic": int(automatic or 0),
@@ -921,19 +919,19 @@ class SyncDashboard(QDialog):
             % "\n".join(skipped_uploads))
         return bool(nothing_else)
 
-    def _start_sync_worker(self, settings, preparation, state=None):
+    def _start_sync_worker(self, context, preparation, state=None):
         """Übersprungene Uploads melden und den Hintergrundlauf starten."""
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
         if state is None:
-            state = load_state(settings.get("state"))
+            # Der Aufrufer kennt den Ausgangszustand; ohne ihn startet der
+            # Lauf leer statt mit einem zweiten Einstellungs-Snapshot.
+            state = {}
         # Das Vergleichsfenster kann beliebig lange offen bleiben; in der
         # Zeit darf der Keep-alive den (single-use) Token rotieren. Deshalb
-        # unmittelbar vor dem Start den GESPEICHERTEN Zugang des Kontos
-        # nehmen -- sonst loest der Worker einen verbrauchten Token ein
-        # (A02). Das schliesst die Luecke auch dann, wenn eine
-        # Zaehlung einmal nicht greift.
-        CredentialStore(settings, settings.get("account_name")).freshest()
+        # nimmt `make_client` im Worker den GESPEICHERTEN Zugang des Kontos
+        # unmittelbar vor dem Login -- ein zweiter Snapshot hier waere
+        # derselbe Aufruf mit demselben Ergebnis.
         total = _dashboard_plan.planned_actions(preparation, len(jobs))
         if not total and not skipped_uploads:
             # Kein stiller Lauf: ohne ausführbare Aktion gibt es eine
@@ -966,12 +964,12 @@ class SyncDashboard(QDialog):
         _apply_busy(self, True)
         self.progress.setRange(0, total)
         self.progress.setValue(0)
-        settings["metadata"] = preparation.get("metadata", {})
-        worker = SyncWorker(settings, jobs, preparation["removals"],
+        worker = SyncWorker(context, jobs, preparation["removals"],
                             preparation["meta_updates"],
                             preparation["series_map"],
                             read_changes=preparation.get("read_changes"),
                             titles=preparation.get("titles"),
+                            metadata=preparation.get("metadata", {}),
                             state=state)
         worker.progress.connect(self.progress_changed)
         worker.completed.connect(self.sync_completed)
@@ -1057,7 +1055,6 @@ class SyncDashboard(QDialog):
         if thread is not None:
             _stop_thread(thread)
         self.progress_label.setText("Bereit")
-        _apply_busy(self, False)
         self.update_status()
 
     def closeEvent(self, event):

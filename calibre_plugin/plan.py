@@ -178,13 +178,17 @@ def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
     upload_uuids = {str(record.book_uuid) for record in uploads}
-    requested = {str(item) for item in only_book_ids}
+    # Über die angeforderten Bücher iterieren, nicht über die ganze
+    # Bibliothek. Schluessel koennen int oder str sein; der Textindex
+    # vergleicht beide Formen einmalig.
+    by_text = {str(key): value for key, value in metadata_by_id.items()}
     updates = []
-    for book_id, metadata in metadata_by_id.items():
+    for book_id in only_book_ids or ():
+        metadata = by_text.get(str(book_id))
+        if metadata is None:
+            continue
         if not isinstance(metadata, dict):
             raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
-        if str(book_id) not in requested:
-            continue
         book_uuid = valid_book_uuid(metadata.get("uuid"))
         if not book_uuid or book_uuid in upload_uuids:
             continue

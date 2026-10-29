@@ -12,6 +12,7 @@ from .. import config
 from ..partners import PARTNERS, WEBREADER_URL
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, active_tags, tag_id_from_patch, tag_state
+from ..run_context import RunContext
 from ..browser_login import browser_login
 from ._support import (
     UI_SOURCE_FILES,compare_inventory,
@@ -1346,7 +1347,9 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         try:
             with patch("calibre_plugin.config.save_credentials",
                        lambda *args: saved.append(args)):
-                worker = ui_module.workers.SyncWorker(settings, [], [])
+                worker = ui_module.workers.SyncWorker(
+                    RunContext.from_values(settings), [], [],
+                    state=settings.get("state"))
                 worker.store.save_refresh("tok-neu")
                 worker.store.save_hardware("hw-neu")
         finally:

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 from . import orchestration_tests
 from ..plan import plan_metadata_updates, plan_sync
+from ..run_context import RunContext
 from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
 
 
@@ -136,6 +137,10 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         dashboard.columns = {"id": False}
         return dashboard
 
+    @staticmethod
+    def _context(dashboard):
+        return RunContext.from_values(dashboard.values(), dashboard.columns)
+
     def _books(self, library=None):
         if library is None:
             library = type("Library", (), {"new_api": type("Api", (), {
@@ -156,7 +161,9 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             authors=["Frank Schatzing"], formats=["EPUB"],
             last_modified="2026-01-01")
         dashboard = self._dashboard(books)
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual(BookIdentifierSourceTests.UUID, metadata[7]["uuid"])
         uploads = plan_sync(metadata, {}, ["EPUB"],
                             upload_book_ids={7})
@@ -188,16 +195,20 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         books = {"library": database, "metadata": {7: metadata_row}}
         dashboard = self._dashboard(
             books, settings={"state": "", "preferred_formats": ["EPUB"]})
-        with patch("calibre_plugin.ui_common.os.stat",
+        with patch("calibre_plugin.planning_values.os.stat",
                    return_value=type("Stat", (), {
                        "st_size": 1, "st_mtime": 1.0})()):
-            metadata = self.dashboard_plan.local_metadata(dashboard)
+            metadata = self.dashboard_plan.local_metadata(
+                dashboard, self._context(dashboard),
+                dashboard.values().get("state"))
         self.assertEqual(["EPUB"], database.stat_formats)
         self.assertEqual({"EPUB": "1:1000"}, metadata[7]["format_signatures"])
 
     def test_a_blank_uuid_still_gets_a_stable_key_and_the_upload_runs(self):
         dashboard = self._dashboard(self._books())
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual("calibre-7", metadata[7]["uuid"])
         # Der Vergleich merkt sich die Cloud-Kopie unter der Ersatzkennung.
         state = {}
@@ -220,7 +231,9 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
                              "fingerprint": "1:1"}}
         dashboard = self._dashboard(self._books(), {
             "state": state, "preferred_formats": ["EPUB"]})
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual("frueher", metadata[7]["uuid"])
 
     def test_a_title_as_uuid_keeps_the_stored_state_key(self):
@@ -236,7 +249,9 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             formats=["EPUB"], last_modified="2026-01-01")
         dashboard = self._dashboard(books, {
             "state": state, "preferred_formats": ["EPUB"]})
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual(title, metadata[7]["uuid"])
         # A legacy fingerprint isn't part of the authoritative state anymore;
         # without file and metadata signatures a sync must be offered.

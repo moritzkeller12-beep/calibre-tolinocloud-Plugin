@@ -99,7 +99,15 @@ def load_ui_module(get_icons_result, qt_stub=None):
     qt_core.QMessageBox.Yes = 1
     qt_core.QMessageBox.No = 2
     qt_core.QMessageBox.StandardButton = qt_core.QMessageBox
-    qt_core.Qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1})
+    # Qt6-Form: Enums sind skopiert; die alten unskopierten Namen fehlen.
+    qt_core.Qt = type("Qt", (), {
+        "SortOrder": type("SortOrder", (),
+                          {"AscendingOrder": 0, "DescendingOrder": 1})})
+    qt_core.QTableWidget.SelectionBehavior = type(
+        "SelectionBehavior", (), {"SelectRows": 1})
+    qt_core.QTableWidget.SelectionMode = type(
+        "SelectionMode", (), {"ExtendedSelection": 2})
+    qt_core.QLineEdit.EchoMode = type("EchoMode", (), {"Password": 2})
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None
     if qt_stub:

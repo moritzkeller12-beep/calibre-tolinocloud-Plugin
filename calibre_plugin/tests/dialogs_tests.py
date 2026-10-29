@@ -6,6 +6,7 @@ import threading
 import unittest
 from . import ui_base_tests
 from ..plan import merge_removals
+from ..run_context import RunContext
 from ._support import (FakeCheckBox, FakeMenu, FakeMessageBox,
                       _ui_source_text, compare_inventory, start_cdp_stubs,
                       stop_cdp_stubs, ui_module_for)
@@ -1127,7 +1128,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
             state = {"u-1": {"tolino_id": "t-1", "calibre_id": 1,
                              "title": "Titel"}}
             preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-                dashboard, self._settings(), self._metadata(), state,
+                dashboard, RunContext.from_values(self._settings()),
+                self._metadata(), state,
                 self._selection([("u-1", "t-1", "Titel")]))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -1140,7 +1142,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
             dashboard = self._dashboard(ui_module)
             state = {"u-9": {"tolino_id": "t-9", "title": "Alt"}}
             preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-                dashboard, self._settings(), self._metadata(), state,
+                dashboard, RunContext.from_values(self._settings()),
+                self._metadata(), state,
                 self._selection([("u-9", "t-9", "Alt")]))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -1308,7 +1311,7 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
 
     @staticmethod
     def _inventory(**values):
-        base = {"id": "t1", "title": "Der Schwarm",
+        base = {"deliverableId": "t1", "title": "Der Schwarm",
                 "authors": "Schätzing, Frank", "isbn": "9783161484100"}
         base.update(values)
         return [base]
@@ -1355,7 +1358,7 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
 
     def test_really_different_authors_stay_a_review(self):
         row = self._row(
-            inventory=[{"id": "t1", "title": "Der Schwarm",
+            inventory=[{"deliverableId": "t1", "title": "Der Schwarm",
                         "authors": "Ganz Anderer", "isbn": "9783161484100"}])
         self.assertEqual("review", row["status"])
         self.assertEqual("conflict", row["match_reason"])

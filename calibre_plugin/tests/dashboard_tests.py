@@ -7,6 +7,7 @@ from . import ui_base_tests
 from .. import config
 from ..partners import PARTNERS
 from ..library import TOLINO_COLUMN
+from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
     FakeText,start_cdp_stubs, stop_cdp_stubs, ui_module_for)
@@ -749,8 +750,8 @@ class LoginPreflightTests(unittest.TestCase):
                 self.deleted = True
 
         class CheckWorker:
-            def __init__(self, settings):
-                self.settings = settings
+            def __init__(self, context):
+                self.context = context
                 self.valid = Signal()
                 self.invalid = Signal()
                 self.busy = Signal()
@@ -809,6 +810,7 @@ class LoginPreflightTests(unittest.TestCase):
             "account_name": "konto", "partner_id": 4,
             "hardware_id": "hw-1", "refresh_token": token,
         }
+        dashboard.columns = {}
         dashboard.values = lambda: dashboard.settings_values
         # Der Zugang kommt aus dem Konto: der Stub sagt, was drin steht.
         dashboard._stored_refresh = lambda: token
@@ -817,7 +819,7 @@ class LoginPreflightTests(unittest.TestCase):
         # Die beiden Ergebnis-Slots des Anmeldefensters: hier nur Empfaenger.
         dashboard.login_completed = lambda *args: None
         dashboard.login_failed = lambda *args: None
-        names = ("browser_login", "_check_stored_login",
+        names = ("browser_login", "_check_stored_login", "run_context",
                  "_start_login_window", "_login_running",
                  "login_still_valid", "login_rejected", "login_check_busy",
                  "_login_cleanup", "store_refresh", "_login_progress")
@@ -833,7 +835,7 @@ class LoginPreflightTests(unittest.TestCase):
         opened = []
         dashboard._start_login_window = lambda values: opened.append(values)
         dashboard.browser_login()
-        self.assertEqual([""], [values["refresh_token"] for values in opened])
+        self.assertEqual([""], [context.refresh_token for context in opened])
         self.assertIsNone(dashboard.login_thread)
 
     def test_with_a_token_the_stored_access_is_checked_first(self):
@@ -847,8 +849,10 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsInstance(dashboard.login_worker, CheckWorker)
         self.assertEqual(1, dashboard.login_thread.starts)
-        self.assertIs(dashboard.settings_values,
-                      dashboard.login_worker.settings)
+        self.assertEqual("konto",
+                         dashboard.login_worker.context.account_name)
+        self.assertEqual("tok-1",
+                         dashboard.login_worker.context.refresh_token)
         self.assertIs(dashboard.login_thread,
                       dashboard.login_worker.moved_to)
         self.assertIn("geprüft", dashboard.status.text())
@@ -943,7 +947,8 @@ class LoginPreflightTests(unittest.TestCase):
         ui_module = self._ui()
         Thread, _, LoginWorker = self._fake_qt(ui_module)
         dashboard = self._dashboard(ui_module)
-        dashboard._start_login_window(dashboard.values())
+        dashboard._start_login_window(
+            RunContext.from_values(dashboard.values()))
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
         self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
@@ -973,7 +978,8 @@ class LoginPreflightTests(unittest.TestCase):
         emitted, calls = [], []
         settings = {"partner_id": 4, "hardware_id": "hw-1",
                     "refresh_token": "tok-1", "account_name": "konto"}
-        worker = ui_module.auth_workers.SessionCheckWorker(settings)
+        worker = ui_module.auth_workers.SessionCheckWorker(
+            RunContext.from_values(settings))
         worker.valid, worker.invalid, worker.busy = (signal("valid"),
                                                      signal("invalid"),
                                                      signal("busy"))
@@ -1014,8 +1020,8 @@ class LoginPreflightTests(unittest.TestCase):
         settings = {"account_name": "konto", "partner_id": 4,
                     "hardware_id": "hw-1", "refresh_token": "tok-1"}
         store = config.CredentialStore(settings, "konto")
-        callback = vault_module.TOKEN_VAULT._callback_for_value(
-            store.refresh_token, store.save_refresh)
+        # Genau diese Methode haengt der Vault als Token-Callback ein.
+        callback = store.save_refresh
         with patch("calibre_plugin.config.save_credentials") as save:
             callback("tok-2")
         self.assertEqual("tok-2", settings["refresh_token"])

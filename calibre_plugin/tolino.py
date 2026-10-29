@@ -113,21 +113,8 @@ def report_error(exc, context="", secrets=()):
     return "%s (Code %s)" % (shown, code)
 
 
-def log_info(message):
+def _log(message, method):
     """Schreibt eine Zeile ins Calibre-Log -- ohne Zugangsdaten.
-
-    Fuer sichtbare Betriebsmeldungen (Keep-alive gestartet/erneuert), die
-    keine Warnung sind, aber ohne Log unsichtbar blieben.
-    """
-    try:
-        from calibre.utils.logging import default_log
-        default_log.info(str(message))
-    except Exception:
-        pass
-
-
-def log_warning(message):
-    """Schreibt eine Warnung ins Calibre-Log -- ohne Zugangsdaten.
 
     Die Meldung darf NIE einen Token-Wert enthalten. Ausserhalb von Calibre
     (Tests, direkter Import) bleibt der Aufruf still: das ist die Naht zum
@@ -135,9 +122,19 @@ def log_warning(message):
     """
     try:
         from calibre.utils.logging import default_log
-        default_log.warn(str(message))
+        getattr(default_log, method)(str(message))
     except Exception:
         pass
+
+
+def log_info(message):
+    """Betriebsmeldung (Keep-alive gestartet/erneuert) ins Calibre-Log."""
+    _log(message, "info")
+
+
+def log_warning(message):
+    """Warnung ins Calibre-Log."""
+    _log(message, "warn")
 
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"

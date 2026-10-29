@@ -241,8 +241,13 @@ def update_tolino_ids(database, updates, enabled=True, account_name=None):
         if not account_name:
             values[book_id] = new_id
             continue
-        metadata = api.get_metadata(book_id)
-        raw = _column_value(metadata)
+        # `field_for` liest nur die eine Spalte; `get_metadata` holt für
+        # jedes Buch den ganzen Datensatz.
+        field_for = getattr(api, "field_for", None)
+        if callable(field_for):
+            raw = field_for(TOLINO_COLUMN, book_id)
+        else:
+            raw = _column_value(api.get_metadata(book_id))
         account_ids = _decode_tolino_ids(raw)
         if account_ids is None:
             # Migrate a legacy single ID when this account first writes the

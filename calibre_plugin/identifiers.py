@@ -77,17 +77,29 @@ def migrate_state_keys(metadata_by_id, state):
     return migrated
 
 
-def state_key_for(state, book_id):
-    """Find a stored state key by its recorded Calibre book id."""
+def state_keys_by_book_id(state):
+    """Calibre-Nummer → gespeicherter Zustandsschlüssel in EINEM Durchlauf.
+
+    ``state_key_for`` suchte für jedes Buch erneut linear über den Zustand;
+    wer mehrere Bücher prüft, baut den Index einmal.
+    """
+    keys = {}
     if not isinstance(state, dict):
-        return ""
+        return keys
     for key, entry in state.items():
         if not isinstance(entry, dict):
             continue
         recorded = entry.get("calibre_id")
         try:
-            if recorded is not None and int(recorded) == int(book_id):
-                return str(key)
+            keys[int(recorded)] = str(key)
         except (TypeError, ValueError):
             continue
-    return ""
+    return keys
+
+
+def state_key_for(state, book_id):
+    """Find a stored state key by its recorded Calibre book id."""
+    try:
+        return state_keys_by_book_id(state).get(int(book_id), "")
+    except (TypeError, ValueError):
+        return ""

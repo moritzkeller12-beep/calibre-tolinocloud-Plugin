@@ -18,16 +18,15 @@ class TokenVault:
         """Return a logged-in client; the lock covers only the login phase."""
         with self._held_lock(lock_timeout):
             values, refresh = self._freshest_token(store)
-            save_rotation = self._callback_for_value(
-                store.refresh_token, store.save_refresh)
             client = TolinoClient(
                 store.values.get("partner_id"), values.get("hardware_id"),
-                refresh, token_callback=save_rotation,
+                refresh, token_callback=store.save_refresh,
                 hardware_callback=store.save_hardware)
+            # Der Client speichert eine Rotation selbst beim Eintreffen der
+            # Antwort (genau einmal, ueber seinen Callback).
             # Erst anmelden, dann den Vault einhängen: `login()` würde
             # sonst über `relogin()` den bereits gehaltenen Lock anfordern.
             client.login()
-            save_rotation(client.refresh)
             client.token_vault = self
             client.credential_store = store
         return client
@@ -59,10 +58,9 @@ class TokenVault:
             values, refresh = self._freshest_token(store)
             client.refresh = refresh
             client.hardware = values.get("hardware_id") or client.hardware
-            result = client._login()
-            if client.refresh:
-                store.save_refresh(client.refresh)
-            return result
+            # `_login()` meldet den neuen Token über den Callback, der ihn
+            # bereits persistiert -- kein zweites Speichern hier.
+            return client._login()
 
     def keepalive_refresh(self, get_credentials):
         """Refresh saved accounts through the same locked client factory."""
@@ -90,20 +88,6 @@ class TokenVault:
             log_info("Tolino-Keep-alive: %d %s erneuert."
                      % (len(rotated), "Konto" if len(rotated) == 1 else "Konten"))
         return rotated[-1] if rotated else None
-
-    @staticmethod
-    def _callback_for_value(initial, persist):
-        previous = [initial]
-
-        def save(refresh):
-            value = normalize_refresh_token(refresh)
-            if value and value != previous[0]:
-                previous[0] = value
-                if persist is not None:
-                    persist(value)
-
-        return save
-
 
 TOKEN_VAULT = TokenVault()
 _KEEPALIVE_STOP = threading.Event()

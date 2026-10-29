@@ -185,47 +185,64 @@ def _collect_candidates(home=None):
     return found, status
 
 
-_PLATFORM_BROWSER_INSTALLS = {
-    "win32": (
-        (("env", "PROGRAMFILES", "C:\\Program Files"),
-         ("env", "PROGRAMFILES(X86)", "C:\\Program Files (x86)")),
-        (("Google\\Chrome\\Application\\chrome.exe", "Google Chrome"),
-         ("Chromium\\Application\\chrome.exe", "Chromium"),
-         ("BraveSoftware\\Brave-Browser\\Application\\brave.exe", "Brave"),
-         ("Microsoft\\Edge\\Application\\msedge.exe", "Edge")),
-    ),
-    "darwin": (
-        (("path", "/Applications", ""), ("home", "Applications", "")),
-        (("Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
-         ("Chromium.app/Contents/MacOS/Chromium", "Chromium"),
-         ("Brave Browser.app/Contents/MacOS/Brave Browser", "Brave"),
-         ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Edge")),
-    ),
-}
+_WINDOWS_BROWSERS = (
+    ("Google\\Chrome\\Application\\chrome.exe", "Google Chrome"),
+    ("Chromium\\Application\\chrome.exe", "Chromium"),
+    ("BraveSoftware\\Brave-Browser\\Application\\brave.exe", "Brave"),
+    ("Microsoft\\Edge\\Application\\msedge.exe", "Edge"),
+)
+
+_DARWIN_BROWSERS = (
+    ("Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
+    ("Chromium.app/Contents/MacOS/Chromium", "Chromium"),
+    ("Brave Browser.app/Contents/MacOS/Brave Browser", "Brave"),
+    ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Edge"),
+)
 
 
-def _platform_browser_paths(platform=None):
-    """Find browsers in the platform's standard installation directories."""
-    roots_and_browsers = _PLATFORM_BROWSER_INSTALLS.get(
-        platform or sys.platform)
-    if roots_and_browsers is None:
-        return []
-    roots, browsers = roots_and_browsers
+def _installed_under(roots, browsers):
+    """Browser unter Standardpfaden; je Anzeigename nur der erste Treffer."""
     found = []
-    for kind, value, fallback in roots:
-        if kind == "env":
-            base = os.environ.get(value) or fallback
-        elif kind == "home":
-            base = os.path.join(os.path.expanduser("~"), value)
-        else:
-            base = value
+    for root in roots:
         for relative_path, label in browsers:
-            path = os.path.join(base, relative_path)
+            path = os.path.join(root, relative_path)
             if (os.path.isfile(path)
                     and not any(existing_label == label
                                 for _argv, existing_label in found)):
                 found.append(([path], label))
     return found
+
+
+def _windows_browser_paths(environ=None):
+    """Browser in den Windows-Programmverzeichnissen."""
+    environ = os.environ if environ is None else environ
+    roots = (environ.get("PROGRAMFILES") or r"C:\Program Files",
+             environ.get("PROGRAMFILES(X86)") or r"C:\Program Files (x86)")
+    return _installed_under(roots, _WINDOWS_BROWSERS)
+
+
+def _macos_browser_paths(home=None):
+    """Browser in den macOS-Programmverzeichnissen (System und Benutzer)."""
+    home = home or os.path.expanduser("~")
+    return _installed_under(
+        ("/Applications", os.path.join(home, "Applications")),
+        _DARWIN_BROWSERS)
+
+
+def _platform_browser_paths(platform=None):
+    """Find browsers in the platform's standard installation directories."""
+    platform = platform or sys.platform
+    if platform == "win32":
+        return _windows_browser_paths()
+    if platform == "darwin":
+        return _macos_browser_paths()
+    return []
+
+
+def _options_with_status(home=None):
+    """(alle Kandidaten inkl. Plattformpfade, Status der Host-Sonde)."""
+    found, status = _collect_candidates(home)
+    return found + _platform_browser_paths(), status
 
 
 def chromium_candidates(home=None):
@@ -235,11 +252,10 @@ def chromium_candidates(home=None):
 
 def chromium_options():
     """All candidates, including standard Windows/macOS install paths."""
-    return _collect_candidates()[0] + _platform_browser_paths()
+    return _options_with_status()[0]
 
 
 def pick_chromium():
     """(bester Kandidat oder None, Status der Host-Sonde)."""
-    found, status = _collect_candidates()
-    options = found + _platform_browser_paths()
+    options, status = _options_with_status()
     return (options[0] if options else None), status
