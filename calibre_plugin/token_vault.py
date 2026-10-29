@@ -1,4 +1,5 @@
 """Serialize single-use refresh-token grants through one shared vault."""
+import atexit
 import contextlib
 import threading
 
@@ -120,6 +121,9 @@ def start_token_keepalive(get_credentials, interval=45 * 60):
     if _KEEPALIVE_STARTED.is_set():
         return None
     _KEEPALIVE_STARTED.set()
+    # Beim Beenden das Event setzen: sonst meldet Calibre beim Shutdown
+    # «Thread still alive: tolino-token-keepalive».
+    atexit.register(_KEEPALIVE_STOP.set)
 
     def loop():
         while not _KEEPALIVE_STOP.wait(max(60, interval)):

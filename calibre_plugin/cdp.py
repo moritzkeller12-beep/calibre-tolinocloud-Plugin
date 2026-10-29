@@ -201,6 +201,10 @@ def launch_reader_window():
             detail="%s: %s" % last_error)
 
     _LAUNCHED.update({"process": process, "port": port, "profile": profile})
+    # Der Port gehört ins Log: nur so lässt sich die CDP-Verbindung von
+    # aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
+    from .tolino import log_info
+    log_info("Tolino-Anmeldefenster: Chromium auf 127.0.0.1:%d." % port)
     deadline = time.time() + 20
     while time.time() < deadline:
         if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
@@ -285,7 +289,13 @@ def _is_reader_url(url):
 
 
 def _reader_target(targets, port):
-    """Return the first validated reader WebSocket and whether a reader exists."""
+    """Return the reader tab's WebSocket address and whether one exists.
+
+    Die Adresse wird aus Port und Target-id gebaut: für einen selbst
+    gestarteten Browser meldet Chrome genau
+    ws://127.0.0.1:<Port>/devtools/page/<id>. Die gemeldete URL zu parsen
+    und gegen den Port zu prüfen, ist damit überflüssig.
+    """
     if not isinstance(targets, list):
         return None, False
     reader_found = False
@@ -294,12 +304,15 @@ def _reader_target(targets, port):
                 or not _is_reader_url(target.get("url"))):
             continue
         reader_found = True
-        ws_url = str(target.get("webSocketDebuggerUrl") or "")
-        try:
-            _devtools_ws_address(ws_url, port)
-        except (TypeError, ValueError):
-            continue
-        return ws_url, reader_found
+        target_id = str(target.get("id") or "").strip()
+        if target_id:
+            return ("ws://127.0.0.1:%d/devtools/page/%s"
+                    % (int(port), target_id)), True
+        # Ohne Target-id bleibt nur die gemeldete Adresse (unsere eigene
+        # Browser-Instanz, kein fremder Host).
+        reported = str(target.get("webSocketDebuggerUrl") or "").strip()
+        if reported:
+            return reported, True
     return None, reader_found
 
 
