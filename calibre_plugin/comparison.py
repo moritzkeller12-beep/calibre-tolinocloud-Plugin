@@ -1,8 +1,6 @@
 """Conservative Calibre-to-tolino inventory comparison and sync signatures."""
 import hashlib
 
-
-
 from .identifiers import valid_book_uuid
 from .library import metadata_tolino_id, normalize_formats
 from .matching import (author_tokens as _author_tokens,
@@ -199,8 +197,8 @@ def _remote_rows(inventory, read_known, read_ids):
             "cloud_id_missing": not record["has_deliverable_id"],
             "status": "only_tolino",
             "file_changed": False,
-        **_read_flags(tolino_id, read_known, read_ids),
-        "explanation": "Nur in tolino – kann heruntergeladen werden.",
+            **_read_flags(tolino_id, read_known, read_ids),
+            "explanation": "Nur in tolino – kann heruntergeladen werden.",
             "normalized_title": normalize_title(record["title"]),
         })
     return rows

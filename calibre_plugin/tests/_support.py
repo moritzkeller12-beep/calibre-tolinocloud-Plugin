@@ -88,8 +88,17 @@ def load_ui_module(get_icons_result, qt_stub=None):
                  "QHBoxLayout", "QTableWidget", "QTableWidgetItem",
                  "QObject", "QInputDialog", "QFileDialog", "QMenu", "Qt"):
         setattr(qt_core, name, type(name, (), {}))
-    qt_core.QHeaderView = type(
-        "QHeaderView", (), {"Stretch": 1, "ResizeToContents": 2})
+    # Qt6-Form: die unskopierten Namen (QHeaderView.Stretch) gibt es dort
+    # nicht mehr. Ein Stub mit nur ResizeMode deckt genau diesen Fehler auf.
+    header_view = type("QHeaderView", (), {})
+    header_view.ResizeMode = type(
+        "ResizeMode", (), {"Stretch": 1, "ResizeToContents": 2})
+    qt_core.QHeaderView = header_view
+    qt_core.QDialog.Accepted = 1
+    qt_core.QDialog.DialogCode = qt_core.QDialog
+    qt_core.QMessageBox.Yes = 1
+    qt_core.QMessageBox.No = 2
+    qt_core.QMessageBox.StandardButton = qt_core.QMessageBox
     qt_core.Qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1})
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None

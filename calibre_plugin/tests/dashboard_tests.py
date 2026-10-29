@@ -739,12 +739,9 @@ class LoginPreflightTests(unittest.TestCase):
                 self.token_callback = callbacks.get("token_callback")
 
             def login(self):
-                if getattr(self, "token_lock_held", False):
-                    return self._rotate()
-                with self.token_lock:
-                    return self._rotate()
+                return self._login()
 
-            def _rotate(self):
+            def _login(self):
                 requested.append(self.refresh)
                 if len(requested) == 1:
                     self.refresh = "rotated"
@@ -760,8 +757,8 @@ class LoginPreflightTests(unittest.TestCase):
             client = TOKEN_VAULT.login(store)
             store.save_refresh("rotated-by-keepalive")
             client.access = None
-            client.login()
-        self.assertEqual(["saved-old", "rotated"], requested)
+            TOKEN_VAULT.relogin(client)
+        self.assertEqual(["saved-old", "rotated-by-keepalive"], requested)
 
     def test_the_rotation_lock_is_released_afterwards(self):
         with self._patch_client([]):

@@ -40,6 +40,7 @@ __all__ = [
     "QThread", "QVBoxLayout", "Qt", "SyncJob",
     "_THREADS", "_apply_busy", "_dialog_busy",
     "_display_value", "_format_signatures", "_login_failure_guidance",
+    "button", "dialog_code", "header_mode",
     "_metadata_value", "_stop_thread", "plural",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
     "_keep_thread_alive", "_thread_running",
@@ -47,6 +48,32 @@ __all__ = [
     "sync_result_detail",
     "sync_result_text",
 ]
+
+
+def _qt_value(owner, name, scope):
+    """Qt-Konstante in alter und skopierter Schreibweise.
+
+    Qt6 (Calibre 9) kennt nur ``QHeaderView.ResizeMode.Stretch``; die alte
+    Form ``QHeaderView.Stretch`` fehlt dort und wirft AttributeError. Die
+    Test-Stubs kennen wiederum keine Enums. Der Helfer nimmt, was da ist.
+    """
+    holder = getattr(owner, scope, None)
+    return getattr(holder, name) if holder is not None else getattr(owner, name)
+
+
+def header_mode(name):
+    """Resize-Modus einer Tabellenspalte, unabhängig von der Qt-Version."""
+    return _qt_value(QHeaderView, name, "ResizeMode")
+
+
+def button(name):
+    """Standardknopf eines Meldungsfensters, unabhängig von der Qt-Version."""
+    return _qt_value(QMessageBox, name, "StandardButton")
+
+
+def dialog_code(name):
+    """Ergebniscode eines Dialogs, unabhängig von der Qt-Version."""
+    return _qt_value(QDialog, name, "DialogCode")
 
 
 def _metadata_value(item, name, default=""):

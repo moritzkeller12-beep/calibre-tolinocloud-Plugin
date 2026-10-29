@@ -1,9 +1,10 @@
 """Dialoge für den tolino-Bibliotheksvergleich."""
 import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                        QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+                        QHBoxLayout, QLabel, QMessageBox,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, Qt, _set_enabled, plural, start_call)
+                        QVBoxLayout, Qt, _set_enabled, header_mode, plural,
+                        start_call)
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import (comparison_group, comparison_sort_key,
                          sort_comparison_rows)
@@ -780,9 +781,9 @@ class InventoryDialog(QDialog):
         """
         header = self.table.horizontalHeader()
         for column in (5, 7):
-            header.setSectionResizeMode(column, QHeaderView.Stretch)
+            header.setSectionResizeMode(column, header_mode("Stretch"))
         for column in (0, 1, 2, 3, 4, 6):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(column, header_mode("ResizeToContents"))
 
     def _apply_group_filter(self, *_args):
         """Gruppenfilter ohne die Zeilen/Wahlzustaende zu verlieren.

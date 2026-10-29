@@ -5,7 +5,8 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
                         QLabel, QLineEdit, QMessageBox, QProgressBar,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
-                        _dialog_busy, _keep_thread_alive,
+                        _dialog_busy, _keep_thread_alive, button,
+                        dialog_code,
                         _login_failure_guidance,
                         _stop_thread, _thread_running, _worker_account_name,
                         _worker_outcome,
@@ -393,8 +394,8 @@ class SyncDashboard(QDialog):
             self, "Konto entfernen",
             "Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
             "werden gelöscht. Bücher in tolino und Calibre bleiben." % name,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+            button("Yes") | button("No"), button("No"))
+        if answer != button("Yes"):
             return
         remaining = [item for item in settings()["accounts"] if item["name"] != name]
         save_settings({"accounts": remaining,
@@ -833,16 +834,8 @@ class SyncDashboard(QDialog):
                 payload["comparison"], settings,
                 client_factory=lambda: self._worker_client(settings),
                 automatic=_dashboard_plan.automatic_action_count(metadata, state))
-        except Exception as exc:
-            # Ein Fehler NACH dem Vergleichsfenster darf nicht als Traceback
-            # im Slot verschwinden: der Nutzer sähe nur ein geschlossenes
-            # Fenster und keinen einzigen Upload.
-            self._cleanup_temp_files()
-            self._show_prepare_error(exc, settings)
-            return
-        if selection is None:
-            return
-        try:
+            if selection is None:
+                return
             preparation = _dashboard_plan.plan_actions(
                 self, settings, metadata, state, selection)
             if preparation["removals"] and not self._confirm_deletions(
@@ -852,9 +845,10 @@ class SyncDashboard(QDialog):
                 return
             self._start_sync_worker(settings, preparation, state)
         except Exception as exc:
-            # Der Plan legt Cover-Dateien an, bevor er fertig ist.
-            # Ein Fehler dort darf sie nicht bis zum naechsten Lauf liegen
-            # lassen -- der fruehe Rueckweg raeumt sie mit auf.
+            # Planen legt Cover-Dateien an, und ein Fehler NACH dem
+            # Vergleichsfenster darf nicht als Traceback im Slot
+            # verschwinden: der Nutzer sähe sonst nur ein geschlossenes
+            # Fenster und keinen einzigen Upload.
             self._cleanup_temp_files()
             self._show_prepare_error(exc, settings)
 
@@ -879,8 +873,8 @@ class SyncDashboard(QDialog):
              "%d Bücher werden aus tolino gelöscht (in Calibre bleiben sie):\n\n%s")
             % (("\n".join(lines),) if len(removals) == 1 else
                (len(removals), "\n".join(lines))),
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
+            button("Yes") | button("No"), button("No"))
+        return answer == button("Yes")
 
     def _confirm_comparison(self, comparison, settings, client_factory=None,
                             automatic=0):
@@ -897,7 +891,7 @@ class SyncDashboard(QDialog):
                 "ignore_column": ignore_column_available(
                     getattr(getattr(self, "gui", None), "current_db", None)),
             })
-        if dialog.exec() != QDialog.Accepted:
+        if dialog.exec() != dialog_code("Accepted"):
             return None
         # Die Auswahl des bestätigten Fensters entscheidet, was
         # passiert -- jede Aktion für sich; eine leere Auswahl ändert
@@ -937,8 +931,8 @@ class SyncDashboard(QDialog):
         answer = QMessageBox.question(
             self, "Cloud-Kopie ersetzen?",
             text,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
+            button("Yes") | button("No"), button("No"))
+        return answer == button("Yes")
 
     def _report_skipped_uploads(self, skipped_uploads, nothing_else=False):
         """Bücher ohne verwendbare Datei melden; True heisst «nichts zu tun».

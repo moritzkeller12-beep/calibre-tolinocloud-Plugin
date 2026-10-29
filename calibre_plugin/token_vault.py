@@ -14,27 +14,22 @@ class TokenVault:
     def __init__(self):
         self._lock = threading.Lock()
 
-    def login(self, store, lock_timeout=5, client_factory=None):
+    def login(self, store, lock_timeout=5):
         """Return a logged-in client; the lock covers only the login phase."""
         with self._held_lock(lock_timeout):
             values, refresh = self._freshest_token(store)
             save_rotation = self._callback_for_value(
                 store.refresh_token, store.save_refresh)
-            factory = client_factory or TolinoClient
-            client = factory(
+            client = TolinoClient(
                 store.values.get("partner_id"), values.get("hardware_id"),
                 refresh, token_callback=save_rotation,
                 hardware_callback=store.save_hardware)
-            client.token_lock = self._lock
+            # Erst anmelden, dann den Vault einhängen: `login()` würde
+            # sonst über `relogin()` den bereits gehaltenen Lock anfordern.
+            client.login()
+            save_rotation(client.refresh)
             client.token_vault = self
-            client.token_lock_timeout = lock_timeout
             client.credential_store = store
-            client.token_lock_held = True
-            try:
-                client.login()
-                save_rotation(client.refresh)
-            finally:
-                client.token_lock_held = False
         return client
 
     @contextlib.contextmanager
@@ -57,10 +52,10 @@ class TokenVault:
                                   code="A03")
         return values, refresh
 
-    def relogin(self, client):
-        """Refresh once under the account lock using the freshest saved token."""
+    def relogin(self, client, timeout=5):
+        """Refresh once under the shared lock using the freshest saved token."""
         store = client.credential_store
-        with self._held_lock(client.token_lock_timeout):
+        with self._held_lock(timeout):
             values, refresh = self._freshest_token(store)
             client.refresh = refresh
             client.hardware = values.get("hardware_id") or client.hardware
