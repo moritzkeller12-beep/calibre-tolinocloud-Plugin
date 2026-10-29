@@ -195,11 +195,6 @@ def read_column_available(database):
     return bool_column_available(database, TOLINO_READ_COLUMN)
 
 
-def metadata_read_value(metadata):
-    """Lesestatus aus ``#tolino_read``: True, False oder None (leer)."""
-    return bool_column_value(metadata, TOLINO_READ_COLUMN)
-
-
 def update_tolino_ids(database, updates, enabled=True, account_name=None):
     """Merge this account's IDs into the shared Calibre custom column."""
     if not enabled or not updates or not custom_column_available(database):
@@ -233,17 +228,6 @@ def update_tolino_ids(database, updates, enabled=True, account_name=None):
         return 0
     api.set_field(TOLINO_COLUMN, values)
     return len(values)
-
-
-def iter_book_ids(database):
-    """Yield book ids from Calibre 5+'s supported database API."""
-    api = database.new_api
-    yield from api.all_book_ids()
-
-
-def metadata_by_id(database, book_id):
-    """Read metadata by a real Calibre id, never by a filtered-view index."""
-    return database.new_api.get_metadata(book_id)
 
 
 def normalize_formats(value):

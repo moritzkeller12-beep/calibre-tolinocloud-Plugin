@@ -8,6 +8,7 @@ from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
 from .identifiers import display_title, migrate_state_keys
+from .library import image_suffix
 from .config import load_state
 from .tolino import (TolinoApiError, TolinoAuthError, log_warning,
                      report_error, sanitize_error)
@@ -418,9 +419,10 @@ class SyncWorker(QObject):
             self._finish_operation(operation, OP_SUCCEEDED)
             # Persist immediately so a later failure cannot lose this mapping.
             self._persist_state()
-            if job.cover_path:
+            if job.cover:
                 try:
-                    client.upload_cover(new_id, job.cover_path)
+                    client.upload_cover(new_id, job.cover,
+                                        image_suffix(job.cover))
                 except Exception as exc:
                     cover_op = self._add_operation(
                         "cover", "Buchcover: %s" % job.label(),

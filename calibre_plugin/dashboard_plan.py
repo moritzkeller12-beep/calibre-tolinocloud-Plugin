@@ -1,13 +1,12 @@
 """Comparison planning and action summaries for the sync dashboard."""
 import os
-import tempfile
 
 from .ui_common import (SyncJob, _display_value, _format_signatures,
                         _metadata_value, plural)
 from .identifiers import book_uuid, state_key_for, valid_book_uuid
-from .library import (cover_bytes, image_suffix, iter_book_ids,
-                      metadata_by_id, metadata_ignored, metadata_read_value,
-                      metadata_tolino_id, normalize_formats, safe_format_path)
+from .library import (TOLINO_READ_COLUMN, bool_column_value, cover_bytes,
+                      image_suffix, metadata_ignored, metadata_tolino_id,
+                      normalize_formats, safe_format_path)
 from .plan import (merge_removals, plan_collection_updates,
                    plan_metadata_updates, plan_sync, series_map_from_metadata)
 from .config import load_state
@@ -20,8 +19,9 @@ def local_metadata(dialog):
     """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
     metadata = {}
     state = saved_state(dialog)
-    for book_id in iter_book_ids(dialog.gui.current_db):
-        item = metadata_by_id(dialog.gui.current_db, book_id)
+    database = dialog.gui.current_db
+    for book_id in database.new_api.all_book_ids():
+        item = database.new_api.get_metadata(book_id)
         identifier = book_uuid(item)
         if not identifier:
             identifier = (state_key_for(state, book_id)
@@ -47,7 +47,8 @@ def local_metadata(dialog):
             "series": str(_metadata_value(item, "series") or "").strip(),
         }
         if getattr(dialog, "read_column_enabled", False):
-            metadata[book_id]["calibre_read"] = metadata_read_value(item)
+            metadata[book_id]["calibre_read"] = bool_column_value(
+                item, TOLINO_READ_COLUMN)
     values = dialog.values()
     preferred_formats = normalize_formats(
         values.get("preferred_formats", ()))
@@ -174,23 +175,16 @@ def upload_jobs(dialog, metadata, uploads):
                 "Buch %s (%s), Format %s: %s"
                 % (book_id, title or "ohne Titel", fmt, exc))
             continue
-        cover_path = None
         try:
             cover = cover_bytes(dialog.gui.current_db, book_id)
         except Exception as exc:
             log_warning("Cover für Buch %s nicht verfügbar: %s" % (book_id, exc))
             cover = None
-        suffix = image_suffix(cover)
-        if cover and suffix:
-            temp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-            temp.write(cover)
-            temp.close()
-            cover_path = temp.name
-            dialog.temp_files.append(cover_path)
-        elif cover:
+        if cover and not image_suffix(cover):
             log_warning("Coverformat unbekannt – Cover wird nicht übertragen.")
-        jobs.append(SyncJob(book_id, identifier, fmt, old_id, path,
-                            cover_path, title))
+            cover = None
+        jobs.append(SyncJob(book_id, identifier, fmt, old_id, path, cover,
+                            title))
     return jobs, skipped_uploads
 
 

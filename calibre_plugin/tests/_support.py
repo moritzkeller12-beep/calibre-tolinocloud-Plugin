@@ -198,7 +198,7 @@ def start_cdp_stubs():
     global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
     if _PICK_CHROMIUM_PATCH is None:
         _PICK_CHROMIUM_PATCH = patch("calibre_plugin.cdp.pick_chromium",
-                                     return_value=None)
+                                     return_value=(None, ""))
         _PICK_CHROMIUM_PATCH.start()
     if _CLOSE_WINDOW_PATCH is None:
         _CLOSE_WINDOW_PATCH = patch("calibre_plugin.cdp.close_grabber_window",

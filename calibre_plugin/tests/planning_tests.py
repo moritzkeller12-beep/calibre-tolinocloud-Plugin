@@ -14,8 +14,7 @@ from .. import config
 from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        cover_bytes, create_custom_columns,
                        custom_column_available, ignore_column_available,
-                       iter_book_ids, metadata_by_id, metadata_ignored,
-                       metadata_tolino_id,
+                       metadata_ignored, metadata_tolino_id,
                        normalize_formats, safe_format_path,
                        selected_table_rows, update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
@@ -89,8 +88,9 @@ class SyncPlanTests(unittest.TestCase):
             new_api = DatabaseAPI()
 
         database = Database()
-        self.assertEqual([41, 99], list(iter_book_ids(database)))
-        self.assertEqual({"uuid": "u41"}, metadata_by_id(database, 41))
+        self.assertEqual([41, 99], list(database.new_api.all_book_ids()))
+        self.assertEqual({"uuid": "u41"},
+                         database.new_api.get_metadata(41))
         self.assertEqual("/library/41.epub", safe_format_path(database, 41, "EPUB"))
         self.assertEqual(b"cover-data", cover_bytes(database, 41))
         self.assertEqual([
@@ -150,7 +150,7 @@ class SyncPlanTests(unittest.TestCase):
                 1: {"uuid": "u1", "title": "EPUB verfügbar", "formats": ["EPUB"]},
                 2: {"uuid": "u2", "title": "Nur PDF", "formats": ["PDF"]},
             }
-            dialog = type("Dialog", (), {"temp_files": []})()
+            dialog = type("Dialog", (), {})()
             with patch.object(plan_module, "normalize_formats",
                               wraps=normalize_formats) as normalize:
                 with patch.object(plan_module, "upload_jobs",
@@ -295,7 +295,6 @@ class SyncPlanTests(unittest.TestCase):
 
         dialog = type("Dialog", (), {
             "gui": type("Gui", (), {"current_db": Database()})(),
-            "temp_files": [],
         })()
         with patch.object(dashboard_plan, "cover_bytes",
                           side_effect=OSError("cover unavailable")):
@@ -305,7 +304,7 @@ class SyncPlanTests(unittest.TestCase):
                     {1: {"title": "Buch"}},
                     [UploadRecord(1, "u1", "EPUB", None)])
         self.assertEqual(1, len(jobs))
-        self.assertIsNone(jobs[0].cover_path)
+        self.assertIsNone(jobs[0].cover)
         self.assertEqual([], skipped)
         warning.assert_called_once()
         self.assertIn("cover unavailable", warning.call_args.args[0])
@@ -1262,30 +1261,26 @@ class SyncPlanTests(unittest.TestCase):
             config.PREFERENCES = original
 
     def test_preferred_formats_are_a_global_setting(self):
-        self.assertIn(config.PREFERRED_FORMATS, config.DEFAULTS)
         self.assertNotIn(config.PREFERRED_FORMATS, config.ACCOUNT_KEYS)
+        self.assertIsInstance(
+            config.settings()[config.PREFERRED_FORMATS], list)
 
     def test_settings_only_commits_when_it_writes_a_value(self):
-        class CountingConfig(config.JSONConfig):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.commits = 0
-
-            def commit(self):
-                self.commits += 1
-
-        original = config.PREFERENCES
+        """Lesen committet nie; nur save_account schreibt."""
+        before = dict(config.PREFERENCES)
+        commits = []
+        original = config.PREFERENCES.commit
+        config.PREFERENCES.commit = lambda: commits.append(1)
         try:
-            preferences = CountingConfig("test")
-            config.PREFERENCES = preferences
             config.settings()
-            first_count = preferences.commits
-            self.assertGreater(first_count, 0)
-            config.settings()
-            self.assertEqual(first_count, preferences.commits)
+            self.assertEqual([], commits)
+            config.save_account("konto", {"refresh_token": "tok"},
+                                active="konto")
+            self.assertEqual(1, len(commits))
         finally:
-            config.PREFERENCES = original
-
+            config.PREFERENCES.commit = original
+            config.PREFERENCES.clear()
+            config.PREFERENCES.update(before)
     def test_configuration_contract_keeps_supported_preference_keys(self):
         """Gespeicherte UI-Optionen und Konten haben feste Schluessel."""
         legacy_global = ("preferred_formats",)
@@ -1346,8 +1341,6 @@ class SyncPlanTests(unittest.TestCase):
         values = config.settings()
         self.assertNotIn("sync_collections", values)
         self.assertNotIn("upload_covers", values)
-        self.assertNotIn("sync_collections", config.DEFAULTS)
-        self.assertNotIn("upload_covers", config.DEFAULTS)
 
     def test_partial_settings_ignore_unscoped_legacy_account_fields(self):
         original = config.PREFERENCES
@@ -1415,7 +1408,9 @@ class SyncPlanTests(unittest.TestCase):
 
         creds = {"name": "konto", "partner_id": 4, "hardware_id": "hw",
                  "refresh_token": "tok"}
-        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
+             patch("calibre_plugin.config.account_by_name",
+                   return_value={}):
             with patch.object(vault_module.TOKEN_VAULT, "login",
                               wraps=vault_module.TOKEN_VAULT.login) as login:
                 result = vault_module.TOKEN_VAULT.keepalive_refresh(
@@ -2219,7 +2214,9 @@ class PrepareStateCopyTests(unittest.TestCase):
                     "preferred_formats": ["EPUB"],
                     "sync_column_enabled": False}
         try:
-            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
+             patch("calibre_plugin.config.account_by_name",
+                   return_value={}):
                 worker = ui_module.workers.PrepareWorker(settings, metadata)
                 worker.ready.connect(payloads.append)
                 worker.failed.connect(payloads.append)

@@ -2,7 +2,7 @@
 import unittest
 from ._support import compare_inventory
 from .dialogs_tests import _QtDialogTest
-from ..library import (TOLINO_READ_COLUMN, metadata_read_value,
+from ..library import (TOLINO_READ_COLUMN, bool_column_value,
                        read_column_available)
 
 
@@ -21,10 +21,13 @@ class ReadColumnLibraryTests(unittest.TestCase):
         self.assertFalse(read_column_available(self._db({})))
 
     def test_values_are_read_only_as_true_false_or_empty(self):
-        self.assertTrue(metadata_read_value({TOLINO_READ_COLUMN: True}))
-        self.assertFalse(metadata_read_value({TOLINO_READ_COLUMN: False}))
-        self.assertIsNone(metadata_read_value({TOLINO_READ_COLUMN: None}))
-        self.assertIsNone(metadata_read_value({}))
+        self.assertTrue(bool_column_value({TOLINO_READ_COLUMN: True},
+                          TOLINO_READ_COLUMN))
+        self.assertFalse(bool_column_value({TOLINO_READ_COLUMN: False},
+                          TOLINO_READ_COLUMN))
+        self.assertIsNone(bool_column_value({TOLINO_READ_COLUMN: None},
+                          TOLINO_READ_COLUMN))
+        self.assertIsNone(bool_column_value({}, TOLINO_READ_COLUMN))
 
 
 class ReadColumnComparisonTests(unittest.TestCase):

@@ -23,6 +23,21 @@ class TolinoSyncAction(InterfaceAction):
         except Exception:
             pass  # keep-alive must never break plugin loading
 
+    def shutdown(self):
+        """Calibre beendet sich: Keep-alive anhalten, bevor nach Threads gesucht wird.
+
+        Calibre prüft beim Herunterfahren auf laufende Threads (Phase
+        «Actions shutdown»); ein atexit-Haken käme dafür zu spät.
+        """
+        try:
+            from .token_vault import stop_token_keepalive
+            stop_token_keepalive()
+        except Exception:
+            pass  # der Shutdown darf nie an der Aufräumung scheitern
+        parent = getattr(super(), "shutdown", None)
+        if callable(parent):
+            parent()
+
     def _keepalive_credentials(self):
         try:
             from .config import settings

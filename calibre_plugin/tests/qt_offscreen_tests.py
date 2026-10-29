@@ -1,8 +1,12 @@
 """Real-PyQt6 offscreen smoke test for InventoryDialog (Calibre APIs stubbed)."""
+import importlib.util
 import os
 import sys
 import types
 import unittest
+
+if importlib.util.find_spec("PyQt6") is None:  # die CI installiert PyQt6
+    raise unittest.SkipTest("PyQt6 ist nicht installiert")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

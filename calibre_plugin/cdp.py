@@ -56,28 +56,25 @@ def _new_profile_dir():
 
 
 
-def devtools_port_alive():
-    """Whether the browser launched by this plugin still answers."""
-    return _verified_owner() is not None
+def _ws_parts(ws_url):
+    """(Port, Pfad) einer vom Plugin selbst gebauten DevTools-Adresse.
 
-
-def _devtools_ws_address(ws_url, expected_port):
-    """Use the launched loopback port; never connect to a URL-supplied host."""
+    Der Host wird nie aus der Adresse übernommen: verbunden wird immer mit
+    127.0.0.1 und dem Port des eigenen Fensters.
+    """
     try:
         parsed = urlsplit(str(ws_url or ""))
         port = parsed.port
-        if (parsed.scheme != "ws"
-                or parsed.hostname not in ("127.0.0.1", "localhost", "::1")
-                or expected_port is None or port != int(expected_port)
+        if (parsed.scheme != "ws" or not port
                 or not parsed.path.startswith("/devtools/")):
-            raise ValueError("DevTools URL does not match the launched browser")
-        return "127.0.0.1", port, parsed.path
+            raise ValueError("invalid DevTools URL")
+        return int(port), parsed.path
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid DevTools websocket URL") from exc
 
 
 def _evaluate_raw_in_target(ws_url, expression, timeout=10,
-                            await_promise=False, expected_port=None):
+                            await_promise=False):
     """Like _evaluate_in_target but returns CDP's full result dict.
 
     Returns ``{"ok": bool, "value": <decoded JSON value or raw string>,
@@ -85,8 +82,8 @@ def _evaluate_raw_in_target(ws_url, expression, timeout=10,
     an in-page fetch whose failure text matters) use this variant.
     """
     try:
-        host, port, ws_path = _devtools_ws_address(ws_url, expected_port)
-        ws = _Ws.connect(host, port, ws_path, timeout=timeout)
+        port, ws_path = _ws_parts(ws_url)
+        ws = _Ws.connect("127.0.0.1", port, ws_path, timeout=timeout)
     except (OSError, ValueError):
         return {"ok": False, "value": None, "exception": "connect failed"}
     try:
@@ -124,11 +121,9 @@ def _evaluate_raw_in_target(ws_url, expression, timeout=10,
         ws.close()
 
 
-def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False,
-                        expected_port=None):
+def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
     """Run a JS expression in a DevTools page target, return its JSON value."""
-    raw = _evaluate_raw_in_target(ws_url, expression, timeout, await_promise,
-                                  expected_port)
+    raw = _evaluate_raw_in_target(ws_url, expression, timeout, await_promise)
     if not raw["ok"]:
         return None
     try:
@@ -150,9 +145,10 @@ def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False,
 
 def launch_reader_window():
     """Start Chromium with an isolated temporary profile and random port."""
-    binary, label = pick_chromium() or (None, None)
+    candidate, status = pick_chromium()
+    binary, label = candidate or (None, None)
     if not binary:
-        message, code, status = browser_finder.missing_browser_error()
+        message, code = browser_finder.missing_browser_error(status)
         raise TolinoAuthError(message, code=code,
                               detail="Host-Sonde: %s" % status)
     previous = _verified_owner()
@@ -176,13 +172,10 @@ def launch_reader_window():
         "--window-size=1280,900", "--new-window", WEBREADER_URL,
     ]
     creationflags = 0x00000008 if os.name == "nt" else 0
-    attempts = [(list(binary), label)]
+    candidates = [(list(binary), label)]
     last_error = None
     process = None
-    index = 0
-    while index < len(attempts):
-        argv, candidate_label = attempts[index]
-        index += 1
+    for index, (argv, candidate_label) in enumerate(candidates):
         try:
             process = subprocess.Popen(
                 list(argv) + flags, creationflags=creationflags,
@@ -190,11 +183,12 @@ def launch_reader_window():
             break
         except OSError as exc:
             last_error = (candidate_label, exc)
-            if index == 1:
-                attempts.extend(
-                    candidate for candidate in browser_finder.chromium_options()
-                    if candidate[0] != binary)
-    else:
+            if index == 0:
+                # Weitere Kandidaten erst nach einem Fehlschlag suchen.
+                alternatives = browser_finder.chromium_options()
+                candidates.extend(
+                    option for option in alternatives if option[0] != binary)
+    if process is None:
         shutil.rmtree(profile, ignore_errors=True)
         raise TolinoAuthError(
             "Chromium konnte nicht gestartet werden.", code="B07",
@@ -235,7 +229,7 @@ def _abandon_failed_launch(process, record):
     return _shutdown(live)
 
 
-def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
+def read_idb_tokens(ws_url, db_names, timeout=10):
     """Walk every IndexedDB database's object stores for token values.
 
     Returns the merged ``{"refresh": [...], "hardware": [...]}`` dict;
@@ -247,8 +241,7 @@ def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
         if not name or not str(name).strip():
             continue
         result = _evaluate_in_target(ws_url, idb_expression(name), timeout,
-                                     await_promise=True,
-                                     expected_port=expected_port)
+                                     await_promise=True)
         if not result:
             continue
         for bucket in ("refresh", "hardware"):
@@ -258,18 +251,16 @@ def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
     return merged
 
 
-def _grab_page_tokens(ws_url, timeout=10, expected_port=None):
+def _grab_page_tokens(ws_url, timeout=10):
     """ONE full storage grab: localStorage, sessionStorage, IndexedDB."""
     grabbed = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
-                                  await_promise=True,
-                                  expected_port=expected_port) or {}
+                                  await_promise=True) or {}
     for bucket in ("refresh", "hardware", "idb"):
         if not isinstance(grabbed.get(bucket), list):
             grabbed[bucket] = []
     idb_names = list(grabbed.get("idb"))
     if idb_names:
-        idb_tokens = read_idb_tokens(ws_url, idb_names, timeout,
-                                     expected_port=expected_port)
+        idb_tokens = read_idb_tokens(ws_url, idb_names, timeout)
         for bucket in ("refresh", "hardware"):
             for value in idb_tokens.get(bucket) or []:
                 if value not in grabbed[bucket]:
@@ -333,7 +324,7 @@ def grab_once_from_grabber(port=None, timeout=12):
         _http_get_json("http://127.0.0.1:%d/json/list" % port), port)[0]
     if ws_url is None:
         return None
-    return _grab_page_tokens(ws_url, timeout, expected_port=port)
+    return _grab_page_tokens(ws_url, timeout)
 
 
 def _oauth_rejection_reason(body):
@@ -373,21 +364,14 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     succeed, so the callers fail fast with instructions instead of
     retrying the same token.
     """
-    record = _verified_owner()
-    if record is None:
+    if _verified_owner() is None:
         return 0, "browser ownership could not be verified"
-    expected_port = int(record["port"])
-    try:
-        _devtools_ws_address(ws_url, expected_port)
-    except (TypeError, ValueError):
-        return 0, "DevTools endpoint did not match the owned browser"
     expression = (_EXCHANGE_SNIPPET
                   .replace("TOKEN_URL_PLACEHOLDER",
                            json.dumps(str(token_url)))
                   .replace("BODY_PLACEHOLDER", json.dumps(str(form_body))))
     raw = _evaluate_raw_in_target(ws_url, expression, timeout,
-                                  await_promise=True,
-                                  expected_port=expected_port)
+                                  await_promise=True)
     if not raw.get("ok"):
         return 0, "page evaluate failed: %s" % (raw.get("exception") or "?")
     try:
@@ -426,19 +410,15 @@ def _browser_ws_for_record(record, timeout=2):
         "http://127.0.0.1:%d/json/version" % port, timeout)
     ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
     try:
-        return _devtools_ws_address(ws_url, port)
+        return _ws_parts(ws_url)
     except ValueError:
         return None
 
 
-def _send_browser_close(host, port, path, timeout=2, expected_port=None):
-    """Send Browser.close to a loopback DevTools endpoint on our port."""
-    expected_port = port if expected_port is None else expected_port
+def _send_browser_close(port, path, timeout=2):
+    """Send Browser.close to the loopback DevTools endpoint on our port."""
     try:
-        host_literal = "[%s]" % host if ":" in host else host
-        host, port, path = _devtools_ws_address(
-            "ws://%s:%s%s" % (host_literal, port, path), expected_port)
-        ws = _Ws.connect(host, port, path, timeout=timeout)
+        ws = _Ws.connect("127.0.0.1", int(port), path, timeout=timeout)
         try:
             ws.send_json({"id": 1, "method": "Browser.close"})
             try:
@@ -475,8 +455,7 @@ def _shutdown(record, timeout=2):
     if port and _endpoint_answers(record, timeout):
         target = _browser_ws_for_record(record, timeout)
         if target:
-            _send_browser_close(*target, timeout=timeout,
-                                expected_port=port)
+            _send_browser_close(*target, timeout=timeout)
         _wait_for_endpoint_exit(record, timeout)
     if not _stop_launched_process(process, timeout):
         return False
@@ -568,7 +547,7 @@ def collect_grab(port, timeout=180, progress=None):
             time.sleep(2)
             continue
         saw_reader = True
-        result = _grab_page_tokens(ws_url, 10, expected_port=int(port))
+        result = _grab_page_tokens(ws_url, 10)
         if result and result.get("refresh"):
             return result
         if progress:

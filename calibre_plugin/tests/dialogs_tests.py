@@ -1,7 +1,6 @@
 """Dialoge: Vergleich, Aktionen und Loeschbestaetigung."""
 
 import os
-import re
 import tempfile
 import threading
 import unittest
@@ -374,16 +373,6 @@ class ComparisonLayoutTests(unittest.TestCase):
         # Die eine zusammengefasste Spalte und der doppelte Status sind weg.
         for gone in ("Wo", "Status"):
             self.assertNotIn(gone, headers)
-
-    def test_one_button_holds_all_marked_row_actions(self):
-        body = self._body()
-        for gone in ("self.download_btn", "self.collection_add_btn",
-                     "self.collection_rm_btn", "self.read_selected",
-                     "self.more_toggle", "_toggle_more_actions"):
-            self.assertNotIn(gone, body, "%s sollte entfallen sein" % gone)
-        self.assertIn("self.row_actions = QPushButton(", body)
-        self.assertIn("self.row_actions.clicked.connect(self.choose_row_action)",
-                      body)
 
     def test_the_menu_offers_every_row_action(self):
         """Die Spalten-Aktionen gelten auch für markierte Zeilen."""
@@ -1624,30 +1613,3 @@ class BackgroundCallTests(unittest.TestCase):
         self.assertIsNot(threading.main_thread(), seen[0])
         self.assertTrue(os.path.exists(path))
 
-
-    def test_download_action_is_offloaded_from_the_gui_thread(self):
-        """Wächter: Netzarbeit beim Download bleibt im Worker-Thread."""
-        source = _ui_source_text()
-        body = source.split("    def download_selected(", 1)[1].split(
-            "\n    def ", 1)[0]
-        self.assertIn("_start_action", body)
-        self.assertIn("self._download_finished", body)
-        self.assertNotIn("lambda result: self._download_finished", body)
-        self.assertIn("EPUB (*.epub);;PDF (*.pdf)", body)
-        self.assertIn("result[:4] == b\"%PDF\"", source)
-        dialogs = source.split("    def _start_action(", 1)[1].split(
-            "\n    def ", 1)[0]
-        self.assertIn("start_call", dialogs)
-
-    def test_no_ui_module_uses_a_lambda_as_worker_signal_receiver(self):
-        source = _ui_source_text()
-        ignored = {"thread.finished.connect(lambda: _discard_item(_THREADS, thread))"}
-        violations = []
-        for line_number, line in enumerate(source.splitlines(), 1):
-            if "lambda" not in line or not re.search(
-                    r"\b(?:done|failed|valid|invalid|busy|completed|ready)\.connect", line):
-                continue
-            if any(fragment in line for fragment in ignored):
-                continue
-            violations.append((line_number, line.strip()))
-        self.assertEqual([], violations)

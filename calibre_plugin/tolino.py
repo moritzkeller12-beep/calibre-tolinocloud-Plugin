@@ -563,15 +563,13 @@ class TolinoClient:
         return records
 
     @staticmethod
-    def _multipart(fields, file_path, field="file"):
-        """Build a multipart body in memory.
+    def _multipart(fields, payload, filename, field="file"):
+        """Build a multipart body in memory from bytes.
 
         Memory note: the returned body is one contiguous bytes object, so a
         large EPUB is held roughly twice while the chunks are joined. EPUBs
         are usually small (single-digit MB); keeping the stdlib-only
-        transport (urllib) is worth that trade-off. The upload is sent as a
-        single request, and the temporary profile/cover data is cleaned up
-        by the caller.
+        transport (urllib) is worth that trade-off.
         """
         boundary = ("----CalibreTolino%s" % uuid.uuid4().hex).encode("ascii")
         chunks = []
@@ -579,11 +577,9 @@ class TolinoClient:
             chunks.extend([b"--" + boundary + b"\r\n",
                            ("Content-Disposition: form-data; name=\"%s\"\r\n\r\n" % key).encode(),
                            str(value).encode(), b"\r\n"])
-        name = os.path.basename(file_path)
+        name = os.path.basename(str(filename))
         guessed_type = mimetypes.guess_type(name)
         mime = next(iter(guessed_type), None) or "application/octet-stream"
-        with open(file_path, "rb") as source:
-            payload = source.read()
         chunks.extend([b"--" + boundary + b"\r\n",
                        ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field, name)).encode(),
                        ("Content-Type: %s\r\n\r\n" % mime).encode(),
@@ -592,7 +588,9 @@ class TolinoClient:
         return b"".join(chunks), "multipart/form-data; boundary=%s" % boundary.decode()
 
     def upload(self, file_path):
-        body, content_type = self._multipart({}, file_path)
+        with open(file_path, "rb") as source:
+            payload = source.read()
+        body, content_type = self._multipart({}, payload, file_path)
         data = self._request(BASE_URL + "/upload", "POST", body,
                              content_type=content_type)
         deliverable = (data.get("metadata") or {}).get("deliverableId")
@@ -600,9 +598,12 @@ class TolinoClient:
             raise TolinoApiError("Upload ohne deliverableId in der Antwort.", code="N04", short="tolino hat den Upload nicht bestätigt.")
         return str(deliverable)
 
-    def upload_cover(self, deliverable_id, file_path):
-        body, content_type = self._multipart({"deliverableId": deliverable_id}, file_path)
-        self._request(BASE_URL + "/cover", "POST", body, content_type=content_type)
+    def upload_cover(self, deliverable_id, data, suffix=".jpg"):
+        body, content_type = self._multipart(
+            {"deliverableId": deliverable_id}, data,
+            "cover" + str(suffix or ""))
+        self._request(BASE_URL + "/cover", "POST", body,
+                      content_type=content_type)
 
     def delete(self, deliverable_id):
         self._request(BASE_URL + "/deletecontent?deliverableId=" + str(deliverable_id))

@@ -119,23 +119,21 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         self.addCleanup(self.ui_module._restore_stubs_for_tests)
         self.dashboard_module = self.ui_module.dashboard
         self.dashboard_plan = self.dashboard_module._dashboard_plan
-        self.original = (self.dashboard_plan.iter_book_ids,
-                         self.dashboard_plan.metadata_by_id)
-
-    def tearDown(self):
-        (self.dashboard_plan.iter_book_ids,
-         self.dashboard_plan.metadata_by_id) = self.original
 
     def _dashboard(self, books, settings=None):
         settings = settings or {"state": "", "preferred_formats": ["EPUB"]}
         dashboard = self.dashboard_module.SyncDashboard.__new__(
             self.dashboard_module.SyncDashboard)
-        dashboard.gui = type("Gui", (), {"current_db": books["library"]})()
+        api = books["library"].new_api
+        metadata = books["metadata"]
+        attrs = {name: staticmethod(getattr(api, name)) for name in
+                 ("has_id", "format_abspath", "cover") if hasattr(api, name)}
+        attrs["all_book_ids"] = staticmethod(lambda: list(metadata))
+        attrs["get_metadata"] = staticmethod(lambda book_id: metadata[book_id])
+        library = type("Library", (), {"new_api": type("Api", (), attrs)()})()
+        dashboard.gui = type("Gui", (), {"current_db": library})()
         dashboard.values = lambda: settings
         dashboard.sync_column_enabled = False
-        self.dashboard_plan.iter_book_ids = lambda _db: list(books["metadata"])
-        self.dashboard_plan.metadata_by_id = (
-            lambda _db, book_id: books["metadata"][book_id])
         return dashboard
 
     def _books(self, library=None):

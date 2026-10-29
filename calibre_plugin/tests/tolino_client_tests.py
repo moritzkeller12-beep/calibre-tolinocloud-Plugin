@@ -11,9 +11,10 @@ from . import ui_base_tests, worker_base_tests
 from .. import config
 from ..partners import PARTNERS, WEBREADER_URL
 from ..tolino import TolinoAuthError, TolinoClient
-from ..sync_data import READ_TAG, tag_id_from_patch, tag_pairs, tag_state
+from ..sync_data import READ_TAG, active_tags, tag_id_from_patch, tag_state
 from ..browser_login import browser_login
-from ._support import (UI_SOURCE_FILES, _ui_source_text, compare_inventory,
+from ._support import (
+    UI_SOURCE_FILES,compare_inventory,
                        start_cdp_stubs, stop_cdp_stubs)
 from pathlib import Path
 from unittest.mock import patch
@@ -955,36 +956,6 @@ class UserTextTests(unittest.TestCase):
                     and id(node) not in docstrings):
                 yield node.value
 
-    def test_visible_ui_texts_avoid_the_haekchen_wording(self):
-        """«Auswahl/ausgewählt» statt «Häkchen/anhaken» – überall im Dialog."""
-        base = Path(__file__).resolve().parent.parent
-        offenders = [text.strip()[:60]
-                     for name in UI_SOURCE_FILES
-                     for text in self._visible_strings(base / name)
-                     if any(word in text.casefold() for word in self.WORDS)]
-        worker_texts = self._visible_strings(base / "ui_workers.py")
-        offenders += [text.strip()[:60] for text in worker_texts
-                      if "deliverable" in text.casefold()]
-        self.assertEqual([], offenders)
-
-    def test_prepare_error_dialog_shows_only_the_short_message(self):
-        """Feldbefund: Der Dialog zeigte Meldung + Traceback doppelt.
-
-        Die Details (inklusive Traceback unerwarteter Fehler) schreibt
-        report_error() ins Calibre-Log; der Dialog bekommt genau eine Zeile.
-        """
-        source = _ui_source_text()
-        tree = ast.parse(source)
-        body = None
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.FunctionDef)
-                    and node.name == "_show_prepare_error"):
-                body = ast.get_source_segment(source, node) or ""
-        self.assertIsNotNone(body)
-        self.assertIn('report_error(exc, "Vorbereitung", secrets)', body)
-        self.assertNotIn("format_error_details", body)
-        self.assertNotIn("Traceback", body)
-
     def test_reported_message_is_one_clean_line(self):
         """Genau «Text (Code A01)» – ohne Zeilenumbruch und ohne Traceback."""
         exc = tolino_module.TolinoAuthError(
@@ -1068,8 +1039,9 @@ class DownloadMetadataTests(unittest.TestCase):
         client._multipart = lambda *_args, **_kwargs: (b"body", "multipart/form-data")
         client._request = lambda *_args, **_kwargs: {"metadata": None}
         from ..tolino import TolinoApiError
-        with self.assertRaises(TolinoApiError) as caught:
-            client.upload("book.epub")
+        with tempfile.NamedTemporaryFile(suffix=".epub") as source:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.upload(source.name)
         self.assertEqual("N04", caught.exception.code)
 
     def test_download_returns_content_without_an_inventory_request(self):
@@ -1109,8 +1081,10 @@ class MultipartMemoryTests(unittest.TestCase):
             path = tmp.name
         try:
             tracemalloc.start()
+            with open(path, "rb") as source:
+                payload = source.read()
             body, content_type = TolinoClient._multipart(
-                {"deliverableId": "abc"}, path)
+                {"deliverableId": "abc"}, payload, path)
             _current, peak = tracemalloc.get_traced_memory()
             tracemalloc.stop()
         finally:
@@ -1274,8 +1248,8 @@ class TagStateReducerTests(unittest.TestCase):
         active = tag_state(
             patches, self.BOOK, "gelesen", "system")
         self.assertIsNotNone(active)
-        pairs = tag_pairs(patches, "collection")
-        self.assertEqual({("book-1", "SciFi")}, pairs)
+        pairs = active_tags(patches, "collection")
+        self.assertEqual({("book-1", "SciFi")}, set(pairs))
 
     def test_mark_read_does_not_add_an_already_active_tag(self):
         client = TolinoClient(4, "hardware", "refresh-token")

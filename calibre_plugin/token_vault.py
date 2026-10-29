@@ -1,5 +1,4 @@
 """Serialize single-use refresh-token grants through one shared vault."""
-import atexit
 import contextlib
 import threading
 
@@ -109,6 +108,7 @@ class TokenVault:
 TOKEN_VAULT = TokenVault()
 _KEEPALIVE_STOP = threading.Event()
 _KEEPALIVE_STARTED = threading.Event()
+_KEEPALIVE_THREAD = None
 
 
 def make_client(store, lock_timeout=5):
@@ -120,21 +120,36 @@ def start_token_keepalive(get_credentials, interval=45 * 60):
     """Rotate saved refresh tokens periodically in a daemon thread."""
     if _KEEPALIVE_STARTED.is_set():
         return None
+    global _KEEPALIVE_THREAD
     _KEEPALIVE_STARTED.set()
-    # Beim Beenden das Event setzen: sonst meldet Calibre beim Shutdown
-    # «Thread still alive: tolino-token-keepalive».
-    atexit.register(_KEEPALIVE_STOP.set)
+    _KEEPALIVE_STOP.clear()
 
     def loop():
         while not _KEEPALIVE_STOP.wait(max(60, interval)):
             TOKEN_VAULT.keepalive_refresh(get_credentials)
 
-    thread = threading.Thread(target=loop, name="tolino-token-keepalive",
-                              daemon=True)
-    thread.start()
+    _KEEPALIVE_THREAD = threading.Thread(
+        target=loop, name="tolino-token-keepalive", daemon=True)
+    _KEEPALIVE_THREAD.start()
     log_info("Tolino-Keep-alive gestartet: alle %d Minuten."
              % (max(60, interval) // 60))
-    return thread
+    return _KEEPALIVE_THREAD
+
+
+def stop_token_keepalive(timeout=2):
+    """Keep-alive-Schleife anhalten -- aus dem Shutdown des Plugins.
+
+    Calibre prüft beim Herunterfahren, ob noch Threads laufen, und meldet
+    sonst «Thread still alive: tolino-token-keepalive». Ein atexit-Haken
+    käme dafür zu spät: er läuft erst am Ende des Interpreters, die Prüfung
+    davor.
+    """
+    global _KEEPALIVE_THREAD
+    _KEEPALIVE_STOP.set()
+    thread, _KEEPALIVE_THREAD = _KEEPALIVE_THREAD, None
+    _KEEPALIVE_STARTED.clear()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=max(0.1, timeout))
 
 
 def check_stored_login(store, lock_timeout=5):

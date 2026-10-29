@@ -3,6 +3,7 @@ import json
 import time
 from urllib.parse import urlencode
 
+from . import cdp as cdp_module
 from .partners import PARTNERS
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
                      TolinoClient, _bot_check_detected,
@@ -44,10 +45,8 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     # Fingerprints wie der Reader selbst -- der eigene POST wird vom
     # Bot-Schutz gelegentlich mit WAF-403 abgewiesen.
     try:
-        from . import cdp as cdp_module
         ws_url = cdp_module.reader_ws_url()
     except Exception:
-        cdp_module = None
         ws_url = None
     if ws_url:
         form = urlencode({
@@ -114,7 +113,6 @@ def _close_window_after_grab(progress=None):
     Statuszeile das -- der uebernommene Token waere sonst still gefaehrdet,
     weil der Reader ihn weiterrotieren wuerde (Reuse-Schutz).
     """
-    from . import cdp as cdp_module
     try:
         if cdp_module.close_grabber_window():
             return True
@@ -137,7 +135,6 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     no Chromium browser is installed – the caller reports that and
     offers the manual route (access key in the settings) instead.
     """
-    from . import cdp as cdp_module
     grabber_window_state = cdp_module.grabber_window_state
     grabbed = _normalize_live_grab(cdp_module.grab_live_tokens(
         timeout=timeout, progress=progress))

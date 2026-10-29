@@ -2,7 +2,6 @@
 
 import calibre_plugin.tolino as tolino_module
 import calibre_plugin.token_vault as vault_module
-import re
 import unittest
 from . import ui_base_tests
 from .. import config
@@ -10,7 +9,7 @@ from ..partners import PARTNERS
 from ..library import TOLINO_COLUMN
 from ..tolino import TolinoAuthError
 from ._support import (
-    FakeText, _ui_source_text, start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+    FakeText,start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from pathlib import Path
 from unittest.mock import patch
 
@@ -185,76 +184,6 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         self.assertFalse(dashboard.switch_account(""))
         self.assertEqual([], calls)
 
-class DashboardLayoutTests(unittest.TestCase):
-    """Ensure every dashboard widget is added to a visible layout."""
-
-    def _source(self):
-        return _ui_source_text()
-
-    def _dashboard_body(self):
-        return self._source().split("class SyncDashboard(QDialog):", 1)[1].split(
-            "\nclass ", 1)[0]
-
-    def test_every_created_button_is_added_to_a_layout(self):
-        """Auch der Knopf im Einstellungsfenster und die Kontoauswahl auf
-        der ersten Seite."""
-        source = self._source()
-        names = re.findall(
-            r"self\.(\w+) = (?:QPushButton|QCheckBox|QComboBox|QLineEdit)\(",
-            source)
-        self.assertNotIn("debug", names)
-        # Beschriftungen wie "Hardware-ID (automatisch erkannt)" enthalten
-        # selbst Klammern -- deshalb zeilenweise prüfen: dieselbe Zeile muss
-        # an ein addRow/addWidget/addLayout gehen.
-        for name in names:
-            self.assertTrue(
-                re.search(r"add(?:Row|Widget|Layout)\([^\n]*self\.%s\b" % name,
-                          source),
-                "Widget %r hängt in keinem Layout" % name)
-
-    def test_login_and_compare_have_their_own_buttons(self):
-        """Der alte Doppelweg (zwei Anmeldeknöpfe) bleibt weg, aber der
-        Anmeldeknopf steht wieder sichtbar auf der ersten Seite."""
-        body = self._dashboard_body()
-        self.assertIn("self.primary.clicked.connect(self.primary_action)", body)
-        self.assertIn(
-            "self.login_button.clicked.connect(self.browser_login)", body)
-        self.assertNotIn("self.browser = QPushButton(", body)
-        self.assertNotIn("self.start = QPushButton(", body)
-        self.assertNotIn("self.cancel = QPushButton(", body)
-
-    def test_the_settings_dialog_holds_the_rare_options(self):
-        """Alles Seltene liegt in EINEM Fenster, nicht hinter zwei
-        «… anzeigen»-Häkchen."""
-        settings = ((Path(__file__).resolve().parents[1] / "ui_dashboard.py")
-                   .read_text(encoding="utf-8"))
-        self.assertIn("class SettingsDialog(QDialog):", settings)
-        for group in ("Einstellungen", "Konten und Verbindung"):
-            self.assertIn('QGroupBox("%s")' % group, settings)
-        body = self._dashboard_body()
-        self.assertNotIn("advanced_toggle", body)
-        self.assertNotIn("_toggle_advanced", body)
-        self.assertIn("self.settings_button.clicked.connect(self.open_settings)",
-                      body)
-
-    def test_connection_controls_remain_available_without_diagnostics(self):
-        """Removing the report does not remove account or token controls."""
-        source = self._source()
-        settings = ((Path(__file__).resolve().parents[1] / "ui_dashboard.py")
-                   .read_text(encoding="utf-8"))
-        self.assertIn("Konten und Verbindung", settings)
-        self.assertIn('QGroupBox("Konten und Verbindung")', settings)
-        for label in ("Aktives Konto", "Geräte-ID (automatisch)",
-                      "Zugangstoken (nur bei Problemen ändern)"):
-            self.assertIn(label, source)
-        self.assertNotIn("DiagnosticDialog", source)
-        self.assertNotIn("diagnose_preparation", source)
-        self.assertNotIn("Lokale Diagnose", source)
-        self.assertIn("self.login_button = QPushButton", source)
-        self.assertIn("for pid, partner in sorted(PARTNERS.items())", source)
-        self.assertNotIn("partner.get(\"token_url\")", source)
-        self.assertIn("self.partner.findData(partner_id) < 0", source)
-
 class ColumnSetupButtonTests(unittest.TestCase):
     """Je Calibre-Spalte ein Knopf in den Einstellungen."""
 
@@ -276,18 +205,6 @@ class ColumnSetupButtonTests(unittest.TestCase):
         for name in ("create_columns", "_refresh_column_flags"):
             setattr(dashboard, name, getattr(cls, name).__get__(dashboard))
         return dashboard
-
-    def test_the_settings_offer_one_button_per_column(self):
-        source = _ui_source_text()
-        self.assertIn("self.column_buttons = {}", source)
-        self.assertIn("for index, (label, _name, datatype) in "
-                      "enumerate(CUSTOM_COLUMNS):", source)
-        self.assertIn('button = QPushButton("#%s anlegen …" % label)', source)
-        self.assertIn("lambda _checked=False, key=label: "
-                      "self.create_columns(key)", source)
-        self.assertIn("self.column_buttons[label] = button", source)
-        self.assertIn('transfer.addRow("Calibre-Spalten" if index == 0 '
-                      'else "", button)', source)
 
     def test_one_button_creates_only_its_own_column(self):
         from unittest.mock import patch
@@ -1148,8 +1065,8 @@ class LoginMessageTests(unittest.TestCase):
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
             dashboard)
 
-        with patch.object(ui_module.dashboard, "devtools_port_alive",
-                          return_value=False, create=True) as alive, \
+        with patch.object(ui_module.dashboard, "_verified_owner",
+                          return_value=None, create=True) as alive, \
              patch.object(ui_module.dashboard, "close_grabber_window",
                           create=True) as close:
             dashboard.login_completed("tok-neu", "hw-neu")

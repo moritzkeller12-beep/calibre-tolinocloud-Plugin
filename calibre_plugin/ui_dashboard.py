@@ -1,11 +1,9 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
-import os
-
 from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
                         QLabel, QLineEdit, QMessageBox, QProgressBar,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
-                        _dialog_busy, _keep_thread_alive, button,
+                        _dialog_busy, button, start_worker,
                         dialog_code,
                         _login_failure_guidance,
                         _stop_thread, _thread_running, _worker_account_name,
@@ -26,7 +24,7 @@ from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
 from .tolino import (RELOGIN, hardware_id, log_warning,
                      normalize_refresh_token, report_error, sanitize_error)
-from .cdp import devtools_port_alive
+from .cdp import _verified_owner
 from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
@@ -78,6 +76,15 @@ def _offer_next_step(dialog):
         pass  # Fenster wurde bereits geschlossen
 
 
+def _running_text(dialog):
+    """Was läuft gerade? Nur der Dialog kennt seine Worker-Attribute."""
+    if dialog.thread is not None:
+        return "Synchronisierung läuft …"
+    if getattr(dialog, "prepare_thread", None) is not None:
+        return "Vergleich läuft …"
+    return "Anmeldung wird geprüft …"
+
+
 def _persist_sync_result(dialog, state, updates):
     """Sync-Zustand und Tolino-IDs sichern; Lesestatusspalte bleibt lesend."""
     _persist_run(dialog, state)
@@ -96,20 +103,6 @@ def _persist_run(dialog, state):
     except Exception as exc:
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s" % sanitize_error(exc))
-
-
-def _register_login_thread(dialog, thread, worker):
-    """Anmelde-Thread starten und am Leben halten.
-
-    Ohne Elternteil: ein bereits geschlossenes Fenster darf den laufenden
-    Thread nicht zerstören. Die Liste hält die Referenz, bis der Thread
-    fertig ist -- sonst räumt ihn der Garbage Collector vorzeitig ab.
-    """
-    thread.finished.connect(thread.deleteLater)
-    _keep_thread_alive(thread)
-    dialog.login_thread = thread
-    dialog.login_worker = worker
-    thread.start()
 
 
 def _sync_cancelled_text(outcome):
@@ -148,7 +141,6 @@ class SyncDashboard(QDialog):
         self.sync_column_enabled = False
         self.read_column_enabled = False
         self.account_name = ""
-        self.temp_files = []
         self.setWindowTitle("tolino Cloud Sync")
         self.setMinimumWidth(560)
         root = QVBoxLayout(self)
@@ -457,9 +449,8 @@ class SyncDashboard(QDialog):
         logged_in = bool(self._effective_refresh())
         running = _dialog_busy(self)
         if running:
-            # Sperren und «… läuft»-Text kommen aus dem gemeinsamen Helfer;
-            # hier bleibt nur die Auswahl der Zweige.
             _apply_busy(self, True)
+            self.status.setText(_running_text(self))
         elif logged_in:
             self.status.setText("Angemeldet.")
         else:
@@ -596,16 +587,12 @@ class SyncDashboard(QDialog):
         _apply_busy(self, True)
         self.primary.setEnabled(False)
         self.status.setText("Anmeldung wird geprüft …")
-        thread = QThread()  # no parent: dialog may close first
         worker = SessionCheckWorker(settings)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        for signal in (worker.valid, worker.invalid, worker.busy):
-            signal.connect(thread.quit)
         worker.valid.connect(self.login_still_valid)
         worker.invalid.connect(self.login_rejected)
         worker.busy.connect(self.login_check_busy)
-        _register_login_thread(self, thread, worker)
+        start_worker(self, worker, QThread(), "login_thread", "login_worker",
+                     (worker.valid, worker.invalid, worker.busy))
 
     def login_still_valid(self):
         """Prüfung bestanden: Anmeldung bleibt gültig."""
@@ -648,16 +635,12 @@ class SyncDashboard(QDialog):
         self.primary.setEnabled(False)
         self.status.setText(
             "Bitte im Browserfenster anmelden, bis die Bücherliste erscheint.")
-        thread = QThread()  # no parent: dialog may close first
         worker = BrowserLoginWorker(partner_id, settings["hardware_id"])
-        worker.moveToThread(thread)
         worker.progress.connect(self._login_progress)
-        thread.started.connect(worker.run)
-        worker.completed.connect(thread.quit)
-        worker.failed.connect(thread.quit)
         worker.completed.connect(self.login_completed)
         worker.failed.connect(self.login_failed)
-        _register_login_thread(self, thread, worker)
+        start_worker(self, worker, QThread(), "login_thread", "login_worker",
+                     (worker.completed, worker.failed))
 
     def login_completed(self, refresh, hardware):
         try:
@@ -670,7 +653,7 @@ class SyncDashboard(QDialog):
             self.status.setText("Angemeldet.")
             # Der Grabber schliesst sein Fenster bereits. Die UI fragt nur
             # den Zustand ab; ein fehlender Besitzsatz heisst nicht «offen».
-            if devtools_port_alive():
+            if _verified_owner():
                 self.status.setText(
                     "Angemeldet. Das Anmeldefenster ist noch offen.")
             _offer_next_step(self)
@@ -764,20 +747,13 @@ class SyncDashboard(QDialog):
         self.progress.setVisible(True)
         self.progress_label.setVisible(True)
         self.progress_label.setText("Verbinde mit tolino …")
-        thread = QThread(self)
         worker = PrepareWorker(settings, metadata)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
         worker.progress.connect(self._prepare_progress)
         worker.ready.connect(self._prepare_ready)
         worker.failed.connect(self._prepare_failed)
-        worker.ready.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
-        self.prepare_thread = thread
-        self.prepare_worker = worker
+        start_worker(self, worker, QThread(self), "prepare_thread",
+                     "prepare_worker", (worker.ready, worker.failed))
         self.update_status()
-        thread.start()
 
     def _prepare_progress(self, text):
         try:
@@ -841,15 +817,12 @@ class SyncDashboard(QDialog):
             if preparation["removals"] and not self._confirm_deletions(
                     preparation["removals"], state,
                     preparation.get("removal_titles")):
-                self._cleanup_temp_files()
                 return
             self._start_sync_worker(settings, preparation, state)
         except Exception as exc:
-            # Planen legt Cover-Dateien an, und ein Fehler NACH dem
-            # Vergleichsfenster darf nicht als Traceback im Slot
-            # verschwinden: der Nutzer sähe sonst nur ein geschlossenes
-            # Fenster und keinen einzigen Upload.
-            self._cleanup_temp_files()
+            # Ein Fehler NACH dem Vergleichsfenster darf nicht als
+            # Traceback im Slot verschwinden: der Nutzer sähe sonst nur ein
+            # geschlossenes Fenster und keinen einzigen Upload.
             self._show_prepare_error(exc, settings)
 
     def _confirm_deletions(self, removals, state, titles=None):
@@ -966,19 +939,16 @@ class SyncDashboard(QDialog):
             # Antwort statt eines Hintergrundstarts.
             # Calibre zeigt ein info_dialog nur mit show=True an; ohne das
             # Argument entsteht das Fenster und bleibt unsichtbar.
-            self._cleanup_temp_files()
             info_dialog(self, "Nichts zu tun",
                         _dashboard_plan.nothing_to_do_text(preparation),
                         show=True, show_copy_button=False)
             return
         if skipped_uploads and self._report_skipped_uploads(
                 skipped_uploads, nothing_else=not total):
-            self._cleanup_temp_files()
             return
         replacements = [job for job in jobs
                         if getattr(job, "old_id", None)]
         if replacements and not self._confirm_replacements(replacements):
-            self._cleanup_temp_files()
             status = getattr(self, "status", None)
             if status is not None:
                 status.setText("Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
@@ -995,21 +965,17 @@ class SyncDashboard(QDialog):
         _apply_busy(self, True)
         self.progress.setRange(0, total)
         self.progress.setValue(0)
-        self.thread = QThread(self)
         settings["metadata"] = preparation.get("metadata", {})
-        self.worker = SyncWorker(settings, jobs, preparation["removals"],
-                                 preparation["meta_updates"],
-                                 preparation["series_map"],
-                                 preparation["selected_read"],
-                                 preparation["selected_unread"],
-                                 titles=preparation.get("titles"))
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.progress.connect(self.progress_changed)
-        self.worker.completed.connect(self.sync_completed)
-        self.worker.failed.connect(self.sync_failed)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.thread.start()
+        worker = SyncWorker(settings, jobs, preparation["removals"],
+                            preparation["meta_updates"],
+                            preparation["series_map"],
+                            preparation["selected_read"],
+                            preparation["selected_unread"],
+                            titles=preparation.get("titles"))
+        worker.progress.connect(self.progress_changed)
+        worker.completed.connect(self.sync_completed)
+        worker.failed.connect(self.sync_failed)
+        start_worker(self, worker, QThread(self), "thread", "worker")
         self.progress.setValue(0)
         # Der Plan steht sofort im Fenster: der Nutzer sieht, dass der Lauf
         # begonnen hat und was er tut.
@@ -1083,21 +1049,6 @@ class SyncDashboard(QDialog):
             self, _sync_failure_heading(outcome)[0], text,
             det_msg=sync_result_detail(outcome), show=True)
 
-    def _cleanup_temp_files(self):
-        """Temporäre Cover-Dateien löschen -- auch auf frühen Rückwegen.
-
-        Die Dateien entstehen beim Planen; stand die Aufraeumung nur
-        im Abschluss, blieben sie bei «Nichts zu übertragen» oder einer
-        abgebrochenen Löschbestätigung bis zum nächsten Lauf liegen
-.
-        """
-        for path in getattr(self, "temp_files", ()):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-        self.temp_files = []
-
     def finish_thread(self):
         thread = self.thread
         self.thread = None
@@ -1105,7 +1056,6 @@ class SyncDashboard(QDialog):
         if thread is not None:
             _stop_thread(thread)
         self.progress_label.setText("Bereit")
-        self._cleanup_temp_files()
         _apply_busy(self, False)
         self.update_status()
 

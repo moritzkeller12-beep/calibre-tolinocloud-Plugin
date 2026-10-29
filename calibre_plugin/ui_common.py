@@ -40,7 +40,7 @@ __all__ = [
     "QThread", "QVBoxLayout", "Qt", "SyncJob",
     "_THREADS", "_apply_busy", "_dialog_busy",
     "_display_value", "_format_signatures", "_login_failure_guidance",
-    "button", "dialog_code", "header_mode",
+    "button", "dialog_code", "header_mode", "start_worker",
     "_metadata_value", "_stop_thread", "plural",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
     "_keep_thread_alive", "_thread_running",
@@ -120,16 +120,17 @@ class SyncJob:
     # Titel, nicht die Kennung. Der Standardwert haelt aeltere Aufrufer
     # (und Tests) unveraendert am Laufen.
     __slots__ = ("book_id", "book_uuid", "format_name", "old_id", "path",
-                 "cover_path", "title")
+                 "cover", "title")
 
     def __init__(self, book_id, book_uuid, format_name, old_id, path,
-                 cover_path, title=""):
+                 cover, title=""):
         self.book_id = book_id
         self.book_uuid = book_uuid
         self.format_name = format_name
         self.old_id = old_id
         self.path = path
-        self.cover_path = cover_path
+        # Cover-Bytes statt einer Temp-Datei: kein Aufraeumen noetig.
+        self.cover = cover
         self.title = title
 
     def label(self):
@@ -190,6 +191,26 @@ def start_call(dialog, call, on_done, on_failed):
     _keep_thread_alive(thread)
     dialog._call_thread = thread
     dialog._call_worker = worker
+    thread.start()
+    return thread
+
+
+def start_worker(dialog, worker, thread, thread_name, worker_name, stop_on=()):
+    """Run ``worker.run`` in ``thread`` and remember both on the dialog.
+
+    ``stop_on`` sind die Signale, nach denen der Worker fertig ist; sie
+    beenden die Thread-Schleife. Ohne sie beendet der Aufrufer den Thread
+    selbst (``_stop_thread``). Der Dialog haelt die Referenzen, damit ein
+    geschlossenes Fenster den laufenden Thread nicht zerstoert.
+    """
+    worker.moveToThread(thread)
+    thread.started.connect(worker.run)
+    for signal in stop_on:
+        signal.connect(thread.quit)
+    thread.finished.connect(thread.deleteLater)
+    _keep_thread_alive(thread)
+    setattr(dialog, thread_name, thread)
+    setattr(dialog, worker_name, worker)
     thread.start()
     return thread
 
@@ -273,22 +294,16 @@ def _set_enabled(owner, names, enabled):
 
 
 def _apply_busy(dialog, busy):
-    """Disable account/partner/sync controls while an operation runs."""
+    """Disable account/partner/sync controls while an operation runs.
+
+    Der Statustext kommt von den Startern -- sie wissen, was läuft; hier
+    würde nur geraten.
+    """
     _set_enabled(dialog, ("account_quick", "account_select", "account_new",
                           "account_remove", "partner", "login_button",
                           "settings_button", "hardware", "refresh",
                           "formats"),
                  not busy)
-    if busy:
-        status = getattr(dialog, "status", None)
-        if status is not None:
-            if getattr(dialog, "thread", None) is not None:
-                text = "Synchronisierung läuft …"
-            elif getattr(dialog, "prepare_thread", None) is not None:
-                text = "Vergleich läuft …"
-            else:
-                text = "Anmeldung wird geprüft …"
-            status.setText(text)
 
 
 # Titel + naechster Schritt je Anmelde-Fehlercode. Kurz, einzeilig und

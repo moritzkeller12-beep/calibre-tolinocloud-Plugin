@@ -29,10 +29,6 @@ DEFAULT_ACCOUNT = {
     "refresh_token": "",
     "state": {},
 }
-# Nur globale Schluessel: Kontofelder stehen in `accounts` und werden dort
-# gelesen -- als Top-Level-Default waeren sie stille Leichen.
-DEFAULTS = {PREFERRED_FORMATS: ["EPUB"]}
-
 _SETTINGS_LOCK = threading.RLock()
 
 
@@ -81,26 +77,14 @@ def settings():
             active = accounts[0]["name"]
         current = next(item for item in accounts if item["name"] == active)
         values = {PREFERRED_FORMATS: _copy(PREFERENCES.get(
-            PREFERRED_FORMATS, DEFAULTS[PREFERRED_FORMATS]))}
+            PREFERRED_FORMATS, ["EPUB"]))}
         values.update({key: _copy(current[key]) for key in ACCOUNT_KEYS})
         values.update({
             "name": current["name"],
             "accounts": [_copy(item) for item in accounts],
             "active_account": active,
         })
-        # Persist only the current schema and its explicit defaults.
-        changed = False
-        if PREFERRED_FORMATS not in PREFERENCES:
-            PREFERENCES[PREFERRED_FORMATS] = _copy(values[PREFERRED_FORMATS])
-            changed = True
-        if PREFERENCES.get("accounts") != accounts:
-            PREFERENCES["accounts"] = accounts
-            changed = True
-        if PREFERENCES.get("active_account") != active:
-            PREFERENCES["active_account"] = active
-            changed = True
-        if changed:
-            PREFERENCES.commit()
+        # Reines Lesen: geschrieben wird nur in save_account/save_settings.
         return values
 
 

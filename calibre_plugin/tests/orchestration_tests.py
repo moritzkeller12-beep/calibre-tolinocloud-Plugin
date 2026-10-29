@@ -544,52 +544,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual("Nichts zu tun", infos[0][1])
         self.assertIn("nichts zu übertragen", infos[0][2].casefold())
 
-    def test_an_empty_plan_removes_the_planned_cover_files(self):
-        """Temp-Cover entstehen beim Planen; endet der Lauf vorher, dürfen
-        sie nicht bis zum nächsten Start in /tmp liegen bleiben."""
-        ui_module = self._ui_module()
-        ui_module.dashboard.info_dialog = lambda *args, **kwargs: None
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(b"jpg")
-            cover = tmp.name
-        self.addCleanup(lambda: os.path.exists(cover) and os.unlink(cover))
-        dashboard = self._planning_dashboard(ui_module)
-        dashboard.temp_files = [cover]
-        dashboard._start_sync_worker(dashboard.values(), _preparation())
-        self.assertIsNone(dashboard.thread)
-        self.assertFalse(os.path.exists(cover))
-        self.assertEqual([], dashboard.temp_files)
-
-    def test_a_planning_failure_removes_the_planned_cover_files(self):
-        """Auch ein Fehler IN `_plan_actions` darf keine Cover-Datei behalten."""
-        ui_module = self._ui_module()
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(b"jpg")
-            cover = tmp.name
-        self.addCleanup(lambda: os.path.exists(cover) and os.unlink(cover))
-        dashboard = self._planning_dashboard(ui_module)
-        dashboard.temp_files = [cover]
-        dashboard._confirm_comparison = lambda *args, **kwargs: {
-            "uploads": set(), "metadata": set(), "read": [], "unread": [],
-            "cloud_deletions": [],
-        }
-
-        def fail(*args, **kwargs):
-            raise RuntimeError("Planung kaputt")
-
-        errors = []
-        dashboard._show_prepare_error = (
-            lambda exc, settings: errors.append(str(exc)))
-        with patch.object(ui_module.dashboard._dashboard_plan,
-                          "plan_actions", side_effect=fail):
-            dashboard._prepare_ready({
-                "account_name": "konto", "settings": dashboard.values(),
-                "metadata": {}, "state": {}, "comparison": [],
-            })
-        self.assertEqual(["Planung kaputt"], errors)
-        self.assertFalse(os.path.exists(cover))
-        self.assertEqual([], dashboard.temp_files)
-
     def test_the_sync_worker_starts_with_the_stored_token(self):
         """Zwischen Vergleichsfenster und Start kann der Keep-alive den
         Token rotiert haben. Der Worker muss den GESPEICHERTEN nehmen --
@@ -658,7 +612,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         ui_module.dashboard.InventoryDialog = lambda *args, **kwargs: dialog
 
         dashboard = self._dashboard(ui_module, settings)
-        dashboard.temp_files = []
         self.assertEqual(2, len(rows))
         selection = dashboard._confirm_comparison(
             rows, settings, client_factory=lambda: None)
@@ -784,7 +737,6 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.sync_column_enabled = None
         dashboard.account_name = "konto"
-        dashboard.temp_files = []
         dashboard.prepare_thread = None
         dashboard.prepare_worker = None
         dashboard.update_status = lambda: None
@@ -828,11 +780,10 @@ class ReplacementConfirmationTests(unittest.TestCase):
         return ui_module.common.SyncJob(book_id, "u%d" % book_id, "EPUB",
                                         old_id, "/library/b.epub", None, title)
 
-    def _run(self, ui_module, answer, jobs, temp_files=()):
+    def _run(self, ui_module, answer, jobs):
         settings = CloudCopyAssignmentPlanTests._settings()
         dashboard = CloudCopyAssignmentPlanTests._dashboard(
             self, ui_module, settings)
-        dashboard.temp_files = list(temp_files)
         dashboard.status = type("Label", (), {
             "text_value": "",
             "setText": lambda self, text: setattr(self, "text_value", text),
@@ -853,23 +804,17 @@ class ReplacementConfirmationTests(unittest.TestCase):
             settings, _preparation(jobs=jobs))
         return dashboard, asked
 
-    def test_no_means_no_run_and_no_temp_files(self):
+    def test_no_means_no_run(self):
         ui_module = self._ui()
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(b"jpg")
-            cover = tmp.name
-        self.addCleanup(lambda: os.path.exists(cover) and os.unlink(cover))
         dashboard, asked = self._run(
             ui_module, 0,
-            [self._job(ui_module, 1, "Der Schwarm", "t-0")], [cover])
+            [self._job(ui_module, 1, "Der Schwarm", "t-0")])
         self.assertEqual(1, len(asked))
         # Titel statt Kennung, und die Frage nennt das Loeschen der Kopie.
         self.assertIn("Der Schwarm", asked[0][2])
         self.assertNotIn("u1", asked[0][2])
         self.assertIn("gehen verloren", asked[0][2])
         self.assertIsNone(dashboard.thread)
-        self.assertFalse(os.path.exists(cover))
-        self.assertEqual([], dashboard.temp_files)
         self.assertIn("unverändert", dashboard.status.text_value)
 
     def test_yes_starts_the_run(self):

@@ -171,7 +171,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             def upload(self, path):
                 return "new-1"
 
-            def upload_cover(self, tolino_id, path):
+            def upload_cover(self, tolino_id, data, suffix=".jpg"):
                 raise RuntimeError("cover kaputt")
 
         try:
@@ -246,7 +246,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                 self.uploads += 1
                 return "new-%d" % self.uploads
 
-            def upload_cover(self, tolino_id, path):
+            def upload_cover(self, tolino_id, data, suffix=".jpg"):
                 raise RuntimeError("cover kaputt")
 
         try:
@@ -1615,3 +1615,17 @@ class ReadStatusUnknownTests(unittest.TestCase):
             self.assertFalse(dialog._set_row_choice(0, "read", True))
         finally:
             ui_module._restore_stubs_for_tests()
+
+
+class KeepaliveStopTests(unittest.TestCase):
+    """Der Keep-alive-Thread endet im Plugin-Shutdown, nicht erst im atexit."""
+
+    def test_stop_ends_a_running_keepalive_thread(self):
+        from .. import token_vault
+        token_vault.stop_token_keepalive()
+        thread = token_vault.start_token_keepalive(lambda: {}, interval=3600)
+        try:
+            self.assertTrue(thread.is_alive())
+        finally:
+            token_vault.stop_token_keepalive()
+        self.assertFalse(thread.is_alive())
