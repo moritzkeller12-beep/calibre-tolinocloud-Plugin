@@ -409,6 +409,12 @@ class SyncWorker(QObject):
             # ist -- jede Zuordnung gilt als gescheitert.
             for _book, _tolino, _series, operation in collection_ops:
                 self._record_failure(operation, exc, client)
+                # Auch ein gescheiterter Schritt ist abgeschlossen; sonst
+                # bliebe der Fortschrittsbalken am Beginn der Phase stehen.
+                done += 1
+                self.progress.emit(
+                    done, total, "Fehlgeschlagen: %s"
+                    % (operation.get("label") or "Sammlung"))
             if self._fatal_error(exc):
                 raise
         revision = None

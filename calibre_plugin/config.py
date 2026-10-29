@@ -182,32 +182,46 @@ def _account_list(raw):
     return accounts
 
 
+def _accounts_and_active():
+    """Normalisierte Konten und aktives Konto -- EINE Kopie je Aufruf.
+
+    `_account_list` liefert bereits unabhängige Konten (inklusive tiefer
+    Zustandskopie). Ein zweiter `deepcopy` über alle Konten wäre reine
+    Verschwendung; die aktuellen Felder werden nur einmal gezielt kopiert.
+    """
+    accounts = _account_list(PREFERENCES.get("accounts", None))
+    names = {item["name"] for item in accounts}
+    active = str(PREFERENCES.get("active_account", "") or "")
+    if active not in names:
+        active = accounts[0]["name"]
+    return accounts, active
+
+
 def settings():
     """Return a complete current-account snapshot from the fresh store."""
     with _SETTINGS_LOCK:
-        accounts = _account_list(PREFERENCES.get("accounts", None))
-        names = {item["name"] for item in accounts}
-        active = str(PREFERENCES.get("active_account", "") or "")
-        if active not in names:
-            active = accounts[0]["name"]
+        accounts, active = _accounts_and_active()
         current = next(item for item in accounts if item["name"] == active)
         values = {PREFERRED_FORMATS: _copy(PREFERENCES.get(
             PREFERRED_FORMATS, ["EPUB"]))}
         values.update({key: _copy(current[key]) for key in ACCOUNT_KEYS})
         values.update({
             "name": current["name"],
-            "accounts": [_copy(item) for item in accounts],
+            "accounts": accounts,
             "active_account": active,
         })
         # Reines Lesen: geschrieben wird nur in save_account/save_settings.
         return values
 
 
-def save_account(name, values, active=None):
-    """Persist one account without changing any other account's state."""
+def save_account(name, values, active=None, preferred_formats=None):
+    """Persist one account without changing any other account's state.
+
+    `preferred_formats` schreibt die globalen Formate im selben Commit mit;
+    der Dialog braucht dafür keinen zweiten `save_settings`-Aufruf.
+    """
     with _SETTINGS_LOCK:
-        snapshot = settings()
-        accounts = snapshot["accounts"]
+        accounts, current_active = _accounts_and_active()
         existing = next((item for item in accounts if item["name"] == name), {})
         merged = dict(existing)
         merged.update(values)
@@ -218,11 +232,13 @@ def save_account(name, values, active=None):
                 break
         else:
             accounts.append(normalized)
-        chosen = active or snapshot["active_account"]
+        chosen = active or current_active
         if chosen not in {item["name"] for item in accounts}:
             chosen = normalized["name"]
         PREFERENCES["accounts"] = accounts
         PREFERENCES["active_account"] = chosen
+        if preferred_formats is not None:
+            PREFERENCES[PREFERRED_FORMATS] = _copy(list(preferred_formats))
         PREFERENCES.commit()
 
 
@@ -313,13 +329,13 @@ class CredentialStore:
 def save_settings(values):
     """Persist global options and the selected account."""
     with _SETTINGS_LOCK:
-        current = settings()
+        accounts, current_active = _accounts_and_active()
         if PREFERRED_FORMATS in values:
             PREFERENCES[PREFERRED_FORMATS] = values[PREFERRED_FORMATS]
-        accounts = values.get("accounts", current["accounts"])
-        active = values.get("active_account", current["active_account"])
-        if not isinstance(accounts, list):
-            accounts = current["accounts"]
+        given = values.get("accounts")
+        if isinstance(given, list):
+            accounts = given
+        active = values.get("active_account", current_active)
         active_values = {key: values[key] for key in ACCOUNT_KEYS if key in values}
         if active_values:
             save_account(active, dict(active_values, name=active), active=active)
@@ -328,4 +344,5 @@ def save_settings(values):
                 _account(item, item.get("name", DEFAULT_ACCOUNT_NAME))
                 for item in accounts]
             PREFERENCES["active_account"] = active
+            PREFERENCES.commit()
             PREFERENCES.commit()

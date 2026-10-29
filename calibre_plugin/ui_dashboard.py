@@ -87,17 +87,30 @@ def _running_text(dialog):
 
 
 def _persist_sync_result(dialog, state, updates):
-    """Sync-Zustand, Tolino-IDs und bestätigten Lesestatus sichern."""
+    """Sync-Zustand, Tolino-IDs und bestätigten Lesestatus sichern.
+
+    Die beiden Calibre-Schreibvorgänge laufen getrennt und sind einzeln
+    abgesichert: ein Fehler in einer Spalte darf weder den anderen
+    Schreibvorgang noch den Abschluss des Laufs verhindern.
+    """
     _persist_run(dialog, state)
     if dialog.columns.get("id"):
-        update_tolino_ids(
-            dialog.gui.current_db, updates, enabled=True,
-            account_name=_worker_account_name(dialog))
+        try:
+            update_tolino_ids(
+                dialog.gui.current_db, updates, enabled=True,
+                account_name=_worker_account_name(dialog))
+        except Exception as exc:
+            log_warning("Tolino-IDs konnten nicht in Calibre geschrieben "
+                        "werden: %s" % sanitize_error(exc))
     if dialog.columns.get("read"):
         worker = getattr(dialog, "worker", None)
-        update_read_status(
-            dialog.gui.current_db,
-            list(getattr(worker, "read_updates", ()) or ()))
+        try:
+            update_read_status(
+                dialog.gui.current_db,
+                list(getattr(worker, "read_updates", ()) or ()))
+        except Exception as exc:
+            log_warning("Lesestatus konnte nicht in Calibre geschrieben "
+                        "werden: %s" % sanitize_error(exc))
 
 
 def _persist_run(dialog, state):
@@ -324,8 +337,19 @@ class SyncDashboard(QDialog):
         if not getattr(self, "account_name", None):
             return
         values = values or self.values()
-        save_settings({PREFERRED_FORMATS: values[PREFERRED_FORMATS]})
-        save_account(self.account_name, values, active=self.account_name)
+        name = str(values.get("account_name") or "")
+        if not name:
+            # Das angezeigte Konto existiert nicht mehr (z. B. extern
+            # geänderte Einstellungen). Dann darf weder der Zustand eines
+            # anderen Kontos noch ein leerer Zustand unter dem alten Namen
+            # gespeichert werden.
+            log_warning("Das sichtbare Konto existiert nicht mehr; "
+                        "Änderungen wurden nicht gespeichert.")
+            return
+        # Formate und Konto in EINEM Commit: vorher waren es zwei
+        # vollständige Snapshots und zwei Schreibvorgänge.
+        save_account(name, values, active=name,
+                     preferred_formats=values[PREFERRED_FORMATS])
 
     def account_changed(self, index):
         """Konto in den Einstellungen gewechselt."""
@@ -399,6 +423,9 @@ class SyncDashboard(QDialog):
         remaining = [item for item in settings()["accounts"] if item["name"] != name]
         save_settings({"accounts": remaining,
                        "active_account": remaining[0]["name"]})
+        if not clear_state_journal(name):
+            log_warning("Zustandsjournal des entfernten Kontos konnte nicht "
+                        "gelöscht werden.")
         self.load_values()
 
     def load_values(self):
@@ -545,14 +572,22 @@ class SyncDashboard(QDialog):
         nur vorhandene Schluessel und laesst den gespeicherten Token damit
         unberuehrt -- auch wenn der Keep-alive ihn gerade rotiert hat.
         """
-        account = self._selected_account() or settings()
+        # Nur ohne Kontonamen auf das aktive Konto zurückfallen. Ist der
+        # angezeigte Name gesetzt, aber nicht mehr vorhanden, bleibt der
+        # Zustand leer -- sonst landeten die Werte eines anderen Kontos
+        # unter diesem Namen in den Einstellungen.
+        account = self._selected_account()
+        if not account and not getattr(self, "account_name", None):
+            account = settings()
+        if not isinstance(account, dict):
+            account = {}
         hardware = self.hardware.text().strip() or hardware_id()
         if hardware == getattr(self, "_loaded_hardware", None):
             stored_hardware = str(account.get("hardware_id") or "").strip()
             if stored_hardware:
                 hardware = stored_hardware
         values = {
-            "account_name": self.account_name,
+            "account_name": str(account.get("name") or ""),
             "partner_id": self.partner.currentData(),
             "hardware_id": hardware,
             "preferred_formats": ([
@@ -913,10 +948,12 @@ class SyncDashboard(QDialog):
         Aktion mehr übrig ist: dann endet der Lauf hier, und die Meldung sagt
         das auch.
         """
+        text = ("Diese Bücher haben keine Datei im gewählten Format:\n\n%s"
+                % "\n".join(skipped_uploads))
+        if not nothing_else:
+            text += "\n\nDie übrigen Aktionen werden trotzdem ausgeführt."
         QMessageBox.warning(
-            self, "Einige Bücher wurden nicht hochgeladen",
-            "Diese Bücher haben keine Datei im gewählten Format:\n\n%s"
-            % "\n".join(skipped_uploads))
+            self, "Einige Bücher wurden nicht hochgeladen", text)
         return bool(nothing_else)
 
     def _start_sync_worker(self, context, preparation, state=None):
@@ -924,9 +961,13 @@ class SyncDashboard(QDialog):
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
         if state is None:
-            # Der Aufrufer kennt den Ausgangszustand; ohne ihn startet der
-            # Lauf leer statt mit einem zweiten Einstellungs-Snapshot.
-            state = {}
+            # Ohne ausdrücklichen Zustand den gespeicherten Zustand des
+            # LAUF-Kontos nehmen. Ein leerer Zustand würde bereits
+            # vorhandene Cloud-Kopien erneut hochladen.
+            stored = account_by_name(getattr(context, "account_name", ""))
+            state = stored.get("state") if isinstance(stored, dict) else {}
+            if not isinstance(state, dict):
+                state = {}
         # Das Vergleichsfenster kann beliebig lange offen bleiben; in der
         # Zeit darf der Keep-alive den (single-use) Token rotieren. Deshalb
         # nimmt `make_client` im Worker den GESPEICHERTEN Zugang des Kontos
@@ -952,11 +993,6 @@ class SyncDashboard(QDialog):
             if status is not None:
                 status.setText("Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
             return
-        if skipped_uploads:
-            info_dialog(self, "Nicht hochgeladen",
-                        "Diese Bücher wurden nicht hochgeladen: "
-                        + "; ".join(skipped_uploads), show=True,
-                        show_copy_button=False)
         plan = _dashboard_plan.plan_text(preparation, len(jobs))
         # Der Plan steht im Log, auch wenn der Lauf danach scheitert;
         # Zugangsdaten werden dabei nicht ausgegeben.
@@ -1009,8 +1045,12 @@ class SyncDashboard(QDialog):
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
         outcome = _worker_outcome(self)
-        _persist_sync_result(self, state, updates)
-        self.finish_thread()
+        try:
+            _persist_sync_result(self, state, updates)
+        finally:
+            # Auch ein unerwarteter Fehler beim Schreiben in Calibre darf
+            # den Dialog nicht im Zustand «läuft» zurücklassen.
+            self.finish_thread()
         if outcome.get("cancelled"):
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)
@@ -1031,10 +1071,12 @@ class SyncDashboard(QDialog):
             str(message) == CANCEL_MESSAGE
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
-        _persist_sync_result(
-            self, getattr(worker, "state", {}),
-            getattr(worker, "updates", ()))
-        self.finish_thread()
+        try:
+            _persist_sync_result(
+                self, getattr(worker, "state", {}),
+                getattr(worker, "updates", ()))
+        finally:
+            self.finish_thread()
         if cancelled:
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)

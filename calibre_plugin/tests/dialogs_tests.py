@@ -30,6 +30,11 @@ def _read_ids(dialog, finished):
             in dialog.selected_read_changes() if state is finished]
 
 
+def _action_cell(dialog, index, column):
+    """Check-Controller einer Aktionsspalte (0 Upload, 1 Metadaten, 2 Read)."""
+    return (dialog.checks, dialog.meta_checks, dialog.read_checks)[column][index]
+
+
 class _QtDialogTest(unittest.TestCase):
     """Vergleichsfenster mit vollem Qt-Stub; räumt nach jedem Test auf."""
 
@@ -125,6 +130,24 @@ class InventoryDialogSortTests(unittest.TestCase):
         class FakeItem:
             def __init__(self, text):
                 self.text = text
+                self._check_state = 0
+                self._flags = 0
+                self.tooltip = ""
+
+            def setFlags(self, flags):
+                self._flags = flags
+
+            def flags(self):
+                return self._flags
+
+            def setCheckState(self, state):
+                self._check_state = state
+
+            def checkState(self):
+                return self._check_state
+
+            def setToolTip(self, text):
+                self.tooltip = text
 
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
@@ -467,10 +490,8 @@ class InventoryDialogReadStateTests(_QtDialogTest):
 
     @staticmethod
     def _cells_by_title(dialog):
-        """Zeilen-Widgets, nach Titel – das Fenster sortiert beim Bau."""
-        cells = {(row, column): widget
-                 for row, column, widget in dialog.table.cell_widgets}
-        return {row["title"]: cells[(index, 2)]
+        """Lese-Checkzellen nach Titel – das Fenster sortiert beim Bau."""
+        return {row["title"]: dialog.read_checks[index]
                 for index, row in enumerate(dialog.rows)}
 
     def test_cloud_read_book_is_prechecked_and_unlockable(self):
@@ -714,9 +735,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             self.assertTrue(self._row(dialog, "Ungelesen")["upload"])
             self.assertFalse(self._row(dialog, "Gelesen")["upload"])
             # Zeile UND Auswahlfeld in der Tabelle sind gesetzt.
-            cells = {(row, column): widget
-                     for row, column, widget in dialog.table.cell_widgets}
-            self.assertTrue(cells[(index, 0)].isChecked())
+            self.assertTrue(_action_cell(dialog, index, 0).isChecked())
             self.assertTrue(dialog.checks[index].isChecked())
             self.assertEqual(
                 "Upload aktiviert für 1 von 1 markierten Büchern.",
@@ -738,12 +757,11 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
                 "Metadaten aktiviert für 3 von 4 markierten Büchern; "
                 "1 übersprungen.",
                 dialog.action_feedback.text())
-            cells = {(row, column): widget
-                     for row, column, widget in dialog.table.cell_widgets}
             for index, row in enumerate(dialog.rows):
                 wanted = bool(row["tolino_id"])
                 self.assertEqual(wanted, dialog.meta_checks[index].isChecked())
-                self.assertEqual(wanted, cells[(index, 1)].isChecked())
+                self.assertEqual(wanted,
+                                 _action_cell(dialog, index, 1).isChecked())
             self.assertEqual([], calls)
         finally:
             ui_module._restore_stubs_for_tests()
@@ -1021,12 +1039,12 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self.assertTrue(dialog.rows[index]["delete_cloud"])
             self.assertIn("Wird beim Start aus tolino gelöscht.",
                           dialog.table.items[(index, 7)])
-            cells = {(row, column): widget
-                     for row, column, widget in dialog.table.cell_widgets}
             for column in (0, 1, 2):
-                self.assertFalse(cells[(index, column)].enabled)
-                self.assertFalse(cells[(index, column)].isChecked())
-            self.assertIn("Zum Löschen", cells[(index, 0)].tooltip)
+                cell = _action_cell(dialog, index, column)
+                self.assertFalse(cell.enabled)
+                self.assertFalse(cell.isChecked())
+            self.assertIn("Zum Löschen",
+                          _action_cell(dialog, index, 0).tooltip)
             self.assertIn("1 Löschung", dialog.summary.text())
             self.assertIn("(1)", dialog.confirm.text())
             self.assertFalse(any(kind == "question"
@@ -1034,7 +1052,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             # Die nicht markierte Cloud-Kopie bleibt unangetastet.
             other = self._index(dialog, "Behalten")
             self.assertFalse(dialog.rows[other].get("delete_cloud"))
-            self.assertTrue(cells[(other, 1)].enabled)
+            self.assertTrue(_action_cell(dialog, other, 1).enabled)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1049,9 +1067,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self.assertEqual([("u-1", "t-1", "Löschen")],
                              dialog.selected_cloud_deletions())
             self.assertTrue(dialog.rows[index].get("delete_cloud"))
-            cells = {(row, column): widget
-                     for row, column, widget in dialog.table.cell_widgets}
-            self.assertFalse(cells[(index, 0)].enabled)
+            self.assertFalse(_action_cell(dialog, index, 0).enabled)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1070,10 +1086,8 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self.assertFalse(dialog.rows[index].get("delete_cloud"))
             self.assertNotIn("Wird beim Start aus tolino gelöscht.",
                              dialog.table.items[(index, 7)])
-            cells = {(row, column): widget
-                     for row, column, widget in dialog.table.cell_widgets}
-            self.assertTrue(cells[(index, 0)].enabled)
-            self.assertTrue(cells[(index, 1)].enabled)
+            self.assertTrue(_action_cell(dialog, index, 0).enabled)
+            self.assertTrue(_action_cell(dialog, index, 1).enabled)
             self.assertFalse(any("nichts geändert" in text.casefold()
                                  for kind, text in calls
                                  if kind == "information"))

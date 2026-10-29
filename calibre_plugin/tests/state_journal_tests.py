@@ -143,3 +143,28 @@ class StateJournalTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(saved))
         self.assertEqual({}, config.read_state_journal("A"))
+
+    def test_removing_an_account_clears_its_journal(self):
+        """Ein gelöschtes Konto darf sein Journal nicht zurücklassen."""
+        ui_module = self._ui()
+        cleared = []
+        dashboard = type("Dialog", (), {})()
+        dashboard.account_names = ["A", "B"]
+        dashboard.account_name = "A"
+        dashboard.load_values = lambda: None
+
+        class Box:
+            @staticmethod
+            def question(*_args, **_kwargs):
+                return 1
+
+        with patch.object(ui_module.dashboard, "QMessageBox", Box), \
+             patch.object(ui_module.dashboard, "button", lambda _name: 1), \
+             patch.object(ui_module.dashboard, "settings", lambda: {
+                 "accounts": [{"name": "A"}, {"name": "B"}]}), \
+             patch.object(ui_module.dashboard, "save_settings",
+                          lambda _values: None), \
+             patch.object(ui_module.dashboard, "clear_state_journal",
+                          lambda name: cleared.append(name) or True):
+            ui_module.dashboard.SyncDashboard.remove_account(dashboard)
+        self.assertEqual(["A"], cleared)

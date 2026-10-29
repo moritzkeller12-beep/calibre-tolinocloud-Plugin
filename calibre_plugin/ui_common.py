@@ -41,8 +41,9 @@ __all__ = [
     "_THREADS", "_apply_busy", "_dialog_busy",
     "_login_failure_guidance",
     "button", "dialog_code", "display_value", "echo_mode",
-    "format_signatures", "gui_guard", "header_mode", "metadata_value",
-    "plural", "selection_behavior", "selection_mode", "sort_order",
+    "format_signatures", "gui_guard", "header_mode", "item_flag",
+    "check_state", "metadata_value", "plural", "selection_behavior",
+    "selection_mode", "sort_order",
     "start_worker", "_stop_thread",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
     "_keep_thread_alive", "_thread_running",
@@ -96,6 +97,16 @@ def echo_mode(name):
 def sort_order(name):
     """Sortierreihenfolge einer Tabellenspalte."""
     return _qt_value(Qt, name, "SortOrder")
+
+
+def item_flag(name):
+    """Flag eines Tabelleneintrags (Qt5 unskopiert, Qt6 als Enum)."""
+    return _qt_value(Qt, name, "ItemFlag")
+
+
+def check_state(name):
+    """Checkzustand eines Tabelleneintrags (Qt5 unskopiert, Qt6 als Enum)."""
+    return _qt_value(Qt, name, "CheckState")
 
 
 def gui_guard(function):

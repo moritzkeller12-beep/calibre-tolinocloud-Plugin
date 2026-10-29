@@ -537,6 +537,16 @@ class TokenRotationWriteBackTests(unittest.TestCase):
                             active="konto")
         self.assertEqual("adoptiert", dashboard.values()["hardware_id"])
 
+    def test_a_missing_account_never_saves_another_accounts_state(self):
+        """Ist der angezeigte Name weg, darf nicht das aktive Konto
+        unter diesem Namen gespeichert werden."""
+        _ui_module, dashboard = self._ui("alt-token")
+        dashboard.account_name = "verschwunden"
+        values = dashboard.values()
+        self.assertEqual("", values["account_name"])
+        dashboard._save_visible_account(values)
+        self.assertEqual("alt-token", self._stored("konto"))
+
 class LoginPreflightTests(unittest.TestCase):
     """Der Anmeldeknopf prueft zuerst den GESPEICHERTEN Zugang.
 

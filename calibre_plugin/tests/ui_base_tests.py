@@ -148,6 +148,11 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def setItem(self, row, column, item):
                 self.items = getattr(self, "items", {})
                 self.items[(row, column)] = item.text
+                self.raw_items = getattr(self, "raw_items", {})
+                self.raw_items[(row, column)] = item
+
+            def item(self, row, column):
+                return getattr(self, "raw_items", {}).get((row, column))
 
             def resizeColumnsToContents(self):
                 self.resized = True
@@ -201,6 +206,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 Widget.__init__(self)
                 self.columns = columns
                 self.header_items = {}
+                self.itemChanged = Signal()
 
             def setHorizontalHeaderLabels(self, labels):
                 self.headers = list(labels)
@@ -215,6 +221,24 @@ class InventoryDialogBuildTests(unittest.TestCase):
         class Item:
             def __init__(self, text):
                 self.text = text
+                self._check_state = 0
+                self._flags = 0
+                self.tooltip = ""
+
+            def setFlags(self, flags):
+                self._flags = flags
+
+            def flags(self):
+                return self._flags
+
+            def setCheckState(self, state):
+                self._check_state = state
+
+            def checkState(self):
+                return self._check_state
+
+            def setToolTip(self, text):
+                self.tooltip = text
 
         class Dialog(Widget):
             def __init__(self, parent=None):
@@ -330,7 +354,12 @@ class InventoryDialogBuildTests(unittest.TestCase):
 
         qt = type("Qt", (), {
             "SortOrder": type("SortOrder", (),
-                              {"AscendingOrder": 0, "DescendingOrder": 1})})
+                              {"AscendingOrder": 0, "DescendingOrder": 1}),
+            "ItemFlag": type("ItemFlag", (), {
+                "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
+            "CheckState": type("CheckState", (),
+                               {"Checked": 2, "Unchecked": 0}),
+        })
         return {
             "Qt": qt,
             "QDialog": Dialog,
@@ -378,14 +407,15 @@ class InventoryDialogBuildTests(unittest.TestCase):
             # Tooltips versprechen Strg-/Shift-Mehrfachauswahl.
             self.assertEqual("ExtendedSelection",
                              dialog.table.selection_mode)
-            cells = {(row, column): widget
-                     for row, column, widget in dialog.table.cell_widgets}
             for index, row in enumerate(dialog.rows):
                 in_cloud = bool(row["tolino_id"])
                 # Drei Auswahlfelder je Buch ...
-                self.assertIs(cells[(index, 0)], dialog.checks[index])
-                self.assertIs(cells[(index, 1)], dialog.meta_checks[index])
-                self.assertIs(cells[(index, 2)], dialog.read_checks[index])
+                self.assertIs(dialog.table.item(index, 0),
+                              dialog.checks[index].item)
+                self.assertIs(dialog.table.item(index, 1),
+                              dialog.meta_checks[index].item)
+                self.assertIs(dialog.table.item(index, 2),
+                              dialog.read_checks[index].item)
                 # ... die zwei Orts-Spalten mit je einem Häkchen ...
                 self.assertEqual("✓" if row["book_id"] is not None else "",
                                  dialog.table.items[(index, 3)])

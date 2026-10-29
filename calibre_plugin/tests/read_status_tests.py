@@ -148,11 +148,9 @@ class ReadColumnDialogTests(_QtDialogTest):
 
     @staticmethod
     def _cell(dialog, title):
-        cells = {(row, column): widget
-                 for row, column, widget in dialog.table.cell_widgets}
         index = next(i for i, row in enumerate(dialog.rows)
                      if row["title"] == title)
-        return index, cells[(index, 2)]
+        return index, dialog.read_checks[index]
 
     def test_calibre_value_is_a_note_not_a_default_or_action(self):
         ui_module = self._ui()

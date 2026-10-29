@@ -102,7 +102,12 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # Qt6-Form: Enums sind skopiert; die alten unskopierten Namen fehlen.
     qt_core.Qt = type("Qt", (), {
         "SortOrder": type("SortOrder", (),
-                          {"AscendingOrder": 0, "DescendingOrder": 1})})
+                          {"AscendingOrder": 0, "DescendingOrder": 1}),
+        "ItemFlag": type("ItemFlag", (), {
+            "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
+        "CheckState": type("CheckState", (),
+                           {"Checked": 2, "Unchecked": 0}),
+    })
     qt_core.QTableWidget.SelectionBehavior = type(
         "SelectionBehavior", (), {"SelectRows": 1})
     qt_core.QTableWidget.SelectionMode = type(
@@ -110,6 +115,29 @@ def load_ui_module(get_icons_result, qt_stub=None):
     qt_core.QLineEdit.EchoMode = type("EchoMode", (), {"Password": 2})
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None
+    class _TableItem:
+        def __init__(self, text=""):
+            self.text = text
+            self._check_state = 0
+            self._flags = 0
+            self.tooltip = ""
+
+        def setFlags(self, flags):
+            self._flags = flags
+
+        def flags(self):
+            return self._flags
+
+        def setCheckState(self, state):
+            self._check_state = state
+
+        def checkState(self):
+            return self._check_state
+
+        def setToolTip(self, text):
+            self.tooltip = text
+
+    qt_core.QTableWidgetItem = _TableItem
     if qt_stub:
         # Zuletzt, damit ein Stub auch pyqtSignal/Signal ersetzen darf.
         for name, value in qt_stub.items():

@@ -3,15 +3,102 @@ import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QHBoxLayout, QLabel, QMessageBox,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, _set_enabled, header_mode,
-                        selection_behavior, selection_mode, sort_order,
-                        start_call)
+                        QVBoxLayout, _set_enabled, check_state, header_mode,
+                        item_flag, selection_behavior, selection_mode,
+                        sort_order, start_call)
 from .planning_values import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import (ReadState, comparison_group, comparison_sort_key,
                          sort_comparison_rows)
 from .library import TOLINO_IGNORE_COLUMN, selected_table_rows
 from .tolino import report_error
+
+
+def row_capabilities(row):
+    """Was darf diese Vergleichszeile? -- EINE Quelle für alle vier Stellen.
+
+    Die Funktion beschreibt nur die technische Anwendbarkeit, nicht die
+    Empfehlung: ein unsicher zugeordnetes Buch darf manuell hochgeladen
+    werden, wird aber nicht vorgeschlagen. Export und Löschmarkierung sind
+    keine Auswahlspalten und deshalb hier nicht enthalten.
+    """
+    has_book = row.get("book_id") is not None
+    in_cloud = bool(row.get("tolino_id"))
+    ignored = bool(row.get("ignored"))
+    deleting = bool(row.get("delete_cloud"))
+    usable = not ignored and not deleting
+    return {
+        "upload": bool(has_book and usable
+                       and row.get("has_preferred_format", True)),
+        "metadata": bool(has_book and in_cloud and usable),
+        "read": bool(in_cloud and usable
+                     and ReadState.from_row(row).known),
+        # Download ist auch für eine bereits markierte Kopie sinnvoll:
+        # damit lässt sich die Datei vor dem Löschen noch retten.
+        "download": in_cloud,
+        "delete": bool(in_cloud and not ignored),
+    }
+
+
+class _CellSignal:
+    """Sehr kleiner Signal-Ersatz für die Check-Zellen (Tests/Kompatibilität)."""
+
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        self._slots.append(slot)
+
+    def emit(self, *args):
+        for slot in list(self._slots):
+            slot(*args)
+
+
+class _ActionCheck:
+    """Steuert eine Check-Zelle, ohne ein eigenes Widget zu erzeugen.
+
+    Der Zustand liegt im `QTableWidgetItem`; dieses Objekt hält nur die
+    Schnittstelle, die die Oberfläche und die Tests von der früheren
+    Checkbox kannten (`isChecked`, `setChecked`, `enabled`, `tooltip`).
+    """
+
+    def __init__(self, item, on_changed=None):
+        self.item = item
+        self.enabled = True
+        self.tooltip = ""
+        self._blocked = False
+        self._on_changed = on_changed
+        self.clicked = _CellSignal()
+
+    def isChecked(self):
+        return self.item.checkState() == check_state("Checked")
+
+    def setChecked(self, value):
+        state = check_state("Checked" if value else "Unchecked")
+        if self.item.checkState() != state:
+            self.item.setCheckState(state)
+            if not self._blocked and self._on_changed is not None:
+                self._on_changed()
+
+    def blockSignals(self, blocked):
+        previous = self._blocked
+        self._blocked = bool(blocked)
+        return previous
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+        flags = self.item.flags()
+        enabled_flag = item_flag("ItemIsEnabled")
+        checkable_flag = item_flag("ItemIsUserCheckable")
+        if self.enabled:
+            flags |= enabled_flag | checkable_flag
+        else:
+            flags &= ~(enabled_flag | checkable_flag)
+        self.item.setFlags(flags)
+
+    def setToolTip(self, text):
+        self.tooltip = str(text or "")
+        self.item.setToolTip(self.tooltip)
 
 
 class InventoryDialog(QDialog):
@@ -121,6 +208,7 @@ class InventoryDialog(QDialog):
         erzeugen könnte. Bücher ohne passendes Upload-Format erhalten keinen
         Upload-Vorschlag.
         """
+        caps = row_capabilities(row)
         # Ein ignoriertes Buch wird nie vorgeschlagen -- weder Upload noch
         # Metadaten.
         if row.get("ignored"):
@@ -129,14 +217,15 @@ class InventoryDialog(QDialog):
         if row.get("status") == "review":
             return (False, False)
         if row.get("book_id") is None or not row.get("tolino_id"):
-            new_book = row.get("book_id") is not None
             if row.get("stale_cloud_id"):
                 return (False, False)
-            return (new_book and row.get("has_preferred_format", True), False)
+            return (caps["upload"], False)
         if row.get("status") == "new_in_calibre":
-            return (True, False)
+            return (caps["upload"], False)
         if row.get("status") == "changed":
-            return (False, True) if not row.get("file_changed") else (True, False)
+            if row.get("file_changed"):
+                return (caps["upload"], False)
+            return (False, caps["metadata"])
         return (False, False)
 
     def __init__(self, rows, parent=None, client_factory=None, options=None):
@@ -264,6 +353,9 @@ class InventoryDialog(QDialog):
         table_header.setSortIndicatorShown(True)
         table_header.setSortIndicator(0, sort_order("AscendingOrder"))
         table_header.sectionClicked.connect(self._sort_by_column)
+        item_changed = getattr(self.table, "itemChanged", None)
+        if item_changed is not None:
+            item_changed.connect(self._item_changed)
         self._rebuild_table(self.rows)
         layout.addWidget(self.table)
 
@@ -339,8 +431,7 @@ class InventoryDialog(QDialog):
                 row[key] = checked
             self._update_summary()
 
-    @staticmethod
-    def _set_checked_quietly(check_widget, value):
+    def _set_checked_quietly(self, check_widget, value):
         """Auswahlkästchen ohne Signal setzen.
 
         Sammelaktionen setzten bisher jedes Kästchen einzeln und jede
@@ -348,12 +439,29 @@ class InventoryDialog(QDialog):
         quadratisch. Die Signale bleiben hier aus; die Zusammenfassung
         schreibt der Aufrufer genau einmal.
         """
-        blocker = getattr(check_widget, "blockSignals", None)
-        if callable(blocker):
-            blocker(True)
-        check_widget.setChecked(value)
-        if callable(blocker):
-            blocker(False)
+        previous = getattr(self, "_syncing_checks", False)
+        self._syncing_checks = True
+        try:
+            blocker = getattr(check_widget, "blockSignals", None)
+            if callable(blocker):
+                blocker(True)
+            check_widget.setChecked(value)
+            if callable(blocker):
+                blocker(False)
+        finally:
+            self._syncing_checks = previous
+
+    def _item_changed(self, item):
+        """Eine Check-Zelle wurde vom Nutzer umgeschaltet."""
+        if getattr(self, "_syncing_checks", False):
+            return
+        for key, checks in (("upload", self.checks),
+                            ("metadata", self.meta_checks),
+                            ("read", self.read_checks)):
+            for index, check in enumerate(checks):
+                if getattr(check, "item", None) is item:
+                    self._choice_changed(index, key)
+                    return
 
     def _set_selection(self, chooser, clear_deletions=False):
         """Auswahl in einem Schritt setzen (Zeilen und Widgets synchron).
@@ -509,17 +617,19 @@ class InventoryDialog(QDialog):
                        if 0 <= index < len(self.rows)]
         predicates = {
             "upload_on": lambda row: (
-                row.get("book_id") is not None and not row.get("upload")
-                and row.get("has_preferred_format", True)),
+                row_capabilities(row)["upload"] and not row.get("upload")),
             "upload_off": lambda row: bool(row.get("upload")),
             "metadata_on": lambda row: (
-                row.get("book_id") is not None and row.get("tolino_id")
+                row_capabilities(row)["metadata"]
                 and not row.get("metadata")),
             "metadata_off": lambda row: bool(row.get("metadata")),
-            "read": lambda row: row.get("tolino_id") and not row.get("read"),
-            "read_off": lambda row: row.get("tolino_id") and row.get("read"),
-            "download": lambda row: bool(row.get("tolino_id")),
-            "cloud_delete": lambda row: bool(row.get("tolino_id")),
+            "read": lambda row: (
+                row_capabilities(row)["read"] and not row.get("read")),
+            "read_off": lambda row: (
+                row_capabilities(row)["read"] and row.get("read")),
+            "download": lambda row: row_capabilities(row)["download"],
+            "cloud_delete": lambda row: (
+                row_capabilities(row)["delete"] and not row.get("delete_cloud")),
             "cloud_delete_off": lambda row: bool(row.get("delete_cloud")),
         }
         for label, key in self.ROW_ACTIONS:
@@ -618,19 +728,8 @@ class InventoryDialog(QDialog):
 
     @staticmethod
     def _column_applies(key, row):
-        """Geht diese Spalte bei dieser Zeile? (wie beim einzelnen Klick)"""
-        if row.get("delete_cloud") or row.get("ignored"):
-            return False
-        if key == "upload":
-            # Ohne Upload-Format ist das Kaestchen gesperrt -- eine
-            # Sammelaktion darf es deshalb auch nicht einschalten.
-            return (row.get("book_id") is not None
-                    and row.get("has_preferred_format", True))
-        if key == "metadata":
-            return row.get("book_id") is not None and bool(row.get("tolino_id"))
-        if key == "read":
-            return bool(row.get("tolino_id"))
-        return False
+        """Geht diese Spalte bei dieser Zeile? -- dieselbe Capability-Regel."""
+        return bool(row_capabilities(row).get(key))
 
     def _set_row_choice(self, index, key, value):
         """Zeile und Auswahlkästchen setzen; False = war schon so.
@@ -677,7 +776,7 @@ class InventoryDialog(QDialog):
         has_book = row.get("book_id") is not None
         in_cloud = bool(row.get("tolino_id"))
         delete_cloud = bool(row.get("delete_cloud"))
-        read_known = self._read_state(row).known
+        caps = row_capabilities(row)
         ignored = bool(row.get("ignored"))
         delete_tooltip = (
             "Zum Löschen aus tolino markiert – zuerst "
@@ -685,34 +784,37 @@ class InventoryDialog(QDialog):
         ignored_tooltip = ("In Calibre ignoriert (%s) – wird nicht "
                            "abgeglichen." % TOLINO_IGNORE_COLUMN)
         return (
-            ("upload", has_book and not delete_cloud and not ignored
-             and row.get("has_preferred_format", True),
+            ("upload", caps["upload"],
              "Buchdatei in die Cloud hochladen.",
              ("Nur in tolino – es gibt keine Calibre-Datei zum Hochladen."
               if not has_book else
               "Kein Buchformat aus den Upload-Formaten vorhanden.")),
-            ("metadata", has_book and in_cloud and not delete_cloud
-             and not ignored,
+            ("metadata", caps["metadata"],
              "Titel, Autor und ISBN in der Cloud aktualisieren, ohne "
              "Upload.",
              "Nur in Calibre – es gibt in tolino nichts zu "
              "aktualisieren." if has_book else
              "Kein Calibre-Buch – nichts zu aktualisieren."),
-            ("read", in_cloud and read_known and not delete_cloud
-             and not ignored,
+            ("read", caps["read"],
              self.READ_TOOLTIP + " Im ausgewählten tolino-Konto änderbar.",
              "Lesestatus unbekannt – nicht geladen." if in_cloud else
              "Geht erst, wenn das Buch in tolino liegt."),
         ), delete_cloud, ignored, delete_tooltip, ignored_tooltip
 
     def _build_action_checks(self, row_index, row):
-        """Create the three selection cells for one book row."""
+        """Create the three check cells for one book row -- ohne Widgets."""
         checks, delete_cloud, ignored, delete_tooltip, ignored_tooltip = \
             self._action_check_specs(row)
         for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
-            check = QCheckBox()
-            check.setChecked(bool(row.get(key)) and not delete_cloud)
+            item = QTableWidgetItem("")
+            def changed(i=row_index, k=key):
+                if not getattr(self, "_syncing_checks", False):
+                    self._choice_changed(i, k)
+            check = _ActionCheck(item, changed)
             check.setEnabled(enabled)
+            # Eine deaktivierte Aktion nie angehakt zeigen -- sonst sähe eine
+            # ignorierte oder zum Löschen markierte Zeile ausgewählt aus.
+            check.setChecked(bool(row.get(key)) and enabled)
             if (key == "upload" and row.get("match_reason") in
                     ("title_only", "ambiguous")):
                 tooltip = "Kann ein Duplikat erzeugen."
@@ -720,13 +822,9 @@ class InventoryDialog(QDialog):
                 ignored_tooltip if ignored
                 else tooltip if enabled
                 else (delete_tooltip if delete_cloud else disabled_tooltip))
-            state_signal = getattr(check, "stateChanged", None)
-            state_signal.connect(
-                lambda _state, i=row_index, k=key:
-                self._choice_changed(i, k))
             (self.checks, self.meta_checks,
              self.read_checks)[column].append(check)
-            self.table.setCellWidget(row_index, column, check)
+            self.table.setItem(row_index, column, item)
 
     def _row_display_values(self, row, has_book, in_cloud):
         """Render explanation and the non-action cells for one comparison row."""
@@ -749,6 +847,7 @@ class InventoryDialog(QDialog):
     def _rebuild_table(self, rows):
         """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen."""
         self.table.setUpdatesEnabled(False)
+        self._syncing_checks = True
         try:
             # Zeilen sind die einzige Quelle -- auch wenn ein Aufrufer oder
             # Test sie als rohes Dict übergibt.
@@ -774,6 +873,7 @@ class InventoryDialog(QDialog):
         finally:
             # Auch ein Fehler beim Aufbau darf die Tabelle nicht dauerhaft
             # unsichtbar lassen (setUpdatesEnabled bleibt sonst aus).
+            self._syncing_checks = False
             self.table.setUpdatesEnabled(True)
         self._update_summary()
 

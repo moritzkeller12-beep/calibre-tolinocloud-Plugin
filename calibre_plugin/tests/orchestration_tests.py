@@ -719,6 +719,42 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual(1, len(boxes))
         self.assertIn("1 hochgeladen", boxes[0][2])
 
+    def test_a_column_write_error_still_finishes_the_dialog(self):
+        """Ein Calibre-Fehler nach dem Lauf darf den Dialog nicht sperren."""
+        ui_module = self._ui_module()
+        boxes, finished = [], []
+        dashboard = type("Dashboard", (), {})()
+        dashboard.account_name = "A"
+        dashboard.refresh = type("F", (), {
+            "text": lambda self: "tok",
+            "setText": lambda self, value: None,
+        })()
+        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.columns = {"id": True, "read": False}
+        dashboard.finish_thread = lambda: finished.append(True)
+        worker = type("Worker", (), {})()
+        worker.account_name = "A"
+        worker.state = {"u1": {"tolino_id": "new-1"}}
+        worker.updates = [(1, "new-1")]
+        worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
+                          "skipped": 0, "failed": 0, "not_started": 0}
+        dashboard.worker = worker
+
+        def boom(*_args, **_kwargs):
+            raise OSError("Spalte gesperrt")
+
+        with patch("calibre_plugin.ui_dashboard.save_account",
+                   lambda *args, **kwargs: None), \
+             patch("calibre_plugin.ui_dashboard.update_tolino_ids", boom), \
+             patch("calibre_plugin.ui_dashboard.info_dialog",
+                   lambda *args, **kwargs: boxes.append(args)):
+            ui_module.dashboard.SyncDashboard.sync_completed(
+                dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
+        self.assertEqual([True], finished)
+        self.assertEqual(1, len(boxes))
+        self.assertIn("1 hochgeladen", boxes[0][2])
+
+
 class CloudCopyAssignmentPlanTests(unittest.TestCase):
     """Die Zuordnung landet im Plan und im Zustand."""
 
