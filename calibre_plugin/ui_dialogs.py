@@ -3,11 +3,12 @@ import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QHBoxLayout, QLabel, QMessageBox, QMenu,
                         QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, Qt, _set_enabled, plural, start_call)
+                        QVBoxLayout, Qt, _set_enabled, plural, qt_enum,
+                        start_call)
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import comparison_group, sort_comparison_rows
 from .library import TOLINO_IGNORE_COLUMN, selected_table_rows
-from .tolino import report_error
+from .tolino import log_warning, report_error
 
 
 class InventoryDialog(QDialog):
@@ -241,10 +242,15 @@ class InventoryDialog(QDialog):
         """Tabelle samt Kopfzeilen-Tooltips und Sortierung aufbauen."""
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionBehavior(
+            qt_enum(QTableWidget, "SelectionBehavior", "SelectRows"))
         # Strg-/Shift-Klick und Strg+A werden in Tooltips und Menue
         # versprochen -- ohne ExtendedSelection waere das falsch.
-        selection_mode = getattr(QTableWidget, "ExtendedSelection", None)
+        try:
+            selection_mode = qt_enum(QTableWidget, "SelectionMode",
+                                     "ExtendedSelection")
+        except AttributeError:
+            selection_mode = None  # Qt-Stub ohne Auswahlmodus
         if selection_mode is not None:
             self.table.setSelectionMode(selection_mode)
         header_tooltips = (
@@ -272,7 +278,8 @@ class InventoryDialog(QDialog):
         table_header = self.table.horizontalHeader()
         try:
             table_header.setSortIndicatorShown(True)
-            table_header.setSortIndicator(0, Qt.AscendingOrder)
+            table_header.setSortIndicator(
+                0, qt_enum(Qt, "SortOrder", "AscendingOrder"))
         except Exception:
             pass  # Sortieranzeige ist nur Kosmetik
         table_header.sectionClicked.connect(self._sort_by_column)
@@ -780,8 +787,9 @@ class InventoryDialog(QDialog):
         try:
             self.table.horizontalHeader().setSortIndicator(
                 column,
-                Qt.DescendingOrder if self._sort_descending
-                else Qt.AscendingOrder)
+                qt_enum(Qt, "SortOrder",
+                        "DescendingOrder" if self._sort_descending
+                        else "AscendingOrder"))
         except Exception:
             pass  # Sortieranzeige ist nur Kosmetik
         self._rebuild_table(ordered)
@@ -925,14 +933,19 @@ class InventoryDialog(QDialog):
         """
         try:
             from qt.core import QHeaderView
+        except ImportError:
+            return  # Qt-Stub: keine Spaltenbreiten
+        try:
+            stretch = qt_enum(QHeaderView, "ResizeMode", "Stretch")
+            fit = qt_enum(QHeaderView, "ResizeMode", "ResizeToContents")
             header = self.table.horizontalHeader()
             for column in (5, 7):
-                header.setSectionResizeMode(column, QHeaderView.Stretch)
+                header.setSectionResizeMode(column, stretch)
             for column in (0, 1, 2, 3, 4, 6):
-                header.setSectionResizeMode(column,
-                                            QHeaderView.ResizeToContents)
-        except Exception:
-            pass  # Qt-Stub oder aeltere Qt-Version: keine Spaltenbreiten
+                header.setSectionResizeMode(column, fit)
+        except Exception as exc:
+            # Nur Kosmetik: der Vergleich darf daran nie scheitern.
+            log_warning("Spaltenbreiten nicht gesetzt: %s" % exc)
 
     def _apply_group_filter(self, *_args):
         """Gruppenfilter ohne die Zeilen/Wahlzustaende zu verlieren.

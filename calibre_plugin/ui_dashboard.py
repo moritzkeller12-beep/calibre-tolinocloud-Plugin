@@ -9,7 +9,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         _login_failure_guidance,
                         _stop_thread, _thread_running, _worker_account_name,
                         _worker_outcome,
-                        sync_result_detail,
+                        qt_enum, sync_result_detail,
                         sync_result_text)
 from calibre.gui2 import error_dialog, info_dialog
 from .client import make_client
@@ -31,6 +31,17 @@ from .ui_workers import PrepareWorker, SyncWorker
 from .ui_auth_workers import (BrowserLoginWorker, SessionCheckWorker,
                               _LOGIN_WORKER_THREADS)
 from .ui_settings import SettingsDialog
+
+def _button(name):
+    """QMessageBox-Knopf; zur Laufzeit gelesen, damit Tests ihn ersetzen."""
+    return qt_enum(QMessageBox, "StandardButton", name)
+
+
+def _accepted(result):
+    """True für «Accepted»: exec() liefert unter PyQt6 eine Zahl, kein Enum."""
+    code = qt_enum(QDialog, "DialogCode", "Accepted")
+    return result == code or result == getattr(code, "value", code)
+
 
 def _offer_next_step(dialog):
     """Nach der Anmeldung ist der Hauptknopf der naechste Schritt.
@@ -259,7 +270,7 @@ class SyncDashboard(QDialog):
         self.account_remove.clicked.connect(self.remove_account)
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
-        self.refresh.setEchoMode(QLineEdit.Password)
+        self.refresh.setEchoMode(qt_enum(QLineEdit, "EchoMode", "Password"))
         # Das Feld zeigt den Token nicht an: das Konto ist die Quelle, ein
         # leeres Feld heisst «gespeicherten Zugang behalten».
         self.refresh.setPlaceholderText(
@@ -394,8 +405,8 @@ class SyncDashboard(QDialog):
             self, "Konto entfernen",
             "Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
             "werden gelöscht. Bücher in tolino und Calibre bleiben." % name,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+            _button("Yes") | _button("No"), _button("No"))
+        if answer != _button("Yes"):
             return
         remaining = [item for item in settings()["accounts"] if item["name"] != name]
         save_settings({"accounts": remaining,
@@ -889,8 +900,8 @@ class SyncDashboard(QDialog):
              "%d Bücher werden aus tolino gelöscht (in Calibre bleiben sie):\n\n%s")
             % (("\n".join(lines),) if len(removals) == 1 else
                (len(removals), "\n".join(lines))),
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
+            _button("Yes") | _button("No"), _button("No"))
+        return answer == _button("Yes")
 
     def _confirm_comparison(self, comparison, settings, client_factory=None,
                             automatic=0):
@@ -907,7 +918,7 @@ class SyncDashboard(QDialog):
                 "ignore_column": ignore_column_available(
                     getattr(getattr(self, "gui", None), "current_db", None)),
             })
-        if dialog.exec() != QDialog.Accepted:
+        if not _accepted(dialog.exec()):
             return None
         # Die Auswahl des bestätigten Fensters entscheidet, was
         # passiert -- jede Aktion für sich; eine leere Auswahl ändert
@@ -948,8 +959,8 @@ class SyncDashboard(QDialog):
         answer = QMessageBox.question(
             self, "Cloud-Kopie ersetzen?",
             text,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
+            _button("Yes") | _button("No"), _button("No"))
+        return answer == _button("Yes")
 
     def _report_skipped_uploads(self, skipped_uploads, nothing_else=False):
         """Bücher ohne verwendbare Datei melden; True heisst «nichts zu tun».

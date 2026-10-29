@@ -1,5 +1,9 @@
 # Änderungen
 
+## Unveröffentlicht
+
+- Der Bibliotheksvergleich bricht unter Calibre mit Qt 6 nicht mehr mit «QHeaderView has no attribute 'Stretch'» (E99) ab: Qt-Enums werden in der vollständigen Form (`QHeaderView.ResizeMode.Stretch` usw.) angesprochen, die Qt 5 und Qt 6 verstehen. Ein Test verhindert neue Kurzformen.
+
 ## 0.1.03
 
 - Neue optionale Calibre-Spalte `#tolino_ignore` (Ja/Nein): so markierte Bücher lädt der Abgleich nicht hoch und ändert sie nicht — gekaufte Bücher erzeugen damit keine zweite Kopie in der Cloud. Sie bleiben im Vergleich sichtbar (Gruppe «Ignoriert») und ihre Cloud-Kopie wird weiterhin zugeordnet.
