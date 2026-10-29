@@ -1,6 +1,26 @@
 """Pure sync-plan construction and collection/metadata action planning."""
+from typing import NamedTuple
+
 from .identifiers import valid_book_uuid
 from .library import normalize_formats
+
+
+class UploadRecord(NamedTuple):
+    """One planned upload: Calibre book, chosen format, replaced cloud copy."""
+
+    book_id: object
+    book_uuid: object
+    format_name: object
+    old_id: object
+
+
+class MetaUpdateRecord(NamedTuple):
+    """One planned in-place metadata patch for an existing cloud copy."""
+
+    book_id: object
+    book_uuid: object
+    tolino_id: object
+    fields: object
 
 
 def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
@@ -24,7 +44,7 @@ def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
             continue
         old = state.get(book_uuid)
         old_id = old.get("tolino_id") if isinstance(old, dict) else None
-        uploads.append((book_id, book_uuid, selected_format, old_id))
+        uploads.append(UploadRecord(book_id, book_uuid, selected_format, old_id))
     return uploads
 
 
@@ -54,21 +74,6 @@ def merge_removals(explicit=()):
         seen.add(tolino_id)
         merged.append((str(book_uuid or ""), tolino_id))
     return merged, titles
-
-
-def unpack_upload_record(record):
-    """Read one upload plan record with a contextual validation error."""
-    if not isinstance(record, (tuple, list)) or len(record) != 4:
-        raise ValueError("Preparation returned an invalid upload record: %r" % (record,))
-    book_id, book_uuid, format_name, old_id = record
-    if book_id is None or not book_uuid or not format_name:
-        raise ValueError("Preparation returned an incomplete upload record: %r" % (record,))
-    return {
-        "book_id": book_id,
-        "book_uuid": str(book_uuid),
-        "format_name": str(format_name),
-        "old_id": old_id,
-    }
 
 
 def series_map_from_metadata(metadata_by_id):
@@ -159,22 +164,6 @@ def metadata_update_fields(metadata):
     return fields
 
 
-def unpack_meta_update_record(record):
-    """Read one in-place metadata update record with a contextual error."""
-    if not isinstance(record, (tuple, list)) or len(record) != 4:
-        raise ValueError("Preparation returned an invalid metadata update record: %r" % (record,))
-    book_id, book_uuid, tolino_id, fields = record
-    if (book_id is None or not book_uuid or not tolino_id
-            or not isinstance(fields, dict) or not fields):
-        raise ValueError("Preparation returned an incomplete metadata update record: %r" % (record,))
-    return {
-        "book_id": book_id,
-        "book_uuid": str(book_uuid),
-        "tolino_id": str(tolino_id),
-        "fields": dict(fields),
-    }
-
-
 def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     """In-place Metadaten-Updates (/meta) für die ausgewählten Bücher.
 
@@ -188,8 +177,7 @@ def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     """
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         raise ValueError("Preparation requires metadata and sync state mappings.")
-    upload_uuids = {str(unpack_upload_record(record)["book_uuid"])
-                    for record in uploads}
+    upload_uuids = {str(record.book_uuid) for record in uploads}
     requested = {str(item) for item in only_book_ids}
     updates = []
     for book_id, metadata in metadata_by_id.items():
@@ -207,5 +195,5 @@ def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
         fields = metadata_update_fields(metadata)
         if not fields:
             continue
-        updates.append((book_id, book_uuid, tolino_id, fields))
+        updates.append(MetaUpdateRecord(book_id, book_uuid, tolino_id, fields))
     return updates

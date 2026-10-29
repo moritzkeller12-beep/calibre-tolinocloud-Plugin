@@ -36,19 +36,6 @@ def is_real_uuid(value):
     return bool(_UUID_TEXT.fullmatch(normalize_uuid_text(value)))
 
 
-def metadata_uuid(item):
-    """Read a raw UUID from a metadata object or mapping."""
-    if isinstance(item, dict):
-        return item.get("uuid")
-    try:
-        return item.uuid
-    except Exception:
-        try:
-            return item.get("uuid")
-        except Exception:
-            return None
-
-
 def display_title(title, number=None):
     """Prefer a human-readable title to an internal identifier in progress."""
     text = str(title or "").strip()
@@ -62,7 +49,9 @@ def display_title(title, number=None):
 
 def book_uuid(item):
     """Return a canonical Calibre UUID from Metadata, if present."""
-    value = normalize_uuid_text(metadata_uuid(item))
+    raw = (item.get("uuid") if isinstance(item, dict)
+           else getattr(item, "uuid", None))
+    value = normalize_uuid_text(raw)
     return value if value and is_real_uuid(value) else ""
 
 
@@ -74,16 +63,16 @@ def migrate_state_keys(metadata_by_id, state):
     for book_id, metadata in metadata_by_id.items():
         if not isinstance(metadata, dict):
             continue
-        book_uuid = valid_book_uuid(metadata.get("uuid"))
-        if not book_uuid or book_uuid in state:
+        key = valid_book_uuid(metadata.get("uuid"))
+        if not key or key in state:
             continue
         old_key = state_key_for(state, book_id)
-        if not old_key or old_key == book_uuid:
+        if not old_key or old_key == key:
             continue
         entry = state.pop(old_key)
         if isinstance(entry, dict):
             entry["calibre_id"] = book_id
-        state[book_uuid] = entry
+        state[key] = entry
         migrated += 1
     return migrated
 

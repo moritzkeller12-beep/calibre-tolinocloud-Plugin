@@ -2,13 +2,13 @@
 import copy
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, plural, pyqtSignal)
-from .client import make_client
+from .token_vault import make_client
 from .config import CredentialStore, save_account
-from .plan import (plan_collection_updates, remember_collection,
-                  unpack_meta_update_record)
+from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
 from .identifiers import display_title, migrate_state_keys
+from .library import image_suffix
 from .config import load_state
 from .tolino import (TolinoApiError, TolinoAuthError, log_warning,
                      report_error, sanitize_error)
@@ -16,12 +16,12 @@ from .tolino import (TolinoApiError, TolinoAuthError, log_warning,
 
 class SyncWorker(QObject):
     progress = pyqtSignal(int, int, str)
-    completed = pyqtSignal(object, object, object)
-    failed = pyqtSignal(str, str)
+    completed = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
 
     def __init__(self, settings, jobs, removals, meta_updates=None,
-                 series_map=None, read_marks=None, read_unmarks=None,
-                 titles=None, read_sync=None):
+                 series_map=None, read_changes=None, titles=None,
+                 state=None):
         QObject.__init__(self)
         # Unveraenderlicher Kontokontext: Jede Persistenz (Tokenrotation,
         # Zustand, tolino-ID) gehoert zu dem Konto dieses Laufs.
@@ -34,21 +34,17 @@ class SyncWorker(QObject):
         self.removals = list(removals or ())
         self.meta_updates = list(meta_updates or ())
         self.series_map = dict(series_map or {})
-        # tolino-IDs, die in der Cloud als gelesen markiert werden sollen.
-        # Leer heisst: Lesestatus bleibt unangetastet.
-        self.read_marks = [str(item) for item in (read_marks or ())
-                           if str(item or "").strip()]
-        # tolino-IDs, deren Lesestatus auf ungelesen gesetzt wird. Ebenfalls
-        # leer = Lesestatus bleibt unangetastet.
-        self.read_unmarks = [str(item) for item in (read_unmarks or ())
-                             if str(item or "").strip()]
-        # Abgleich mit #tolino_read: Ziel-Lesestatus je Buch. Nach dem Lauf
-        # stehen in `read_updates` die (Calibre-ID, Wert)-Paare, die das
-        # Dashboard im GUI-Thread in die Spalte schreibt.
-        self.read_sync = [dict(item) for item in (read_sync or ())
-                          if isinstance(item, dict) and item.get("book_uuid")]
-        self.read_updates = []
-        self.calibre_read_op = None
+        # (tolino-ID, Calibre-Nummer, gelesen?) je ausdrücklich gewählter
+        # Änderung aus dem Vergleichsfenster. Leer heisst: Lesestatus bleibt
+        # unangetastet und die Spalte unverändert.
+        self.read_changes = [
+            (str(tolino_id), book_id, bool(finished))
+            for tolino_id, book_id, finished in (read_changes or ())
+            if str(tolino_id or "").strip()]
+        self.read_marks = [tolino_id for tolino_id, _id, finished
+                           in self.read_changes if finished]
+        self.read_unmarks = [tolino_id for tolino_id, _id, finished
+                             in self.read_changes if not finished]
         # Titel für sichtbare Texte: Schlüssel sind Kennung und tolino-ID.
         # Ohne Titel steht «Buch <Nummer>» -- nie eine UUID.
         self.titles = {str(key): str(value)
@@ -60,13 +56,17 @@ class SyncWorker(QObject):
             if isinstance(item, dict) and item.get("uuid")
         }
         self.cancelled = False
-        self.state = load_state(self.settings.get("state"))
+        # Eine private Kopie je Lauf: Uploads und Löschungen schreiben in
+        # dasselbe Objekt, das `_persist_state` sichert.
+        self.state = (copy.deepcopy(state) if isinstance(state, dict)
+                      else load_state(self.settings.get("state")))
         self.updates = []
+        # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
+        self.read_updates = []
         self.operations = []
         self.outcome = {
             "uploaded": 0, "updated": 0, "deleted": 0,
             "metadata": 0, "read_marked": 0, "read_unmarked": 0,
-            "calibre_read": 0,
             "collections": 0, "skipped": 0, "failed": 0,
             "cancelled": False, "not_started": 0,
             "operations": self.operations,
@@ -76,15 +76,15 @@ class SyncWorker(QObject):
         self.cancelled = True
 
     def _label(self, book_uuid, book_id=None, title=""):
-        """Sichtbarer Name eines Buchs: Titel, sonst «Buch <Nummer>»."""
-        text = str(title or "").strip()
-        if not text:
-            text = self.titles.get(str(book_uuid), "")
-        entry = None
-        if isinstance(self.state, dict):
-            entry = self.state.get(str(book_uuid))
-        if not text and isinstance(entry, dict):
-            text = str(entry.get("title") or "")
+        """Sichtbarer Name eines Buchs: Titel, sonst «Buch <Nummer>».
+
+        Titel kommen aus dem Plan (`titles_for`); der Zustand liefert nur
+        noch die Calibre-Nummer, wenn der Aufrufer keine kennt.
+        """
+        text = (str(title or "").strip()
+                or self.titles.get(str(book_uuid), ""))
+        entry = (self.state.get(str(book_uuid))
+                 if isinstance(self.state, dict) else None)
         if book_id is None and isinstance(entry, dict):
             book_id = entry.get("calibre_id")
         return display_title(text, book_id)
@@ -106,7 +106,7 @@ class SyncWorker(QObject):
         counts = {OP_SUCCEEDED: 0, OP_SKIPPED: 0,
                   OP_FAILED: 0, OP_NOT_STARTED: 0}
         kinds = {"upload": 0, "metadata": 0, "read": 0, "unread": 0,
-                 "collection": 0, "delete": 0, "calibre_read": 0}
+                 "collection": 0, "delete": 0}
         for operation in self.operations:
             status = operation["status"]
             kind = operation["kind"]
@@ -121,7 +121,6 @@ class SyncWorker(QObject):
             "metadata": kinds["metadata"],
             "read_marked": kinds["read"],
             "read_unmarked": kinds["unread"],
-            "calibre_read": kinds["calibre_read"],
             "collections": kinds["collection"],
             "skipped": counts.get(OP_SKIPPED, 0),
             "failed": counts.get(OP_FAILED, 0),
@@ -154,7 +153,7 @@ class SyncWorker(QObject):
         """
         self._record_failure(operation, exc, client)
         if self._fatal_error(exc):
-            raise
+            raise exc
 
     @staticmethod
     def _fatal_error(exc):
@@ -201,12 +200,12 @@ class SyncWorker(QObject):
         """Plan selected actions; collections are added after uploads."""
         meta_ops = []
         for update in self.meta_updates:
-            record = unpack_meta_update_record(update)
-            meta_ops.append((record, self._add_operation(
+            fields = update.fields or {}
+            meta_ops.append((update, self._add_operation(
                 "metadata", "Metadaten: %s"
-                % self._label(record["book_uuid"], record["book_id"],
-                              (record.get("fields") or {}).get("title")),
-                book_uuid=record["book_uuid"])))
+                % self._label(update.book_uuid, update.book_id,
+                              fields.get("title")),
+                book_uuid=update.book_uuid)))
         upload_ops = []
         for job in self.jobs:
             upload_ops.append((job, self._add_operation(
@@ -220,26 +219,15 @@ class SyncWorker(QObject):
                 % self._label(book_uuid, None,
                               self.titles.get(str(tolino_id), "")),
                 book_uuid=book_uuid, tolino_id=str(tolino_id))))
-        # Neu hochgeladene, in Calibre gelesene Bücher werden erst nach dem
-        # Upload markiert; ihre tolino-ID kennt der Plan noch nicht.
-        read_after_upload = any(item["value"] and not item.get("tolino_id")
-                                for item in self.read_sync)
         read_op = (self._add_operation(
             "read", "Als gelesen markieren", count=len(self.read_marks))
-            if self.read_marks or read_after_upload else None)
+            if self.read_marks else None)
         unread_op = (self._add_operation(
             "unread", "Als ungelesen markieren",
             count=len(self.read_unmarks)) if self.read_unmarks else None)
-        calibre_read = [item for item in self.read_sync
-                        if item.get("write_calibre")]
-        calibre_op = (self._add_operation(
-            "calibre_read", "Lesestatus in Calibre", count=len(calibre_read))
-            if calibre_read else None)
-        self.calibre_read_op = calibre_op
         total = (len(meta_ops) + len(upload_ops) + len(delete_ops)
                  + (1 if read_op else 0)
-                 + (1 if unread_op else 0)
-                 + (1 if calibre_op else 0))
+                 + (1 if unread_op else 0))
         self._refresh_counts()
         self.outcome["total"] = total
         return meta_ops, upload_ops, delete_ops, read_op, unread_op, total
@@ -294,6 +282,12 @@ class SyncWorker(QObject):
                                    "Erledigt: %s" % self._label(book_uuid))
         return done
 
+    def _record_read_updates(self, finished):
+        """Bestätigten Lesestatus für die Calibre-Spalte vormerken."""
+        self.read_updates.extend(
+            (book_id, finished) for _tolino, book_id, state
+            in self.read_changes if state is finished and book_id is not None)
+
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
                         done, total):
         """Ausgewählten Lesestatus übertragen."""
@@ -321,56 +315,11 @@ class SyncWorker(QObject):
                 self._count_failure(operation, exc, client)
             else:
                 self._finish_operation(operation, OP_SUCCEEDED)
+                self._record_read_updates(finished)
                 self._refresh_counts()
                 self.progress.emit(done, total, done_text)
             done += 1
         return done
-
-    def _adopt_uploaded_read_status(self, job, new_id):
-        """Lesestatus-Abgleich auf die neue Cloud-Kopie eines Uploads legen."""
-        for item in self.read_sync:
-            if item.get("book_uuid") != job.book_uuid:
-                continue
-            old_id = str(item.get("tolino_id") or "")
-            if old_id:
-                # Die alte Kopie wird ersetzt; ihr Lesestatus zählt nicht mehr.
-                self.read_marks = [i for i in self.read_marks if i != old_id]
-                self.read_unmarks = [i for i in self.read_unmarks
-                                     if i != old_id]
-            item["tolino_id"] = new_id
-            if item["value"] and new_id not in self.read_marks:
-                self.read_marks.append(new_id)
-
-    def _finish_read_sync(self, read_op, unread_op, state):
-        """Abgeglichenen Lesestatus merken und Calibre-Änderungen sammeln.
-
-        Nur Bücher, deren Cloud-Schritt geklappt hat (oder keiner nötig
-        war): sonst stünde in Calibre ein Stand, den tolino nicht hat.
-        """
-        failed = set()
-        for operation, book_ids in ((read_op, self.read_marks),
-                                    (unread_op, self.read_unmarks)):
-            if operation is not None and operation["status"] != OP_SUCCEEDED:
-                failed.update(book_ids)
-        for item in self.read_sync:
-            tolino_id = str(item.get("tolino_id") or "")
-            if not tolino_id or tolino_id in failed:
-                continue
-            entry = state.get(item["book_uuid"])
-            if isinstance(entry, dict):
-                entry["read_synced"] = bool(item["value"])
-            if item.get("write_calibre"):
-                self.read_updates.append((item["book_id"], bool(item["value"])))
-        operation = self.calibre_read_op
-        if operation is not None:
-            if self.read_updates:
-                self._finish_operation(operation, OP_SUCCEEDED,
-                                       count=len(self.read_updates))
-            else:
-                self._finish_operation(operation, OP_SKIPPED,
-                                       reason="tolino-Schritt fehlgeschlagen")
-        if self.read_sync:
-            self._persist_state()
 
     def _run_collections(self, client, collection_ops, checkpoint, done,
                          total):
@@ -388,6 +337,7 @@ class SyncWorker(QObject):
             if self._fatal_error(exc):
                 raise
         revision = None
+        changed = False
         # Ohne Bestand ist keine Zuordnung möglich: dann startet kein
         # Schritt -- auch kein Checkpoint.
         for book_uuid, tolino_id, series, operation in (
@@ -397,7 +347,7 @@ class SyncWorker(QObject):
                 remember_collection(self.state, book_uuid, series)
                 self._finish_operation(operation, OP_SKIPPED,
                                        reason="schon in der Cloud")
-                self._persist_state()
+                changed = True
                 done += 1
                 self._refresh_counts()
                 continue
@@ -417,10 +367,86 @@ class SyncWorker(QObject):
             known.add((tolino_id, series))
             remember_collection(self.state, book_uuid, series)
             self._finish_operation(operation, OP_SUCCEEDED)
-            self._persist_state()
+            changed = True
             done += 1
             self._refresh_counts()
+        if changed:
+            self._persist_state()
         self.progress.emit(done, total, "Serien geprüft")
+        return done
+
+    def _run_metadata_updates(self, client, operations, checkpoint, done, total):
+        """Apply selected metadata patches and persist their confirmed state."""
+        changed = False
+        for record, operation in operations:
+            checkpoint()
+            self.progress.emit(
+                done, total,
+                "Metadaten: %s" % self._label(
+                    record.book_uuid, record.book_id,
+                    (record.fields or {}).get("title")))
+            try:
+                client.update_metadata(record.tolino_id, record.fields)
+            except Exception as exc:
+                self._count_failure(operation, exc, client)
+                done += 1
+                continue
+            self._finish_operation(operation, OP_SUCCEEDED)
+            self._refresh_counts()
+            entry = self.state.get(record.book_uuid)
+            metadata = self.metadata_by_uuid.get(record.book_uuid)
+            if isinstance(entry, dict) and metadata:
+                entry["meta_verified_fp"] = metadata_fingerprint(metadata)
+            # Keep the confirmed Tolino-ID mapping current.
+            self.updates.append((record.book_id, record.tolino_id))
+            changed = True
+            done += 1
+        if changed:
+            # Einmal je Phase statt je Buch: derselbe Patch ist idempotent.
+            self._persist_state()
+        return done
+
+    def _run_uploads(self, client, operations, checkpoint, done, total):
+        """Upload selected books and preserve each successful partial result."""
+        for job, operation in operations:
+            checkpoint()
+            self.progress.emit(done, total, "Lade hoch: %s (%s)" %
+                               (job.label(), job.format_name))
+            try:
+                new_id = client.upload(job.path)
+            except Exception as exc:
+                self._count_failure(operation, exc, client)
+                done += 1
+                self.progress.emit(done, total, "Fehlgeschlagen: %s"
+                                   % job.label())
+                continue
+            entry = dict(self.state.get(job.book_uuid) or {})
+            entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
+            entry.pop("collections", None)
+            self.state[job.book_uuid] = entry
+            metadata = self.metadata_by_uuid.get(job.book_uuid)
+            if metadata:
+                entry["content_fp"] = content_fingerprint(
+                    metadata, job.format_name)
+                # Ein Upload bestätigt die Metadaten nicht per Read-back.
+                entry.pop("meta_verified_fp", None)
+            self.updates.append((job.book_id, new_id))
+            self._finish_operation(operation, OP_SUCCEEDED)
+            # Persist immediately so a later failure cannot lose this mapping.
+            self._persist_state()
+            if job.cover:
+                try:
+                    client.upload_cover(new_id, job.cover,
+                                        image_suffix(job.cover))
+                except Exception as exc:
+                    cover_op = self._add_operation(
+                        "cover", "Buchcover: %s" % job.label(),
+                        book_uuid=job.book_uuid)
+                    self._count_failure(cover_op, exc, client)
+            self._remove_replaced_copy(client, job)
+            done += 1
+            self._refresh_counts()
+            self.progress.emit(done, total, "Hochgeladen: %s" % job.label())
         return done
 
     def _run(self):
@@ -438,93 +464,20 @@ class SyncWorker(QObject):
                 # Alle geplanten Operationen, die noch nicht gestartet sind,
                 # bleiben «nicht begonnen» -- der Bericht weist sie aus.
                 self._refresh_counts()
-                self.completed.emit(state, client.refresh, self.updates)
+                self.completed.emit(state, self.updates)
                 raise _SyncCancelled()
 
-            # Erst die in-place Metadaten-Updates, dann die Uploads.
-            for record, operation in meta_ops:
-                checkpoint()
-                self.progress.emit(
-                    done, total,
-                    "Metadaten: %s" % self._label(
-                        record["book_uuid"], record["book_id"],
-                        (record.get("fields") or {}).get("title")))
-                try:
-                    client.update_metadata(record["tolino_id"], record["fields"])
-                except Exception as exc:
-                    self._count_failure(operation, exc, client)
-                    done += 1
-                    continue
-                self._finish_operation(operation, OP_SUCCEEDED)
-                self._refresh_counts()
-                entry = self.state.get(record["book_uuid"])
-                metadata = self.metadata_by_uuid.get(record["book_uuid"])
-                if isinstance(entry, dict) and metadata:
-                    entry["meta_fp"] = metadata_fingerprint(metadata)
-                    entry["meta_verified_fp"] = entry["meta_fp"]
-                # Der Metadaten-Patch bestaetigt ebenfalls die Cloud-ID fuer
-                # die Calibre-Spalte; Uploads fuegen sie an derselben Stelle
-                # ihres Erfolgs hinzu.
-                self.updates.append((record["book_id"], record["tolino_id"]))
-                self._persist_state()
-                done += 1
-            for job, operation in upload_ops:
-                checkpoint()
-                # Der Laufzeitplan kann diese Serien erst nach dem Upload
-                # ergänzen; offene Sammlungen vorab für den Zähler merken.
-                self.progress.emit(done, total, "Lade hoch: %s (%s)" %
-                                   (job.label(), job.format_name))
-                try:
-                    new_id = client.upload(job.path)
-                except Exception as exc:
-                    self._count_failure(operation, exc, client)
-                    done += 1
-                    self.progress.emit(done, total, "Fehlgeschlagen: %s"
-                                       % job.label())
-                    continue
-                # Plan-Eintrag kopieren; Fingerprints erst nach erfolgreichem Upload setzen.
-                entry = dict(state.get(job.book_uuid) or {})
-                entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
-                # Neue Cloud-Kopie: alte Serien-Zuordnungen gelten nicht mehr.
-                entry.pop("collections", None)
-                state[job.book_uuid] = entry
-                metadata = self.metadata_by_uuid.get(job.book_uuid)
-                if metadata:
-                    entry["content_fp"] = content_fingerprint(
-                        metadata, job.format_name)
-                    entry["meta_fp"] = metadata_fingerprint(metadata)
-                    entry.pop("meta_verified_fp", None)
-                self.updates.append((job.book_id, new_id))
-                self._adopt_uploaded_read_status(job, new_id)
-                self._finish_operation(operation, OP_SUCCEEDED)
-                # SOFORT sichern: Cover, Loeschen oder ein spaeterer Fehler
-                # duerfen die Zuordnung nicht mehr verlieren.
-                self._persist_state()
-                if job.cover_path:
-                    try:
-                        client.upload_cover(new_id, job.cover_path)
-                    except Exception as exc:
-                        # Der Upload selbst ist erfolgreich -- Teilstand
-                        # bleibt, der Fehler wird gezaehlt, das naechste Buch
-                        # laeuft weiter.
-                        cover_op = self._add_operation(
-                            "cover", "Buchcover: %s" % job.label(),
-                            book_uuid=job.book_uuid)
-                        self._count_failure(cover_op, exc, client)
-                self._remove_replaced_copy(client, job)
-                done += 1
-                self._refresh_counts()
-                self.progress.emit(done, total,
-                                   "Hochgeladen: %s" % job.label())
+            # Erst Metadaten, dann Uploads; jede Phase hält ihre Persistenzlogik.
+            done = self._run_metadata_updates(
+                client, meta_ops, checkpoint, done, total)
+            done = self._run_uploads(
+                client, upload_ops, checkpoint, done, total)
             done = self._run_deletions(
                 client, delete_ops, checkpoint, state, done, total)
-            # Lesestatus nur für ausgewählte Bücher übertragen. Sammlungen
-            # und andere Angaben bleiben unverändert.
+            # Lesestatus nur für ausdrücklich im Vergleichsfenster
+            # ausgewählte Bücher übertragen.
             done = self._run_read_marks(
                 client, read_op, unread_op, checkpoint, done, total)
-            self._finish_read_sync(read_op, unread_op, state)
-            if self.calibre_read_op is not None:
-                done += 1
             series_items = plan_collection_updates(self.series_map, state)
             collection_ops = []
             for book_uuid, tolino_id, series in series_items:
@@ -538,7 +491,7 @@ class SyncWorker(QObject):
             done = self._run_collections(
                 client, collection_ops, checkpoint, done, total)
             self._refresh_counts()
-            self.completed.emit(state, client.refresh, self.updates)
+            self.completed.emit(state, self.updates)
         except _SyncCancelled:
             return
         except Exception as exc:
@@ -549,9 +502,7 @@ class SyncWorker(QObject):
                        else report_error(exc, "Sync", (
                            self.store.refresh_token,
                            getattr(client, "access", None))))
-            self.failed.emit(
-                message,
-                client.refresh if client else self.store.refresh_token)
+            self.failed.emit(message)
 
 
 class _SyncCancelled(Exception):
@@ -621,12 +572,6 @@ class PrepareWorker(QObject):
                 return
             self.progress.emit("Lade Cloud-Bestand …")
             inventory = client.inventory()
-
-            # Eine unbekannte Hülle darf nie als leere Bibliothek gelten.
-            if not getattr(client, "inventory_ok", True):
-                raise TolinoApiError(
-                    "Die Cloud-Antwort enthält kein PublicationInventory.",
-                    code="N02")
             read_known = True
             try:
                 read_ids = client.read_ids()
@@ -642,21 +587,21 @@ class PrepareWorker(QObject):
             if self._stop_requested():
                 return
             self.progress.emit("Vergleiche Bibliothek …")
+            columns = dict(self.settings.get("columns") or {})
             comparison = compare_inventory(
                 self.metadata, state, inventory,
                 self.settings.get("preferred_formats", ()),
-                use_metadata_ids=self.settings.get("sync_column_enabled", True),
+                use_metadata_ids=columns.get("id", True),
                 read_ids=read_ids,
-                read_column=bool(self.settings.get("read_column_enabled")))
-            if getattr(client, "inventory_ok", True):
-                for row in comparison:
-                    stale_id = str(row.get("stale_cloud_id") or "").strip()
-                    book_uuid = str(row.get("uuid") or "").strip()
-                    if stale_id and book_uuid:
-                        entry = state.get(book_uuid)
-                        if isinstance(entry, dict) and str(
-                                entry.get("tolino_id") or "").strip() == stale_id:
-                            entry.pop("tolino_id", None)
+                read_column=bool(columns.get("read")))
+            for row in comparison:
+                stale_id = str(row.get("stale_cloud_id") or "").strip()
+                book_uuid = str(row.get("uuid") or "").strip()
+                if stale_id and book_uuid:
+                    entry = state.get(book_uuid)
+                    if isinstance(entry, dict) and str(
+                            entry.get("tolino_id") or "").strip() == stale_id:
+                        entry.pop("tolino_id", None)
             if self._stop_requested():
                 return
             self.ready.emit({
@@ -665,7 +610,6 @@ class PrepareWorker(QObject):
                 "state": state,
                 "comparison": comparison,
                 "read_status_known": read_known,
-                "refresh": client.refresh,
                 "hardware": client.hardware,
                 "account_name": self.account_name,
             })

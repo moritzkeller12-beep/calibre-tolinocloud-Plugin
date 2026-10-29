@@ -1,17 +1,14 @@
 """Comparison planning and action summaries for the sync dashboard."""
 import os
-import tempfile
 
 from .ui_common import (SyncJob, _display_value, _format_signatures,
                         _metadata_value, plural)
 from .identifiers import book_uuid, state_key_for, valid_book_uuid
-from .library import (cover_bytes, image_suffix, iter_book_ids, legacy_tolino_id,
-                      metadata_by_id, metadata_ignored, metadata_read_value,
-                      metadata_tolino_id,
-                      normalize_formats, safe_format_path, update_tolino_ids)
+from .library import (TOLINO_READ_COLUMN, bool_column_value, cover_bytes,
+                      image_suffix, metadata_ignored, metadata_tolino_id,
+                      normalize_formats, safe_format_path)
 from .plan import (merge_removals, plan_collection_updates,
-                   plan_metadata_updates, plan_sync, series_map_from_metadata,
-                   unpack_upload_record)
+                   plan_metadata_updates, plan_sync, series_map_from_metadata)
 from .config import load_state
 from .tolino import log_warning
 
@@ -22,14 +19,9 @@ def local_metadata(dialog):
     """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
     metadata = {}
     state = saved_state(dialog)
-    legacy_ids = []
-    account_name = str(getattr(dialog, "account_name", "") or "")
-    for book_id in iter_book_ids(dialog.gui.current_db):
-        item = metadata_by_id(dialog.gui.current_db, book_id)
-        if dialog.sync_column_enabled and account_name:
-            old_id = legacy_tolino_id(item)
-            if old_id:
-                legacy_ids.append((book_id, old_id))
+    database = dialog.gui.current_db
+    for book_id in database.new_api.all_book_ids():
+        item = database.new_api.get_metadata(book_id)
         identifier = book_uuid(item)
         if not identifier:
             identifier = (state_key_for(state, book_id)
@@ -51,18 +43,13 @@ def local_metadata(dialog):
             "last_modified": str(_metadata_value(item, "last_modified")),
             "tolino_id": (metadata_tolino_id(
                 item, getattr(dialog, "account_name", ""))
-                          if dialog.sync_column_enabled else ""),
+                          if (dialog.columns or {}).get("id") else ""),
             "series": str(_metadata_value(item, "series") or "").strip(),
         }
-        if getattr(dialog, "read_column_enabled", False):
-            metadata[book_id]["calibre_read"] = metadata_read_value(item)
+        if (dialog.columns or {}).get("read"):
+            metadata[book_id]["calibre_read"] = bool_column_value(
+                item, TOLINO_READ_COLUMN)
     values = dialog.values()
-    if (legacy_ids and len(values.get("accounts") or []) > 1
-            and dialog.sync_column_enabled):
-        # One-time migration: assign old unscoped IDs to the account that is
-        # active during the first multi-account sync.
-        update_tolino_ids(dialog.gui.current_db, legacy_ids, enabled=True,
-                          account_name=account_name)
     preferred_formats = normalize_formats(
         values.get("preferred_formats", ()))
     for book_id, item in metadata.items():
@@ -74,27 +61,22 @@ def local_metadata(dialog):
 
 
 def saved_state(dialog):
+    """Gespeicherter Sync-Zustand des Kontos; leer, wenn er unlesbar ist."""
     try:
         return load_state(dialog.values().get("state"))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return {}
 
 
-def _ignored(item):
-    """True, wenn das Buch laut Calibre-Spalte vom Abgleich ausgenommen ist."""
-    return bool(isinstance(item, dict) and item.get("ignored"))
+def syncable_metadata(metadata):
+    """Metadaten ohne die in Calibre als «ignoriert» markierten Bücher."""
+    return {book_id: item for book_id, item in (metadata or {}).items()
+            if not (isinstance(item, dict) and item.get("ignored"))}
 
 
 def syncable_book_ids(metadata, book_ids):
     """Ausgewählte Calibre-Nummern ohne die ignorierten Bücher."""
-    return {book_id for book_id in (book_ids or ())
-            if not _ignored((metadata or {}).get(book_id))}
-
-
-def syncable_metadata(metadata):
-    """Metadaten ohne ignorierte Bücher (für Serien und Sammlungen)."""
-    return {book_id: item for book_id, item in (metadata or {}).items()
-            if not _ignored(item)}
+    return set(book_ids or ()) & set(syncable_metadata(metadata))
 
 
 def automatic_action_count(metadata, state):
@@ -112,21 +94,19 @@ def plan_actions(dialog, settings, metadata, state, selection):
     # Ignorierte Bücher fallen hier endgültig heraus -- unabhängig davon,
     # was die Auswahl enthält.
     requested_uploads = syncable_book_ids(metadata, selection["uploads"])
-    valid_uploads = set()
-    skipped_formats = []
-    for book_id in requested_uploads:
-        item = metadata.get(book_id) or {}
-        available = set(normalize_formats(item.get("formats")))
-        if any(fmt in available for fmt in preferred):
-            valid_uploads.add(book_id)
-        else:
-            title = item.get("title") or "ohne Titel"
-            display = ", ".join(preferred) or "EPUB"
-            skipped_formats.append(
-                "Buch %s (%s): kein Format %s." %
-                (book_id, title, display))
     uploads = plan_sync(
-        metadata, state, preferred, upload_book_ids=valid_uploads)
+        metadata, state, preferred, upload_book_ids=requested_uploads)
+    planned_book_ids = {record[0] for record in uploads}
+    skipped_formats = []
+    display = ", ".join(preferred) or "EPUB"
+    for book_id in requested_uploads - planned_book_ids:
+        item = metadata.get(book_id)
+        if not isinstance(item, dict) or not valid_book_uuid(item.get("uuid")):
+            continue
+        title = item.get("title") or "ohne Titel"
+        skipped_formats.append(
+            "Buch %s (%s): kein Format %s." %
+            (book_id, title, display))
     removals, removal_titles = merge_removals(
         (selection or {}).get("cloud_deletions"))
     titles = titles_for(metadata, removal_titles)
@@ -134,9 +114,8 @@ def plan_actions(dialog, settings, metadata, state, selection):
         metadata, state, uploads,
         only_book_ids=syncable_book_ids(metadata, selection["metadata"]))
     series_map = series_map_from_metadata(syncable_metadata(metadata))
-    jobs, skipped_uploads = upload_jobs(dialog, settings, metadata, uploads)
+    jobs, skipped_uploads = upload_jobs(dialog, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
-    read_sync = read_sync_items(metadata, jobs, selection.get("read_sync"))
     settings["state"] = state
     gaps = selection_gaps(selection, uploads, meta_updates)
     return {
@@ -146,36 +125,12 @@ def plan_actions(dialog, settings, metadata, state, selection):
         "removal_titles": removal_titles,
         "meta_updates": meta_updates,
         "series_map": series_map,
+        "collections": len(plan_collection_updates(series_map, state)),
         "skipped_uploads": skipped_uploads,
-        "selected_read": selection["read"],
-        "selected_unread": selection["unread"],
-        "read_sync": read_sync,
+        "read_changes": selection["read_changes"],
         "titles": titles,
         "selected_without_action": gaps,
     }
-
-
-def read_sync_items(metadata, jobs, selected=()):
-    """Abgleich mit #tolino_read samt neu hochgeladener Bücher.
-
-    Ein neues Buch hat in tolino noch keinen Lesestatus: ist es in Calibre
-    gelesen, markiert der Lauf die neue Cloud-Kopie nach dem Upload.
-    """
-    items = [dict(item) for item in (selected or ())]
-    known = {item.get("book_uuid") for item in items}
-    for job in jobs or ():
-        local = (metadata.get(job.book_id) or {}).get("calibre_read")
-        if local is None or job.book_uuid in known:
-            continue
-        items.append({"book_id": job.book_id, "book_uuid": job.book_uuid,
-                      "tolino_id": "", "value": bool(local),
-                      "write_calibre": False})
-    return items
-
-
-def calibre_read_updates(preparation):
-    return [item for item in preparation.get("read_sync") or ()
-            if item.get("write_calibre")]
 
 
 def titles_for(metadata, removal_titles=None):
@@ -193,89 +148,89 @@ def titles_for(metadata, removal_titles=None):
 
 def selection_gaps(selection, uploads, meta_updates):
     """Count selected actions that could not become work items."""
-    planned_uploads = {unpack_upload_record(item)["book_id"] for item in uploads}
+    planned_uploads = {item.book_id for item in uploads}
     planned_meta = {record[0] for record in meta_updates}
     open_uploads = set(selection["uploads"]) - planned_uploads
     open_meta = set(selection["metadata"]) - planned_meta
     return {"uploads": len(open_uploads), "metadata": len(open_meta)}
 
 
-def upload_jobs(dialog, settings, metadata, uploads):
+def upload_jobs(dialog, metadata, uploads):
     """Build upload jobs, recording unavailable local formats."""
     jobs = []
     skipped_uploads = []
     for upload in uploads:
-        record = unpack_upload_record(upload)
-        book_id = record["book_id"]
-        book_uuid = record["book_uuid"]
-        fmt = record["format_name"]
-        old_id = record["old_id"]
+        book_id = upload.book_id
+        identifier = upload.book_uuid
+        fmt = upload.format_name
+        old_id = upload.old_id
+        title = str((metadata.get(book_id) or {}).get("title") or "")
         try:
             path = safe_format_path(dialog.gui.current_db, book_id, fmt)
             if not os.path.isfile(path):
                 raise ValueError("Datei nicht gefunden: %s" % path)
         except ValueError as exc:
-            title = metadata.get(book_id, {}).get("title") or "ohne Titel"
             skipped_uploads.append(
-                "Buch %s (%s), Format %s: %s" % (book_id, title, fmt, exc))
+                "Buch %s (%s), Format %s: %s"
+                % (book_id, title or "ohne Titel", fmt, exc))
             continue
-        cover_path = None
         try:
             cover = cover_bytes(dialog.gui.current_db, book_id)
         except Exception as exc:
             log_warning("Cover für Buch %s nicht verfügbar: %s" % (book_id, exc))
             cover = None
-        suffix = image_suffix(cover)
-        if cover and suffix:
-            temp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-            temp.write(cover)
-            temp.close()
-            cover_path = temp.name
-            dialog.temp_files.append(cover_path)
-        elif cover:
+        if cover and not image_suffix(cover):
             log_warning("Coverformat unbekannt – Cover wird nicht übertragen.")
-        title = (metadata.get(book_id) or {}).get("title") or ""
-        jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path,
-                            cover_path, title))
+            cover = None
+        jobs.append(SyncJob(book_id, identifier, fmt, old_id, path, cover,
+                            title))
     return jobs, skipped_uploads
 
 
-def open_collections(preparation, state):
-    """Count only collection additions that are still needed."""
-    return len(plan_collection_updates(
-        preparation.get("series_map") or {}, state or {}))
+def plan_counts(preparation, uploads):
+    """Zahlen des Laufs -- eine Regel für Plan, Text und Fortschritt."""
+    changes = preparation.get("read_changes") or ()
+    marked = sum(1 for _tolino, _book, finished in changes if finished)
+    unmarked = len(changes) - marked
+    counts = {
+        "uploads": int(uploads),
+        "removals": len(preparation.get("removals") or ()),
+        "metadata": len(preparation.get("meta_updates") or ()),
+        "collections": int(preparation.get("collections") or 0),
+        "read": marked,
+        "unread": unmarked,
+    }
+    # Lesestatus kostet je Richtung einen Schritt, nicht je Buch.
+    counts["steps"] = (counts["uploads"] + counts["removals"]
+                       + counts["metadata"] + counts["collections"]
+                       + (1 if marked else 0) + (1 if unmarked else 0))
+    return counts
 
 
-def planned_actions(preparation, uploads, state):
-    return (int(uploads) + len(preparation["removals"])
-            + len(preparation.get("meta_updates") or ())
-            + open_collections(preparation, state)
-            + (1 if preparation.get("selected_read") else 0)
-            + (1 if preparation.get("selected_unread") else 0)
-            + (1 if calibre_read_updates(preparation) else 0))
+def planned_actions(preparation, uploads):
+    """Zahl der Schritte, die der Lauf abarbeitet."""
+    return plan_counts(preparation, uploads)["steps"]
 
 
-def plan_text(preparation, uploads, state):
+def plan_text(preparation, uploads):
     """Summarize concrete actions before starting the worker."""
+    counts = plan_counts(preparation, uploads)
     parts = []
-    if uploads:
-        parts.append("%d Upload%s" % (uploads, "s" if uploads != 1 else ""))
-    if preparation["removals"]:
-        count = len(preparation["removals"])
-        parts.append("%d %s" % (count, plural(count, "Löschung", "Löschungen")))
-    if preparation.get("meta_updates"):
-        count = len(preparation["meta_updates"])
-        parts.append("%d Metadaten" % count)
-    collections = open_collections(preparation, state)
-    if collections:
-        parts.append("%d Sammlungen" % collections)
-    if preparation.get("selected_read"):
-        parts.append("%d gelesen" % len(preparation["selected_read"]))
-    if preparation.get("selected_unread"):
-        parts.append("%d ungelesen" % len(preparation["selected_unread"]))
-    calibre_read = calibre_read_updates(preparation)
-    if calibre_read:
-        parts.append("%d Lesestatus in Calibre" % len(calibre_read))
+    if counts["uploads"]:
+        parts.append("%d %s" % (counts["uploads"],
+                                plural(counts["uploads"], "Upload", "Uploads")))
+    if counts["removals"]:
+        parts.append("%d %s" % (counts["removals"],
+                                plural(counts["removals"], "Löschung",
+                                       "Löschungen")))
+    if counts["metadata"]:
+        parts.append("%d Metadaten" % counts["metadata"])
+    if counts["collections"]:
+        parts.append("%d Sammlungen" % counts["collections"])
+    if counts["read"]:
+        parts.append("%d gelesen" % counts["read"])
+    if counts["unread"]:
+        parts.append("%d ungelesen" % counts["unread"])
     return ("Läuft: %s." % ", ".join(parts)
             if parts else "Läuft …")
 

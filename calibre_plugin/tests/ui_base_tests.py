@@ -40,7 +40,6 @@ class ToolbarIconTests(unittest.TestCase):
             plugin.show_dashboard = lambda: None
             plugin.load_resources = lambda _names: icon_module._test_resources
             plugin._keepalive_credentials = lambda: {}
-            plugin._keepalive_persist = lambda *_args: None
             icon = icon_module.TolinoSyncAction._toolbar_icon(plugin)
             self.assertIsNotNone(icon)
             self.assertFalse(icon.isNull())
@@ -183,12 +182,23 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def setSortIndicator(self, column, order):
                 self.indicator = (column, order)
 
+            def setSectionResizeMode(self, column, mode):
+                self.section_modes = getattr(self, "section_modes", {})
+                self.section_modes[column] = mode
+
         class Table(Widget):
             SelectRows = "SelectRows"
             ExtendedSelection = "ExtendedSelection"
 
             def setSelectionMode(self, mode):
                 self.selection_mode = mode
+
+            def setUpdatesEnabled(self, value):
+                self.updates_enabled = value
+
+            def setRowHidden(self, index, hidden):
+                self.row_hidden = getattr(self, "row_hidden", {})
+                self.row_hidden[index] = hidden
 
             def __init__(self, rows, columns):
                 Widget.__init__(self)
@@ -228,13 +238,39 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 Widget.__init__(self, text)
                 self.stateChanged = Signal()
                 self.toggled = Signal()
+                self._signals_blocked = False
                 # Wie in Qt: nach dem Umschalten kommt clicked.
                 self.clicked = Signal()
+
+            def setChecked(self, value):
+                value = bool(value)
+                changed = value != self.isChecked()
+                self.checked = value
+                if changed and not self._signals_blocked:
+                    self.stateChanged.emit(int(value))
+
+            def blockSignals(self, blocked):
+                previous = self._signals_blocked
+                self._signals_blocked = bool(blocked)
+                return previous
 
         class Button(Widget):
             def __init__(self, text=""):
                 Widget.__init__(self, text)
                 self.clicked = Signal()
+
+        class ComboBox(Widget):
+            def __init__(self, *args, **_kwargs):
+                Widget.__init__(self)
+                self.currentIndexChanged = Signal()
+                self.items = []
+                self.index = 0
+
+            def addItem(self, label, key=None):
+                self.items.append((label, key))
+
+            def currentData(self):
+                return self.items[self.index][1] if self.items else None
 
         class SelectRows:
             pass
@@ -302,6 +338,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
             "QLabel": Widget,
             "QPushButton": Button,
             "QCheckBox": CheckBox,
+            "QComboBox": ComboBox,
+            "QHeaderView": type("QHeaderView", (),
+                               {"Stretch": 1, "ResizeToContents": 2}),
             "QGroupBox": Widget,
             "QTableWidget": Table,
             "QTableWidgetItem": Item,

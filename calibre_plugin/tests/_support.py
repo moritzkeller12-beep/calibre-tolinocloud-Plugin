@@ -43,7 +43,7 @@ def compare_inventory(metadata, state, inventory, preferred_formats=(),
 # Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
 # der Einstieg; Dialoge, Worker und Dashboard liegen in eigenen Modulen.
 UI_SOURCE_FILES = ("ui.py", "ui_common.py", "ui_dialogs.py",
-                   "ui_workers.py", "ui_auth_workers.py", "ui_settings.py",
+                   "ui_workers.py", "ui_auth_workers.py",
                    "ui_dashboard.py", "dashboard_plan.py")
 
 
@@ -88,6 +88,18 @@ def load_ui_module(get_icons_result, qt_stub=None):
                  "QHBoxLayout", "QTableWidget", "QTableWidgetItem",
                  "QObject", "QInputDialog", "QFileDialog", "QMenu", "Qt"):
         setattr(qt_core, name, type(name, (), {}))
+    # Qt6-Form: die unskopierten Namen (QHeaderView.Stretch) gibt es dort
+    # nicht mehr. Ein Stub mit nur ResizeMode deckt genau diesen Fehler auf.
+    header_view = type("QHeaderView", (), {})
+    header_view.ResizeMode = type(
+        "ResizeMode", (), {"Stretch": 1, "ResizeToContents": 2})
+    qt_core.QHeaderView = header_view
+    qt_core.QDialog.Accepted = 1
+    qt_core.QDialog.DialogCode = qt_core.QDialog
+    qt_core.QMessageBox.Yes = 1
+    qt_core.QMessageBox.No = 2
+    qt_core.QMessageBox.StandardButton = qt_core.QMessageBox
+    qt_core.Qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1})
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None
     if qt_stub:
@@ -124,7 +136,6 @@ def load_ui_module(get_icons_result, qt_stub=None):
                         "calibre_plugin.token_candidates",
                         "calibre_plugin.ui_workers",
                         "calibre_plugin.ui_auth_workers",
-                        "calibre_plugin.ui_settings",
                         "calibre_plugin.ui_dashboard",
                         "calibre_plugin.dashboard_plan"):
         sys.modules.pop(module_name, None)
@@ -134,7 +145,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # diese alte Fassung zurück.
     for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
                       "token_candidates", "browser_crypto", "ui_workers",
-                      "ui_auth_workers", "ui_settings", "ui_dashboard",
+                      "ui_auth_workers", "ui_dashboard",
                       "dashboard_plan"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
@@ -148,7 +159,6 @@ def load_ui_module(get_icons_result, qt_stub=None):
     ui_module.dialogs = importlib.import_module("calibre_plugin.ui_dialogs")
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")
-    ui_module.settings_dialog = importlib.import_module("calibre_plugin.ui_settings")
     ui_module._loaded_by_entry_for_tests = loaded_by_entry
     # Stubs stay active until restore_stubs() so that function-level
     # imports (from calibre.gui2 import get_icons) still resolve.
@@ -188,7 +198,7 @@ def start_cdp_stubs():
     global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
     if _PICK_CHROMIUM_PATCH is None:
         _PICK_CHROMIUM_PATCH = patch("calibre_plugin.cdp.pick_chromium",
-                                     return_value=None)
+                                     return_value=(None, ""))
         _PICK_CHROMIUM_PATCH.start()
     if _CLOSE_WINDOW_PATCH is None:
         _CLOSE_WINDOW_PATCH = patch("calibre_plugin.cdp.close_grabber_window",
@@ -223,6 +233,20 @@ class FakeText:
         return self.value
 
 
+class FakeSignal:
+    """Kleines Signal-Doppel für Widgettests."""
+
+    def __init__(self):
+        self.slots = []
+
+    def connect(self, slot):
+        self.slots.append(slot)
+
+    def emit(self, *args):
+        for slot in self.slots:
+            slot(*args)
+
+
 class FakeCheckBox:
     """QCheckBox-Ersatz fuer die Zell-Widgets der Bestandsliste."""
 
@@ -230,9 +254,20 @@ class FakeCheckBox:
         self._checked = False
         self.enabled = True
         self.tooltip = ""
+        self.stateChanged = FakeSignal()
+        self._signals_blocked = False
 
     def setChecked(self, value):
-        self._checked = bool(value)
+        value = bool(value)
+        if value != self._checked:
+            self._checked = value
+            if not self._signals_blocked:
+                self.stateChanged.emit(int(value))
+
+    def blockSignals(self, blocked):
+        previous = self._signals_blocked
+        self._signals_blocked = bool(blocked)
+        return previous
 
     def isChecked(self):
         return self._checked
@@ -242,9 +277,6 @@ class FakeCheckBox:
 
     def setToolTip(self, text):
         self.tooltip = text
-
-    def stateChanged(self):
-        return None
 
 
 class FakeMenu:

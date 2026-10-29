@@ -19,10 +19,24 @@ class TolinoSyncAction(InterfaceAction):
         # runs, so an adopted token survives between syncs.
         try:
             from .token_vault import start_token_keepalive
-            start_token_keepalive(self._keepalive_credentials,
-                                  self._keepalive_persist)
+            start_token_keepalive(self._keepalive_credentials)
         except Exception:
             pass  # keep-alive must never break plugin loading
+
+    def shutdown(self):
+        """Calibre beendet sich: Keep-alive anhalten, bevor nach Threads gesucht wird.
+
+        Calibre prüft beim Herunterfahren auf laufende Threads (Phase
+        «Actions shutdown»); ein atexit-Haken käme dafür zu spät.
+        """
+        try:
+            from .token_vault import stop_token_keepalive
+            stop_token_keepalive()
+        except Exception:
+            pass  # der Shutdown darf nie an der Aufräumung scheitern
+        parent = getattr(super(), "shutdown", None)
+        if callable(parent):
+            parent()
 
     def _keepalive_credentials(self):
         try:
@@ -35,21 +49,6 @@ class TolinoSyncAction(InterfaceAction):
             for item in cfg.get("accounts", ())
             if item.get("refresh_token")
         ]}
-
-    def _keepalive_persist(self, refresh, account_name=None):
-        try:
-            from .config import save_account, settings
-            cfg = settings()
-            name = (account_name or cfg.get("active_account")
-                    or cfg.get("name"))
-            if name and refresh:
-                save_account(name, {"refresh_token": refresh}, active=name)
-        except Exception as exc:
-            # Nicht still scheitern: eine unterbliebene Rotation faellt sonst
-            # erst Stunden spaeter als abgelaufene Sitzung auf. Ohne Token.
-            from .tolino import log_warning, sanitize_error
-            log_warning("Tolino-Keep-alive konnte den neuen Zugang nicht "
-                        "speichern: %s" % sanitize_error(exc, (refresh,)))
 
     def show_dashboard(self):
         from .ui_dashboard import SyncDashboard

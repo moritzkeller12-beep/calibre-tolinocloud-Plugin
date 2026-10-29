@@ -15,11 +15,21 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libegl1 libfontconfig1 libfreetype6 libxkbcommon0
+
       - name: Install test-only dependencies
-        run: python3 -m pip install --quiet pycryptodome pyflakes
+        run: python3 -m pip install --quiet pycryptodome pyflakes PyQt6
 
       - name: Unit tests
         run: python3 -m unittest calibre_plugin.test_sync
+
+      - name: PyQt6 offscreen dialog smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python3 -m unittest calibre_plugin.tests.qt_offscreen_tests
 
       - name: Lint (unused imports, undefined names)
         run: python3 -m pyflakes calibre_plugin/ __init__.py build_plugin.py

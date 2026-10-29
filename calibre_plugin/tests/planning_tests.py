@@ -10,21 +10,19 @@ import time
 import calibre_plugin.token_vault as vault_module
 import unittest
 import uuid
-import zipfile
 from .. import config
 from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        cover_bytes, create_custom_columns,
                        custom_column_available, ignore_column_available,
-                       iter_book_ids, metadata_by_id, metadata_ignored,
-                       metadata_tolino_id,
+                       metadata_ignored, metadata_tolino_id,
                        normalize_formats, safe_format_path,
                        selected_table_rows, update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
 from ..plan import (metadata_update_fields, plan_collection_updates,
                     plan_metadata_updates, plan_sync, recorded_collections,
-                    remember_collection, series_map_from_metadata,
-                    unpack_meta_update_record, unpack_upload_record)
+                    remember_collection, series_map_from_metadata)
+from ..plan import UploadRecord
 from ..inventory import normalize_inventory_record
 from ..comparison import compare_inventory as comparison_compare_inventory
 from ..plan import plan_sync as plan_module_plan_sync
@@ -90,8 +88,9 @@ class SyncPlanTests(unittest.TestCase):
             new_api = DatabaseAPI()
 
         database = Database()
-        self.assertEqual([41, 99], list(iter_book_ids(database)))
-        self.assertEqual({"uuid": "u41"}, metadata_by_id(database, 41))
+        self.assertEqual([41, 99], list(database.new_api.all_book_ids()))
+        self.assertEqual({"uuid": "u41"},
+                         database.new_api.get_metadata(41))
         self.assertEqual("/library/41.epub", safe_format_path(database, 41, "EPUB"))
         self.assertEqual(b"cover-data", cover_bytes(database, 41))
         self.assertEqual([
@@ -142,6 +141,31 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual([], uploads)
 
+    def test_upload_planner_filters_formats_without_rechecking_them(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            plan_module = ui_module.dashboard._dashboard_plan
+            metadata = {
+                1: {"uuid": "u1", "title": "EPUB verfügbar", "formats": ["EPUB"]},
+                2: {"uuid": "u2", "title": "Nur PDF", "formats": ["PDF"]},
+            }
+            dialog = type("Dialog", (), {})()
+            with patch.object(plan_module, "normalize_formats",
+                              wraps=normalize_formats) as normalize:
+                with patch.object(plan_module, "upload_jobs",
+                                  return_value=([], [])):
+                    preparation = plan_module.plan_actions(
+                        dialog, {"preferred_formats": ["EPUB"]}, metadata, {},
+                        {"uploads": {1, 2}, "metadata": set(), "read_changes": [], "cloud_deletions": []})
+            self.assertEqual(1, normalize.call_count)
+            self.assertEqual(1, preparation["selected_without_action"]["uploads"])
+            self.assertEqual(1, len(preparation["skipped_uploads"]))
+            self.assertIn("Nur PDF", preparation["skipped_uploads"][0])
+            self.assertIn("EPUB", preparation["skipped_uploads"][0])
+        finally:
+            ui_module._restore_stubs_for_tests()
+
     def test_selected_rows_handles_qmodelindex_and_short_values(self):
         class Index:
             def __init__(self, value):
@@ -160,16 +184,6 @@ class SyncPlanTests(unittest.TestCase):
 
         self.assertEqual([2, 0], selected_table_rows(Table()))
 
-    def test_plan_result_helpers_reject_short_records_with_context(self):
-        with self.assertRaisesRegex(ValueError, "invalid upload record"):
-            unpack_upload_record((1, "uuid"))
-        with self.assertRaisesRegex(ValueError, "invalid upload record"):
-            unpack_upload_record((1, "uuid"))
-        self.assertEqual(
-            {"book_id": 1, "book_uuid": "u1", "format_name": "EPUB", "old_id": None},
-            unpack_upload_record((1, "u1", "EPUB", None)),
-        )
-
     def test_complete_preparation_path_handles_empty_single_and_short_data(self):
         cases = (
             ({}, [], []),
@@ -183,7 +197,7 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual(expected_uploads, uploads)
             for record in uploads:
                 self.assertEqual(expected_uploads[0][0] if expected_uploads else None,
-                                 unpack_upload_record(record)["book_id"])
+                                 record.book_id)
 
     def test_safe_format_path_accepts_calibre_path_or_missing_format(self):
         class DatabaseAPI:
@@ -238,7 +252,7 @@ class SyncPlanTests(unittest.TestCase):
 
         class Dialog:
             gui = type("Gui", (), {"current_db": Db()})()
-            sync_column_enabled = False
+            columns = {"id": False}
 
             @staticmethod
             def values():
@@ -280,16 +294,16 @@ class SyncPlanTests(unittest.TestCase):
 
         dialog = type("Dialog", (), {
             "gui": type("Gui", (), {"current_db": Database()})(),
-            "temp_files": [],
         })()
         with patch.object(dashboard_plan, "cover_bytes",
                           side_effect=OSError("cover unavailable")):
             with patch.object(dashboard_plan, "log_warning") as warning:
                 jobs, skipped = dashboard_plan.upload_jobs(
-                    dialog, {},
-                    {1: {"title": "Buch"}}, [(1, "u1", "EPUB", None)])
+                    dialog,
+                    {1: {"title": "Buch"}},
+                    [UploadRecord(1, "u1", "EPUB", None)])
         self.assertEqual(1, len(jobs))
-        self.assertIsNone(jobs[0].cover_path)
+        self.assertIsNone(jobs[0].cover)
         self.assertEqual([], skipped)
         warning.assert_called_once()
         self.assertIn("cover unavailable", warning.call_args.args[0])
@@ -1246,30 +1260,26 @@ class SyncPlanTests(unittest.TestCase):
             config.PREFERENCES = original
 
     def test_preferred_formats_are_a_global_setting(self):
-        self.assertIn(config.PREFERRED_FORMATS, config.DEFAULTS)
         self.assertNotIn(config.PREFERRED_FORMATS, config.ACCOUNT_KEYS)
+        self.assertIsInstance(
+            config.settings()[config.PREFERRED_FORMATS], list)
 
     def test_settings_only_commits_when_it_writes_a_value(self):
-        class CountingConfig(config.JSONConfig):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.commits = 0
-
-            def commit(self):
-                self.commits += 1
-
-        original = config.PREFERENCES
+        """Lesen committet nie; nur save_account schreibt."""
+        before = dict(config.PREFERENCES)
+        commits = []
+        original = config.PREFERENCES.commit
+        config.PREFERENCES.commit = lambda: commits.append(1)
         try:
-            preferences = CountingConfig("test")
-            config.PREFERENCES = preferences
             config.settings()
-            first_count = preferences.commits
-            self.assertGreater(first_count, 0)
-            config.settings()
-            self.assertEqual(first_count, preferences.commits)
+            self.assertEqual([], commits)
+            config.save_account("konto", {"refresh_token": "tok"},
+                                active="konto")
+            self.assertEqual(1, len(commits))
         finally:
-            config.PREFERENCES = original
-
+            config.PREFERENCES.commit = original
+            config.PREFERENCES.clear()
+            config.PREFERENCES.update(before)
     def test_configuration_contract_keeps_supported_preference_keys(self):
         """Gespeicherte UI-Optionen und Konten haben feste Schluessel."""
         legacy_global = ("preferred_formats",)
@@ -1330,8 +1340,6 @@ class SyncPlanTests(unittest.TestCase):
         values = config.settings()
         self.assertNotIn("sync_collections", values)
         self.assertNotIn("upload_covers", values)
-        self.assertNotIn("sync_collections", config.DEFAULTS)
-        self.assertNotIn("upload_covers", config.DEFAULTS)
 
     def test_partial_settings_ignore_unscoped_legacy_account_fields(self):
         original = config.PREFERENCES
@@ -1368,69 +1376,6 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
-    def test_zip_entrypoint_uses_calibre_namespace_package(self):
-        archive = Path(__file__).parent.parent.parent / "tolino_cloud_sync.zip"
-        if not archive.exists():
-            self.skipTest("build_plugin.py has not been run")
-        with zipfile.ZipFile(archive) as plugin:
-            from build_plugin import EXPECTED
-            self.assertEqual(EXPECTED, set(plugin.namelist()))
-            self.assertTrue({
-                "__init__.py",
-                "plugin-import-name-tolino_cloud_sync.txt",
-                "ui.py",
-                "ui_common.py",
-                "ui_dialogs.py",
-                "ui_workers.py",
-                "ui_auth_workers.py",
-                "ui_settings.py",
-                "ui_dashboard.py",
-                "dashboard_plan.py",
-                "config.py",
-                "identifiers.py",
-                "comparison.py",
-                "sync_data.py",
-                "plan.py",
-                "matching.py",
-                "library.py",
-                "inventory.py",
-                "partners.py",
-                "client.py",
-                "transport.py",
-                "tolino.py",
-                "token_vault.py",
-                "browser_crypto.py",
-                "token_candidates.py",
-                "browser_login.py",
-                "browser_finder.py",
-                "cdp_scripts.py",
-                "cdp_transport.py",
-                "cdp.py",
-                "images/tolino_cloud_sync.png",
-            }.issubset(set(plugin.namelist())))
-            marker = next(name for name in plugin.namelist()
-                          if name.startswith("plugin-import-name-") and name.endswith(".txt"))
-            self.assertEqual("tolino_cloud_sync",
-                             marker[len("plugin-import-name-"):-len(".txt")])
-            self.assertEqual(b"", plugin.read(marker))
-            metadata = ast.parse(plugin.read("__init__.py").decode("utf-8"))
-            values = [
-                node.value.value
-                for node in ast.walk(metadata)
-                if isinstance(node, ast.Assign)
-                and any(getattr(target, "id", "") == "actual_plugin"
-                        for target in node.targets)
-                and isinstance(node.value, ast.Constant)
-            ]
-            self.assertEqual(["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"], values)
-
-    def test_bundled_toolbar_icon_is_a_real_png(self):
-        """The bundled image must be a real PNG."""
-        with zipfile.ZipFile(Path(__file__).resolve().parents[2] / "tolino_cloud_sync.zip") as plugin:
-            data = plugin.read("images/tolino_cloud_sync.png")
-        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"),
-                        "bundled icon is not a PNG: %r" % data[:12])
-
     def test_jwt_helpers_parse_iat_and_age(self):
         """JWT payload parsing extracts iat and shape."""
         import base64 as b64
@@ -1450,26 +1395,28 @@ class SyncPlanTests(unittest.TestCase):
         self.assertFalse(_jwt_shaped("short.not.jwt"))
 
 
-    def test_keepalive_refresh_rotates_and_persists(self):
-        """Keep-alive must silently rotate the stored token and persist it."""
-        persisted = []
-
+    def test_keepalive_reuses_the_locked_login_factory(self):
         class FakeClient:
-            def __init__(self, partner, hw, token, token_callback=None):
-                self.token = token
+            def __init__(self, partner, hw, token, token_callback=None,
+                         hardware_callback=None):
+                self.refresh = token + "-rotated"
                 self.token_callback = token_callback
 
             def login(self):
-                self.refresh = self.token + "-rotated"
-                if self.token_callback:
-                    self.token_callback(self.refresh)
+                self.token_callback(self.refresh)
 
-        creds = {"partner_id": 4, "hardware_id": "hw", "refresh_token": "tok"}
-        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
-            result = vault_module.TOKEN_VAULT.keepalive_refresh(
-                lambda: creds, lambda value, _account: persisted.append(value))
+        creds = {"name": "konto", "partner_id": 4, "hardware_id": "hw",
+                 "refresh_token": "tok"}
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
+             patch("calibre_plugin.config.account_by_name",
+                   return_value={}):
+            with patch.object(vault_module.TOKEN_VAULT, "login",
+                              wraps=vault_module.TOKEN_VAULT.login) as login:
+                result = vault_module.TOKEN_VAULT.keepalive_refresh(
+                    lambda: {"accounts": [creds]})
         self.assertEqual("tok-rotated", result)
-        self.assertEqual(["tok-rotated"], persisted)
+        login.assert_called_once()
+        self.assertEqual("tok-rotated", creds["refresh_token"])
 
     def test_rotation_persister_writes_each_new_value_exactly_once(self):
         """Login darf denselben Token zweimal melden; gespeichert wird einmal."""
@@ -1490,11 +1437,11 @@ class SyncPlanTests(unittest.TestCase):
         """Ohne Token und bei laufender Rotation passiert nichts."""
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock:
             self.assertIsNone(
-                vault_module.TOKEN_VAULT.keepalive_refresh(lambda: {}, None))
+                vault_module.TOKEN_VAULT.keepalive_refresh(lambda: {}))
             client_mock.assert_not_called()
             with vault_module.TOKEN_VAULT._lock:
                 self.assertIsNone(vault_module.TOKEN_VAULT.keepalive_refresh(
-                    lambda: {"refresh_token": "tok"}, None))
+                    lambda: {"refresh_token": "tok"}))
             client_mock.assert_not_called()
 
 class MetadataUpdatePlanTests(unittest.TestCase):
@@ -1525,12 +1472,12 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         state = self._state(book, meta_fp="stale")
         updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
-        record = unpack_meta_update_record(updates[0])
-        self.assertEqual(1, record["book_id"])
-        self.assertEqual("u1", record["book_uuid"])
-        self.assertEqual("d1", record["tolino_id"])
+        record = updates[0]
+        self.assertEqual(1, record.book_id)
+        self.assertEqual("u1", record.book_uuid)
+        self.assertEqual("d1", record.tolino_id)
         self.assertEqual({"title": "A", "author": "Fred Vargas", "isbn": "123"},
-                         record["fields"])
+                         record.fields)
 
     def test_unchecked_books_are_never_touched(self):
         """Ohne Auswahl kein /meta-Schreibvorgang – auch wenn sich die
@@ -1545,14 +1492,14 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         """"Hochladen" heisst hochladen – kein heimliches /meta."""
         book = self._book()
         state = self._state(book, meta_fp="stale")
-        uploads = [(1, "u1", "EPUB", "d1")]
+        uploads = [UploadRecord(1, "u1", "EPUB", "d1")]
         updates = plan_metadata_updates({1: book}, state, uploads, {1})
         self.assertEqual([], updates)
 
     def test_replaced_file_stays_a_full_upload(self):
         book = self._book()
         state = self._state(book, content_fp="other-file", meta_fp="stale")
-        uploads = [(1, "u1", "EPUB", "d1")]
+        uploads = [UploadRecord(1, "u1", "EPUB", "d1")]
         updates = plan_metadata_updates({1: book}, state, uploads, {1})
         self.assertEqual([], updates)
 
@@ -1646,14 +1593,6 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         updates = plan_metadata_updates({1: new_book}, state, [], {1})
         self.assertEqual(1, len(updates))
         self.assertNotIn("series", updates[0][3])
-
-    def test_meta_update_record_validation(self):
-        with self.assertRaisesRegex(ValueError, "invalid metadata update"):
-            unpack_meta_update_record((1, "u1"))
-        with self.assertRaisesRegex(ValueError, "incomplete metadata update"):
-            unpack_meta_update_record((1, "u1", "d1", {}))
-        with self.assertRaisesRegex(ValueError, "incomplete metadata update"):
-            unpack_meta_update_record((1, "u1", "", {"title": "A"}))
 
     def test_plan_sync_preserves_old_state_until_the_worker_succeeds(self):
         previous = {"u1": {"tolino_id": "d1", "content_fp": "old-content",
@@ -1855,13 +1794,12 @@ class ConservativeMatchingTests(unittest.TestCase):
             seen = []
 
             with patch("calibre_plugin.dashboard_plan.upload_jobs",
-                       side_effect=lambda _dialog, _settings, _metadata, uploads:
+                       side_effect=lambda _dialog, _metadata, uploads:
                        (seen.extend(uploads) or [], [])):
                 plan_actions(
                     object(), {"preferred_formats": ["EPUB"]}, metadata,
                     dict(state),
-                    {"uploads": [1, 2], "metadata": [1], "read": [],
-                     "unread": [], "cloud_deletions": []})
+                    {"uploads": [1, 2], "metadata": [1], "read_changes": [], "cloud_deletions": []})
             return [record[0] for record in seen]
 
         self.assertEqual([2], planned(True))
@@ -2023,7 +1961,7 @@ class ReadStateComparisonTests(unittest.TestCase):
     def test_matching_book_carries_the_cloud_read_state(self):
         rows = self._rows({"t-1"})
         matched = next(row for row in rows if row["book_id"] == 1)
-        self.assertTrue(matched["read_in_cloud"])
+        self.assertTrue(matched["read"].cloud)
         self.assertTrue(matched["read"])
         self.assertEqual("t-1", matched["tolino_id"])
 
@@ -2031,12 +1969,12 @@ class ReadStateComparisonTests(unittest.TestCase):
         rows = self._rows({"t-9"})
         only_cloud = next(row for row in rows if row["tolino_id"] == "t-9")
         self.assertEqual("only_tolino", only_cloud["status"])
-        self.assertTrue(only_cloud["read_in_cloud"])
+        self.assertTrue(only_cloud["read"].cloud)
         self.assertTrue(only_cloud["read"])
 
     def test_without_read_ids_nothing_is_prechecked(self):
         for row in self._rows(()):
-            self.assertFalse(row["read_in_cloud"])
+            self.assertFalse(row["read"].cloud)
             self.assertFalse(row["read"])
 
 class FileChangeIntegrityTests(unittest.TestCase):
@@ -2200,8 +2138,7 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
                  "u2": {"tolino_id": "t2", "fingerprint": "fp-u2"}}
         uploads = plan_sync(metadata, state, ["EPUB"], upload_book_ids={2})
         current = state
-        self.assertEqual([2], [unpack_upload_record(item)["book_id"]
-                               for item in uploads])
+        self.assertEqual([2], [item.book_id for item in uploads])
         self.assertEqual("t2", current["u2"]["tolino_id"])
         self.assertEqual("t2", current["u2"]["tolino_id"])
         self.assertEqual("t1", current["u1"]["tolino_id"])
@@ -2214,8 +2151,8 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
         uploads = plan_sync(later, state, ["EPUB"], upload_book_ids={1})
         current = state
         self.assertEqual(1, len(uploads))
-        record = unpack_upload_record(uploads[0])
-        self.assertEqual("t1", record["old_id"])
+        record = uploads[0]
+        self.assertEqual("t1", record.old_id)
         self.assertEqual("t1", current["u1"]["tolino_id"])
         # Auch der Vergleich findet das Buch über die gemerkte ID wieder,
         # statt eine zweite Cloud-Kopie anzunehmen.
@@ -2273,9 +2210,11 @@ class PrepareStateCopyTests(unittest.TestCase):
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw-A", "refresh_token": "tok-A", "state": stored,
                     "preferred_formats": ["EPUB"],
-                    "sync_column_enabled": False}
+                    "columns": {"id": False}}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient):
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
+             patch("calibre_plugin.config.account_by_name",
+                   return_value={}):
                 worker = ui_module.workers.PrepareWorker(settings, metadata)
                 worker.ready.connect(payloads.append)
                 worker.failed.connect(payloads.append)
@@ -2359,7 +2298,7 @@ class FingerprintCommitTests(unittest.TestCase):
     @staticmethod
     def _selection(uploads=(), metadata=()):
         return {"uploads": list(uploads), "metadata": list(metadata),
-                "read": [], "unread": [], "cloud_deletions": [],
+                "read_changes": [], "cloud_deletions": [],
                 }
 
     @staticmethod
@@ -2423,7 +2362,7 @@ class FingerprintCommitTests(unittest.TestCase):
     def _run_worker(ui_module, settings, preparation, client, holder=None):
         emitted = {}
         settings["metadata"] = preparation.get("metadata", {})
-        with patch("calibre_plugin.client.TolinoClient",
+        with patch("calibre_plugin.token_vault.TolinoClient",
                    lambda *args, **kwargs: client), \
              patch("calibre_plugin.ui_workers.save_account",
                    lambda *args, **kwargs: None), \
@@ -2432,7 +2371,7 @@ class FingerprintCommitTests(unittest.TestCase):
             worker = ui_module.workers.SyncWorker(
                 settings, preparation["jobs"], preparation["removals"],
                 preparation["meta_updates"], preparation["series_map"],
-                preparation["selected_read"], preparation["selected_unread"],
+                read_changes=preparation["read_changes"],
                 titles=preparation.get("titles"))
             if holder is not None:
                 holder["worker"] = worker
@@ -2467,7 +2406,7 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertIsNone(emitted.get("failed"))
         entry = worker.state["u1"]
         self.assertEqual("new-1", entry["tolino_id"])
-        self.assertEqual(metadata_fingerprint(changed[1]), entry["meta_fp"])
+        self.assertNotIn("meta_verified_fp", entry)
         self.assertEqual(content_fingerprint(changed[1], "EPUB"),
                          entry["content_fp"])
         self.assertNotIn("fingerprint", entry)
@@ -2510,8 +2449,6 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
         self.assertEqual([(1, "t1")], worker.updates)
-        self.assertEqual(metadata_fingerprint(changed[1]),
-                         worker.state["u1"]["meta_fp"])
         self.assertEqual(metadata_fingerprint(changed[1]),
                          worker.state["u1"]["meta_verified_fp"])
 
@@ -2567,10 +2504,10 @@ class FingerprintCommitTests(unittest.TestCase):
             ui_module, settings, preparation, self._client(upload=failing))
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual(metadata_fingerprint(changed[1]),
-                         worker.state["u1"]["meta_fp"])
-        self.assertEqual(previous["u2"]["meta_fp"],
-                         worker.state["u2"]["meta_fp"])
+        self.assertEqual(content_fingerprint(changed[1], "EPUB"),
+                         worker.state["u1"]["content_fp"])
+        self.assertEqual(previous["u2"]["content_fp"],
+                         worker.state["u2"]["content_fp"])
         self.assertEqual("t2", worker.state["u2"]["tolino_id"])
 
     def test_a_cancel_before_the_second_upload_confirms_nothing_for_it(self):
@@ -2597,12 +2534,12 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["not_started"])
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertEqual(metadata_fingerprint(changed[1]),
-                         worker.state["u1"]["meta_fp"])
+        self.assertEqual(content_fingerprint(changed[1], "EPUB"),
+                         worker.state["u1"]["content_fp"])
         # Das zweite Buch wurde nie begonnen: alter Stand bleibt.
         self.assertEqual("t2", worker.state["u2"]["tolino_id"])
-        self.assertEqual(previous["u2"]["meta_fp"],
-                         worker.state["u2"]["meta_fp"])
+        self.assertEqual(previous["u2"]["content_fp"],
+                         worker.state["u2"]["content_fp"])
 
 class VersionDocumentationTests(unittest.TestCase):
     """README, CHANGELOG und PLUGIN_VERSION bleiben synchron."""

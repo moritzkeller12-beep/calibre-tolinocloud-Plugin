@@ -8,7 +8,8 @@ import re
 
 try:
     from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox, QMenu,
+                         QFormLayout, QGroupBox, QHeaderView, QLabel,
+                         QLineEdit, QMessageBox, QMenu,
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QObject, QInputDialog,
@@ -16,8 +17,8 @@ try:
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
     from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QLabel, QLineEdit, QMessageBox,
-                         QMenu,
+                         QFormLayout, QGroupBox, QHeaderView, QLabel,
+                         QLineEdit, QMessageBox, QMenu,
                          QProgressBar, QPushButton, QThread,
                          QVBoxLayout, QHBoxLayout, QTableWidget,
                          QTableWidgetItem, QObject, QInputDialog,
@@ -33,19 +34,46 @@ from .library import safe_format_path
 __all__ = [
     "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
     "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog",
-    "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QMenu",
-    "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
+    "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView",
+    "QMenu", "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
     "QThread", "QVBoxLayout", "Qt", "SyncJob",
-    "_ORPHANED_THREADS", "_apply_busy", "_dialog_busy",
+    "_THREADS", "_apply_busy", "_dialog_busy",
     "_display_value", "_format_signatures", "_login_failure_guidance",
+    "button", "dialog_code", "header_mode", "start_worker",
     "_metadata_value", "_stop_thread", "plural",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
-    "_discard_item", "_thread_running",
+    "_keep_thread_alive", "_thread_running",
     "pyqtSignal", "safe_format_path",
     "sync_result_detail",
     "sync_result_text",
 ]
+
+
+def _qt_value(owner, name, scope):
+    """Qt-Konstante in alter und skopierter Schreibweise.
+
+    Qt6 (Calibre 9) kennt nur ``QHeaderView.ResizeMode.Stretch``; die alte
+    Form ``QHeaderView.Stretch`` fehlt dort und wirft AttributeError. Die
+    Test-Stubs kennen wiederum keine Enums. Der Helfer nimmt, was da ist.
+    """
+    holder = getattr(owner, scope, None)
+    return getattr(holder, name) if holder is not None else getattr(owner, name)
+
+
+def header_mode(name):
+    """Resize-Modus einer Tabellenspalte, unabhängig von der Qt-Version."""
+    return _qt_value(QHeaderView, name, "ResizeMode")
+
+
+def button(name):
+    """Standardknopf eines Meldungsfensters, unabhängig von der Qt-Version."""
+    return _qt_value(QMessageBox, name, "StandardButton")
+
+
+def dialog_code(name):
+    """Ergebniscode eines Dialogs, unabhängig von der Qt-Version."""
+    return _qt_value(QDialog, name, "DialogCode")
 
 
 def _metadata_value(item, name, default=""):
@@ -92,16 +120,17 @@ class SyncJob:
     # Titel, nicht die Kennung. Der Standardwert haelt aeltere Aufrufer
     # (und Tests) unveraendert am Laufen.
     __slots__ = ("book_id", "book_uuid", "format_name", "old_id", "path",
-                 "cover_path", "title")
+                 "cover", "title")
 
     def __init__(self, book_id, book_uuid, format_name, old_id, path,
-                 cover_path, title=""):
+                 cover, title=""):
         self.book_id = book_id
         self.book_uuid = book_uuid
         self.format_name = format_name
         self.old_id = old_id
         self.path = path
-        self.cover_path = cover_path
+        # Cover-Bytes statt einer Temp-Datei: kein Aufraeumen noetig.
+        self.cover = cover
         self.title = title
 
     def label(self):
@@ -119,13 +148,27 @@ OP_SKIPPED = "skipped"
 OP_FAILED = "failed"
 OP_NOT_STARTED = "not_started"
 
-# Threads, die beim Schliessen nicht innerhalb des Zeitlimits fertig wurden:
-# Die Referenz haelt sie am Leben, statt sie (und Calibre) abzustuerzen.
-_ORPHANED_THREADS = []
+# Laufende oder nach einem Timeout noch nicht beendete Threads bleiben bis
+# zum finished-Signal referenziert.
+_THREADS = []
 
-# Laufende Einzelaufrufe (CallWorker). Wie bei der Anmeldung haelt diese
-# Referenz den Thread am Leben, wenn das Fenster vorher schliesst.
-_CALL_THREADS = []
+
+class CallWorker(QObject):
+    """Run one value-only callback outside the GUI thread."""
+    done = pyqtSignal(object)
+    failed = pyqtSignal(object)
+
+    def __init__(self, call):
+        QObject.__init__(self)
+        self.call = call
+
+    def run(self):
+        try:
+            result = self.call()
+        except Exception as exc:
+            self.failed.emit(exc)
+            return
+        self.done.emit(result)
 
 
 def start_call(dialog, call, on_done, on_failed):
@@ -136,8 +179,6 @@ def start_call(dialog, call, on_done, on_failed):
     stellt sie in den GUI-Thread. Ohne Elternteil, damit ein geschlossenes
     Fenster keinen laufenden Thread zerstoert.
     """
-    from .ui_auth_workers import CallWorker
-
     thread = QThread()
     worker = CallWorker(call)
     worker.moveToThread(thread)
@@ -147,10 +188,28 @@ def start_call(dialog, call, on_done, on_failed):
     worker.done.connect(on_done)
     worker.failed.connect(on_failed)
     thread.finished.connect(thread.deleteLater)
-    thread.finished.connect(lambda: _discard_item(_CALL_THREADS, thread))
-    _CALL_THREADS.append(thread)
+    _keep_thread_alive(thread)
     dialog._call_thread = thread
-    dialog._call_worker = worker
+    thread.start()
+    return thread
+
+
+def start_worker(dialog, worker, thread, thread_name, worker_name, stop_on=()):
+    """Run ``worker.run`` in ``thread`` and remember both on the dialog.
+
+    ``stop_on`` sind die Signale, nach denen der Worker fertig ist; sie
+    beenden die Thread-Schleife. Ohne sie beendet der Aufrufer den Thread
+    selbst (``_stop_thread``). Der Dialog haelt die Referenzen, damit ein
+    geschlossenes Fenster den laufenden Thread nicht zerstoert.
+    """
+    worker.moveToThread(thread)
+    thread.started.connect(worker.run)
+    for signal in stop_on:
+        signal.connect(thread.quit)
+    thread.finished.connect(thread.deleteLater)
+    _keep_thread_alive(thread)
+    setattr(dialog, thread_name, thread)
+    setattr(dialog, worker_name, worker)
     thread.start()
     return thread
 
@@ -161,6 +220,15 @@ def _discard_item(collection, item):
         collection.remove(item)
     except ValueError:
         pass
+
+
+def _keep_thread_alive(thread):
+    """Retain a thread until Qt reports that it has finished."""
+    if thread not in _THREADS:
+        _THREADS.append(thread)
+        finished = getattr(thread, "finished", None)
+        if finished is not None:
+            finished.connect(lambda: _discard_item(_THREADS, thread))
 
 
 def _stop_thread(thread, timeout_ms=3000):
@@ -180,7 +248,12 @@ def _stop_thread(thread, timeout_ms=3000):
             thread.setParent(None)
         except Exception:
             pass
-        _ORPHANED_THREADS.append(thread)
+        _keep_thread_alive(thread)
+        try:
+            if thread.isFinished():
+                _discard_item(_THREADS, thread)
+        except Exception:
+            pass
     return finished
 
 
@@ -197,11 +270,8 @@ def _worker_outcome(dialog):
 
 
 def _thread_running(thread):
-    """Läuft dieser Thread noch? (None = nein, Stub ohne isRunning = ja)"""
-    try:
-        return thread is not None and thread.isRunning()
-    except Exception:
-        return thread is not None
+    """Läuft dieser Thread noch?"""
+    return thread is not None and thread.isRunning()
 
 
 def _dialog_busy(dialog):
@@ -214,37 +284,25 @@ def _dialog_busy(dialog):
 
 
 def _set_enabled(owner, names, enabled):
-    """Widgets sperren/freigeben -- tolerant gegen fehlende Qt-Stubs."""
+    """Widgets sperren/freigeben -- nur vorhandene Widgets."""
     for name in names:
         setter = getattr(getattr(owner, name, None), "setEnabled", None)
         if setter is None:
             continue
-        try:
-            setter(enabled)
-        except Exception:
-            pass  # Qt-Stub ohne Aktivierung
+        setter(enabled)
 
 
 def _apply_busy(dialog, busy):
-    """Disable account/partner/sync controls while an operation runs."""
+    """Disable account/partner/sync controls while an operation runs.
+
+    Der Statustext kommt von den Startern -- sie wissen, was läuft; hier
+    würde nur geraten.
+    """
     _set_enabled(dialog, ("account_quick", "account_select", "account_new",
                           "account_remove", "partner", "login_button",
                           "settings_button", "hardware", "refresh",
                           "formats"),
                  not busy)
-    if busy:
-        status = getattr(dialog, "status", None)
-        if status is not None:
-            try:
-                if getattr(dialog, "thread", None) is not None:
-                    text = "Synchronisierung läuft …"
-                elif getattr(dialog, "prepare_thread", None) is not None:
-                    text = "Vergleich läuft …"
-                else:
-                    text = "Anmeldung wird geprüft …"
-                status.setText(text)
-            except Exception:
-                pass
 
 
 # Titel + naechster Schritt je Anmelde-Fehlercode. Kurz, einzeilig und
@@ -337,19 +395,11 @@ def sync_result_text(outcome, prefix="Fertig"):
 def _operation_line(item):
     """Eine Zeile je gescheitertem Schritt -- Name und kurzer Grund."""
     item = item if isinstance(item, dict) else {}
-    error = item.get("error")
-    if error and hasattr(error, "short"):
-        detail = str(error.short or error)
-        code = str(getattr(error, "code", "") or "")
-        if code:
-            detail += " (Code %s)" % code
-    elif error:
-        code_match = re.search(r"\(Code ([A-Z][0-9]{2})\)", str(error))
-        detail = str(error)
-        if code_match and code_match.group(1) not in detail[-16:]:
-            detail += " (Code %s)" % code_match.group(1)
-    else:
-        detail = str(error or "")
+    # `error` ist immer der bereits bereinigte Text aus sanitize_error().
+    detail = str(item.get("error") or "")
+    code_match = re.search(r"\(Code ([A-Z][0-9]{2})\)", detail)
+    if code_match and code_match.group(1) not in detail[-16:]:
+        detail += " (Code %s)" % code_match.group(1)
     return "- %s%s" % (item.get("label") or "Schritt",
                        (": " + detail) if detail else "")
 

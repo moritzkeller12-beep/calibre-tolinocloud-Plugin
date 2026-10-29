@@ -25,9 +25,11 @@ def flatpak_permission_hint():
         " com.calibre_ebook.calibre")
 
 
-def missing_browser_error():
-    """Return user-facing details when no Chromium browser is available."""
-    status = _host_probe_status
+def missing_browser_error(status=""):
+    """Return user-facing details when no Chromium browser is available.
+
+    ``status`` ist das Ergebnis der Host-Sonde aus ``pick_chromium()``.
+    """
     message = (
         "Kein Chromium-Browser gefunden. Bitte Chrome, Chromium, Brave oder "
         "Edge installieren – oder den Zugangsschlüssel in den "
@@ -37,11 +39,11 @@ def missing_browser_error():
             "Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt. "
             "Bitte «flatpak update» ausführen und Calibre danach "
             "vollständig neu starten.")
-        return message, "B06", status
+        return message, "B06"
     if in_flatpak_sandbox() and status not in ("empty", "unavailable"):
         message += "\n\n" + flatpak_permission_hint()
-        return message, "B08", status
-    return message, "B05", status
+        return message, "B08"
+    return message, "B05"
 
 
 # PATH-independent locations for desktop-launched Calibre.
@@ -78,9 +80,6 @@ _BROWSER_COMMANDS = (
     ("opera-stable", "Opera", False),
 )
 
-# Host-probe state: not run/found, unavailable, denied, empty, or ok.
-_host_probe_status = ""
-
 # Keep the native Flatpak launcher and host probe mappings in one place.
 _FLATPAK_BROWSER_APPS = (
     ("org.chromium.Chromium", "chrome", "Chromium (Flatpak)",
@@ -104,12 +103,10 @@ def _browser_label_for(path):
 
 
 def _sandbox_host_launchers():
-    """Discover host Chromium launchers through flatpak-spawn."""
-    global _host_probe_status
+    """Discover host Chromium launchers; returns ``(launchers, status)``."""
     spawn = shutil.which("flatpak-spawn")
     if not spawn:
-        _host_probe_status = "unavailable"
-        return []
+        return [], "unavailable"
     script = (
         "for b in HOST_COMMAND_LIST; do "
         "p=$(command -v \"$b\") && { echo \"NATIVE $p\"; break; }; done; "
@@ -129,11 +126,10 @@ def _sandbox_host_launchers():
                               stderr=subprocess.DEVNULL,
                               universal_newlines=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
-        return []
+        return [], ""
     output = proc.stdout or ""
     if proc.returncode != 0 and not output.strip():
-        _host_probe_status = "denied"
-        return []
+        return [], "denied"
     commands = {app_id: (command, host_label)
                 for app_id, command, _label, host_label
                 in _FLATPAK_BROWSER_APPS}
@@ -150,16 +146,14 @@ def _sandbox_host_launchers():
             command, label = commands[value]
             launchers.append(([spawn, "--host", "flatpak", "run",
                                "--command=%s" % command, value], label))
-    _host_probe_status = "ok" if launchers else "empty"
-    return launchers
+    return launchers, ("ok" if launchers else "empty")
 
 
-def chromium_candidates(home=None):
-    """Installed Chromium-family browsers, most common first.
+def _collect_candidates(home=None):
+    """(Kandidaten, Status der Host-Sonde) -- Status ist "" ohne Sonde.
 
-    Returns ``(argv_prefix, label)`` pairs for native, Flatpak, and Snap
-    installs. User-directory checks are used for Flatpak and Snap apps;
-    host probing runs only from inside a Flatpak sandbox.
+    User-directory checks are used for Flatpak and Snap apps; host probing
+    runs only from inside a Flatpak sandbox.
     """
     home = home or os.path.expanduser("~")
     flat = os.path.join(home, ".var", "app")
@@ -184,9 +178,11 @@ def chromium_candidates(home=None):
     snap_bin = shutil.which("snap")
     if snap_bin and os.path.isdir(os.path.join(snap, "chromium")):
         found.append(([snap_bin, "run", "chromium"], "Chromium (Snap)"))
+    status = ""
     if in_flatpak_sandbox():
-        found.extend(_sandbox_host_launchers())
-    return found
+        launchers, status = _sandbox_host_launchers()
+        found.extend(launchers)
+    return found, status
 
 
 _PLATFORM_BROWSER_INSTALLS = {
@@ -232,12 +228,18 @@ def _platform_browser_paths(platform=None):
     return found
 
 
+def chromium_candidates(home=None):
+    """Installed Chromium-family browsers, most common first."""
+    return _collect_candidates(home)[0]
+
+
 def chromium_options():
     """All candidates, including standard Windows/macOS install paths."""
-    return chromium_candidates() + _platform_browser_paths()
+    return _collect_candidates()[0] + _platform_browser_paths()
 
 
 def pick_chromium():
-    """Return the best available Chromium-family candidate, or None."""
-    found = chromium_options()
-    return found[0] if found else None
+    """(bester Kandidat oder None, Status der Host-Sonde)."""
+    found, status = _collect_candidates()
+    options = found + _platform_browser_paths()
+    return (options[0] if options else None), status

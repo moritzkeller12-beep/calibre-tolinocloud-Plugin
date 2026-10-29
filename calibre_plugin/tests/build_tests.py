@@ -1,4 +1,5 @@
 """Tests for building a Calibre-installable plugin archive."""
+import ast
 import tempfile
 import unittest
 import zipfile
@@ -30,6 +31,21 @@ class PluginArchiveTests(unittest.TestCase):
                     self.assertEqual((SOURCE / name).read_bytes(), archive.read(name))
                 self.assertEqual((ROOT / "__init__.py").read_bytes(),
                                  archive.read("__init__.py"))
+                self.assertTrue(archive.read(ICON).startswith(
+                    b"\x89PNG\r\n\x1a\n"),
+                    "built toolbar icon is not a PNG")
+                metadata = ast.parse(archive.read("__init__.py").decode("utf-8"))
+                entrypoints = [
+                    node.value.value
+                    for node in ast.walk(metadata)
+                    if isinstance(node, ast.Assign)
+                    and any(getattr(target, "id", "") == "actual_plugin"
+                            for target in node.targets)
+                    and isinstance(node.value, ast.Constant)
+                ]
+                self.assertEqual(
+                    ["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"],
+                    entrypoints)
 
 
 if __name__ == "__main__":

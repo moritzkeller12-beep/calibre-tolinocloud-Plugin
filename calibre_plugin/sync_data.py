@@ -36,9 +36,9 @@ def tag_id_from_patch(item):
     return parts[1] if parts else ""
 
 
-def tag_pairs(patches, category, name=None):
-    """Reduce add/remove patch history to active (book, tag-name) pairs."""
-    pairs = set()
+def active_tags(patches, category, name=None):
+    """Reduce add/remove history to ``{(book_id, tag_name): active patch}``."""
+    active = {}
     for item in patches:
         if not isinstance(item, dict):
             continue
@@ -50,35 +50,21 @@ def tag_pairs(patches, category, name=None):
         parts = tag_path_parts(item.get("path"))
         if parts is None:
             continue
-        pair = (parts[0], str(value.get("name") or ""))
+        key = (parts[0], str(value.get("name") or ""))
         if str(item.get("op") or "add") == "remove":
-            pairs.discard(pair)
+            active.pop(key, None)
         else:
-            pairs.add(pair)
-    return pairs
-
-
-def tag_state(patches, book_id, name, category):
-    """Return the last active patch matching one book/tag/category."""
-    wanted_book = str(book_id)
-    active = None
-    for item in patches:
-        if not isinstance(item, dict):
-            continue
-        value = item.get("value")
-        if not isinstance(value, dict):
-            continue
-        if value.get("category") != category or value.get("name") != name:
-            continue
-        parts = tag_path_parts(item.get("path"))
-        if parts is None or parts[0] != wanted_book:
-            continue
-        active = None if str(item.get("op") or "add") == "remove" else item
+            active[key] = item
     return active
 
 
+def tag_state(patches, book_id, name, category):
+    """Return the active patch for one book/tag, or None."""
+    return active_tags(patches, category, name).get((str(book_id), name))
+
+
 def read_ids(patches):
-    return {book_id for book_id, _name in tag_pairs(
+    return {book_id for book_id, _name in active_tags(
         patches, "system", READ_TAG)}
 
 
@@ -116,4 +102,4 @@ def mark_read_many(client, book_ids, finished, error_type):
 
 
 def collection_pairs(patches):
-    return tag_pairs(patches, "collection")
+    return set(active_tags(patches, "collection"))

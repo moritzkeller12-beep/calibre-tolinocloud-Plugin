@@ -35,7 +35,8 @@ def _start_port():
 _LAUNCHED = {"process": None, "port": None, "profile": ""}
 
 
-def _launched_record(port=None, require_endpoint=True):
+def _verified_owner(port=None, require_endpoint=True):
+    """This process's browser record, by default only while it answers."""
     process = _LAUNCHED["process"]
     actual_port = _LAUNCHED["port"]
     profile = _LAUNCHED["profile"]
@@ -50,38 +51,30 @@ def _launched_record(port=None, require_endpoint=True):
     return record
 
 
-def _verified_owner(port=None):
-    """Return this process's browser only while its chosen port answers."""
-    return _launched_record(port)
-
-
 def _new_profile_dir():
     return tempfile.mkdtemp(prefix="tolino-grab-")
 
 
 
-def devtools_port_alive():
-    """Whether the browser launched by this plugin still answers."""
-    return _verified_owner() is not None
+def _ws_parts(ws_url):
+    """(Port, Pfad) einer vom Plugin selbst gebauten DevTools-Adresse.
 
-
-def _devtools_ws_address(ws_url, expected_port):
-    """Use the launched loopback port; never connect to a URL-supplied host."""
+    Der Host wird nie aus der Adresse übernommen: verbunden wird immer mit
+    127.0.0.1 und dem Port des eigenen Fensters.
+    """
     try:
         parsed = urlsplit(str(ws_url or ""))
         port = parsed.port
-        if (parsed.scheme != "ws"
-                or parsed.hostname not in ("127.0.0.1", "localhost", "::1")
-                or expected_port is None or port != int(expected_port)
+        if (parsed.scheme != "ws" or not port
                 or not parsed.path.startswith("/devtools/")):
-            raise ValueError("DevTools URL does not match the launched browser")
-        return "127.0.0.1", port, parsed.path
+            raise ValueError("invalid DevTools URL")
+        return int(port), parsed.path
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid DevTools websocket URL") from exc
 
 
 def _evaluate_raw_in_target(ws_url, expression, timeout=10,
-                            await_promise=False, expected_port=None):
+                            await_promise=False):
     """Like _evaluate_in_target but returns CDP's full result dict.
 
     Returns ``{"ok": bool, "value": <decoded JSON value or raw string>,
@@ -89,8 +82,8 @@ def _evaluate_raw_in_target(ws_url, expression, timeout=10,
     an in-page fetch whose failure text matters) use this variant.
     """
     try:
-        host, port, ws_path = _devtools_ws_address(ws_url, expected_port)
-        ws = _Ws.connect(host, port, ws_path, timeout=timeout)
+        port, ws_path = _ws_parts(ws_url)
+        ws = _Ws.connect("127.0.0.1", port, ws_path, timeout=timeout)
     except (OSError, ValueError):
         return {"ok": False, "value": None, "exception": "connect failed"}
     try:
@@ -128,11 +121,9 @@ def _evaluate_raw_in_target(ws_url, expression, timeout=10,
         ws.close()
 
 
-def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False,
-                        expected_port=None):
+def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
     """Run a JS expression in a DevTools page target, return its JSON value."""
-    raw = _evaluate_raw_in_target(ws_url, expression, timeout, await_promise,
-                                  expected_port)
+    raw = _evaluate_raw_in_target(ws_url, expression, timeout, await_promise)
     if not raw["ok"]:
         return None
     try:
@@ -152,11 +143,12 @@ def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False,
 
 # ---------------------------------------------------------------- Fenster-Flow
 
-def launch_reader_window(partner_id):
+def launch_reader_window():
     """Start Chromium with an isolated temporary profile and random port."""
-    binary, label = pick_chromium() or (None, None)
+    candidate, status = pick_chromium()
+    binary, label = candidate or (None, None)
     if not binary:
-        message, code, status = browser_finder.missing_browser_error()
+        message, code = browser_finder.missing_browser_error(status)
         raise TolinoAuthError(message, code=code,
                               detail="Host-Sonde: %s" % status)
     previous = _verified_owner()
@@ -180,13 +172,10 @@ def launch_reader_window(partner_id):
         "--window-size=1280,900", "--new-window", WEBREADER_URL,
     ]
     creationflags = 0x00000008 if os.name == "nt" else 0
-    attempts = [(list(binary), label)]
+    candidates = [(list(binary), label)]
     last_error = None
     process = None
-    index = 0
-    while index < len(attempts):
-        argv, candidate_label = attempts[index]
-        index += 1
+    for index, (argv, candidate_label) in enumerate(candidates):
         try:
             process = subprocess.Popen(
                 list(argv) + flags, creationflags=creationflags,
@@ -194,17 +183,22 @@ def launch_reader_window(partner_id):
             break
         except OSError as exc:
             last_error = (candidate_label, exc)
-            if index == 1:
-                attempts.extend(
-                    candidate for candidate in browser_finder.chromium_options()
-                    if candidate[0] != binary)
-    else:
+            if index == 0:
+                # Weitere Kandidaten erst nach einem Fehlschlag suchen.
+                alternatives = browser_finder.chromium_options()
+                candidates.extend(
+                    option for option in alternatives if option[0] != binary)
+    if process is None:
         shutil.rmtree(profile, ignore_errors=True)
         raise TolinoAuthError(
             "Chromium konnte nicht gestartet werden.", code="B07",
             detail="%s: %s" % last_error)
 
     _LAUNCHED.update({"process": process, "port": port, "profile": profile})
+    # Der Port gehört ins Log: nur so lässt sich die CDP-Verbindung von
+    # aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
+    from .tolino import log_info
+    log_info("Tolino-Anmeldefenster: Chromium auf 127.0.0.1:%d." % port)
     deadline = time.time() + 20
     while time.time() < deadline:
         if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
@@ -230,30 +224,12 @@ def _stop_launched_process(process, timeout=2):
 
 def _abandon_failed_launch(process, record):
     """Close the launched browser before removing its temporary profile."""
-    port = _LAUNCHED["port"]
-    if port:
-        live = {"process": process, "port": int(port),
-                "profile": record["profile"]}
-        target = _browser_ws_for_record(live)
-        if target:
-            _send_browser_close(*target, expected_port=port)
-    if not _stop_launched_process(process):
-        return False
-    if port and _endpoint_answers({"port": port}, 0.2):
-        deadline = time.time() + 2
-        while _endpoint_answers({"port": port}, 0.2) and time.time() < deadline:
-            time.sleep(0.1)
-        if _endpoint_answers({"port": port}, 0.2):
-            return False
-    shutil.rmtree(record["profile"], ignore_errors=True)
-    if os.path.exists(record["profile"]):
-        return False
-    if _LAUNCHED["process"] is process:
-        _LAUNCHED.update({"process": None, "port": None, "profile": ""})
-    return True
+    live = {"process": process, "port": int(_LAUNCHED["port"] or 0),
+            "profile": record["profile"]}
+    return _shutdown(live)
 
 
-def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
+def read_idb_tokens(ws_url, db_names, timeout=10):
     """Walk every IndexedDB database's object stores for token values.
 
     Returns the merged ``{"refresh": [...], "hardware": [...]}`` dict;
@@ -265,8 +241,7 @@ def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
         if not name or not str(name).strip():
             continue
         result = _evaluate_in_target(ws_url, idb_expression(name), timeout,
-                                     await_promise=True,
-                                     expected_port=expected_port)
+                                     await_promise=True)
         if not result:
             continue
         for bucket in ("refresh", "hardware"):
@@ -276,18 +251,16 @@ def read_idb_tokens(ws_url, db_names, timeout=10, expected_port=None):
     return merged
 
 
-def _grab_page_tokens(ws_url, timeout=10, expected_port=None):
+def _grab_page_tokens(ws_url, timeout=10):
     """ONE full storage grab: localStorage, sessionStorage, IndexedDB."""
     grabbed = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
-                                  await_promise=True,
-                                  expected_port=expected_port) or {}
+                                  await_promise=True) or {}
     for bucket in ("refresh", "hardware", "idb"):
         if not isinstance(grabbed.get(bucket), list):
             grabbed[bucket] = []
     idb_names = list(grabbed.get("idb"))
     if idb_names:
-        idb_tokens = read_idb_tokens(ws_url, idb_names, timeout,
-                                     expected_port=expected_port)
+        idb_tokens = read_idb_tokens(ws_url, idb_names, timeout)
         for bucket in ("refresh", "hardware"):
             for value in idb_tokens.get(bucket) or []:
                 if value not in grabbed[bucket]:
@@ -306,21 +279,32 @@ def _is_reader_url(url):
             and (host == "mytolino.com" or host.endswith(".mytolino.com")))
 
 
-def _reader_ws_url(targets, port):
-    """First mytolino page's validated WebSocket on the owned port."""
+def _reader_target(targets, port):
+    """Return the reader tab's WebSocket address and whether one exists.
+
+    Die Adresse wird aus Port und Target-id gebaut: für einen selbst
+    gestarteten Browser meldet Chrome genau
+    ws://127.0.0.1:<Port>/devtools/page/<id>. Die gemeldete URL zu parsen
+    und gegen den Port zu prüfen, ist damit überflüssig.
+    """
     if not isinstance(targets, list):
-        return None
+        return None, False
+    reader_found = False
     for target in targets:
         if (not isinstance(target, dict) or target.get("type") != "page"
                 or not _is_reader_url(target.get("url"))):
             continue
-        ws_url = str(target.get("webSocketDebuggerUrl") or "")
-        try:
-            _devtools_ws_address(ws_url, port)
-        except (TypeError, ValueError):
-            continue
-        return ws_url
-    return None
+        reader_found = True
+        target_id = str(target.get("id") or "").strip()
+        if target_id:
+            return ("ws://127.0.0.1:%d/devtools/page/%s"
+                    % (int(port), target_id)), True
+        # Ohne Target-id bleibt nur die gemeldete Adresse (unsere eigene
+        # Browser-Instanz, kein fremder Host).
+        reported = str(target.get("webSocketDebuggerUrl") or "").strip()
+        if reported:
+            return reported, True
+    return None, reader_found
 
 
 def grab_once_from_grabber(port=None, timeout=12):
@@ -336,11 +320,11 @@ def grab_once_from_grabber(port=None, timeout=12):
     if record is None:
         return None
     port = int(record["port"])
-    ws_url = _reader_ws_url(
-        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)
+    ws_url = _reader_target(
+        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)[0]
     if ws_url is None:
         return None
-    return _grab_page_tokens(ws_url, timeout, expected_port=port)
+    return _grab_page_tokens(ws_url, timeout)
 
 
 def _oauth_rejection_reason(body):
@@ -380,21 +364,14 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
     succeed, so the callers fail fast with instructions instead of
     retrying the same token.
     """
-    record = _verified_owner()
-    if record is None:
+    if _verified_owner() is None:
         return 0, "browser ownership could not be verified"
-    expected_port = int(record["port"])
-    try:
-        _devtools_ws_address(ws_url, expected_port)
-    except (TypeError, ValueError):
-        return 0, "DevTools endpoint did not match the owned browser"
     expression = (_EXCHANGE_SNIPPET
                   .replace("TOKEN_URL_PLACEHOLDER",
                            json.dumps(str(token_url)))
                   .replace("BODY_PLACEHOLDER", json.dumps(str(form_body))))
     raw = _evaluate_raw_in_target(ws_url, expression, timeout,
-                                  await_promise=True,
-                                  expected_port=expected_port)
+                                  await_promise=True)
     if not raw.get("ok"):
         return 0, "page evaluate failed: %s" % (raw.get("exception") or "?")
     try:
@@ -422,8 +399,8 @@ def reader_ws_url(port=None):
     if record is None:
         return None
     port = int(record["port"])
-    return _reader_ws_url(
-        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)
+    return _reader_target(
+        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)[0]
 
 
 def _browser_ws_for_record(record, timeout=2):
@@ -433,19 +410,15 @@ def _browser_ws_for_record(record, timeout=2):
         "http://127.0.0.1:%d/json/version" % port, timeout)
     ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
     try:
-        return _devtools_ws_address(ws_url, port)
+        return _ws_parts(ws_url)
     except ValueError:
         return None
 
 
-def _send_browser_close(host, port, path, timeout=2, expected_port=None):
-    """Send Browser.close to a loopback DevTools endpoint on our port."""
-    expected_port = port if expected_port is None else expected_port
+def _send_browser_close(port, path, timeout=2):
+    """Send Browser.close to the loopback DevTools endpoint on our port."""
     try:
-        host_literal = "[%s]" % host if ":" in host else host
-        host, port, path = _devtools_ws_address(
-            "ws://%s:%s%s" % (host_literal, port, path), expected_port)
-        ws = _Ws.connect(host, port, path, timeout=timeout)
+        ws = _Ws.connect("127.0.0.1", int(port), path, timeout=timeout)
         try:
             ws.send_json({"id": 1, "method": "Browser.close"})
             try:
@@ -466,24 +439,27 @@ def _endpoint_answers(record, timeout=0.5):
         "http://127.0.0.1:%d/json/version" % port, timeout)))
 
 
-def close_grabber_window(timeout=2, port=None):
-    """Close only the browser started by this module, then remove its profile."""
-    record = _launched_record(port, require_endpoint=False)
-    if record is None:
-        return False
-    if _endpoint_answers(record, timeout):
-        target = _browser_ws_for_record(record, timeout)
-        if target:
-            _send_browser_close(*target, timeout=timeout,
-                                expected_port=record["port"])
-        deadline = time.time() + max(0.2, timeout)
-        while _endpoint_answers(record, 0.2) and time.time() < deadline:
-            time.sleep(0.1)
-    if not _stop_launched_process(record["process"], timeout):
-        return False
-    deadline = time.time() + max(0.2, timeout)
+def _wait_for_endpoint_exit(record, seconds):
+    """Sleep in small steps while the DevTools endpoint keeps answering."""
+    if not _endpoint_answers(record, 0.2):
+        return
+    deadline = time.time() + max(0.2, seconds)
     while _endpoint_answers(record, 0.2) and time.time() < deadline:
         time.sleep(0.1)
+
+
+def _shutdown(record, timeout=2):
+    """Close a launched browser, then remove its temporary profile."""
+    process = record["process"]
+    port = int(record.get("port") or 0)
+    if port and _endpoint_answers(record, timeout):
+        target = _browser_ws_for_record(record, timeout)
+        if target:
+            _send_browser_close(*target, timeout=timeout)
+        _wait_for_endpoint_exit(record, timeout)
+    if not _stop_launched_process(process, timeout):
+        return False
+    _wait_for_endpoint_exit(record, timeout)
     if _endpoint_answers(record, 0.2):
         # A wrapper may have exited before its browser child; never delete
         # a profile while DevTools can still be using it.
@@ -491,9 +467,17 @@ def close_grabber_window(timeout=2, port=None):
     shutil.rmtree(record["profile"], ignore_errors=True)
     if os.path.exists(record["profile"]):
         return False
-    if _LAUNCHED["process"] is record["process"]:
+    if _LAUNCHED["process"] is process:
         _LAUNCHED.update({"process": None, "port": None, "profile": ""})
     return True
+
+
+def close_grabber_window(timeout=2, port=None):
+    """Close only the browser started by this module, then remove its profile."""
+    record = _verified_owner(port, require_endpoint=False)
+    if record is None:
+        return False
+    return _shutdown(record, timeout)
 
 
 def grabber_window_state(port=None, timeout=5):
@@ -505,13 +489,7 @@ def grabber_window_state(port=None, timeout=5):
     targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
     if not isinstance(targets, list):
         return {"window": False, "reader_tab": False}
-    reader_tab = False
-    for target in targets:
-        if not isinstance(target, dict) or target.get("type") != "page":
-            continue
-        if _is_reader_url(target.get("url")):
-            reader_tab = True
-            break
+    _ws_url, reader_tab = _reader_target(targets, port)
     return {"window": True, "reader_tab": reader_tab}
 
 
@@ -548,12 +526,9 @@ def collect_grab(port, timeout=180, progress=None):
             time.sleep(1)
             continue
         endpoint_misses = 0
-        ws_url = _reader_ws_url(targets, port)
+        ws_url, reader_found = _reader_target(targets, port)
         if ws_url is None:
-            saw_reader = saw_reader or any(
-                isinstance(target, dict) and target.get("type") == "page"
-                and _is_reader_url(target.get("url"))
-                for target in targets)
+            saw_reader = saw_reader or reader_found
             foreign_page = any(
                 isinstance(target, dict) and target.get("type") == "page"
                 and not str(target.get("url") or "").startswith(
@@ -572,7 +547,7 @@ def collect_grab(port, timeout=180, progress=None):
             time.sleep(2)
             continue
         saw_reader = True
-        result = _grab_page_tokens(ws_url, 10, expected_port=int(port))
+        result = _grab_page_tokens(ws_url, 10)
         if result and result.get("refresh"):
             return result
         if progress:
@@ -588,14 +563,14 @@ def collect_grab(port, timeout=180, progress=None):
         + RELOGIN, code="B04", detail="kein Web-Reader-Tab")
 
 
-def grab_live_tokens(partner_id, timeout=300, progress=None):
+def grab_live_tokens(timeout=300, progress=None):
     """Open the grabber window and read the reader's CURRENT tokens.
 
     Returns the grabbed dict ``{"refresh": [...], "hardware": [...]}``;
     the token-endpoint exchange stays in tolino.py (single source of
     truth for the client swap, testable without a browser).
     """
-    port = launch_reader_window(partner_id)
+    port = launch_reader_window()
     if progress:
         progress("Anmeldefenster geöffnet – bitte anmelden und warten, "
                  "bis die Bücherliste lädt.")

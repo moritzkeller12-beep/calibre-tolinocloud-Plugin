@@ -3,6 +3,7 @@ import json
 import time
 from urllib.parse import urlencode
 
+from . import cdp as cdp_module
 from .partners import PARTNERS
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
                      TolinoClient, _bot_check_detected,
@@ -16,12 +17,9 @@ from .token_candidates import (
 LOGIN_TIMEOUT = 300
 
 
-def _exchange_fresh_response(partner_id, hardware, candidate, data):
-    """Exchange via in-page fetch and apply the response with full logic."""
-    client = TolinoClient(partner_id, hardware or "")
-    client.refresh = candidate
-    client._apply_token_response(data)
-    return client.refresh or candidate, client.hardware or hardware
+def _token_from_response(candidate, hardware, data):
+    """Read the rotated refresh token straight from a token response."""
+    return str(data.get("refresh_token") or candidate), hardware
 
 
 def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
@@ -47,10 +45,8 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     # Fingerprints wie der Reader selbst -- der eigene POST wird vom
     # Bot-Schutz gelegentlich mit WAF-403 abgewiesen.
     try:
-        from . import cdp as cdp_module
         ws_url = cdp_module.reader_ws_url()
     except Exception:
-        cdp_module = None
         ws_url = None
     if ws_url:
         form = urlencode({
@@ -68,8 +64,7 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
                 data = {}
             if isinstance(data, dict) and data.get("access_token"):
                 log_info("Tolino-Token-Tausch: Browser-Reader (in-page fetch).")
-                return _exchange_fresh_response(
-                    partner_id, hardware_id, candidate, data)
+                return _token_from_response(candidate, hardware_id, data)
         # A fetch rejection (status 0), malformed success, OAuth response,
         # or server error is ambiguous: the server may already have consumed
         # this single-use grant. Only a positively identified WAF block is a
@@ -118,7 +113,6 @@ def _close_window_after_grab(progress=None):
     Statuszeile das -- der uebernommene Token waere sonst still gefaehrdet,
     weil der Reader ihn weiterrotieren wuerde (Reuse-Schutz).
     """
-    from . import cdp as cdp_module
     try:
         if cdp_module.close_grabber_window():
             return True
@@ -141,10 +135,9 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     no Chromium browser is installed – the caller reports that and
     offers the manual route (access key in the settings) instead.
     """
-    from . import cdp as cdp_module
     grabber_window_state = cdp_module.grabber_window_state
     grabbed = _normalize_live_grab(cdp_module.grab_live_tokens(
-        partner_id, timeout=timeout, progress=progress))
+        timeout=timeout, progress=progress))
     deadline = time.monotonic() + max(0, timeout)
     rejected = set()
     last_error = ""

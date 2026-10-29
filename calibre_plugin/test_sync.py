@@ -1,46 +1,16 @@
-"""Einstieg der Testsuite: sammelt die thematischen Module.
+"""Einstieg der Testsuite: laedt alle thematischen Module.
 
-Die Tests liegen in ``calibre_plugin/tests/``; dieser Modulname bleibt der
-dokumentierte Aufruf ``python3 -m unittest calibre_plugin.test_sync`` und
-fuehrt alle Module aus. Einzelne Gruppen lassen sich direkt starten, z. B.
-``python3 -m unittest calibre_plugin.tests.workers_tests``.
+Der dokumentierte Aufruf bleibt ``python3 -m unittest calibre_plugin.test_sync``.
+``python3 -m unittest discover -s calibre_plugin/tests -t .`` laedt dieselben
+Dateien; die Qt-/Chromium-Stubs richten die Testmodule selbst in
+``setUpModule`` ein.
 """
-import unittest
+import os
 
-from .tests import (browser_tests, build_tests, dashboard_tests, dialogs_tests,
-                    identifiers_tests, orchestration_tests, planning_tests,
-                    read_status_tests, tolino_client_tests, transport_tests, ui_base_tests,
-                    worker_base_tests, workers_tests)
-from .tests._support import start_cdp_stubs, stop_cdp_stubs
-
-_MODULES = (
-    ui_base_tests,
-    worker_base_tests,
-    orchestration_tests,
-    planning_tests,
-    tolino_client_tests,
-    transport_tests,
-    browser_tests,
-    build_tests,
-    dialogs_tests,
-    dashboard_tests,
-    workers_tests,
-    identifiers_tests,
-    read_status_tests,
-)
-
-
-def setUpModule():
-    start_cdp_stubs()
-
-
-def tearDownModule():
-    stop_cdp_stubs()
+_TESTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_tests(loader, tests, pattern):
-    """Alle thematischen Module laden -- Reihenfolge bleibt fest."""
-    suite = unittest.TestSuite()
-    for module in _MODULES:
-        suite.addTests(loader.loadTestsFromModule(module))
-    return suite
+    """Alle ``*_tests.py`` im Testpaket laden."""
+    return loader.discover(_TESTS, pattern="*_tests.py", top_level_dir=_ROOT)

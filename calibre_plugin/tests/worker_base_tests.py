@@ -46,8 +46,7 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
 
         return Descriptor, Signal
 
-    def _run_worker(self, series_map, state, known_pairs, read_marks=None,
-                    read_unmarks=None):
+    def _run_worker(self, series_map, state, known_pairs, read_changes=None):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal": self._signal_descriptor()[0]})
@@ -78,9 +77,9 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
                     "refresh_token": "tok",
                     "state": state}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient):
-                worker = ui_module.workers.SyncWorker(settings, [], [], [], series_map,
-                                             read_marks, read_unmarks)
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
+                worker = ui_module.workers.SyncWorker(
+                    settings, [], [], [], series_map, read_changes)
                 calls["worker"] = worker
                 worker.progress.connect(
                     lambda *args: calls["progress"].append(args))
@@ -143,7 +142,7 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
     def test_read_marks_are_one_bulk_call(self):
         calls = self._run_worker(
             {}, {"u1": {"tolino_id": "t1"}}, set(),
-            read_marks=["t1", "t2"])
+            read_changes=[("t1", None, True), ("t2", None, True)])
         self.assertEqual([(["t1", "t2"], True)], calls["read_marks"])
         self.assertIsNotNone(calls["completed"])
         self.assertTrue(any("Als gelesen markieren" in text
@@ -153,17 +152,30 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
         """Häkchen weggeklickt: EIN Aufruf, der die Marke entfernt."""
         calls = self._run_worker(
             {}, {"u1": {"tolino_id": "t1"}}, set(),
-            read_unmarks=["t1", "t2"])
+            read_changes=[("t1", None, False), ("t2", None, False)])
         self.assertEqual([(["t1", "t2"], False)], calls["read_marks"])
         self.assertTrue(any("Als ungelesen markieren" in text
                             for _done, _total, text in calls["progress"]))
         self.assertIsNotNone(calls["completed"])
         self.assertIsNone(calls["failed"])
 
+    def test_confirmed_unmark_reaches_the_calibre_column(self):
+        """Gelesen -> ungelesen muss die Spalte auf Nein setzen."""
+        calls = self._run_worker(
+            {}, {"u1": {"tolino_id": "t1", "calibre_id": 7}}, set(),
+            read_changes=[("t1", 7, False)])
+        self.assertEqual([(7, False)], calls["worker"].read_updates)
+
+    def test_confirmed_mark_reaches_the_calibre_column(self):
+        calls = self._run_worker(
+            {}, {"u1": {"tolino_id": "t1", "calibre_id": 7}}, set(),
+            read_changes=[("t1", 7, True)])
+        self.assertEqual([(7, True)], calls["worker"].read_updates)
+
     def test_marking_and_unmarking_are_two_separate_calls(self):
         calls = self._run_worker(
             {}, {"u1": {"tolino_id": "t1"}}, set(),
-            read_marks=["t1"], read_unmarks=["t2"])
+            read_changes=[("t1", None, True), ("t2", None, False)])
         self.assertEqual([(["t1"], True), (["t2"], False)], calls["read_marks"])
         # Beide Schritte zählen im Fortschritt mit.
         self.assertEqual(2, max(total for _done, total, _text
@@ -172,3 +184,21 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
     def test_without_read_marks_the_cloud_status_is_untouched(self):
         calls = self._run_worker({}, {"u1": {"tolino_id": "t1"}}, set())
         self.assertEqual([], calls["read_marks"])
+
+
+class SyncWorkerStateTests(unittest.TestCase):
+    """Der Lauf arbeitet auf dem bestätigten Zustand, nicht auf einer Kopie."""
+
+    def test_worker_takes_the_state_of_the_run(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub={"pyqtSignal":
+                     CollectionReconcileWorkerTests._signal_descriptor()[0]})
+        settings = {"partner_id": 4, "state": {"alt": {"tolino_id": "t-alt"}}}
+        try:
+            worker = ui_module.workers.SyncWorker(
+                settings, [], [], state={"neu": {"tolino_id": "t-neu"}})
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual({"neu": {"tolino_id": "t-neu"}}, worker.state)
+        self.assertIsNot(worker.state, settings["state"])

@@ -4,8 +4,8 @@ import re
 from collections.abc import Iterable
 
 TOLINO_COLUMN = "#tolino_id"
-# Optionale Ja/Nein-Spalten: #tolino_ignore nimmt Buecher vom Abgleich aus,
-# #tolino_read spiegelt den Lesestatus in die Bibliothek.
+# Optionale Ja/Nein-Spalten: #tolino_ignore nimmt Buecher vom Abgleich aus;
+# #tolino_read zeigt den lokalen Lesestatus nur informativ an.
 TOLINO_IGNORE_COLUMN = "#tolino_ignore"
 TOLINO_READ_COLUMN = "#tolino_read"
 
@@ -45,14 +45,8 @@ def _encode_tolino_ids(ids):
                       separators=(",", ":")) if ids else ""
 
 
-def legacy_tolino_id(metadata):
-    """Return a pre-account ID so the first active account can adopt it."""
-    value = _column_value(metadata)
-    return "" if _decode_tolino_ids(value) is not None else str(value or "").strip()
-
-
 def metadata_tolino_id(metadata, account_name=None):
-    """Read this account's ID from a legacy value or account-map column."""
+    """Read this account's ID from its account-map column."""
     value = _column_value(metadata)
     account_ids = _decode_tolino_ids(value)
     if account_ids is not None:
@@ -192,6 +186,18 @@ def create_custom_columns(database, labels=None):
     return created
 
 
+def column_state(database):
+    """Welche tolino-Spalten es gibt -- einmal je Lauf gefragt.
+
+    Ein Dict statt zweier Flags und wiederholter Datenbankabfragen: der
+    Lauf reicht es an den Worker weiter und schreibt nur in vorhandene
+    Spalten.
+    """
+    return {"id": custom_column_available(database),
+            "read": read_column_available(database),
+            "ignore": ignore_column_available(database)}
+
+
 def read_column_available(database):
     """True, wenn Calibre die Ja/Nein-Spalte ``#tolino_read`` kennt.
 
@@ -201,18 +207,20 @@ def read_column_available(database):
     return bool_column_available(database, TOLINO_READ_COLUMN)
 
 
-def metadata_read_value(metadata):
-    """Lesestatus aus ``#tolino_read``: True, False oder None (leer)."""
-    return bool_column_value(metadata, TOLINO_READ_COLUMN)
+def update_read_status(database, updates, enabled=True):
+    """Bestätigten Cloud-Lesestatus in ``#tolino_read`` spiegeln.
 
-
-def update_read_column(database, updates):
-    """Lesestatus ``(book_id, bool)`` in ``#tolino_read`` schreiben."""
-    if not updates or not read_column_available(database):
+    Die Spalte bleibt informativ: geschrieben wird nur, was tolino nach einem
+    Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung.
+    """
+    if not enabled or not updates or not read_column_available(database):
         return 0
     api = database.new_api
-    values = {book_id: bool(value) for book_id, value in updates
-              if book_id is not None and api.has_id(book_id)}
+    values = {}
+    for book_id, finished in updates:
+        if book_id is None or not api.has_id(book_id):
+            continue
+        values[book_id] = bool(finished)
     if not values:
         return 0
     api.set_field(TOLINO_READ_COLUMN, values)
@@ -237,8 +245,8 @@ def update_tolino_ids(database, updates, enabled=True, account_name=None):
         raw = _column_value(metadata)
         account_ids = _decode_tolino_ids(raw)
         if account_ids is None:
-            # Migration from the old one-ID format: attribute it to the
-            # account currently active when the column was first written.
+            # Migrate a legacy single ID when this account first writes the
+            # account-scoped column value.
             legacy = str(raw or "").strip()
             account_ids = {}
             if legacy:
@@ -252,17 +260,6 @@ def update_tolino_ids(database, updates, enabled=True, account_name=None):
         return 0
     api.set_field(TOLINO_COLUMN, values)
     return len(values)
-
-
-def iter_book_ids(database):
-    """Yield book ids from Calibre 5+'s supported database API."""
-    api = database.new_api
-    yield from api.all_book_ids()
-
-
-def metadata_by_id(database, book_id):
-    """Read metadata by a real Calibre id, never by a filtered-view index."""
-    return database.new_api.get_metadata(book_id)
 
 
 def normalize_formats(value):

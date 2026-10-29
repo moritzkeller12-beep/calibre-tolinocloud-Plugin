@@ -1,13 +1,13 @@
 # tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.1.03-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.1.04-blue)](__init__.py)
 
 Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino Cloud.
 
 ## Installation
 
-1. [Plugin-ZIP herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/0.1.03/tolino_cloud_sync.zip).
+1. [Plugin-ZIP herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/0.1.04/tolino_cloud_sync.zip).
 2. In Calibre: **Einstellungen → Plugins → Plugin aus Datei laden** und ZIP auswählen.
 3. Calibre neu starten.
 
@@ -22,7 +22,7 @@ Plugin öffnen, Buchhändler wählen und **Bei tolino anmelden**. Danach **Bibli
 Die Spalten lassen sich einzeln unter **Einstellungen …** des Plugins anlegen; Calibre danach neu starten.
 
 - `#tolino_id` (Text): speichert die tolino-Zuordnung in der Bibliothek.
-- `#tolino_read` (Ja/Nein): gleicht den Lesestatus in beide Richtungen ab.
+- `#tolino_read` (Ja/Nein): zeigt den Calibre-Lesestatus nur informativ; Änderungen an tolino sind ausschließlich im Vergleichsfenster auswählbar.
 - `#tolino_ignore` (Ja/Nein): bei «Ja» wird ein Buch vom Abgleich ausgeschlossen, etwa wenn es bereits gekauft in tolino liegt.
 
 ## Hinweise

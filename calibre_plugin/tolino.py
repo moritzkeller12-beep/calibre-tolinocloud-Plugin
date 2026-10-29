@@ -13,8 +13,31 @@ from urllib.request import Request, urlopen
 from .inventory import parse_inventory
 from .partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
                        WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS)
-from .transport import BROWSER_USER_AGENT, _browser_sec_headers
 from . import sync_data as _sync_data
+
+CHROME_MAJOR = "153"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36" % CHROME_MAJOR
+)
+
+
+def _browser_sec_headers():
+    """Browser-consistent Sec-Fetch and Client-Hints headers."""
+    return {
+        "Accept": "*/*",
+        "Accept-Language": "de-DE,de;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Priority": "u=1, i",
+        "Sec-CH-UA": '"Chromium";v="%s", "Not_A Brand";v="8"' % CHROME_MAJOR,
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Linux"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-GPC": "1",
+    }
 
 
 class TolinoError(Exception):
@@ -243,13 +266,23 @@ def normalize_hardware_id(value):
     return text
 
 
+def _decode_json(raw):
+    """Antwort-Body als JSON; ein leerer Body ist ein leeres Dict."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise TolinoApiError(
+            "Ungültige Antwort von tolino (kein JSON).", code="N02",
+            short="tolino hat eine ungültige Antwort geliefert.")
+
+
 class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
     def __init__(self, partner_id, hardware, refresh=None, timeout=45,
-                 token_callback=None, hardware_callback=None, token_lock=None,
-                 token_lock_timeout=5, token_vault=None,
-                 credential_store=None):
+                 token_callback=None, hardware_callback=None):
         try:
             partner_id = int(partner_id)
         except (TypeError, ValueError):
@@ -266,18 +299,16 @@ class TolinoClient:
         self.last_error_text = None
         self.token_callback = token_callback
         self.hardware_callback = hardware_callback
-        self.token_lock = token_lock
-        self.token_lock_timeout = token_lock_timeout
-        self.token_lock_held = False
-        self.token_vault = token_vault
-        self.credential_store = credential_store
+        # Beide setzt der Token-Vault, sobald er diesen Client erzeugt;
+        # ohne Vault meldet sich der Client direkt an.
+        self.token_vault = None
+        self.credential_store = None
         self._in_device_recovery = False
         self._hw_registered_now = False
         self._login_lock = threading.Lock()
         # Ein Lesevorgang der sync-data reicht, bis etwas geschrieben wird:
         # Lese-Status und Sammlungen brauchen dieselben Daten.
         self._sync_cache = None
-        self.inventory_ok = True
 
     def login(self):
         # A valid access token avoids spending the rotating refresh token twice.
@@ -286,17 +317,11 @@ class TolinoClient:
         with self._login_lock:
             if self.access and time.time() < self.expires_at:
                 return self.refresh
-            if self.token_lock is None or self.token_lock_held:
+            if self.token_vault is None:
                 return self._login()
-            if getattr(self, "token_vault", None) is not None:
-                return self.token_vault.relogin(self)
-            if not self.token_lock.acquire(
-                    timeout=max(0, self.token_lock_timeout)):
-                raise TolinoAuthError(BUSY_MESSAGE, code="S91")
-            try:
-                return self._login()
-            finally:
-                self.token_lock.release()
+            # Nach einer späten 401 zählt der zuletzt GESPEICHERTE Token:
+            # der Keep-alive kann inzwischen rotiert haben.
+            return self.token_vault.relogin(self)
 
     def _apply_token_response(self, data):
         """Store the token endpoint response; returns the rotated refresh."""
@@ -356,150 +381,159 @@ class TolinoClient:
     def _request(self, url, method="GET", data=None, form=False,
                  authenticated=True, content_type=None, _extra_headers=None):
         retry = {"auth": True, "hardware": True, "waf": 0}
-        retry_request = object()
-
-        def decode(raw):
-            if not raw:
-                return {}
-            try:
-                return json.loads(raw.decode("utf-8"))
-            except ValueError:
-                raise TolinoApiError(
-                    "Ungültige Antwort von tolino (kein JSON).", code="N02",
-                    short="tolino hat eine ungültige Antwort geliefert.")
-
-        def handle_error(exc, raw_detail):
-            try:
-                payload = json.loads(raw_detail)
-            except ValueError:
-                payload = None
-            if isinstance(payload, dict):
-                detail = {key: payload[key] for key in
-                          ("error", "error_description", "message")
-                          if key in payload}
-                response_info = payload.get("ResponseInfo")
-                if isinstance(response_info, dict) and response_info.get("message"):
-                    detail.setdefault("message",
-                                      str(response_info["message"])[:300])
-                detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
-            else:
-                detail = raw_detail
-            self.last_error_text = sanitize_error(
-                detail, (self.refresh, self.access))[:500]
-
-            if (exc.code == 401 and authenticated and self.refresh
-                    and retry["auth"]
-                    and "invalid_grant" not in self.last_error_text.casefold()
-                    and "reuse exceeded" not in self.last_error_text.casefold()):
-                retry["auth"] = False
-                self.access = None
-                self.login()
-                return retry_request
-
-            if (exc.code == 400 and authenticated
-                    and url != self.partner.get("token_url")):
-                if retry["hardware"]:
-                    self._hw_registered_now = False
-                    try:
-                        recovered = self._recover_device_registration()
-                    except Exception:
-                        recovered = False
-                    if recovered:
-                        retry["hardware"] = False
-                        if self._hw_registered_now:
-                            time.sleep(_REGISTER_SETTLE_SECONDS)
-                        return retry_request
-                elif self._hw_registered_now:
-                    self._hw_registered_now = False
-                    time.sleep(_REGISTER_SETTLE_SECONDS)
-                    return retry_request
-
-            if exc.code in (401, 403):
-                is_waf_retry = (
-                    exc.code == 403
-                    and url == self.partner.get("token_url")
-                    and retry["waf"] < len(_WAF_RETRY_SECONDS)
-                    and _bot_check_detected(self.last_error_text))
-                if is_waf_retry:
-                    time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
-                    retry["waf"] += 1
-                    return retry_request
-                self.access = None
-                message = (_compact_error_text(self.last_error_text)
-                           or "no response detail")
-                raise TolinoAuthError(
-                    "tolino hat die Anmeldung abgelehnt (%s): %s"
-                    % (exc.code, message), code="A06",
-                    short="tolino hat die Anmeldung abgelehnt.")
-            raise TolinoApiError(
-                "tolino-Fehler (HTTP %s): %s"
-                % (exc.code, self.last_error_text), code="N03",
-                short="tolino meldet einen Fehler (HTTP %s)." % exc.code)
-
         while True:
-            if authenticated and (not self.access or time.time() >= self.expires_at):
+            if authenticated and (not self.access
+                                  or time.time() >= self.expires_at):
                 self.login()
-
-            headers = {"User-Agent": BROWSER_USER_AGENT}
-            if authenticated:
-                headers.update({
-                    "t_auth_token": self.access,
-                    "hardware_id": self.hardware,
-                    "reseller_id": self.partner["reseller_id"],
-                })
-                for key, shared in (("client_type", WEBREADER_CLIENT_TYPE),
-                                    ("client_version", WEBREADER_CLIENT_VERSION)):
-                    headers[key] = shared
-            elif url == self.partner.get("token_url"):
-                headers.update(_browser_sec_headers())
-                headers.update(WEBREADER_TOKEN_HEADERS)
-            if _extra_headers:
-                headers.update(_extra_headers)
-
-            body = None
-            if data is not None:
-                if form:
-                    body = urlencode(data).encode("utf-8")
-                    headers["Content-Type"] = "application/x-www-form-urlencoded"
-                elif isinstance(data, bytes):
-                    body = data
-                    headers["Content-Type"] = content_type or "application/octet-stream"
-                else:
-                    body = json.dumps(data).encode("utf-8")
-                    headers["Content-Type"] = content_type or "application/json"
-
-            request = Request(url, data=body, headers=headers, method=method)
+            request = self._build_request(url, method, data, form,
+                                          authenticated, content_type,
+                                          _extra_headers)
             try:
                 with urlopen(request, timeout=self.timeout) as response:
                     self.last_error_text = None
                     raw = response.read()
             except HTTPError as exc:
-                outcome = handle_error(exc, exc.read().decode("utf-8", "replace"))
-                if outcome is retry_request:
-                    continue
-                return outcome
+                # Kehrt nur zurück, wenn ein weiterer Versuch erlaubt ist.
+                self._handle_http_error(exc,
+                                        exc.read().decode("utf-8", "replace"),
+                                        url, authenticated, retry)
+                continue
             except (URLError, OSError, TimeoutError) as exc:
                 _raise_transport_error(exc, (self.refresh, self.access))
-            return decode(raw)
+            return _decode_json(raw)
+
+    def _build_request(self, url, method, data, form, authenticated,
+                       content_type, extra_headers):
+        """URL, Header und Body eines Aufrufs -- ohne Wiederholungslogik."""
+        headers = {"User-Agent": BROWSER_USER_AGENT}
+        if authenticated:
+            headers.update({
+                "t_auth_token": self.access,
+                "hardware_id": self.hardware,
+                "reseller_id": self.partner["reseller_id"],
+                "client_type": WEBREADER_CLIENT_TYPE,
+                "client_version": WEBREADER_CLIENT_VERSION,
+            })
+        elif url == self.partner.get("token_url"):
+            headers.update(_browser_sec_headers())
+            headers.update(WEBREADER_TOKEN_HEADERS)
+        if extra_headers:
+            headers.update(extra_headers)
+
+        body = None
+        if data is not None:
+            if form:
+                body = urlencode(data).encode("utf-8")
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+            elif isinstance(data, bytes):
+                body = data
+                headers["Content-Type"] = (content_type
+                                           or "application/octet-stream")
+            else:
+                body = json.dumps(data).encode("utf-8")
+                headers["Content-Type"] = content_type or "application/json"
+        return Request(url, data=body, headers=headers, method=method)
+
+    def _handle_http_error(self, exc, raw_detail, url, authenticated, retry):
+        """Fehlerdetail merken und entweder wiederholen lassen oder werfen.
+
+        `retry` führt die drei Wiederholungsgründe: abgelaufener
+        Access-Token, unbekannte Geräte-Registrierung, WAF-Block.
+        """
+        try:
+            payload = json.loads(raw_detail)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            detail = {key: payload[key] for key in
+                      ("error", "error_description", "message")
+                      if key in payload}
+            response_info = payload.get("ResponseInfo")
+            if isinstance(response_info, dict) and response_info.get("message"):
+                detail.setdefault("message",
+                                  str(response_info["message"])[:300])
+            detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+        else:
+            detail = raw_detail
+        self.last_error_text = sanitize_error(
+            detail, (self.refresh, self.access))[:500]
+
+        if (exc.code == 401 and authenticated and self.refresh
+                and retry["auth"]
+                and "invalid_grant" not in self.last_error_text.casefold()
+                and "reuse exceeded" not in self.last_error_text.casefold()):
+            retry["auth"] = False
+            self.access = None
+            self.login()
+            return
+
+        if (exc.code == 400 and authenticated
+                and url != self.partner.get("token_url")):
+            if retry["hardware"]:
+                self._hw_registered_now = False
+                try:
+                    recovered = self._recover_device_registration()
+                except Exception:
+                    recovered = False
+                if recovered:
+                    retry["hardware"] = False
+                    if self._hw_registered_now:
+                        time.sleep(_REGISTER_SETTLE_SECONDS)
+                    return
+            elif self._hw_registered_now:
+                self._hw_registered_now = False
+                time.sleep(_REGISTER_SETTLE_SECONDS)
+                return
+
+        if exc.code in (401, 403):
+            is_waf_retry = (
+                exc.code == 403
+                and url == self.partner.get("token_url")
+                and retry["waf"] < len(_WAF_RETRY_SECONDS)
+                and _bot_check_detected(self.last_error_text))
+            if is_waf_retry:
+                time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
+                retry["waf"] += 1
+                return
+
+            self.access = None
+
+            message = (_compact_error_text(self.last_error_text)
+                       or "no response detail")
+            raise TolinoAuthError(
+                "tolino hat die Anmeldung abgelehnt (%s): %s"
+                % (exc.code, message), code="A06",
+                short="tolino hat die Anmeldung abgelehnt.")
+        raise TolinoApiError(
+            "tolino-Fehler (HTTP %s): %s"
+            % (exc.code, self.last_error_text), code="N03",
+            short="tolino meldet einen Fehler (HTTP %s)." % exc.code)
+
 
     def inventory(self):
-        """Read the PublicationInventory form used by Tolino's API."""
-        records, problems, self.inventory_ok = parse_inventory(
+        """Read the PublicationInventory form used by Tolino's API.
+
+        Eine unbekannte Hülle ist ein Fehler, keine leere Bibliothek: sonst
+        sähe der Vergleich eine Bibliothek ohne Bücher und plante Duplikate.
+        """
+        records, problems, ok = parse_inventory(
             self._request(BASE_URL + "/inventory/delta?strip=true"))
         if problems:
             log_warning("Tolino-Inventar: %s" % "; ".join(problems))
+        if not ok:
+            raise TolinoApiError(
+                "Die Cloud-Antwort enthält kein PublicationInventory.",
+                code="N02")
         return records
 
     @staticmethod
-    def _multipart(fields, file_path, field="file"):
-        """Build a multipart body in memory.
+    def _multipart(fields, payload, filename, field="file"):
+        """Build a multipart body in memory from bytes.
 
         Memory note: the returned body is one contiguous bytes object, so a
         large EPUB is held roughly twice while the chunks are joined. EPUBs
         are usually small (single-digit MB); keeping the stdlib-only
-        transport (urllib) is worth that trade-off. The upload is sent as a
-        single request, and the temporary profile/cover data is cleaned up
-        by the caller.
+        transport (urllib) is worth that trade-off.
         """
         boundary = ("----CalibreTolino%s" % uuid.uuid4().hex).encode("ascii")
         chunks = []
@@ -507,11 +541,9 @@ class TolinoClient:
             chunks.extend([b"--" + boundary + b"\r\n",
                            ("Content-Disposition: form-data; name=\"%s\"\r\n\r\n" % key).encode(),
                            str(value).encode(), b"\r\n"])
-        name = os.path.basename(file_path)
+        name = os.path.basename(str(filename))
         guessed_type = mimetypes.guess_type(name)
         mime = next(iter(guessed_type), None) or "application/octet-stream"
-        with open(file_path, "rb") as source:
-            payload = source.read()
         chunks.extend([b"--" + boundary + b"\r\n",
                        ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field, name)).encode(),
                        ("Content-Type: %s\r\n\r\n" % mime).encode(),
@@ -520,7 +552,9 @@ class TolinoClient:
         return b"".join(chunks), "multipart/form-data; boundary=%s" % boundary.decode()
 
     def upload(self, file_path):
-        body, content_type = self._multipart({}, file_path)
+        with open(file_path, "rb") as source:
+            payload = source.read()
+        body, content_type = self._multipart({}, payload, file_path)
         data = self._request(BASE_URL + "/upload", "POST", body,
                              content_type=content_type)
         deliverable = (data.get("metadata") or {}).get("deliverableId")
@@ -528,9 +562,12 @@ class TolinoClient:
             raise TolinoApiError("Upload ohne deliverableId in der Antwort.", code="N04", short="tolino hat den Upload nicht bestätigt.")
         return str(deliverable)
 
-    def upload_cover(self, deliverable_id, file_path):
-        body, content_type = self._multipart({"deliverableId": deliverable_id}, file_path)
-        self._request(BASE_URL + "/cover", "POST", body, content_type=content_type)
+    def upload_cover(self, deliverable_id, data, suffix=".jpg"):
+        body, content_type = self._multipart(
+            {"deliverableId": deliverable_id}, data,
+            "cover" + str(suffix or ""))
+        self._request(BASE_URL + "/cover", "POST", body,
+                      content_type=content_type)
 
     def delete(self, deliverable_id):
         self._request(BASE_URL + "/deletecontent?deliverableId=" + str(deliverable_id))

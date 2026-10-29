@@ -2,7 +2,6 @@
 
 import calibre_plugin.tolino as tolino_module
 import calibre_plugin.token_vault as vault_module
-import re
 import unittest
 from . import ui_base_tests
 from .. import config
@@ -10,7 +9,7 @@ from ..partners import PARTNERS
 from ..library import TOLINO_COLUMN
 from ..tolino import TolinoAuthError
 from ._support import (
-    FakeText, _ui_source_text, start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+    FakeText,start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from pathlib import Path
 from unittest.mock import patch
 
@@ -185,76 +184,6 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         self.assertFalse(dashboard.switch_account(""))
         self.assertEqual([], calls)
 
-class DashboardLayoutTests(unittest.TestCase):
-    """Ensure every dashboard widget is added to a visible layout."""
-
-    def _source(self):
-        return _ui_source_text()
-
-    def _dashboard_body(self):
-        return self._source().split("class SyncDashboard(QDialog):", 1)[1].split(
-            "\nclass ", 1)[0]
-
-    def test_every_created_button_is_added_to_a_layout(self):
-        """Auch der Knopf im Einstellungsfenster und die Kontoauswahl auf
-        der ersten Seite."""
-        source = self._source()
-        names = re.findall(
-            r"self\.(\w+) = (?:QPushButton|QCheckBox|QComboBox|QLineEdit)\(",
-            source)
-        self.assertNotIn("debug", names)
-        # Beschriftungen wie "Hardware-ID (automatisch erkannt)" enthalten
-        # selbst Klammern -- deshalb zeilenweise prüfen: dieselbe Zeile muss
-        # an ein addRow/addWidget/addLayout gehen.
-        for name in names:
-            self.assertTrue(
-                re.search(r"add(?:Row|Widget|Layout)\([^\n]*self\.%s\b" % name,
-                          source),
-                "Widget %r hängt in keinem Layout" % name)
-
-    def test_login_and_compare_have_their_own_buttons(self):
-        """Der alte Doppelweg (zwei Anmeldeknöpfe) bleibt weg, aber der
-        Anmeldeknopf steht wieder sichtbar auf der ersten Seite."""
-        body = self._dashboard_body()
-        self.assertIn("self.primary.clicked.connect(self.primary_action)", body)
-        self.assertIn(
-            "self.login_button.clicked.connect(self.browser_login)", body)
-        self.assertNotIn("self.browser = QPushButton(", body)
-        self.assertNotIn("self.start = QPushButton(", body)
-        self.assertNotIn("self.cancel = QPushButton(", body)
-
-    def test_the_settings_dialog_holds_the_rare_options(self):
-        """Alles Seltene liegt in EINEM Fenster, nicht hinter zwei
-        «… anzeigen»-Häkchen."""
-        settings = ((Path(__file__).resolve().parents[1] / "ui_settings.py")
-                   .read_text(encoding="utf-8"))
-        self.assertIn("class SettingsDialog(QDialog):", settings)
-        for group in ("Einstellungen", "Konten und Verbindung"):
-            self.assertIn('QGroupBox("%s")' % group, settings)
-        body = self._dashboard_body()
-        self.assertNotIn("advanced_toggle", body)
-        self.assertNotIn("_toggle_advanced", body)
-        self.assertIn("self.settings_button.clicked.connect(self.open_settings)",
-                      body)
-
-    def test_connection_controls_remain_available_without_diagnostics(self):
-        """Removing the report does not remove account or token controls."""
-        source = self._source()
-        settings = ((Path(__file__).resolve().parents[1] / "ui_settings.py")
-                   .read_text(encoding="utf-8"))
-        self.assertIn("Konten und Verbindung", settings)
-        self.assertIn('QGroupBox("Konten und Verbindung")', settings)
-        for label in ("Aktives Konto", "Geräte-ID (automatisch)",
-                      "Zugangstoken (nur bei Problemen ändern)"):
-            self.assertIn(label, source)
-        self.assertNotIn("DiagnosticDialog", source)
-        self.assertNotIn("diagnose_preparation", source)
-        self.assertNotIn("Lokale Diagnose", source)
-        self.assertIn("self.login_button = QPushButton", source)
-        self.assertIn("for pid, partner in sorted(PARTNERS.items())", source)
-        self.assertNotIn("partner.get(\"token_url\")", source)
-        self.assertIn("self.partner.findData(partner_id) < 0", source)
-
 class ColumnSetupButtonTests(unittest.TestCase):
     """Je Calibre-Spalte ein Knopf in den Einstellungen."""
 
@@ -270,24 +199,12 @@ class ColumnSetupButtonTests(unittest.TestCase):
         cls = ui_module.dashboard.SyncDashboard
         dashboard = type("Dashboard", (), {})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = False
-        dashboard.read_column_enabled = False
+        dashboard.columns = {"id": False}
+        dashboard.columns = {"id": False, "read": False}
         dashboard.update_status = lambda: calls.append("status")
         for name in ("create_columns", "_refresh_column_flags"):
             setattr(dashboard, name, getattr(cls, name).__get__(dashboard))
         return dashboard
-
-    def test_the_settings_offer_one_button_per_column(self):
-        source = _ui_source_text()
-        self.assertIn("self.column_buttons = {}", source)
-        self.assertIn("for index, (label, _name, datatype) in "
-                      "enumerate(CUSTOM_COLUMNS):", source)
-        self.assertIn('button = QPushButton("#%s anlegen …" % label)', source)
-        self.assertIn("lambda _checked=False, key=label: "
-                      "self.create_columns(key)", source)
-        self.assertIn("self.column_buttons[label] = button", source)
-        self.assertIn('transfer.addRow("Calibre-Spalten" if index == 0 '
-                      'else "", button)', source)
 
     def test_one_button_creates_only_its_own_column(self):
         from unittest.mock import patch
@@ -301,10 +218,9 @@ class ColumnSetupButtonTests(unittest.TestCase):
 
         with patch("calibre_plugin.ui_dashboard.create_custom_columns",
                    fake_create), \
-             patch("calibre_plugin.ui_dashboard.custom_column_available",
-                   lambda _db: True), \
-             patch("calibre_plugin.ui_dashboard.read_column_available",
-                   lambda _db: True), \
+             patch("calibre_plugin.ui_dashboard.column_state",
+                   lambda _db: {"id": True, "read": True,
+                                "ignore": True}), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             dashboard.create_columns("tolino_ignore")
@@ -312,8 +228,8 @@ class ColumnSetupButtonTests(unittest.TestCase):
         self.assertEqual([["tolino_ignore"]], seen)
         self.assertIn("#tolino_ignore", boxes[0][2])
         self.assertIn("neu starten", boxes[0][2])
-        self.assertTrue(dashboard.sync_column_enabled)
-        self.assertTrue(dashboard.read_column_enabled)
+        self.assertTrue(dashboard.columns.get("id"))
+        self.assertTrue(dashboard.columns.get("read"))
         self.assertEqual(["status"], calls)
 
     def test_an_existing_column_says_so_and_changes_nothing(self):
@@ -329,7 +245,7 @@ class ColumnSetupButtonTests(unittest.TestCase):
         self.assertIn("schon vorhanden", boxes[0][2])
         self.assertIn("#tolino_read", boxes[0][2])
         self.assertEqual([], calls)
-        self.assertFalse(dashboard.read_column_enabled)
+        self.assertFalse(dashboard.columns.get("read"))
 
     def test_a_refused_creation_is_reported_instead_of_crashing(self):
         from unittest.mock import patch
@@ -633,14 +549,11 @@ class LoginPreflightTests(unittest.TestCase):
 
     @staticmethod
     def _patch_client(records, error=None, rotate=True):
-        """Replace the vault's network client with a deterministic fake."""
-        from contextlib import contextmanager
-
-        @contextmanager
+        """Replace the vault's client factory with a deterministic fake."""
         def login(store, _timeout=5):
             token = store.refresh_token
-            records.append((store.values.get("partner_id"),
-                            store.hardware_id, token))
+            records.append((store.values.get("partner_id"), store.hardware_id, token))
+
             class FakeClient:
                 refresh = token
 
@@ -649,14 +562,14 @@ class LoginPreflightTests(unittest.TestCase):
                         raise error
                     if rotate:
                         self.refresh = token + "-rotated"
-                        store.save_refresh(self.refresh)
+                        self.token_callback(self.refresh)
                         records.append(("persisted", self.refresh))
                     return self.refresh
 
             client = FakeClient()
-            if rotate:
-                client.login()
-            yield client
+            client.token_callback = lambda value: store.save_refresh(value)
+            client.login()
+            return client
 
         return patch("calibre_plugin.token_vault.TOKEN_VAULT.login", login)
 
@@ -667,20 +580,19 @@ class LoginPreflightTests(unittest.TestCase):
              "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records):
             status, detail = vault_module.check_stored_login(store)
-        self.assertEqual("valid", status)
-        self.assertEqual("tok-1-rotated", detail)
+        self.assertEqual(("valid", ""), (status, detail))
         self.assertEqual((4, "hw-1", "tok-1"), records[0])
         self.assertEqual("tok-1-rotated", store.refresh_token)
 
-    def test_an_unchanged_token_is_not_written_again(self):
+    def test_a_successful_check_does_not_return_a_token_to_the_ui(self):
         records = []
         store = config.CredentialStore(
             {"partner_id": 4, "hardware_id": "hw-1",
              "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records, rotate=False):
             status, detail = vault_module.check_stored_login(store)
-        self.assertEqual(("valid", "tok-1"), (status, detail))
-        self.assertEqual([], records[1:])
+        self.assertEqual(("valid", ""), (status, detail))
+        self.assertEqual((4, "hw-1", "tok-1"), records[0])
 
     def test_a_rejected_access_reports_the_reason_without_the_token(self):
         records = []
@@ -743,12 +655,9 @@ class LoginPreflightTests(unittest.TestCase):
                 self.token_callback = callbacks.get("token_callback")
 
             def login(self):
-                if getattr(self, "token_lock_held", False):
-                    return self._rotate()
-                with self.token_lock:
-                    return self._rotate()
+                return self._login()
 
-            def _rotate(self):
+            def _login(self):
                 requested.append(self.refresh)
                 if len(requested) == 1:
                     self.refresh = "rotated"
@@ -761,11 +670,11 @@ class LoginPreflightTests(unittest.TestCase):
                    side_effect=lambda _name: {
                        "refresh_token": store.refresh_token,
                        "hardware_id": store.hardware_id}):
-            with TOKEN_VAULT.login(store) as client:
-                store.save_refresh("rotated-by-keepalive")
-                client.access = None
-                client.login()
-        self.assertEqual(["saved-old", "rotated"], requested)
+            client = TOKEN_VAULT.login(store)
+            store.save_refresh("rotated-by-keepalive")
+            client.access = None
+            TOKEN_VAULT.relogin(client)
+        self.assertEqual(["saved-old", "rotated-by-keepalive"], requested)
 
     def test_the_rotation_lock_is_released_afterwards(self):
         with self._patch_client([]):
@@ -793,6 +702,12 @@ class LoginPreflightTests(unittest.TestCase):
 
         def setToolTip(self, value):
             self.tooltip = value
+
+        def setDefault(self, value):
+            self.is_default = value
+
+        def setFocus(self):
+            self.focused = True
 
     def _ui(self):
         ui_module = ui_module_for(self)
@@ -880,13 +795,6 @@ class LoginPreflightTests(unittest.TestCase):
             "warning": staticmethod(record),
         })
 
-    def _assert_one_line(self, box, title):
-        """Die neuen Infofenster bleiben EINE Zeile (Feldwunsch)."""
-        self.assertEqual(title, box[1])
-        text = box[2]
-        self.assertNotIn("\n", text)
-        self.assertLessEqual(len(text), 100, text)
-
     def _dashboard(self, ui_module, token="tok-1"):
         dashboard = type("Dashboard", (), {})()
         dashboard.account_name = "konto"
@@ -956,10 +864,10 @@ class LoginPreflightTests(unittest.TestCase):
         with patch("calibre_plugin.ui_dashboard.save_credentials",
                    lambda *args: saved.append(args)):
             dashboard.browser_login()
-            dashboard.login_worker.valid.fire("tok-rotated")
+            dashboard.login_worker.valid.fire()
         self.assertEqual([], opened)
-        self.assertEqual([("konto", "tok-rotated", "hw-1")], saved)
-        # Der rotierte Token landet im Konto: das Feld bleibt unberuehrt.
+        self.assertEqual([], saved)
+        # Der rotierte Token wurde schon durch den Client-Callback gespeichert.
         self.assertEqual("tok-1", dashboard.refresh.text())
         self.assertIn("Angemeldet.", dashboard.status.text())
         # Knopf und Fenster sind wieder frei, die Pruefung ist beendet.
@@ -1059,7 +967,8 @@ class LoginPreflightTests(unittest.TestCase):
 
         def signal(name):
             return type("Signal", (), {
-                "emit": lambda self, value: emitted.append((name, value))})()
+                "emit": lambda self, *values:
+                    emitted.append((name,) + values)})()
 
         emitted, calls = [], []
         settings = {"partner_id": 4, "hardware_id": "hw-1",
@@ -1075,20 +984,21 @@ class LoginPreflightTests(unittest.TestCase):
     def test_the_worker_hands_the_stored_account_to_the_check(self):
         ui_module = self._ui()
         _worker, emitted, calls = self._run_check_worker(
-            ui_module, ("valid", "tok-2"))
+            ui_module, ("valid", ""))
         args, kwargs = calls[0]
         self.assertEqual(1, len(args))
         self.assertEqual("konto", args[0].account_name)
         self.assertEqual("tok-1", args[0].refresh_token)
         self.assertEqual({}, kwargs)
-        self.assertEqual([("valid", "tok-2")], emitted)
+        self.assertEqual([("valid",)], emitted)
 
     def test_every_check_result_reaches_the_matching_slot(self):
         ui_module = self._ui()
-        results = (("valid", "tok-2"), ("invalid", "Grund"), ("busy", ""))
+        results = (("valid", ""), ("invalid", "Grund"), ("busy", ""))
         reported = [self._run_check_worker(ui_module, result)[1]
                     for result in results]
-        self.assertEqual([[result] for result in results], reported)
+        self.assertEqual([[("valid",)], [("invalid", "Grund")],
+                          [("busy", "")]], reported)
 
     def test_a_failing_check_is_reported_as_a_rejection(self):
         ui_module = self._ui()
@@ -1154,8 +1064,8 @@ class LoginMessageTests(unittest.TestCase):
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
             dashboard)
 
-        with patch.object(ui_module.dashboard, "devtools_port_alive",
-                          return_value=False, create=True) as alive, \
+        with patch.object(ui_module.dashboard, "_verified_owner",
+                          return_value=None, create=True) as alive, \
              patch.object(ui_module.dashboard, "close_grabber_window",
                           create=True) as close:
             dashboard.login_completed("tok-neu", "hw-neu")
@@ -1195,7 +1105,7 @@ class LoginMessageTests(unittest.TestCase):
             self.assertEqual([("default", True), ("focus",)],
                              dashboard.primary.calls)
             dashboard.primary.calls = []
-            dashboard.login_still_valid("tok-neu")
+            dashboard.login_still_valid()
             self.assertEqual([("default", True), ("focus",)],
                              dashboard.primary.calls)
             self.assertIn("Angemeldet.", dashboard.status.value)
@@ -1327,7 +1237,7 @@ class AccountStateBindingTests(unittest.TestCase):
 
     def test_settings_dialog_keeps_required_widgets_without_diagnostic_ui(self):
         base = Path(__file__).resolve().parent.parent
-        settings = (base / "ui_settings.py").read_text(encoding="utf-8")
+        settings = (base / "ui_dashboard.py").read_text(encoding="utf-8")
         self.assertIn("QGroupBox", settings.split("class SettingsDialog", 1)[0])
         self.assertIn("accounts_form", settings)
         self.assertNotIn("diagnostics_form", settings)

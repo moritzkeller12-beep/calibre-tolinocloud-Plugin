@@ -1,11 +1,13 @@
 """Dialoge für den tolino-Bibliotheksvergleich."""
 import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                        QHBoxLayout, QLabel, QMessageBox, QMenu,
-                        QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, Qt, _set_enabled, plural, start_call)
+                        QHBoxLayout, QLabel, QMessageBox,
+                        QMenu, QPushButton, QTableWidget, QTableWidgetItem,
+                        QVBoxLayout, Qt, _set_enabled, header_mode, plural,
+                        start_call)
 from calibre.gui2 import error_dialog, info_dialog
-from .comparison import comparison_group, sort_comparison_rows
+from .comparison import (ReadState, comparison_group, comparison_sort_key,
+                         sort_comparison_rows)
 from .library import TOLINO_IGNORE_COLUMN, selected_table_rows
 from .tolino import report_error
 
@@ -79,14 +81,9 @@ class InventoryDialog(QDialog):
 
     _SORT_KEYS = (
         # 0 Hochladen / 1 Metadaten: Ausgewähltes zuerst, dann Titel/Autor(en)
-        lambda row: (0 if row.get("upload") else 1,
-                     0 if row.get("metadata") else 1,
-                     str(row.get("title") or "").casefold(),
-                     str(row.get("authors") or "").casefold()),
-        lambda row: (0 if row.get("metadata") else 1,
-                     0 if row.get("upload") else 1,
-                     str(row.get("title") or "").casefold(),
-                     str(row.get("authors") or "").casefold()),
+        comparison_sort_key,
+        lambda row: ((0 if row.get("metadata") else 1,)
+                     + comparison_sort_key(row)[2:]),
         # 2 Lesestatus: gelesene Bücher zuerst
         lambda row: (0 if row.get("read") else 1,
                      str(row.get("title") or "").casefold(),
@@ -174,12 +171,9 @@ class InventoryDialog(QDialog):
                 row["upload"], row["metadata"] = self.default_actions(row)
             # Lesestatus aus der Cloud: eine Auswahl ändert ihn erst mit
             # «Synchronisierung starten».
-            row.setdefault("read_known", True)
-            row.setdefault("read", bool(row.get("read_in_cloud")))
-            # Vorschlag des Abgleichs mit #tolino_read; «Empfohlene
-            # Aktionen» stellt ihn wieder her.
-            row.setdefault("read_default", bool(row["read"]))
-            row.setdefault("read_sync_default", bool(row.get("read_sync")))
+            row["read"] = ReadState.from_row(row)
+            # Die Calibre-Spalte wird nur angezeigt. Die Auswahl folgt dem
+            # Lesestatus des aktuell ausgewählten Tolino-Kontos.
             self.rows.append(row)
         # Ausgewählte Aktionen zuerst, dann Titel/Autor(en).
         self.rows = sort_comparison_rows(self.rows)
@@ -197,7 +191,7 @@ class InventoryDialog(QDialog):
         self.note = QLabel(self._automatic_note())
         self.note.setWordWrap(True)
         if not self.note.text() and any(
-                row.get("read_known") is False for row in self.rows):
+                not ReadState.from_row(row).known for row in self.rows):
             self.note.setText(
                 "Lesestatus unbekannt: konnte nicht geladen werden und "
                 "wird nicht verändert.")
@@ -211,15 +205,12 @@ class InventoryDialog(QDialog):
         """Gruppenfilter, Empfehlung/Auswahl und Zeilenaktionen."""
         helpers = QHBoxLayout()
         self.group_filter = QComboBox()
-        try:
-            for label, key in self.GROUP_FILTERS:
-                self.group_filter.addItem(label, key)
-            self.group_filter.setToolTip(
-                "Filtert nach Aktion, Cloud-Bestand, Prüfung oder unverändert.")
-            self.group_filter.currentIndexChanged.connect(
-                self._apply_group_filter)
-        except AttributeError:
-            pass  # minimaler Qt-Stub ohne Kombobox-Methoden
+        for label, key in self.GROUP_FILTERS:
+            self.group_filter.addItem(label, key)
+        self.group_filter.setToolTip(
+            "Filtert nach Aktion, Cloud-Bestand, Prüfung oder unverändert.")
+        self.group_filter.currentIndexChanged.connect(
+            self._apply_group_filter)
         self.recommend = QPushButton("Empfohlene Aktionen auswählen")
         self.recommend.setToolTip(
             "Wählt Upload oder Metadaten für eindeutig zugeordnete Bücher.")
@@ -250,8 +241,8 @@ class InventoryDialog(QDialog):
         header_tooltips = (
             "Buchdatei in die Cloud hochladen.",
             "Titel, Autor und ISBN ohne Upload aktualisieren.",
-            "Auswahl = gelesen; keine Auswahl = ungelesen. Mit der "
-            "Calibre-Spalte #tolino_read gilt das für beide Seiten.",
+            "Auswahl = gelesen; keine Auswahl = ungelesen. Die Calibre-Spalte "
+            "#tolino_read ist nur informativ.",
             "Buch in Calibre vorhanden.",
             "Buch im ausgewählten tolino-Konto vorhanden.",
             "Buchtitel", "Autor(en)",
@@ -270,11 +261,8 @@ class InventoryDialog(QDialog):
         self._sort_column = 0
         self._sort_descending = False
         table_header = self.table.horizontalHeader()
-        try:
-            table_header.setSortIndicatorShown(True)
-            table_header.setSortIndicator(0, Qt.AscendingOrder)
-        except Exception:
-            pass  # Sortieranzeige ist nur Kosmetik
+        table_header.setSortIndicatorShown(True)
+        table_header.setSortIndicator(0, Qt.AscendingOrder)
         table_header.sectionClicked.connect(self._sort_by_column)
         self._rebuild_table(self.rows)
         layout.addWidget(self.table)
@@ -329,46 +317,27 @@ class InventoryDialog(QDialog):
 
     def _apply_technical_visibility(self):
         for column in self.TECHNICAL_COLUMNS:
-            try:
-                self.table.setColumnHidden(column, not self._technical_visible)
-            except Exception:
-                pass  # Qt-Stub ohne Spaltenverstecken
+            self.table.setColumnHidden(column, not self._technical_visible)
 
-    def _wire_read_check(self, index, check):
-        """Lesestatus mit einem Klick auswählen.
+    def _read_state(self, row):
+        """Lesestatus der Zeile; normalisiert auch von Hand gebaute Zeilen."""
+        state = ReadState.from_row(row)
+        row["read"] = state
+        return state
 
-        Die Übertragung in die Cloud passiert erst mit
-        «Synchronisierung starten»; die Zusammenfassung zählt die Änderungen.
-        """
-        clicked = getattr(check, "clicked", None)
-        if clicked is not None:
-            try:
-                clicked.connect(
-                    lambda _checked=False, i=index: self._read_clicked(i))
-            except Exception:
-                pass  # Qt-Stub ohne echtes Signal
-        if (self.rows[index].get("tolino_id")
-                and not self.rows[index].get("delete_cloud")
-                and self.rows[index].get("read_known", True) is not False):
-            check.setToolTip(self.READ_TOOLTIP)
-
-    def _read_clicked(self, index):
-        """Lesestatus mit einem Klick auswählen."""
-        if not 0 <= index < len(self.rows):
-            return
-        row = self.rows[index]
-        check = self.read_checks[index]
-        row["read"] = bool(check.isChecked())
-        # Ein Klick entscheidet auch einen Konflikt mit #tolino_read.
-        row["read_sync"] = True
-        self._update_summary()
-
-    def _sync_checks_to_rows(self):
-        for row, upload, metadata, read in zip(
-                self.rows, self.checks, self.meta_checks, self.read_checks):
-            row["upload"] = bool(upload.isChecked())
-            row["metadata"] = bool(metadata.isChecked())
-            row["read"] = bool(read.isChecked())
+    def _choice_changed(self, index, key):
+        """Die Zeile hält die Auswahl; die Checkbox zeigt sie nur an."""
+        if 0 <= index < len(self.rows):
+            row = self.rows[index]
+            checked = bool(
+                (self.checks if key == "upload" else
+                 self.meta_checks if key == "metadata" else
+                 self.read_checks)[index].isChecked())
+            if key == "read":
+                self._read_state(row).chosen = checked
+            else:
+                row[key] = checked
+            self._update_summary()
 
     @staticmethod
     def _set_checked_quietly(check_widget, value):
@@ -393,34 +362,29 @@ class InventoryDialog(QDialog):
         markierte Zeilen bleiben unberührt; «Auswahl zurücksetzen» hebt auch
         die Löschmarkierung auf.
         """
-        self._sync_checks_to_rows()
         if clear_deletions:
-            for row, upload, metadata, read in zip(
-                    self.rows, self.checks, self.meta_checks, self.read_checks):
+            for index, row in enumerate(self.rows):
                 row.pop("delete_cloud", None)
                 row["upload"] = row["metadata"] = False
-                row["read"] = bool(row.get("read_in_cloud"))
-                row["read_sync"] = False
-                for check, checked in ((upload, False), (metadata, False),
-                                       (read, row["read"])):
-                    self._set_checked_quietly(check, checked)
+                state = self._read_state(row)
+                state.chosen = state.cloud
+                for check in (self.checks[index], self.meta_checks[index]):
+                    self._set_checked_quietly(check, False)
             if getattr(self, "table", None) is not None:
                 self._rebuild_table(self.rows)
             else:
                 self._update_summary()
             return
-        for row, upload_check, metadata_check, read_check in zip(
-                self.rows, self.checks, self.meta_checks, self.read_checks):
+        for index, row in enumerate(self.rows):
+            upload_check = self.checks[index]
+            metadata_check = self.meta_checks[index]
             if row.get("delete_cloud") or row.get("ignored"):
                 continue
             wanted = tuple(chooser(row))
             upload, metadata = bool(wanted[0]), bool(wanted[1])
-            read = bool(row.get("read_default", row.get("read_in_cloud")))
-            row.update(upload=upload, metadata=metadata, read=read,
-                       read_sync=bool(row.get("read_sync_default")))
+            row.update(upload=upload, metadata=metadata)
             for check, checked in ((upload_check, upload),
-                                   (metadata_check, metadata),
-                                   (read_check, read)):
+                                   (metadata_check, metadata)):
                 self._set_checked_quietly(check, checked)
         self._update_summary()
 
@@ -447,9 +411,7 @@ class InventoryDialog(QDialog):
         """
         return (len(self.selected_upload_ids())
                 + len(self.selected_metadata_ids())
-                + len(self.selected_read_targets())
-                + len(self.selected_read_unmarks())
-                + len(self.selected_calibre_read_updates())
+                + len(self.selected_read_changes())
                 + len(self.selected_cloud_deletions()))
 
     def automatic_actions_enabled(self):
@@ -493,67 +455,32 @@ class InventoryDialog(QDialog):
 
     def selected_upload_ids(self):
         """Bücher, deren Datei hochgeladen werden soll."""
-        return {row["book_id"] for row, check in zip(self.rows, self.checks)
-                if check.isChecked() and not row.get("ignored")
+        return {row["book_id"] for row in self.rows
+                if row.get("upload") and not row.get("ignored")
                 and row.get("book_id") is not None}
 
     def selected_metadata_ids(self):
         """Bücher, deren Cloud-Metadaten aktualisiert werden sollen."""
-        return {row["book_id"] for row, check in zip(self.rows, self.meta_checks)
-                if check.isChecked() and not row.get("ignored")
+        return {row["book_id"] for row in self.rows
+                if row.get("metadata") and not row.get("ignored")
                 and row.get("book_id") is not None}
 
-    def selected_read_targets(self):
-        """tolino-IDs, die jetzt als gelesen markiert werden.
+    def selected_read_changes(self):
+        """(tolino-ID, Calibre-Nummer, gelesen?) der offenen Änderungen.
 
-        Schon gelesene Bücher fallen heraus; übertragen wird nur eine Änderung.
+        Die Zeile kennt Cloud-Stand und Auswahl; übertragen wird nur die
+        Abweichung. Die Calibre-Nummer wandert mit, damit der bestätigte
+        Stand ohne zweite Suche in die Spalte #tolino_read wandert.
         """
-        return [str(row["tolino_id"])
-                for row, check in zip(self.rows, self.read_checks)
-                if check.isChecked() and row.get("tolino_id")
-                and not row.get("delete_cloud") and not row.get("read_in_cloud")
-                and not row.get("ignored")]
-
-    def selected_read_unmarks(self):
-        """tolino-IDs, deren Lesestatus jetzt auf ungelesen gesetzt wird.
-
-        Nur gelesene Bücher, deren Auswahl entfernt wurde; alle anderen
-        behalten ihren Lesestatus.
-        """
-        return [str(row["tolino_id"])
-                for row, check in zip(self.rows, self.read_checks)
-                if not check.isChecked() and row.get("tolino_id")
-                and not row.get("delete_cloud") and row.get("read_in_cloud")
-                and not row.get("ignored")]
-
-    def selected_read_sync(self):
-        """Abgleich mit #tolino_read: ein Eintrag je entschiedenem Buch.
-
-        ``value`` ist der Lesestatus, der danach in Calibre UND tolino gilt;
-        ``write_calibre`` sagt, ob die Calibre-Spalte dafür geändert wird.
-        Konflikte ohne Klick und Bücher zum Löschen fallen heraus.
-        """
-        items = []
-        for row, check in zip(self.rows, self.read_checks):
-            if (not row.get("read_column") or not row.get("read_sync")
-                    or row.get("book_id") is None or not row.get("tolino_id")
-                    or row.get("read_known") is False
-                    or row.get("delete_cloud")):
+        changes = []
+        for row in self.rows:
+            tolino_id = row.get("tolino_id")
+            state = self._read_state(row)
+            if (not tolino_id or row.get("ignored") or row.get("delete_cloud")
+                    or not state.changed):
                 continue
-            value = bool(check.isChecked())
-            items.append({
-                "book_id": row["book_id"],
-                "book_uuid": str(row.get("uuid") or ""),
-                "tolino_id": str(row["tolino_id"]),
-                "value": value,
-                "write_calibre": row.get("read_local") is not value,
-            })
-        return items
-
-    def selected_calibre_read_updates(self):
-        """Bücher, deren #tolino_read-Wert sich ändert."""
-        return [item for item in self.selected_read_sync()
-                if item["write_calibre"]]
+            changes.append((str(tolino_id), row.get("book_id"), state.chosen))
+        return changes
 
     def _marked_row_indexes(self):
         """Markierte Zeilen -- oder ein Hinweis, wenn keine markiert ist."""
@@ -578,48 +505,24 @@ class InventoryDialog(QDialog):
         actions = {}
         row_indexes = [index for index in marked
                        if 0 <= index < len(self.rows)]
-        cloud_rows = [self.rows[index] for index in row_indexes
-                      if self.rows[index].get("tolino_id")]
-        has_cloud = bool(cloud_rows)
-        has_upload_selected = any(self.rows[index].get("upload")
-                                  for index in row_indexes)
-        has_metadata_selected = any(self.rows[index].get("metadata")
-                                    for index in row_indexes)
-        has_metadata_target = any(
-            self.rows[index].get("book_id") is not None
-            and self.rows[index].get("tolino_id")
-            and not self.rows[index].get("metadata")
-            for index in row_indexes)
-        has_unread_target = any(
-            self.rows[index].get("tolino_id") and not self.rows[index].get("read")
-            for index in row_indexes)
-        has_read_target = any(
-            self.rows[index].get("tolino_id") and self.rows[index].get("read")
-            for index in row_indexes)
-        has_deletions = any(self.rows[index].get("delete_cloud")
-                            for index in row_indexes)
+        predicates = {
+            "upload_on": lambda row: (
+                row.get("book_id") is not None and not row.get("upload")
+                and row.get("has_preferred_format", True)),
+            "upload_off": lambda row: bool(row.get("upload")),
+            "metadata_on": lambda row: (
+                row.get("book_id") is not None and row.get("tolino_id")
+                and not row.get("metadata")),
+            "metadata_off": lambda row: bool(row.get("metadata")),
+            "read": lambda row: row.get("tolino_id") and not row.get("read"),
+            "read_off": lambda row: row.get("tolino_id") and row.get("read"),
+            "download": lambda row: bool(row.get("tolino_id")),
+            "cloud_delete": lambda row: bool(row.get("tolino_id")),
+            "cloud_delete_off": lambda row: bool(row.get("delete_cloud")),
+        }
         for label, key in self.ROW_ACTIONS:
-            if key == "download" and not has_cloud:
-                continue
-            if key == "cloud_delete" and not has_cloud:
-                continue
-            if key == "metadata_on" and not has_metadata_target:
-                continue
-            if key == "metadata_off" and not has_metadata_selected:
-                continue
-            if key == "read" and not has_unread_target:
-                continue
-            if key == "read_off" and not has_read_target:
-                continue
-            if key == "cloud_delete_off" and not has_deletions:
-                continue
-            if key == "upload_on" and not any(
-                    self.rows[index].get("book_id") is not None
-                    and not self.rows[index].get("upload")
-                    and self.rows[index].get("has_preferred_format", True)
-                    for index in row_indexes):
-                continue
-            if key == "upload_off" and not has_upload_selected:
+            if not any(predicates[key](self.rows[index])
+                       for index in row_indexes):
                 continue
             actions[menu.addAction(label)] = key
         position = self.row_actions.mapToGlobal(
@@ -709,10 +612,7 @@ class InventoryDialog(QDialog):
         label = getattr(self, "action_feedback", None)
         if label is None:
             return
-        try:
-            label.setText(text)
-        except Exception:
-            pass  # Qt-Stub ohne Text
+        label.setText(text)
 
     @staticmethod
     def _column_applies(key, row):
@@ -737,29 +637,15 @@ class InventoryDialog(QDialog):
             return False
         if key == "read":
             check = self.read_checks[index]
-            if row.get("read_known") is False:
+            state = self._read_state(row)
+            if not state.known or state.chosen == bool(value):
                 return False
-            if row.get("read_column"):
-                # Mit #tolino_read zählt auch Calibre: dieselbe Auswahl wie
-                # in tolino kann die Calibre-Spalte noch ändern oder einen
-                # Konflikt entscheiden.
-                if (bool(row.get("read")) == bool(value)
-                        and bool(check.isChecked()) == bool(value)
-                        and row.get("read_sync")
-                        and row.get("read_local") is bool(value)):
-                    return False
-                row["read_sync"] = True
-                row[key] = bool(value)
-                self._set_checked_quietly(check, bool(value))
-                return True
-            if ((value and row.get("read_in_cloud"))
-                    or (not value and not row.get("read_in_cloud"))):
-                return False
+            state.chosen = bool(value)
         else:
             check = (self.checks if key == "upload" else self.meta_checks)[index]
-        if bool(row.get(key)) == bool(value) and bool(check.isChecked()) == bool(value):
-            return False
-        row[key] = bool(value)
+            if bool(row.get(key)) == bool(value):
+                return False
+            row[key] = bool(value)
         self._set_checked_quietly(check, bool(value))
         return True
 
@@ -767,9 +653,8 @@ class InventoryDialog(QDialog):
         """Spaltenkopf anklicken: aufsteigend <-> absteigend umschalten."""
         if not 0 <= column < len(self._SORT_KEYS):
             return
-        # Auswahlzustand zuerst in die Zeilen retten, sonst geht nach dem
-        # Umsortieren die Auswahl verloren.
-        self._sync_checks_to_rows()
+        # Die Zeilen sind die einzige Quelle der Auswahl; Checkboxen werden
+        # beim Neuaufbau aus ihnen erzeugt.
         if self._sort_column == column:
             self._sort_descending = not self._sort_descending
         else:
@@ -777,26 +662,92 @@ class InventoryDialog(QDialog):
             self._sort_descending = False
         ordered = sorted(self.rows, key=self._SORT_KEYS[column],
                          reverse=self._sort_descending)
-        try:
-            self.table.horizontalHeader().setSortIndicator(
-                column,
-                Qt.DescendingOrder if self._sort_descending
-                else Qt.AscendingOrder)
-        except Exception:
-            pass  # Sortieranzeige ist nur Kosmetik
+        self.table.horizontalHeader().setSortIndicator(
+            column,
+            Qt.DescendingOrder if self._sort_descending
+            else Qt.AscendingOrder)
         self._rebuild_table(ordered)
+
+    def _action_check_specs(self, row):
+        """Return enabled state and tooltips for this row's action checks."""
+        has_book = row.get("book_id") is not None
+        in_cloud = bool(row.get("tolino_id"))
+        delete_cloud = bool(row.get("delete_cloud"))
+        read_known = self._read_state(row).known
+        ignored = bool(row.get("ignored"))
+        delete_tooltip = (
+            "Zum Löschen aus tolino markiert – zuerst "
+            "«Löschmarkierung aufheben».")
+        ignored_tooltip = ("In Calibre ignoriert (%s) – wird nicht "
+                           "abgeglichen." % TOLINO_IGNORE_COLUMN)
+        return (
+            ("upload", has_book and not delete_cloud and not ignored
+             and row.get("has_preferred_format", True),
+             "Buchdatei in die Cloud hochladen.",
+             ("Nur in tolino – es gibt keine Calibre-Datei zum Hochladen."
+              if not has_book else
+              "Kein Buchformat aus den Upload-Formaten vorhanden.")),
+            ("metadata", has_book and in_cloud and not delete_cloud
+             and not ignored,
+             "Titel, Autor und ISBN in der Cloud aktualisieren, ohne "
+             "Upload.",
+             "Nur in Calibre – es gibt in tolino nichts zu "
+             "aktualisieren." if has_book else
+             "Kein Calibre-Buch – nichts zu aktualisieren."),
+            ("read", in_cloud and read_known and not delete_cloud
+             and not ignored,
+             self.READ_TOOLTIP + " Im ausgewählten tolino-Konto änderbar.",
+             "Lesestatus unbekannt – nicht geladen." if in_cloud else
+             "Geht erst, wenn das Buch in tolino liegt."),
+        ), delete_cloud, ignored, delete_tooltip, ignored_tooltip
+
+    def _build_action_checks(self, row_index, row):
+        """Create the three selection cells for one book row."""
+        checks, delete_cloud, ignored, delete_tooltip, ignored_tooltip = \
+            self._action_check_specs(row)
+        for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
+            check = QCheckBox()
+            check.setChecked(bool(row.get(key)) and not delete_cloud)
+            check.setEnabled(enabled)
+            if (key == "upload" and row.get("match_reason") in
+                    ("title_only", "ambiguous")):
+                tooltip = "Kann ein Duplikat erzeugen."
+            check.setToolTip(
+                ignored_tooltip if ignored
+                else tooltip if enabled
+                else (delete_tooltip if delete_cloud else disabled_tooltip))
+            state_signal = getattr(check, "stateChanged", None)
+            state_signal.connect(
+                lambda _state, i=row_index, k=key:
+                self._choice_changed(i, k))
+            (self.checks, self.meta_checks,
+             self.read_checks)[column].append(check)
+            self.table.setCellWidget(row_index, column, check)
+
+    def _row_display_values(self, row, has_book, in_cloud):
+        """Render explanation and the non-action cells for one comparison row."""
+        explanation = str(row.get("explanation", "") or "")
+        if in_cloud and not ReadState.from_row(row).known:
+            explanation = (explanation + " Lesestatus unbekannt.").strip()
+        elif in_cloud and has_book and row.get("read_column"):
+            note = self._read_note(row)
+            if note:
+                explanation = (explanation + " " + note).strip()
+        if row.get("delete_cloud"):
+            explanation = (explanation + " Wird beim Start aus tolino gelöscht.").strip()
+        return (
+            "✓" if has_book else "",
+            "✓" if in_cloud else "",
+            row.get("title", ""), row.get("authors", ""), explanation,
+            row.get("isbn", ""), row.get("tolino_id", ""), row.get("uuid", ""),
+        )
 
     def _rebuild_table(self, rows):
         """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen."""
-        # Ein Aufbau mit hunderten Zeilen soll nicht nach jeder Zelle neu
-        # zeichnen; der Qt-Stub kennt die Methode nicht.
-        updates = getattr(self.table, "setUpdatesEnabled", None)
-        if callable(updates):
-            try:
-                updates(False)
-            except Exception:
-                updates = None
-        self.rows = list(rows)
+        self.table.setUpdatesEnabled(False)
+        # Zeilen sind die einzige Quelle -- auch wenn ein Aufrufer oder Test
+        # sie als rohes Dict übergibt.
+        self.rows = [dict(row, read=ReadState.from_row(row)) for row in rows]
         self.checks = []
         self.meta_checks = []
         self.read_checks = []
@@ -805,87 +756,8 @@ class InventoryDialog(QDialog):
         for row_index, row in enumerate(self.rows):
             has_book = row.get("book_id") is not None
             in_cloud = bool(row.get("tolino_id"))
-            # Zum Löschen markiert: keine andere Aktion mehr anbieten, sonst
-            # würde dieselbe Cloud-Kopie erst hochgeladen und dann gelöscht.
-            delete_cloud = bool(row.get("delete_cloud"))
-            delete_tooltip = (
-                "Zum Löschen aus tolino markiert – zuerst "
-                "«Löschmarkierung aufheben».")
-            # Unbekannter Lesestatus bleibt gesperrt und wird nicht geändert.
-            read_known = row.get("read_known", True) is not False
-            # In Calibre ignorierte Bücher bleiben sichtbar, sind aber in
-            # keiner Richtung wählbar.
-            ignored = bool(row.get("ignored"))
-            ignored_tooltip = ("In Calibre ignoriert (%s) – wird nicht "
-                               "abgeglichen." % TOLINO_IGNORE_COLUMN)
-            checks = (
-                ("upload", has_book and not delete_cloud and not ignored
-                 and row.get("has_preferred_format", True),
-                 "Buchdatei in die Cloud hochladen.",
-                 ("Nur in tolino – es gibt keine Calibre-Datei zum Hochladen."
-                  if not has_book else
-                  "Kein Buchformat aus den Upload-Formaten vorhanden.")),
-                ("metadata", has_book and in_cloud and not delete_cloud
-                 and not ignored,
-                 "Titel, Autor und ISBN in der Cloud aktualisieren, ohne "
-                 "Upload.",
-                 "Nur in Calibre – es gibt in tolino nichts zu "
-                 "aktualisieren." if has_book else
-                 "Kein Calibre-Buch – nichts zu aktualisieren."),
-                # In der Cloud liegende Bücher sind in BEIDE Richtungen
-                # anklickbar: gelesen markieren und wieder ungelesen setzen.
-                # Schon gelesene Bücher sind zusätzlich gesperrt -- der erste
-                # Klick löst nur die Sperre.
-                ("read", in_cloud and read_known and not delete_cloud
-                 and not ignored,
-                 "Im tolino-Konto als gelesen markieren.",
-                 "Lesestatus unbekannt – nicht geladen." if in_cloud else
-                 "Geht erst, wenn das Buch in tolino liegt."),
-            )
-            for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
-                check = QCheckBox()
-                check.setChecked(bool(row.get(key)) and not delete_cloud)
-                check.setEnabled(enabled)
-                if (key == "upload" and row.get("match_reason") in
-                        ("title_only", "ambiguous")):
-                    tooltip = "Kann ein Duplikat erzeugen."
-                check.setToolTip(
-                    ignored_tooltip if ignored
-                    else tooltip if enabled
-                    else (delete_tooltip if delete_cloud
-                          else disabled_tooltip))
-                state_signal = getattr(check, "stateChanged", None)
-                if state_signal is not None:
-                    try:
-                        state_signal.connect(self._update_summary)
-                    except Exception:
-                        pass  # Qt-Stub ohne echtes Signal
-                if column == 2:
-                    self._wire_read_check(row_index, check)
-                (self.checks, self.meta_checks,
-                 self.read_checks)[column].append(check)
-                self.table.setCellWidget(row_index, column, check)
-            explanation = str(row.get("explanation", "") or "")
-            if in_cloud and not read_known:
-                explanation = (explanation + " Lesestatus unbekannt.").strip()
-            elif in_cloud and has_book and row.get("read_column"):
-                note = self._read_note(row)
-                if note:
-                    explanation = (explanation + " " + note).strip()
-            if delete_cloud:
-                explanation = (
-                    explanation + " Wird beim Start aus tolino gelöscht."
-                ).strip()
-            values = (
-                "✓" if has_book else "",
-                "✓" if in_cloud else "",
-                row.get("title", ""),
-                row.get("authors", ""),
-                explanation,
-                row.get("isbn", ""),
-                row.get("tolino_id", ""),
-                row.get("uuid", ""),
-            )
+            self._build_action_checks(row_index, row)
+            values = self._row_display_values(row, has_book, in_cloud)
             for column, value in enumerate(values, 3):
                 self.table.setItem(
                     row_index, column, QTableWidgetItem(str(value or "")))
@@ -893,29 +765,17 @@ class InventoryDialog(QDialog):
         self._size_columns()
         self._apply_technical_visibility()
         self._apply_group_filter()
-        if callable(updates):
-            try:
-                updates(True)
-            except Exception:
-                pass
+        self.table.setUpdatesEnabled(True)
         self._update_summary()
 
     @staticmethod
     def _read_note(row):
-        """Hinweis zum Abgleich mit #tolino_read (leer = nichts zu sagen)."""
-        def word(value):
-            return {True: "gelesen", False: "ungelesen"}.get(value, "leer")
-        local = row.get("read_local")
-        cloud = bool(row.get("read_in_cloud"))
-        if row.get("read_conflict"):
-            return ("Lesestatus widersprüchlich (Calibre: %s, tolino: %s) "
-                    "– per Klick entscheiden." % (word(local), word(cloud)))
-        source = row.get("read_source")
-        if source == "calibre":
-            return "Lesestatus aus Calibre (%s)." % word(local)
-        if source == "tolino":
-            return "Lesestatus aus tolino (%s)." % word(cloud)
-        return ""
+        """Informative Calibre-Spaltenanzeige ohne Einfluss auf Auswahl."""
+        local = ReadState.from_row(row).local
+        if local is None:
+            return "Calibre-Lesestatus: leer."
+        return "Calibre-Lesestatus: %s." % (
+            "gelesen" if local else "ungelesen")
 
     def _size_columns(self):
         """Schmale Standardansicht: Textspalten wachsen, Rest bleibt kompakt.
@@ -923,16 +783,11 @@ class InventoryDialog(QDialog):
         Ohne das erzwingen Titel und Hinweis eine sehr breite Tabelle und
         damit eine Mindestbreite weit über einem 1366x768-Fenster.
         """
-        try:
-            from qt.core import QHeaderView
-            header = self.table.horizontalHeader()
-            for column in (5, 7):
-                header.setSectionResizeMode(column, QHeaderView.Stretch)
-            for column in (0, 1, 2, 3, 4, 6):
-                header.setSectionResizeMode(column,
-                                            QHeaderView.ResizeToContents)
-        except Exception:
-            pass  # Qt-Stub oder aeltere Qt-Version: keine Spaltenbreiten
+        header = self.table.horizontalHeader()
+        for column in (5, 7):
+            header.setSectionResizeMode(column, header_mode("Stretch"))
+        for column in (0, 1, 2, 3, 4, 6):
+            header.setSectionResizeMode(column, header_mode("ResizeToContents"))
 
     def _apply_group_filter(self, *_args):
         """Gruppenfilter ohne die Zeilen/Wahlzustaende zu verlieren.
@@ -940,27 +795,20 @@ class InventoryDialog(QDialog):
         Es werden nur Tabellenzeilen versteckt; `self.rows` bleibt die
         vollstaendige Liste, damit Auswahl und Sortierung unberuehrt bleiben.
         """
-        try:
-            combo = getattr(self, "group_filter", None)
-            selected = combo.currentData() if combo is not None else None
-        except Exception:
-            selected = None
+        combo = getattr(self, "group_filter", None)
+        selected = combo.currentData() if combo is not None else None
         for index, row in enumerate(getattr(self, "rows", ())):
             visible = selected is None or row.get("group") == selected
-            hide = getattr(self.table, "setRowHidden", None)
-            if hide is not None:
-                try:
-                    hide(index, not visible)
-                except Exception:
-                    pass  # Qt-Stub ohne Zeilenverstecken
+            self.table.setRowHidden(index, not visible)
 
     def _update_summary(self, *_args):
         """Kurzzeile: wie viele Aktionen gerade ausgewählt sind."""
         uploads = len(self.selected_upload_ids())
         metadata = len(self.selected_metadata_ids())
-        marked_read = len(self.selected_read_targets())
-        marked_unread = len(self.selected_read_unmarks())
-        calibre_read = len(self.selected_calibre_read_updates())
+        read_changes = self.selected_read_changes()
+        marked_read = sum(1 for _tolino, _book, finished in read_changes
+                          if finished)
+        marked_unread = len(read_changes) - marked_read
         deletions = len(self.selected_cloud_deletions())
         changes = marked_read + marked_unread
         summary = getattr(self, "summary", None)
@@ -973,8 +821,6 @@ class InventoryDialog(QDialog):
                 summary_text += (
                     " (davon %d gelesen, %d ungelesen)"
                     % (marked_read, marked_unread))
-            if calibre_read:
-                summary_text += " · %d Lesestatus in Calibre" % calibre_read
             if deletions:
                 summary_text += " · %d %s" % (
                     deletions, plural(deletions, "Löschung", "Löschungen"))
@@ -986,7 +832,7 @@ class InventoryDialog(QDialog):
             summary.setText(summary_text)
         confirm = getattr(self, "confirm", None)
         if confirm is not None:
-            total = uploads + metadata + changes + calibre_read + deletions
+            total = uploads + metadata + changes + deletions
             confirm.setText("Synchronisierung starten (%d)" % total
                             if total else "Synchronisierung starten")
             confirm.setEnabled(total > 0 or self.automatic_actions_enabled())
@@ -1055,7 +901,6 @@ class InventoryDialog(QDialog):
 
     def _end_action(self):
         self._call_thread = None
-        self._call_worker = None
         self._set_action_busy(False)
 
     def _set_action_busy(self, busy, text=""):
@@ -1063,13 +908,10 @@ class InventoryDialog(QDialog):
         summary = getattr(self, "summary", None)
         if summary is None:
             return
-        try:
-            if busy:
-                summary.setText(text or "Verbindung zu tolino …")
-            else:
-                self._update_summary()
-        except Exception:
-            pass  # noch nicht aufgebaute Oberflaeche
+        if busy:
+            summary.setText(text or "Verbindung zu tolino …")
+        else:
+            self._update_summary()
 
     def download_selected(self):
         row = self._selected_row()
@@ -1163,7 +1005,6 @@ class InventoryDialog(QDialog):
                 "in tolino oder sind bereits zum Löschen markiert.")
             return
         # Die endgültige Löschliste wird einmalig vor dem Sync bestätigt.
-        self._sync_checks_to_rows()
         for row in candidates:
             row["delete_cloud"] = True
             row["upload"] = False
@@ -1176,7 +1017,6 @@ class InventoryDialog(QDialog):
         if not marked:
             return
         changed = 0
-        self._sync_checks_to_rows()
         for index in marked:
             if 0 <= index < len(self.rows):
                 if self.rows[index].pop("delete_cloud", None) is not None:

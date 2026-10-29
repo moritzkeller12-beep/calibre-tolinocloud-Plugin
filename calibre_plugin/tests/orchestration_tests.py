@@ -17,9 +17,9 @@ tearDownModule = stop_cdp_stubs
 def _preparation(**overrides):
     """Leerer Sync-Plan; Tests überschreiben nur, was sie brauchen."""
     preparation = {"jobs": [], "removals": [], "removal_titles": {},
-                   "meta_updates": [], "series_map": {},
-                   "skipped_uploads": [], "selected_read": [],
-                   "selected_unread": [], "selected_without_action": {}}
+                   "meta_updates": [], "series_map": {}, "collections": 0,
+                   "skipped_uploads": [], "read_changes": [],
+                   "selected_without_action": {}}
     preparation.update(overrides)
     return preparation
 
@@ -52,7 +52,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         dashboard._effective_refresh = lambda: str(
             (settings or {}).get("refresh_token") or "")
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = None
+        dashboard.columns = {}
         return dashboard
 
     @staticmethod
@@ -92,12 +92,11 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             # `titles` wird bewusst nur entgegengenommen: die
             # Tests pruefen die Uebergabe, nicht die Anzeige.
             def __init__(self, settings, jobs, removals, meta_updates=None,
-                         series_map=None, selected_read=(),
-                         selected_unread=(), titles=None, read_sync=None):
+                         series_map=None, read_changes=None,
+                         titles=None, state=None):
                 self.arguments = (settings, jobs, removals, meta_updates,
-                                  series_map, selected_read, selected_unread)
+                                  series_map, read_changes)
                 self.titles = titles
-                self.read_sync = read_sync
                 self.progress = FakeSignal()
                 self.completed = FakeSignal()
                 self.failed = FakeSignal()
@@ -134,7 +133,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertEqual(["metadata", "prepare"], [item[0] for item in seen])
         self.assertIs(settings, seen[1][1])
         self.assertIs(metadata, seen[1][2])
-        self.assertTrue(settings["sync_column_enabled"])
+        self.assertTrue(settings["columns"]["id"])
 
     def test_sync_column_availability_accepts_calibre_field_metadata(self):
         ui_module = self._ui_module()
@@ -161,7 +160,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                               "local_metadata", return_value={}):
                 dashboard._start_prepare_worker = lambda *_args: None
                 dashboard.start_sync()
-            self.assertTrue(dashboard.sync_column_enabled)
+            self.assertTrue(dashboard.columns.get("id"))
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
@@ -198,8 +197,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                                       "local_metadata", return_value={}):
                         dashboard._start_prepare_worker = lambda *_args: None
                         dashboard.start_sync()
-                    self.assertIs(expected, dashboard.sync_column_enabled)
-                    self.assertIs(expected, settings["sync_column_enabled"])
+                    self.assertIs(expected, dashboard.columns.get("id"))
+                    self.assertIs(expected, settings["columns"]["id"])
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
@@ -302,9 +301,10 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             preparation = {
                 "jobs": jobs, "removals": ["remove-1"],
                 "meta_updates": [("uuid-1", 7)],
-                "series_map": {"uuid-serie": "Reihe"},
-                "skipped_uploads": [], "selected_read": {"t-read"},
-                "selected_unread": {"t-unread"},
+                "series_map": {"uuid-serie": "Reihe"}, "collections": 1,
+                "skipped_uploads": [],
+                "read_changes": [("t-read", None, True),
+                                 ("t-unread", None, False)],
             }
             # Offene Serien-Zuordnung: das Buch hat eine Tolino-ID und noch
             # keinen gemerkten Sammlungs-Eintrag.
@@ -317,8 +317,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertEqual(["remove-1"], dashboard.worker.arguments[2])
         self.assertEqual([("uuid-1", 7)], dashboard.worker.arguments[3])
         self.assertEqual({"uuid-serie": "Reihe"}, dashboard.worker.arguments[4])
-        self.assertEqual({"t-read"}, dashboard.worker.arguments[5])
-        self.assertEqual({"t-unread"}, dashboard.worker.arguments[6])
+        self.assertEqual([("t-read", None, True), ("t-unread", None, False)],
+                         dashboard.worker.arguments[5])
         self.assertIs(dashboard.thread, dashboard.worker.moved_to)
         self.assertEqual(1, dashboard.thread.starts)
         self.assertEqual(1, len(dashboard.worker.progress.slots))
@@ -332,10 +332,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertIn("1 Löschung", labels[0])
         self.assertEqual([True], status_updates)
 
-    def test_prepare_ready_stores_the_rotated_token_in_the_account(self):
-        """Der SyncWorker darf nie den verbrauchten Token der Vorbereitung
-        bekommen: die Rotation steht im Konto, und von dort liest der Store
-        sie -- der uebergebene Snapshot traegt sie gar nicht mehr."""
+    def test_prepare_ready_ignores_a_token_in_the_payload(self):
+        """A token snapshot may be stale; only the client callback persists it."""
         ui_module = self._ui_module()
         original_preferences = config.PREFERENCES
         try:
@@ -351,7 +349,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard._client_for = lambda given: object()
             dashboard._confirm_comparison = (
                 lambda comp, given, client_factory=None, automatic=0: {
-                    "uploads": [], "metadata": [], "read": [], "unread": [],
+                    "uploads": [], "metadata": [], "read_changes": [],
                     "cloud_deletions": [],
                 })
             started = []
@@ -369,17 +367,11 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                     "metadata": {}, "state": {}, "comparison": [],
                     "refresh": "tok-rotated", "hardware": "hw-rotated",
                 })
-            stored = config.account_by_name("konto")["refresh_token"]
-            worker_store = ui_module.dashboard.CredentialStore(
-                started[0], "konto").freshest()
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
-        self.assertEqual("tok-rotated", stored)
-        self.assertEqual("tok-rotated", worker_store["refresh_token"])
+        self.assertEqual("token-1", started[0]["refresh_token"])
         self.assertEqual("hw-rotated", started[0]["hardware_id"])
-        # Der Snapshot traegt den Token der Vorbereitung nicht mehr: gelesen
-        # wird er aus dem Konto, das ist die einzige Quelle.
 
     def test_skipped_uploads_are_reported_before_the_run(self):
         ui_module = self._ui_module()
@@ -404,7 +396,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard._start_sync_worker(settings, {
                 "jobs": [], "removals": [], "meta_updates": [], "series_map": {},
                 "skipped_uploads": ["Buch 1 (Titel), Format EPUB: fehlt"],
-                "selected_read": set(), "selected_unread": set(),
+                "read_changes": [],
             })
         finally:
             ui_module._restore_stubs_for_tests()
@@ -517,7 +509,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard.thread = None
         dashboard.values = lambda: settings
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = None
+        dashboard.columns = {}
         dashboard.account_name = "konto"
         dashboard.prepare_thread = None
         dashboard.prepare_worker = None
@@ -552,52 +544,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual(1, len(infos))
         self.assertEqual("Nichts zu tun", infos[0][1])
         self.assertIn("nichts zu übertragen", infos[0][2].casefold())
-
-    def test_an_empty_plan_removes_the_planned_cover_files(self):
-        """Temp-Cover entstehen beim Planen; endet der Lauf vorher, dürfen
-        sie nicht bis zum nächsten Start in /tmp liegen bleiben."""
-        ui_module = self._ui_module()
-        ui_module.dashboard.info_dialog = lambda *args, **kwargs: None
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(b"jpg")
-            cover = tmp.name
-        self.addCleanup(lambda: os.path.exists(cover) and os.unlink(cover))
-        dashboard = self._planning_dashboard(ui_module)
-        dashboard.temp_files = [cover]
-        dashboard._start_sync_worker(dashboard.values(), _preparation())
-        self.assertIsNone(dashboard.thread)
-        self.assertFalse(os.path.exists(cover))
-        self.assertEqual([], dashboard.temp_files)
-
-    def test_a_planning_failure_removes_the_planned_cover_files(self):
-        """Auch ein Fehler IN `_plan_actions` darf keine Cover-Datei behalten."""
-        ui_module = self._ui_module()
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(b"jpg")
-            cover = tmp.name
-        self.addCleanup(lambda: os.path.exists(cover) and os.unlink(cover))
-        dashboard = self._planning_dashboard(ui_module)
-        dashboard.temp_files = [cover]
-        dashboard._confirm_comparison = lambda *args, **kwargs: {
-            "uploads": set(), "metadata": set(), "read": [], "unread": [],
-            "cloud_deletions": [],
-        }
-
-        def fail(*args, **kwargs):
-            raise RuntimeError("Planung kaputt")
-
-        errors = []
-        dashboard._show_prepare_error = (
-            lambda exc, settings: errors.append(str(exc)))
-        with patch.object(ui_module.dashboard._dashboard_plan,
-                          "plan_actions", side_effect=fail):
-            dashboard._prepare_ready({
-                "account_name": "konto", "settings": dashboard.values(),
-                "metadata": {}, "state": {}, "comparison": [],
-            })
-        self.assertEqual(["Planung kaputt"], errors)
-        self.assertFalse(os.path.exists(cover))
-        self.assertEqual([], dashboard.temp_files)
 
     def test_the_sync_worker_starts_with_the_stored_token(self):
         """Zwischen Vergleichsfenster und Start kann der Keep-alive den
@@ -667,7 +613,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         ui_module.dashboard.InventoryDialog = lambda *args, **kwargs: dialog
 
         dashboard = self._dashboard(ui_module, settings)
-        dashboard.temp_files = []
         self.assertEqual(2, len(rows))
         selection = dashboard._confirm_comparison(
             rows, settings, client_factory=lambda: None)
@@ -679,12 +624,11 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual(1, len(preparation["jobs"]))
         self.assertEqual([], preparation["skipped_uploads"])
         self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 1, state))
+            preparation, 1))
         # Und der geplante Lauf nennt den Upload auch im Fenster.
         self.assertIn(
             "1 Upload",
-            ui_module.dashboard._dashboard_plan.plan_text(
-                preparation, 1, state))
+            ui_module.dashboard._dashboard_plan.plan_text(preparation, 1))
         dashboard.progress = type("Bar", (), {
             "setRange": lambda self, *args: None,
             "setValue": lambda self, value: None,
@@ -731,7 +675,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
                                            "setText": lambda self, v: None})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = False
+        dashboard.columns = {"id": False, "read": False}
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
@@ -745,15 +689,13 @@ class NoSilentDeadEndTests(unittest.TestCase):
         def boom(*_args, **_kwargs):
             raise OSError("Platte voll")
 
-        with patch("calibre_plugin.ui_dashboard.save_credentials", boom), \
-             patch("calibre_plugin.ui_dashboard.save_account",
-                   lambda *args, **kwargs: None), \
+        with patch("calibre_plugin.ui_dashboard.save_account", boom), \
              patch("calibre_plugin.ui_dashboard.update_tolino_ids",
                    lambda *args, **kwargs: None), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             ui_module.dashboard.SyncDashboard.sync_completed(
-                dashboard, {"u1": {"tolino_id": "new-1"}}, "rot-A", [(1, "new-1")])
+                dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
         # Der Abschlussdialog kommt trotz Speicherfehler: der Upload ist
         # gelaufen und darf nicht als «nichts passiert» erscheinen.
         self.assertEqual(1, len(boxes))
@@ -777,8 +719,7 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
 
     @staticmethod
     def _selection(**overrides):
-        selection = {"uploads": set(), "metadata": set(), "read": [],
-                     "unread": [], "cloud_deletions": []}
+        selection = {"uploads": set(), "metadata": set(), "read_changes": [], "cloud_deletions": []}
         selection.update(overrides)
         return selection
 
@@ -794,9 +735,8 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
         dashboard.thread = None
         dashboard.values = lambda: settings
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.sync_column_enabled = None
+        dashboard.columns = {}
         dashboard.account_name = "konto"
-        dashboard.temp_files = []
         dashboard.prepare_thread = None
         dashboard.prepare_worker = None
         dashboard.update_status = lambda: None
@@ -840,11 +780,10 @@ class ReplacementConfirmationTests(unittest.TestCase):
         return ui_module.common.SyncJob(book_id, "u%d" % book_id, "EPUB",
                                         old_id, "/library/b.epub", None, title)
 
-    def _run(self, ui_module, answer, jobs, temp_files=()):
+    def _run(self, ui_module, answer, jobs):
         settings = CloudCopyAssignmentPlanTests._settings()
         dashboard = CloudCopyAssignmentPlanTests._dashboard(
             self, ui_module, settings)
-        dashboard.temp_files = list(temp_files)
         dashboard.status = type("Label", (), {
             "text_value": "",
             "setText": lambda self, text: setattr(self, "text_value", text),
@@ -865,23 +804,17 @@ class ReplacementConfirmationTests(unittest.TestCase):
             settings, _preparation(jobs=jobs))
         return dashboard, asked
 
-    def test_no_means_no_run_and_no_temp_files(self):
+    def test_no_means_no_run(self):
         ui_module = self._ui()
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(b"jpg")
-            cover = tmp.name
-        self.addCleanup(lambda: os.path.exists(cover) and os.unlink(cover))
         dashboard, asked = self._run(
             ui_module, 0,
-            [self._job(ui_module, 1, "Der Schwarm", "t-0")], [cover])
+            [self._job(ui_module, 1, "Der Schwarm", "t-0")])
         self.assertEqual(1, len(asked))
         # Titel statt Kennung, und die Frage nennt das Loeschen der Kopie.
         self.assertIn("Der Schwarm", asked[0][2])
         self.assertNotIn("u1", asked[0][2])
         self.assertIn("gehen verloren", asked[0][2])
         self.assertIsNone(dashboard.thread)
-        self.assertFalse(os.path.exists(cover))
-        self.assertEqual([], dashboard.temp_files)
         self.assertIn("unverändert", dashboard.status.text_value)
 
     def test_yes_starts_the_run(self):
@@ -917,7 +850,7 @@ class DroppedSelectionCountTests(unittest.TestCase):
             self, ui_module, CloudCopyAssignmentPlanTests._settings())
         settings = CloudCopyAssignmentPlanTests._settings()
         metadata = {1: {"uuid": "u1", "title": "PDF only", "formats": ["PDF"]}}
-        selection = {"uploads": {1}, "metadata": set(), "read": [], "unread": [],
+        selection = {"uploads": {1}, "metadata": set(), "read_changes": [],
                      "cloud_deletions": []}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
             dashboard, settings, metadata, {}, selection)
@@ -973,7 +906,7 @@ class VisibleResultTests(unittest.TestCase):
                         "operations": []},
             "account": {}, "account_name": "konto"})()
         dashboard.finish_thread = lambda: None
-        dashboard.sync_completed({}, None, [])
+        dashboard.sync_completed({}, [])
         self.assertEqual(1, len(seen))
         self.assertIs(True, seen[0].get("show"))
 
@@ -1012,26 +945,35 @@ class EmptyRunAccountingTests(unittest.TestCase):
         return ui_module
 
 
+    @staticmethod
+    def _prepared(ui_module, series_map, state):
+        """Wie `plan_actions`: die offenen Sammlungen einmal zählen."""
+        plan = ui_module.dashboard._dashboard_plan
+        return _preparation(
+            series_map=series_map,
+            collections=len(plan.plan_collection_updates(series_map, state)))
+
     def test_remembered_collections_are_not_a_planned_action(self):
         ui_module = self._ui()
-        preparation = _preparation(series_map={"u1": "Reihe", "u2": "Reihe"})
         state = {"u1": {"tolino_id": "t1", "collections": ["Reihe"]},
                  "u2": {"tolino_id": "t2", "collections": ["Reihe"]}}
+        preparation = self._prepared(
+            ui_module, {"u1": "Reihe", "u2": "Reihe"}, state)
         self.assertEqual(0, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0, state))
+            preparation, 0))
 
     def test_open_collections_still_count(self):
         ui_module = self._ui()
-        preparation = _preparation(series_map={"u1": "Reihe"})
-        state = {"u1": {"tolino_id": "t1"}}
+        preparation = self._prepared(
+            ui_module, {"u1": "Reihe"}, {"u1": {"tolino_id": "t1"}})
         self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0, state))
+            preparation, 0))
 
     def test_plan_text_does_not_promise_remembered_collections(self):
         ui_module = self._ui()
-        preparation = _preparation(series_map={"u1": "Reihe"})
         state = {"u1": {"tolino_id": "t1", "collections": ["Reihe"]}}
-        text = ui_module.dashboard._dashboard_plan.plan_text(preparation, 0, state)
+        preparation = self._prepared(ui_module, {"u1": "Reihe"}, state)
+        text = ui_module.dashboard._dashboard_plan.plan_text(preparation, 0)
         self.assertNotIn("Serie", text)
 
     def test_selected_actions_without_a_plan_are_counted(self):
@@ -1041,7 +983,7 @@ class EmptyRunAccountingTests(unittest.TestCase):
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         # Ohne UUID kann plan_sync das Buch nicht einplanen.
         metadata = {1: {"uuid": "", "title": "Kaputt", "formats": ["EPUB"]}}
-        selection = {"uploads": {1}, "metadata": {1}, "read": [], "unread": [],
+        selection = {"uploads": {1}, "metadata": {1}, "read_changes": [],
                      "cloud_deletions": []}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
             dashboard, StartSyncOrchestrationTests._settings(), metadata, {},
