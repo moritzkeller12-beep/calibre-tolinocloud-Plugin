@@ -1,5 +1,14 @@
 # Änderungen
 
+## 0.1.05
+
+- Qt6-Enums werden durchgängig in der skopierten Schreibweise gesetzt (`Qt.AscendingOrder`, `QTableWidget.SelectRows`, `QLineEdit.Password`); die Test-Stubs kennen keine unscharfen Aliase mehr, die solche Fehler verdeckt hätten.
+- Konto und Optionen eines Laufs stehen in einem expliziten `RunContext`; Metadaten und Sync-Zustand sind eigene Parameter. Die Planungsschicht ist Qt-frei und wird durch einen eigenen Test davor bewahrt, `qt.core` zu laden.
+- Tolino-IDs werden nach Upload und Löschung sofort per fsync in einem kleinen Journal je Konto gesichert; die ganze Konfiguration wird nur noch einmal je Phase und am Laufende geschrieben. Ein Restjournal wird beim Start angewandt und verhindert doppelte Uploads nach einem Abbruch.
+- Der `SyncWorker` bündelt Abbruchprüfung, Fortschritt, Fehlerzählung und Erfolg in `_step()` und pflegt seine Zähler inkrementell, statt nach jedem Schritt über alle Operationen zu laufen.
+- Bulk-«Upload aktivieren» respektiert das bevorzugte Format; die Web-Reader-Erkennung verlangt mindestens 80 Zeichen, die Autoren-Normalisierung trennt «Joe» und «Jo», und die Inventar-Erkennung nutzt kein generisches `id` als Löschkennung.
+- Weitere Härtungen: `config._copy` kopiert tief, `SessionCheckWorker` verträgt fehlende Tokens, `_rebuild_table` gibt die Anzeige auch bei Fehlern wieder frei, `start_call` hält seinen Worker, die Token-Rotation wird nur noch an einer Stelle gespeichert; Tests um Qt-Freiheit und das Zustandsjournal ergänzt.
+
 ## 0.1.04
 
 - `#tolino_read` ist nur noch eine informative Calibre-Spalte; Lesestatusänderungen werden ausschließlich im Vergleichsfenster ausgewählt und an das aktuell gewählte Tolino-Konto übertragen.
