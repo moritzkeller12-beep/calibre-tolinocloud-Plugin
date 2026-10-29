@@ -190,7 +190,6 @@ def start_call(dialog, call, on_done, on_failed):
     thread.finished.connect(thread.deleteLater)
     _keep_thread_alive(thread)
     dialog._call_thread = thread
-    dialog._call_worker = worker
     thread.start()
     return thread
 

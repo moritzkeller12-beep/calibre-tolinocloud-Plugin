@@ -509,49 +509,6 @@ class TolinoClient:
             % (exc.code, self.last_error_text), code="N03",
             short="tolino meldet einen Fehler (HTTP %s)." % exc.code)
 
-        while True:
-            if authenticated and (not self.access or time.time() >= self.expires_at):
-                self.login()
-
-            headers = {"User-Agent": BROWSER_USER_AGENT}
-            if authenticated:
-                headers.update({
-                    "t_auth_token": self.access,
-                    "hardware_id": self.hardware,
-                    "reseller_id": self.partner["reseller_id"],
-                })
-                for key, shared in (("client_type", WEBREADER_CLIENT_TYPE),
-                                    ("client_version", WEBREADER_CLIENT_VERSION)):
-                    headers[key] = shared
-            elif url == self.partner.get("token_url"):
-                headers.update(_browser_sec_headers())
-                headers.update(WEBREADER_TOKEN_HEADERS)
-            if _extra_headers:
-                headers.update(_extra_headers)
-
-            body = None
-            if data is not None:
-                if form:
-                    body = urlencode(data).encode("utf-8")
-                    headers["Content-Type"] = "application/x-www-form-urlencoded"
-                elif isinstance(data, bytes):
-                    body = data
-                    headers["Content-Type"] = content_type or "application/octet-stream"
-                else:
-                    body = json.dumps(data).encode("utf-8")
-                    headers["Content-Type"] = content_type or "application/json"
-
-            request = Request(url, data=body, headers=headers, method=method)
-            try:
-                with urlopen(request, timeout=self.timeout) as response:
-                    self.last_error_text = None
-                    raw = response.read()
-            except HTTPError as exc:
-                handle_error(exc, exc.read().decode("utf-8", "replace"))
-                continue
-            except (URLError, OSError, TimeoutError) as exc:
-                _raise_transport_error(exc, (self.refresh, self.access))
-            return decode(raw)
 
     def inventory(self):
         """Read the PublicationInventory form used by Tolino's API.

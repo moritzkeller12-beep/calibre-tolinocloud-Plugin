@@ -7,7 +7,7 @@
 - Der Vergleichsdialog und die Synchronisierung wurden vereinfacht; der Worker führt Metadaten- und Upload-Schritte jetzt in getrennten Phasen aus.
 - CI ergänzt einen PyQt6-Offscreen-Smoke-Test für den Vergleichsdialog mit echten Qt-Widgets.
 - Behebt «QHeaderView has no attribute Stretch» beim Öffnen des Vergleichsfensters unter Calibre 9: Spaltenbreiten, Meldungsfenster und Dialogcodes werden in der Qt6-Schreibweise gesetzt und funktionieren weiterhin mit Qt5.
-- Token-Verwaltung gestrafft: der Client führt keinen eigenen Lock mehr, der Vault meldet sich einmal unter seinem Lock an; `_request` ist in Aufbau, Fehlerbehandlung und Wiederholung getrennt.
+- Token-Verwaltung gestrafft: der Vault meldet sich einmal unter seinem Lock an, der Client schützt nur seinen eigenen Login; `_request` ist in Aufbau, Fehlerbehandlung und Wiederholung getrennt.
 
 ## 0.1.03
 

@@ -124,27 +124,26 @@ def _same_comparison_fields(metadata, remote):
     return True
 
 
-class ReadState(dict):
+class ReadState:
     """Lesestatus einer Vergleichszeile.
 
-    Ein Typ statt vier loser Schlüssel: ``known`` (Cloud-Antwort lesbar?),
-    ``cloud`` (Stand in tolino), ``chosen`` (Auswahl im Fenster) und
-    ``local`` (Calibre-Spalte, reine Anzeige). Als Dict bleiben die alten
-    Schlüssel lesbar, damit gespeicherte Zeilen und Tests weiterlaufen.
+    Vier Fakten an einem Ort: ``known`` (Cloud-Antwort lesbar?), ``cloud``
+    (Stand in tolino), ``chosen`` (Auswahl im Fenster) und ``local``
+    (Calibre-Spalte, reine Anzeige). ``changed`` ist die einzige Regel,
+    nach der übertragen wird.
     """
 
-    __slots__ = ()
+    __slots__ = ("known", "cloud", "chosen", "local")
 
     def __init__(self, known=True, cloud=False, chosen=None, local=None):
-        super().__init__(
-            read_known=bool(known),
-            read_in_cloud=bool(cloud),
-            read=bool(cloud) if chosen is None else bool(chosen),
-            read_local=local)
+        self.known = bool(known)
+        self.cloud = bool(cloud)
+        self.chosen = self.cloud if chosen is None else bool(chosen)
+        self.local = local
 
     @classmethod
     def from_row(cls, row):
-        """Aus einer Zeile lesen -- egal ob schon typisiert oder als Dict."""
+        """Aus einer Zeile lesen -- typisiert auch rohe Dicts einmalig."""
         state = row.get("read")
         if isinstance(state, cls):
             return state
@@ -152,25 +151,6 @@ class ReadState(dict):
                    cloud=row.get("read_in_cloud"),
                    chosen=row.get("read"),
                    local=row.get("read_local"))
-
-    known = property(lambda self: bool(self["read_known"]))
-    cloud = property(lambda self: bool(self["read_in_cloud"]))
-
-    def _get_chosen(self):
-        return bool(self["read"])
-
-    def _set_chosen(self, value):
-        self["read"] = bool(value)
-
-    chosen = property(_get_chosen, _set_chosen)
-
-    def _get_local(self):
-        return self["read_local"]
-
-    def _set_local(self, value):
-        self["read_local"] = value
-
-    local = property(_get_local, _set_local)
 
     @property
     def changed(self):
@@ -180,11 +160,15 @@ class ReadState(dict):
     def __bool__(self):
         return self.chosen
 
+    def __repr__(self):
+        return ("ReadState(known=%s, cloud=%s, chosen=%s, local=%s)"
+                % (self.known, self.cloud, self.chosen, self.local))
+
 
 def _read_flags(tolino_id, read_known, read_ids):
     """Lesestatus einer Zeile: Cloud-Stand und Auswahl in einem Objekt."""
     is_read = read_known and bool(tolino_id) and str(tolino_id) in read_ids
-    return {"read": ReadState(known=read_known, cloud=is_read)}
+    return ReadState(known=read_known, cloud=is_read)
 
 
 def _column_read_info(metadata):
@@ -249,7 +233,7 @@ def _remote_rows(inventory, read_known, read_ids):
             "cloud_id_missing": not record["has_deliverable_id"],
             "status": "only_tolino",
             "file_changed": False,
-            **_read_flags(tolino_id, read_known, read_ids),
+            "read": _read_flags(tolino_id, read_known, read_ids),
             "explanation": "Nur in tolino – kann heruntergeladen werden.",
             "normalized_title": normalize_title(record["title"]),
         })
@@ -404,7 +388,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         "match_reason": match_reason,
         "file_changed": file_changed,
         "has_preferred_format": bool(selected_format),
-        **_read_flags(tolino_id, read_known, read_ids),
+        "read": _read_flags(tolino_id, read_known, read_ids),
         "explanation": (IGNORED_EXPLANATION if ignored
                         else _row_explanation(status, match_reason,
                                               file_changed)),

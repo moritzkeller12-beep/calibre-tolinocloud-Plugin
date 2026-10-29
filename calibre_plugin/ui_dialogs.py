@@ -901,7 +901,6 @@ class InventoryDialog(QDialog):
 
     def _end_action(self):
         self._call_thread = None
-        self._call_worker = None
         self._set_action_busy(False)
 
     def _set_action_busy(self, busy, text=""):
