@@ -78,7 +78,7 @@ class CollectionReconcileWorkerTests(unittest.TestCase):
                     "refresh_token": "tok",
                     "state": state}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient):
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
                 worker = ui_module.workers.SyncWorker(settings, [], [], [], series_map,
                                              read_marks, read_unmarks)
                 calls["worker"] = worker

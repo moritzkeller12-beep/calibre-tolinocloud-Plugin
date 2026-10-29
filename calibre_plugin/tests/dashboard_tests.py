@@ -226,7 +226,7 @@ class DashboardLayoutTests(unittest.TestCase):
     def test_the_settings_dialog_holds_the_rare_options(self):
         """Alles Seltene liegt in EINEM Fenster, nicht hinter zwei
         «… anzeigen»-Häkchen."""
-        settings = ((Path(__file__).resolve().parents[1] / "ui_settings.py")
+        settings = ((Path(__file__).resolve().parents[1] / "ui_dashboard.py")
                    .read_text(encoding="utf-8"))
         self.assertIn("class SettingsDialog(QDialog):", settings)
         for group in ("Einstellungen", "Konten und Verbindung"):
@@ -240,7 +240,7 @@ class DashboardLayoutTests(unittest.TestCase):
     def test_connection_controls_remain_available_without_diagnostics(self):
         """Removing the report does not remove account or token controls."""
         source = self._source()
-        settings = ((Path(__file__).resolve().parents[1] / "ui_settings.py")
+        settings = ((Path(__file__).resolve().parents[1] / "ui_dashboard.py")
                    .read_text(encoding="utf-8"))
         self.assertIn("Konten und Verbindung", settings)
         self.assertIn('QGroupBox("Konten und Verbindung")', settings)
@@ -1324,7 +1324,7 @@ class AccountStateBindingTests(unittest.TestCase):
 
     def test_settings_dialog_keeps_required_widgets_without_diagnostic_ui(self):
         base = Path(__file__).resolve().parent.parent
-        settings = (base / "ui_settings.py").read_text(encoding="utf-8")
+        settings = (base / "ui_dashboard.py").read_text(encoding="utf-8")
         self.assertIn("QGroupBox", settings.split("class SettingsDialog", 1)[0])
         self.assertIn("accounts_form", settings)
         self.assertNotIn("diagnostics_form", settings)

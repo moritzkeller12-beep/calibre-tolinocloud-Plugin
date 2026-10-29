@@ -31,23 +31,14 @@ DEFAULT_ACCOUNT = {
 }
 # Nur globale Schluessel: Kontofelder stehen in `accounts` und werden dort
 # gelesen -- als Top-Level-Default waeren sie stille Leichen.
-DEFAULTS = {
-    PREFERRED_FORMATS: ["EPUB"],
-    "accounts": [],
-    "active_account": DEFAULT_ACCOUNT_NAME,
-}
-PREFERENCES.defaults = DEFAULTS
+DEFAULTS = {PREFERRED_FORMATS: ["EPUB"]}
 
 _SETTINGS_LOCK = threading.RLock()
 
 
 def load_state(raw):
     """Load the saved state mapping; malformed or absent values are empty."""
-    if not raw:
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    return {}
+    return raw if isinstance(raw, dict) else {}
 
 
 def _copy(value):

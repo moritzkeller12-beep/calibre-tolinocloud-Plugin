@@ -113,7 +113,7 @@ def plan_actions(dialog, settings, metadata, state, selection):
         metadata, state, uploads,
         only_book_ids=syncable_book_ids(metadata, selection["metadata"]))
     series_map = series_map_from_metadata(syncable_metadata(metadata))
-    jobs, skipped_uploads = upload_jobs(dialog, settings, metadata, uploads)
+    jobs, skipped_uploads = upload_jobs(dialog, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
     settings["state"] = state
     gaps = selection_gaps(selection, uploads, meta_updates)
@@ -124,6 +124,7 @@ def plan_actions(dialog, settings, metadata, state, selection):
         "removal_titles": removal_titles,
         "meta_updates": meta_updates,
         "series_map": series_map,
+        "collections": len(plan_collection_updates(series_map, state)),
         "skipped_uploads": skipped_uploads,
         "selected_read": selection["read"],
         "selected_unread": selection["unread"],
@@ -154,13 +155,13 @@ def selection_gaps(selection, uploads, meta_updates):
     return {"uploads": len(open_uploads), "metadata": len(open_meta)}
 
 
-def upload_jobs(dialog, settings, metadata, uploads):
+def upload_jobs(dialog, metadata, uploads):
     """Build upload jobs, recording unavailable local formats."""
     jobs = []
     skipped_uploads = []
     for upload in uploads:
         book_id = upload.book_id
-        book_uuid = upload.book_uuid
+        identifier = upload.book_uuid
         fmt = upload.format_name
         old_id = upload.old_id
         title = str((metadata.get(book_id) or {}).get("title") or "")
@@ -188,26 +189,20 @@ def upload_jobs(dialog, settings, metadata, uploads):
             dialog.temp_files.append(cover_path)
         elif cover:
             log_warning("Coverformat unbekannt – Cover wird nicht übertragen.")
-        jobs.append(SyncJob(book_id, book_uuid, fmt, old_id, path,
+        jobs.append(SyncJob(book_id, identifier, fmt, old_id, path,
                             cover_path, title))
     return jobs, skipped_uploads
 
 
-def open_collections(preparation, state):
-    """Count only collection additions that are still needed."""
-    return len(plan_collection_updates(
-        preparation.get("series_map") or {}, state or {}))
-
-
-def planned_actions(preparation, uploads, state):
+def planned_actions(preparation, uploads):
     return (int(uploads) + len(preparation["removals"])
             + len(preparation.get("meta_updates") or ())
-            + open_collections(preparation, state)
+            + int(preparation.get("collections") or 0)
             + (1 if preparation.get("selected_read") else 0)
             + (1 if preparation.get("selected_unread") else 0))
 
 
-def plan_text(preparation, uploads, state):
+def plan_text(preparation, uploads):
     """Summarize concrete actions before starting the worker."""
     parts = []
     if uploads:
@@ -218,7 +213,7 @@ def plan_text(preparation, uploads, state):
     if preparation.get("meta_updates"):
         count = len(preparation["meta_updates"])
         parts.append("%d Metadaten" % count)
-    collections = open_collections(preparation, state)
+    collections = int(preparation.get("collections") or 0)
     if collections:
         parts.append("%d Sammlungen" % collections)
     if preparation.get("selected_read"):

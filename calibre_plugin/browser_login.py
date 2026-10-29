@@ -140,7 +140,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     from . import cdp as cdp_module
     grabber_window_state = cdp_module.grabber_window_state
     grabbed = _normalize_live_grab(cdp_module.grab_live_tokens(
-        partner_id, timeout=timeout, progress=progress))
+        timeout=timeout, progress=progress))
     deadline = time.monotonic() + max(0, timeout)
     rejected = set()
     last_error = ""

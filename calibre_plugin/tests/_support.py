@@ -43,7 +43,7 @@ def compare_inventory(metadata, state, inventory, preferred_formats=(),
 # Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
 # der Einstieg; Dialoge, Worker und Dashboard liegen in eigenen Modulen.
 UI_SOURCE_FILES = ("ui.py", "ui_common.py", "ui_dialogs.py",
-                   "ui_workers.py", "ui_auth_workers.py", "ui_settings.py",
+                   "ui_workers.py", "ui_auth_workers.py",
                    "ui_dashboard.py", "dashboard_plan.py")
 
 
@@ -127,7 +127,6 @@ def load_ui_module(get_icons_result, qt_stub=None):
                         "calibre_plugin.token_candidates",
                         "calibre_plugin.ui_workers",
                         "calibre_plugin.ui_auth_workers",
-                        "calibre_plugin.ui_settings",
                         "calibre_plugin.ui_dashboard",
                         "calibre_plugin.dashboard_plan"):
         sys.modules.pop(module_name, None)
@@ -137,7 +136,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # diese alte Fassung zurück.
     for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
                       "token_candidates", "browser_crypto", "ui_workers",
-                      "ui_auth_workers", "ui_settings", "ui_dashboard",
+                      "ui_auth_workers", "ui_dashboard",
                       "dashboard_plan"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
@@ -151,7 +150,6 @@ def load_ui_module(get_icons_result, qt_stub=None):
     ui_module.dialogs = importlib.import_module("calibre_plugin.ui_dialogs")
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")
-    ui_module.settings_dialog = importlib.import_module("calibre_plugin.ui_settings")
     ui_module._loaded_by_entry_for_tests = loaded_by_entry
     # Stubs stay active until restore_stubs() so that function-level
     # imports (from calibre.gui2 import get_icons) still resolve.

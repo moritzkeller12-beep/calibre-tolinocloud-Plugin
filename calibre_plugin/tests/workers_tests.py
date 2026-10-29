@@ -2,7 +2,7 @@
 
 import calibre_plugin.tolino as tolino_module
 import calibre_plugin.token_vault as vault_module
-import calibre_plugin.client as client_module
+import calibre_plugin.token_vault as client_module
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
@@ -46,7 +46,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
                                       "calibre_id": 7,
                                       "title": "Titel"}}}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient), \
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                  patch("calibre_plugin.ui_workers.save_account",
                        lambda *args, **kwargs: None):
                 worker = ui_module.workers.SyncWorker(
@@ -91,7 +91,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
              series_map=None):
         emitted = {"completed": None, "failed": None, "progress": []}
         saved, credentials = [], []
-        with patch("calibre_plugin.client.TolinoClient", fake_client), \
+        with patch("calibre_plugin.token_vault.TolinoClient", fake_client), \
              patch("calibre_plugin.ui_workers.save_account",
                    lambda name, values, active=None: saved.append(
                        (name, values))), \
@@ -537,7 +537,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
         holder = {}
         fake = FakeClient()
-        with patch("calibre_plugin.client.TolinoClient", lambda *a, **k: fake), \
+        with patch("calibre_plugin.token_vault.TolinoClient", lambda *a, **k: fake), \
              patch("calibre_plugin.ui_workers.save_account",
                    lambda name, values, active=None: saved.append(
                        (name, values))):
@@ -747,7 +747,7 @@ class PrepareWorkerTests(unittest.TestCase):
                     "preferred_formats": ["EPUB"],
                     "sync_column_enabled": False}
         payloads = []
-        with patch("calibre_plugin.client.TolinoClient", FakeClient), \
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
              patch("calibre_plugin.config.account_by_name", lambda _name: None), \
              patch("calibre_plugin.config.save_credentials",
                    lambda *args: credentials.append(args)), \
@@ -791,7 +791,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return []
 
         messages = []
-        with patch("calibre_plugin.client.TolinoClient", FakeClient):
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
             worker = ui_module.workers.PrepareWorker(
                 {"account_name": "A", "partner_id": 4, "hardware_id": "hw",
                  "refresh_token": "tok",
@@ -821,7 +821,7 @@ class PrepareWorkerTests(unittest.TestCase):
             def inventory(self):
                 return []
 
-        with patch("calibre_plugin.client.TolinoClient", FakeClient):
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
             worker = ui_module.workers.PrepareWorker(
                 {"account_name": "A", "partner_id": 4, "hardware_id": "hw",
                  "refresh_token": "tok",
@@ -862,7 +862,7 @@ class PrepareWorkerTests(unittest.TestCase):
                     "hardware_id": "hw", "refresh_token": "tok",
                     "state": {"u-stale": {"tolino_id": "gone"}},
                     "preferred_formats": ["EPUB"]}
-        with patch("calibre_plugin.client.TolinoClient", FakeClient):
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
             worker = ui_module.workers.PrepareWorker(settings, metadata)
             worker.ready.connect(payloads.append)
             worker.run()
@@ -897,7 +897,7 @@ class PrepareWorkerTests(unittest.TestCase):
                     "hardware_id": "hw", "refresh_token": "tok",
                     "state": {"u-stale": {"tolino_id": "gone"}},
                     "preferred_formats": ["EPUB"]}
-        with patch("calibre_plugin.client.TolinoClient", FakeClient):
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
             worker = ui_module.workers.PrepareWorker(settings, metadata)
             worker.ready.connect(payloads.append)
             worker.run()
@@ -924,7 +924,7 @@ class PrepareWorkerTests(unittest.TestCase):
             def read_ids(self):
                 return set()
 
-        with patch("calibre_plugin.client.TolinoClient", FakeClient), \
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                 patch("calibre_plugin.ui_workers.compare_inventory",
                       lambda *args, **kwargs: compared.append(args[2]) or []):
             worker = ui_module.workers.PrepareWorker(
@@ -954,7 +954,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 raise RuntimeError("Netz weg")
 
         messages = []
-        with patch("calibre_plugin.client.TolinoClient", FakeClient):
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
             worker = ui_module.workers.PrepareWorker(
                 {"account_name": "A", "partner_id": 4, "hardware_id": "hw",
                  "refresh_token": "tok",
@@ -1016,7 +1016,7 @@ class PrepareWorkerTests(unittest.TestCase):
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw-alt", "refresh_token": "alt-token", "state": {},
                     "preferred_formats": ["EPUB"]}
-        with patch("calibre_plugin.client.TolinoClient", FakeClient), \
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                 patch("calibre_plugin.config.account_by_name",
                       lambda name: {"name": "A", "refresh_token": "neu-token",
                                     "hardware_id": "hw-neu"}):
@@ -1051,7 +1051,7 @@ class PrepareWorkerTests(unittest.TestCase):
             dashboard = ui_module.dashboard.SyncDashboard.__new__(
                 ui_module.dashboard.SyncDashboard)
             dashboard.account_name = "A"
-            with patch("calibre_plugin.client.TolinoClient", FakeClient), \
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                  patch("calibre_plugin.config.save_credentials",
                        lambda *args: saved.append(args)):
                 dashboard._worker_client(settings)
@@ -1087,7 +1087,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
                     "refresh_token": "tok",
                     "state": {}}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient):
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
                 worker = ui_module.workers.SyncWorker(settings, [], [])
                 worker.run()
         finally:
@@ -1117,7 +1117,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
                     "refresh_token": "tok",
                     "state": {}}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient):
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
                 worker = ui_module.workers.SyncWorker(
                     settings, [], [],
                     meta_updates=[MetaUpdateRecord(1, "u1", "t1", {"title": "A"})])
@@ -1168,7 +1168,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
             def login(self):
                 raise RuntimeError("kaputt")
 
-        with patch("calibre_plugin.client.TolinoClient", FailingClient):
+        with patch("calibre_plugin.token_vault.TolinoClient", FailingClient):
             with self.assertRaises(RuntimeError):
                 client_module.make_client(store)
         self.assertFalse(TOKEN_VAULT._lock.locked())
@@ -1275,7 +1275,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
 
     def _run(self, ui_module, settings, jobs, client):
         emitted, saved = {}, []
-        with patch("calibre_plugin.client.TolinoClient",
+        with patch("calibre_plugin.token_vault.TolinoClient",
                    lambda *args, **kwargs: client), \
              patch("calibre_plugin.ui_workers.save_account",
                    lambda name, values, active=None: saved.append(values)), \
@@ -1574,7 +1574,7 @@ class ReadStatusUnknownTests(unittest.TestCase):
                     "preferred_formats": ["EPUB"],
                     "sync_column_enabled": False}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient), \
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                  patch("calibre_plugin.ui_workers.log_warning",
                        lambda text: logged.append(text)), \
                  patch("calibre_plugin.ui_workers.compare_inventory",

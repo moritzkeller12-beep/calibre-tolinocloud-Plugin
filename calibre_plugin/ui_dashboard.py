@@ -2,7 +2,7 @@
 import os
 
 from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
-                        QFormLayout, QHBoxLayout, QInputDialog,
+                        QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
                         QLabel, QLineEdit, QMessageBox, QProgressBar,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
                         _dialog_busy, _keep_thread_alive,
@@ -12,7 +12,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         sync_result_detail,
                         sync_result_text)
 from calibre.gui2 import error_dialog, info_dialog
-from .client import make_client
+from .token_vault import make_client
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      load_state, save_account, save_credentials,
                      save_settings, set_active_account, settings)
@@ -29,7 +29,35 @@ from .cdp import devtools_port_alive
 from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
-from .ui_settings import SettingsDialog
+
+
+class SettingsDialog(QDialog):
+    """Bündelt Übertragungsoptionen und Kontoverwaltung."""
+
+    def __init__(self, dashboard):
+        QDialog.__init__(self, dashboard)
+        self.dashboard = dashboard
+        self.setWindowTitle("Einstellungen")
+        self.setMinimumWidth(620)
+        layout = QVBoxLayout(self)
+
+        self.transfer = QGroupBox("Einstellungen")
+        self.transfer_form = QFormLayout(self.transfer)
+        layout.addWidget(self.transfer)
+
+        self.accounts = QGroupBox("Konten und Verbindung")
+        self.accounts_form = QFormLayout(self.accounts)
+        layout.addWidget(self.accounts)
+
+        self.close_button = QPushButton("Speichern und schließen")
+        self.close_button.setToolTip(
+            "Speichert die Änderungen und schließt die Einstellungen.")
+        self.close_button.clicked.connect(self.dashboard.close_settings)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        bottom.addWidget(self.close_button)
+        layout.addLayout(bottom)
+
 
 def _offer_next_step(dialog):
     """Nach der Anmeldung ist der Hauptknopf der naechste Schritt.
@@ -938,7 +966,7 @@ class SyncDashboard(QDialog):
         # (A02). Das schliesst die Luecke auch dann, wenn eine
         # Zaehlung einmal nicht greift.
         CredentialStore(settings, settings.get("account_name")).freshest()
-        total = _dashboard_plan.planned_actions(preparation, len(jobs), state)
+        total = _dashboard_plan.planned_actions(preparation, len(jobs))
         if not total and not skipped_uploads:
             # Kein stiller Lauf: ohne ausführbare Aktion gibt es eine
             # Antwort statt eines Hintergrundstarts.
@@ -966,7 +994,7 @@ class SyncDashboard(QDialog):
                         "Diese Bücher wurden nicht hochgeladen: "
                         + "; ".join(skipped_uploads), show=True,
                         show_copy_button=False)
-        plan = _dashboard_plan.plan_text(preparation, len(jobs), state)
+        plan = _dashboard_plan.plan_text(preparation, len(jobs))
         # Der Plan steht im Log, auch wenn der Lauf danach scheitert;
         # Zugangsdaten werden dabei nicht ausgegeben.
         log_warning("Sync geplant: %s" % plan)

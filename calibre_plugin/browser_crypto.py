@@ -77,8 +77,8 @@ def _aes_expand_key(key):
     return words, rounds
 
 
-def _aes_rounds(state, words, rounds, decrypt=False):
-    """Run the AES round function over a 4x4 state (state[r][c] = in[4c+r])."""
+def _aes_decrypt_state(state, words, rounds):
+    """Run the AES inverse rounds over a 4x4 state (state[r][c] = in[4c+r])."""
     _aes_init_tables()
 
     def add_round_key(current, round_index):
@@ -86,19 +86,15 @@ def _aes_rounds(state, words, rounds, decrypt=False):
             for r in range(4):
                 current[r][c] ^= words[round_index * 4 + c][r]
 
-    def sub_bytes(current, inverse=False):
-        box = _AES_INV_SBOX if inverse else _AES_SBOX
+    def inv_sub_bytes(current):
         for r in range(4):
             for c in range(4):
-                current[r][c] = box[current[r][c]]
+                current[r][c] = _AES_INV_SBOX[current[r][c]]
 
-    def shift_rows(current, inverse=False):
+    def inv_shift_rows(current):
         for r in range(1, 4):
             row = current[r]
-            if not inverse:
-                current[r] = row[r:] + row[:r]
-            else:
-                current[r] = row[-r:] + row[:-r]
+            current[r] = row[-r:] + row[:-r]
 
     def xtime(v):
         v <<= 1
@@ -113,44 +109,27 @@ def _aes_rounds(state, words, rounds, decrypt=False):
             m >>= 1
         return result & 0xFF
 
-    def mix_columns(current, inverse=False):
+    def inv_mix_columns(current):
         for c in range(4):
             a = [current[r][c] for r in range(4)]
-            if not inverse:
-                current[0][c] = mul(a[0], 2) ^ mul(a[1], 3) ^ a[2] ^ a[3]
-                current[1][c] = a[0] ^ mul(a[1], 2) ^ mul(a[2], 3) ^ a[3]
-                current[2][c] = a[0] ^ a[1] ^ mul(a[2], 2) ^ mul(a[3], 3)
-                current[3][c] = mul(a[0], 3) ^ a[1] ^ a[2] ^ mul(a[3], 2)
-            else:
-                current[0][c] = (mul(a[0], 14) ^ mul(a[1], 11) ^
-                                 mul(a[2], 13) ^ mul(a[3], 9))
-                current[1][c] = (mul(a[0], 9) ^ mul(a[1], 14) ^
-                                 mul(a[2], 11) ^ mul(a[3], 13))
-                current[2][c] = (mul(a[0], 13) ^ mul(a[1], 9) ^
-                                 mul(a[2], 14) ^ mul(a[3], 11))
-                current[3][c] = (mul(a[0], 11) ^ mul(a[1], 13) ^
-                                 mul(a[2], 9) ^ mul(a[3], 14))
+            current[0][c] = (mul(a[0], 14) ^ mul(a[1], 11) ^
+                             mul(a[2], 13) ^ mul(a[3], 9))
+            current[1][c] = (mul(a[0], 9) ^ mul(a[1], 14) ^
+                             mul(a[2], 11) ^ mul(a[3], 13))
+            current[2][c] = (mul(a[0], 13) ^ mul(a[1], 9) ^
+                             mul(a[2], 14) ^ mul(a[3], 11))
+            current[3][c] = (mul(a[0], 11) ^ mul(a[1], 13) ^
+                             mul(a[2], 9) ^ mul(a[3], 14))
 
-    if not decrypt:
-        add_round_key(state, 0)
-        for round_index in range(1, rounds):
-            sub_bytes(state)
-            shift_rows(state)
-            mix_columns(state)
-            add_round_key(state, round_index)
-        sub_bytes(state)
-        shift_rows(state)
-        add_round_key(state, rounds)
-    else:
-        add_round_key(state, rounds)
-        for round_index in range(rounds - 1, 0, -1):
-            shift_rows(state, inverse=True)
-            sub_bytes(state, inverse=True)
-            add_round_key(state, round_index)
-            mix_columns(state, inverse=True)
-        shift_rows(state, inverse=True)
-        sub_bytes(state, inverse=True)
-        add_round_key(state, 0)
+    add_round_key(state, rounds)
+    for round_index in range(rounds - 1, 0, -1):
+        inv_shift_rows(state)
+        inv_sub_bytes(state)
+        add_round_key(state, round_index)
+        inv_mix_columns(state)
+    inv_shift_rows(state)
+    inv_sub_bytes(state)
+    add_round_key(state, 0)
     return state
 
 
@@ -170,7 +149,7 @@ def _state_to_block(state):
 def _aes_decrypt_block(block, words, rounds):
     """Decrypt one 16-byte block with AES."""
     return _state_to_block(
-        _aes_rounds(_state_from_block(block), words, rounds, decrypt=True))
+        _aes_decrypt_state(_state_from_block(block), words, rounds))
 
 
 def _evp_bytes_to_key(password, salt, key_len=32, iv_len=16):

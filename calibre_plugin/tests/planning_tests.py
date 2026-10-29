@@ -301,7 +301,7 @@ class SyncPlanTests(unittest.TestCase):
                           side_effect=OSError("cover unavailable")):
             with patch.object(dashboard_plan, "log_warning") as warning:
                 jobs, skipped = dashboard_plan.upload_jobs(
-                    dialog, {},
+                    dialog,
                     {1: {"title": "Buch"}},
                     [UploadRecord(1, "u1", "EPUB", None)])
         self.assertEqual(1, len(jobs))
@@ -1800,7 +1800,7 @@ class ConservativeMatchingTests(unittest.TestCase):
             seen = []
 
             with patch("calibre_plugin.dashboard_plan.upload_jobs",
-                       side_effect=lambda _dialog, _settings, _metadata, uploads:
+                       side_effect=lambda _dialog, _metadata, uploads:
                        (seen.extend(uploads) or [], [])):
                 plan_actions(
                     object(), {"preferred_formats": ["EPUB"]}, metadata,
@@ -2219,7 +2219,7 @@ class PrepareStateCopyTests(unittest.TestCase):
                     "preferred_formats": ["EPUB"],
                     "sync_column_enabled": False}
         try:
-            with patch("calibre_plugin.client.TolinoClient", FakeClient):
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
                 worker = ui_module.workers.PrepareWorker(settings, metadata)
                 worker.ready.connect(payloads.append)
                 worker.failed.connect(payloads.append)
@@ -2367,7 +2367,7 @@ class FingerprintCommitTests(unittest.TestCase):
     def _run_worker(ui_module, settings, preparation, client, holder=None):
         emitted = {}
         settings["metadata"] = preparation.get("metadata", {})
-        with patch("calibre_plugin.client.TolinoClient",
+        with patch("calibre_plugin.token_vault.TolinoClient",
                    lambda *args, **kwargs: client), \
              patch("calibre_plugin.ui_workers.save_account",
                    lambda *args, **kwargs: None), \

@@ -17,7 +17,7 @@ tearDownModule = stop_cdp_stubs
 def _preparation(**overrides):
     """Leerer Sync-Plan; Tests überschreiben nur, was sie brauchen."""
     preparation = {"jobs": [], "removals": [], "removal_titles": {},
-                   "meta_updates": [], "series_map": {},
+                   "meta_updates": [], "series_map": {}, "collections": 0,
                    "skipped_uploads": [], "selected_read": [],
                    "selected_unread": [], "selected_without_action": {}}
     preparation.update(overrides)
@@ -301,7 +301,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             preparation = {
                 "jobs": jobs, "removals": ["remove-1"],
                 "meta_updates": [("uuid-1", 7)],
-                "series_map": {"uuid-serie": "Reihe"},
+                "series_map": {"uuid-serie": "Reihe"}, "collections": 1,
                 "skipped_uploads": [], "selected_read": {"t-read"},
                 "selected_unread": {"t-unread"},
             }
@@ -670,12 +670,11 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual(1, len(preparation["jobs"]))
         self.assertEqual([], preparation["skipped_uploads"])
         self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 1, state))
+            preparation, 1))
         # Und der geplante Lauf nennt den Upload auch im Fenster.
         self.assertIn(
             "1 Upload",
-            ui_module.dashboard._dashboard_plan.plan_text(
-                preparation, 1, state))
+            ui_module.dashboard._dashboard_plan.plan_text(preparation, 1))
         dashboard.progress = type("Bar", (), {
             "setRange": lambda self, *args: None,
             "setValue": lambda self, value: None,
@@ -1001,26 +1000,35 @@ class EmptyRunAccountingTests(unittest.TestCase):
         return ui_module
 
 
+    @staticmethod
+    def _prepared(ui_module, series_map, state):
+        """Wie `plan_actions`: die offenen Sammlungen einmal zählen."""
+        plan = ui_module.dashboard._dashboard_plan
+        return _preparation(
+            series_map=series_map,
+            collections=len(plan.plan_collection_updates(series_map, state)))
+
     def test_remembered_collections_are_not_a_planned_action(self):
         ui_module = self._ui()
-        preparation = _preparation(series_map={"u1": "Reihe", "u2": "Reihe"})
         state = {"u1": {"tolino_id": "t1", "collections": ["Reihe"]},
                  "u2": {"tolino_id": "t2", "collections": ["Reihe"]}}
+        preparation = self._prepared(
+            ui_module, {"u1": "Reihe", "u2": "Reihe"}, state)
         self.assertEqual(0, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0, state))
+            preparation, 0))
 
     def test_open_collections_still_count(self):
         ui_module = self._ui()
-        preparation = _preparation(series_map={"u1": "Reihe"})
-        state = {"u1": {"tolino_id": "t1"}}
+        preparation = self._prepared(
+            ui_module, {"u1": "Reihe"}, {"u1": {"tolino_id": "t1"}})
         self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0, state))
+            preparation, 0))
 
     def test_plan_text_does_not_promise_remembered_collections(self):
         ui_module = self._ui()
-        preparation = _preparation(series_map={"u1": "Reihe"})
         state = {"u1": {"tolino_id": "t1", "collections": ["Reihe"]}}
-        text = ui_module.dashboard._dashboard_plan.plan_text(preparation, 0, state)
+        preparation = self._prepared(ui_module, {"u1": "Reihe"}, state)
+        text = ui_module.dashboard._dashboard_plan.plan_text(preparation, 0)
         self.assertNotIn("Serie", text)
 
     def test_selected_actions_without_a_plan_are_counted(self):

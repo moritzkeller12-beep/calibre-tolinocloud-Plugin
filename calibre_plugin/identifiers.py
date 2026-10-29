@@ -63,16 +63,16 @@ def migrate_state_keys(metadata_by_id, state):
     for book_id, metadata in metadata_by_id.items():
         if not isinstance(metadata, dict):
             continue
-        book_uuid = valid_book_uuid(metadata.get("uuid"))
-        if not book_uuid or book_uuid in state:
+        key = valid_book_uuid(metadata.get("uuid"))
+        if not key or key in state:
             continue
         old_key = state_key_for(state, book_id)
-        if not old_key or old_key == book_uuid:
+        if not old_key or old_key == key:
             continue
         entry = state.pop(old_key)
         if isinstance(entry, dict):
             entry["calibre_id"] = book_id
-        state[book_uuid] = entry
+        state[key] = entry
         migrated += 1
     return migrated
 

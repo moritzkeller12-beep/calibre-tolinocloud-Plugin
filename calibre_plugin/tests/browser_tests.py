@@ -125,7 +125,7 @@ class LiveGrabTests(unittest.TestCase):
                                return_value={"webSocketDebuggerUrl":
                                              "ws://127.0.0.1:%d/devtools/browser/x" % 9441}), \
                  _patch.object(cdp_module.time, "sleep"):
-                port = cdp_module.launch_reader_window(4)
+                port = cdp_module.launch_reader_window()
         args = spawned["args"]
         self.assertEqual(prefix, args[:4])
         self.assertIn("--remote-debugging-port=%d" % port, args)
@@ -1212,7 +1212,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=True):
             with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window(4)
+                cdp_module.launch_reader_window()
         message = str(ctx.exception)
         self.assertIn("installieren", message)
         self.assertNotIn("flatpak override", message)
@@ -1246,7 +1246,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                                return_value={"webSocketDebuggerUrl":
                                              "ws://127.0.0.1:%d/devtools/browser/x" % 9441}), \
                  _patch.object(cdp_module.time, "sleep"):
-                port = cdp_module.launch_reader_window(4)
+                port = cdp_module.launch_reader_window()
         self.assertEqual("/usr/bin/working", spawned["args"][0])
         self.assertIn("--remote-debugging-port=%d" % port, spawned["args"])
         self.assertIn("mytolino.com", spawned["args"][-1])
@@ -1280,7 +1280,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
              _patch.object(cdp_module.time, "time", side_effect=[0, 100]), \
              _patch.object(cdp_module.time, "sleep"):
             with self.assertRaises(TolinoAuthError):
-                cdp_module.launch_reader_window(4)
+                cdp_module.launch_reader_window()
         self.assertTrue(state["terminated"])
         self.assertTrue(state["waited"])
         self.assertIsNone(cdp_module._LAUNCHED["process"])
@@ -1302,7 +1302,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
              _patch.object(browser_finder, "chromium_options", return_value=[]), \
              _patch.object(cdp_module.subprocess, "Popen", FakePopen):
             with self.assertRaises(TolinoAuthError):
-                cdp_module.launch_reader_window(4)
+                cdp_module.launch_reader_window()
         self.assertEqual(1, len(spawned_profile))
         self.assertFalse(os.path.exists(spawned_profile[0]))
 
@@ -1376,7 +1376,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=False):
             with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window(4)
+                cdp_module.launch_reader_window()
         message = str(ctx.exception)
         self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertNotIn("flatpak override", message)
@@ -1530,7 +1530,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=True):
             with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window(4)
+                cdp_module.launch_reader_window()
         message = str(ctx.exception)
         self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertIn("flatpak override --user", message)
@@ -1550,7 +1550,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=True):
             with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window(4)
+                cdp_module.launch_reader_window()
         message = str(ctx.exception)
         self.assertIn("flatpak update", message)
         self.assertNotIn("flatpak override", message)
@@ -1649,7 +1649,7 @@ class CdpOwnershipTests(unittest.TestCase):
              patch.object(self.cdp, "_start_port", return_value=9441), \
              patch.object(self.cdp.subprocess, "Popen", FakePopen), \
              patch.object(self.cdp, "_http_get_json", return_value={"ok": True}):
-            port = self.cdp.launch_reader_window(4)
+            port = self.cdp.launch_reader_window()
         self.assertEqual(9441, port)
         profile_arg = next(arg for arg in spawned["args"]
                            if arg.startswith("--user-data-dir="))

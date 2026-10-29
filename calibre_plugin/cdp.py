@@ -148,7 +148,7 @@ def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False,
 
 # ---------------------------------------------------------------- Fenster-Flow
 
-def launch_reader_window(partner_id):
+def launch_reader_window():
     """Start Chromium with an isolated temporary profile and random port."""
     binary, label = pick_chromium() or (None, None)
     if not binary:
@@ -571,14 +571,14 @@ def collect_grab(port, timeout=180, progress=None):
         + RELOGIN, code="B04", detail="kein Web-Reader-Tab")
 
 
-def grab_live_tokens(partner_id, timeout=300, progress=None):
+def grab_live_tokens(timeout=300, progress=None):
     """Open the grabber window and read the reader's CURRENT tokens.
 
     Returns the grabbed dict ``{"refresh": [...], "hardware": [...]}``;
     the token-endpoint exchange stays in tolino.py (single source of
     truth for the client swap, testable without a browser).
     """
-    port = launch_reader_window(partner_id)
+    port = launch_reader_window()
     if progress:
         progress("Anmeldefenster geöffnet – bitte anmelden und warten, "
                  "bis die Bücherliste lädt.")

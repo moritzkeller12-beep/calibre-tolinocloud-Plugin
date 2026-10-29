@@ -39,7 +39,7 @@ class TokenVault:
 
     @contextlib.contextmanager
     def _held_lock(self, timeout):
-        """Konto-Lock für die Dauer des Blocks halten -- sonst «belegt»."""
+        """Vault-Lock (alle Konten teilen ihn) für den Block halten."""
         if not self._lock.acquire(timeout=max(0, timeout)):
             raise TolinoAuthError(BUSY_MESSAGE, code="S91")
         try:
@@ -84,13 +84,10 @@ class TokenVault:
             try:
                 client = self.login(store, lock_timeout=0)
                 rotated.append(client.refresh)
-            except TolinoAuthError as exc:
-                if exc.code == "S91":
-                    continue
-                log_warning("Tolino-Keep-alive fehlgeschlagen (%s): %s"
-                            % (account or "Konto",
-                               sanitize_error(exc, (store.refresh_token,))))
             except Exception as exc:
+                # Ein belegter Lock (S91) ist kein Fehler -- nächste Runde.
+                if isinstance(exc, TolinoAuthError) and exc.code == "S91":
+                    continue
                 log_warning("Tolino-Keep-alive fehlgeschlagen (%s): %s"
                             % (account or "Konto",
                                sanitize_error(exc, (store.refresh_token,))))
@@ -115,13 +112,19 @@ class TokenVault:
 
 TOKEN_VAULT = TokenVault()
 _KEEPALIVE_STOP = threading.Event()
+_KEEPALIVE_STARTED = threading.Event()
+
+
+def make_client(store, lock_timeout=5):
+    """Log in with the freshest stored token for an account."""
+    return TOKEN_VAULT.login(store, lock_timeout)
 
 
 def start_token_keepalive(get_credentials, interval=45 * 60):
     """Rotate saved refresh tokens periodically in a daemon thread."""
-    if getattr(start_token_keepalive, "_started", False):
+    if _KEEPALIVE_STARTED.is_set():
         return None
-    start_token_keepalive._started = True
+    _KEEPALIVE_STARTED.set()
 
     def loop():
         while not _KEEPALIVE_STOP.wait(max(60, interval)):

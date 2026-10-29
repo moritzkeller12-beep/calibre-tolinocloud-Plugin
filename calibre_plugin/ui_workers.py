@@ -2,7 +2,7 @@
 import copy
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, plural, pyqtSignal)
-from .client import make_client
+from .token_vault import make_client
 from .config import CredentialStore, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
