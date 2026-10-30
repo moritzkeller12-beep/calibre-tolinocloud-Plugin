@@ -817,6 +817,7 @@ class SyncDashboard(QDialog):
         _stop_thread(thread, timeout_ms=2000)
         self.update_status()
 
+    @gui_guard
     def _prepare_failed(self, message):
         worker = getattr(self, "prepare_worker", None)
         cancelled = bool(getattr(worker, "cancelled", False))
@@ -829,6 +830,7 @@ class SyncDashboard(QDialog):
         log_warning("Vergleich fehlgeschlagen: " + sanitize_error(message))
         error_dialog(self, "Vergleich fehlgeschlagen", str(message), show=True)
 
+    @gui_guard
     def _prepare_ready(self, payload):
         """Vergleich anzeigen (GUI-Thread) und den Sync starten."""
         context = payload["context"]
@@ -1033,6 +1035,7 @@ class SyncDashboard(QDialog):
         self.progress_label.setText(plan)
         self.update_status()
 
+    @gui_guard
     def progress_changed(self, done, total, text):
         self.progress.setRange(0, total or 1)
         self.progress.setValue(done)
@@ -1054,6 +1057,7 @@ class SyncDashboard(QDialog):
         self.progress_label.setText("Abbruch angefordert …")
         self.primary.setEnabled(False)
 
+    @gui_guard
     def sync_completed(self, state, updates):
         """Erfolgreicher Lauf (auch nach regulaerem Abbruch).
 
@@ -1080,6 +1084,7 @@ class SyncDashboard(QDialog):
                     sync_result_text(outcome, "Fertig"), show=True,
                     show_copy_button=False)
 
+    @gui_guard
     def sync_failed(self, message):
         outcome = _worker_outcome(self)
         worker = self.worker

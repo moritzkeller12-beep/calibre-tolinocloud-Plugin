@@ -1430,7 +1430,7 @@ class SyncPlanTests(unittest.TestCase):
                               wraps=vault_module.TOKEN_VAULT.login) as login:
                 result = vault_module.TOKEN_VAULT.keepalive_refresh(
                     lambda: {"accounts": [creds]})
-        self.assertEqual("tok-rotated", result)
+        self.assertEqual(1, result)
         login.assert_called_once()
         self.assertEqual("tok-rotated", creds["refresh_token"])
 
@@ -1451,11 +1451,11 @@ class SyncPlanTests(unittest.TestCase):
     def test_keepalive_refresh_skips_when_there_is_nothing_to_do(self):
         """Ohne Token und bei laufender Rotation passiert nichts."""
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock:
-            self.assertIsNone(
-                vault_module.TOKEN_VAULT.keepalive_refresh(lambda: {}))
+            self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh(
+                lambda: {}))
             client_mock.assert_not_called()
             with vault_module.TOKEN_VAULT._lock:
-                self.assertIsNone(vault_module.TOKEN_VAULT.keepalive_refresh(
+                self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh(
                     lambda: {"refresh_token": "tok"}))
             client_mock.assert_not_called()
 

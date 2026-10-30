@@ -29,14 +29,20 @@ class _Ws:
             "Sec-WebSocket-Key: %s\r\n"
             "Sec-WebSocket-Version: 13\r\n\r\n" % (path, host, port, key)
         )
-        sock.sendall(request.encode("ascii"))
-        sock.settimeout(timeout)
-        data = b""
-        while b"\r\n\r\n" not in data:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
+        try:
+            sock.sendall(request.encode("ascii"))
+            sock.settimeout(timeout)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except OSError:
+            # Auch ein Timeout beim Handshake ist ein OSError. Ohne das
+            # Schliessen blieb der Socket bis zum Garbage Collector offen.
+            sock.close()
+            raise
         head, _, rest = data.partition(b"\r\n\r\n")
         if b" 101 " not in head.split(b"\r\n", 1)[0]:
             sock.close()

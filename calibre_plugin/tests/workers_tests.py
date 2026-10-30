@@ -1173,11 +1173,11 @@ class KeepaliveSafetyTests(unittest.TestCase):
                     lambda: {"accounts": [{"name": "A", "partner_id": 4,
                                             "hardware_id": "hw",
                                             "refresh_token": "tok"}]})
-            self.assertIsNone(result)
+            self.assertEqual(0, result)
             client_mock.assert_not_called()
             client_mock.return_value.login.return_value = None
             client_mock.return_value.refresh = "rotiert"
-            self.assertEqual("rotiert", vault_module.TOKEN_VAULT.keepalive_refresh(
+            self.assertEqual(1, vault_module.TOKEN_VAULT.keepalive_refresh(
                 lambda: {"accounts": [{"name": "A", "partner_id": 4,
                                         "hardware_id": "hw",
                                         "refresh_token": "tok"}]}))
@@ -1222,7 +1222,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
                 lambda: {"accounts": [{"name": "A", "partner_id": 4,
                                         "hardware_id": "hw",
                                         "refresh_token": "alt"}]})
-        self.assertEqual("neu", result)
+        self.assertEqual(1, result)
         self.assertTrue(any("Keep-alive" in line for line in logged))
 
     def test_keepalive_failure_is_logged_without_the_token(self):
@@ -1241,7 +1241,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
                 lambda: {"accounts": [{"name": "A", "partner_id": 4,
                                         "hardware_id": "hw",
                                         "refresh_token": "sk-geheim-token"}]})
-        self.assertIsNone(result)
+        self.assertEqual(0, result)
         self.assertEqual(1, len(logged))
         self.assertIn("Keep-alive", logged[0])
         self.assertNotIn("sk-geheim-token", logged[0])

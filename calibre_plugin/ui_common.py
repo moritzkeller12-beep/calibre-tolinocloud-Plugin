@@ -44,19 +44,44 @@ def qt_enum(owner, name, scope):
     return getattr(getattr(owner, scope), name)
 
 
+def _widget_deleted(widget):
+    """True nur fuer ein von Qt bereits zerstoertes Widget.
+
+    `sip` ist in Calibre vorhanden; ausserhalb (Tests, andere Qt-Bindings)
+    bleibt die Pruefung aus, statt einen Importfehler zu riskieren.
+    """
+    try:
+        import sip
+    except ImportError:
+        try:
+            from PyQt6 import sip
+        except ImportError:
+            return False
+    try:
+        return bool(sip.isdeleted(widget))
+    except (TypeError, RuntimeError):
+        return False
+
+
 def gui_guard(function):
     """GUI-Slot ausführen; ein bereits zerstörtes Fenster ist kein Fehler.
 
     Qt wirft RuntimeError, wenn ein Slot nach dem Schliessen des Fensters
-    noch ein Widget anfasst. Das ist während des Calibre-Shutdowns normal
-    und darf keinen Traceback im Log hinterlassen.
+    noch ein Widget anfasst. Das ist während des Calibre-Shutdowns normal.
+    Ein echter RuntimeError aus dem Slot darf aber nicht verschluckt werden:
+    deshalb wird nur bei nachweislich gelöschtem Widget geschluckt.
     """
     @functools.wraps(function)
     def guarded(*args, **kwargs):
+        target = args[0] if args else None
+        if target is not None and _widget_deleted(target):
+            return None
         try:
             return function(*args, **kwargs)
         except RuntimeError:
-            return None
+            if target is not None and _widget_deleted(target):
+                return None
+            raise
     return guarded
 
 

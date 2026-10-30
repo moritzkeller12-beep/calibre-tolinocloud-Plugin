@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from .partners import WEBREADER_URL
-from .tolino import RELOGIN, RELOGIN_THEN, TolinoAuthError
+from .tolino import TolinoAuthError
 from .cdp_transport import _Ws, _http_get_json
 from .cdp_scripts import _GRAB_SNIPPET, idb_expression
 
@@ -56,27 +56,14 @@ def _new_profile_dir():
 
 
 
-def _ws_parts(ws_url):
-    """(Port, Pfad) einer vom Plugin selbst gebauten DevTools-Adresse.
+def _open_target(target, timeout):
+    """Eine DevTools-WebSocket-Verbindung zum eigenen Fenster öffnen.
 
-    Der Host wird nie aus der Adresse übernommen: verbunden wird immer mit
-    127.0.0.1 und dem Port des eigenen Fensters.
+    ``target`` ist bereits ``(Port, Pfad)``; der Host bleibt immer
+    127.0.0.1. Damit wird keine selbst gebaute URL wieder zerlegt.
     """
-    try:
-        parsed = urlsplit(str(ws_url or ""))
-        port = parsed.port
-        if (parsed.scheme != "ws" or not port
-                or not parsed.path.startswith("/devtools/")):
-            raise ValueError("invalid DevTools URL")
-        return int(port), parsed.path
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid DevTools websocket URL") from exc
-
-
-def _open_target(ws_url, timeout):
-    """Eine DevTools-WebSocket-Verbindung zum eigenen Fenster öffnen."""
-    port, ws_path = _ws_parts(ws_url)
-    return _Ws.connect("127.0.0.1", port, ws_path, timeout=timeout)
+    port, path = target
+    return _Ws.connect("127.0.0.1", int(port), str(path), timeout=timeout)
 
 
 def _evaluate_message(ws, expression, timeout, await_promise, message_id):
@@ -112,10 +99,10 @@ def _evaluate_message(ws, expression, timeout, await_promise, message_id):
     return {"ok": False, "value": None, "exception": "evaluate timeout"}
 
 
-def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
+def _evaluate_in_target(target, expression, timeout=10, await_promise=False):
     """Run a JS expression in a DevTools page target, return its JSON value."""
     try:
-        ws = _open_target(ws_url, timeout)
+        ws = _open_target(target, timeout)
     except (OSError, ValueError):
         return None
     try:
@@ -181,10 +168,16 @@ def launch_reader_window():
     profile = _new_profile_dir()
     flags = _reader_flags(port, profile)
     creationflags = 0x00000008 if os.name == "nt" else 0
-    candidates = [(list(binary), label)]
+    def candidates():
+        """Erster Kandidat, danach die Alternativen nur bei Bedarf."""
+        yield list(binary), label
+        for argv, option_label in browser_finder.chromium_options():
+            if list(argv) != list(binary):
+                yield list(argv), option_label
+
     last_error = None
     process = None
-    for index, (argv, candidate_label) in enumerate(candidates):
+    for argv, candidate_label in candidates():
         try:
             process = subprocess.Popen(
                 list(argv) + flags, creationflags=creationflags,
@@ -192,11 +185,6 @@ def launch_reader_window():
             break
         except OSError as exc:
             last_error = (candidate_label, exc)
-            if index == 0:
-                # Weitere Kandidaten erst nach einem Fehlschlag suchen.
-                alternatives = browser_finder.chromium_options()
-                candidates.extend(
-                    option for option in alternatives if option[0] != binary)
     if process is None:
         shutil.rmtree(profile, ignore_errors=True)
         raise TolinoAuthError(
@@ -228,7 +216,7 @@ def _stop_launched_process(process, timeout=2):
         return False
 
 
-def read_idb_tokens(ws_url, db_names, timeout=10):
+def read_idb_tokens(target, db_names, timeout=10):
     """Walk every IndexedDB database's object stores for token values.
 
     Returns the merged ``{"refresh": [...], "hardware": [...]}`` dict;
@@ -240,7 +228,7 @@ def read_idb_tokens(ws_url, db_names, timeout=10):
     if not names:
         return merged
     try:
-        ws = _open_target(ws_url, timeout)
+        ws = _open_target(target, timeout)
     except (OSError, ValueError):
         return merged
     try:
@@ -266,16 +254,16 @@ def read_idb_tokens(ws_url, db_names, timeout=10):
     return merged
 
 
-def _grab_page_tokens(ws_url, timeout=10):
+def _grab_page_tokens(target, timeout=10):
     """ONE full storage grab: localStorage, sessionStorage, IndexedDB."""
-    grabbed = _evaluate_in_target(ws_url, _GRAB_SNIPPET, timeout,
+    grabbed = _evaluate_in_target(target, _GRAB_SNIPPET, timeout,
                                   await_promise=True) or {}
     for bucket in ("refresh", "hardware", "idb"):
         if not isinstance(grabbed.get(bucket), list):
             grabbed[bucket] = []
     idb_names = list(grabbed.get("idb"))
     if idb_names:
-        idb_tokens = read_idb_tokens(ws_url, idb_names, timeout)
+        idb_tokens = read_idb_tokens(target, idb_names, timeout)
         for bucket in ("refresh", "hardware"):
             for value in idb_tokens.get(bucket) or []:
                 if value not in grabbed[bucket]:
@@ -295,12 +283,13 @@ def _is_reader_url(url):
 
 
 def _reader_target(targets, port):
-    """Return the reader tab's WebSocket address and whether one exists.
+    """Return the reader tab's ``(port, path)`` and whether one exists.
 
     Die Adresse wird aus Port und Target-id gebaut: für einen selbst
     gestarteten Browser meldet Chrome genau
-    ws://127.0.0.1:<Port>/devtools/page/<id>. Die gemeldete URL zu parsen
-    und gegen den Port zu prüfen, ist damit überflüssig.
+    ws://127.0.0.1:<Port>/devtools/page/<id>. Ohne Target-id gibt es
+    keinen sicheren Verbindungsweg; die gemeldete URL wird nicht mehr
+    ungeprueft uebernommen.
     """
     if not isinstance(targets, list):
         return None, False
@@ -312,13 +301,7 @@ def _reader_target(targets, port):
         reader_found = True
         target_id = str(target.get("id") or "").strip()
         if target_id:
-            return ("ws://127.0.0.1:%d/devtools/page/%s"
-                    % (int(port), target_id)), True
-        # Ohne Target-id bleibt nur die gemeldete Adresse (unsere eigene
-        # Browser-Instanz, kein fremder Host).
-        reported = str(target.get("webSocketDebuggerUrl") or "").strip()
-        if reported:
-            return reported, True
+            return (int(port), "/devtools/page/%s" % target_id), True
     return None, reader_found
 
 
@@ -332,8 +315,8 @@ def _reader_targets(port=None, timeout=5):
         "http://127.0.0.1:%d/json/list" % port, timeout)
     if not isinstance(targets, list):
         return None
-    ws_url, reader_found = _reader_target(targets, port)
-    return {"window": True, "reader_tab": reader_found, "ws_url": ws_url}
+    target, reader_found = _reader_target(targets, port)
+    return {"window": True, "reader_tab": reader_found, "target": target}
 
 
 def grab_once_from_grabber(port=None, timeout=12):
@@ -345,10 +328,10 @@ def grab_once_from_grabber(port=None, timeout=12):
     waiting for a sign-in that may not happen – the user just clicks the
     button again after signing in.
     """
-    target = _reader_targets(port)
-    if target is None or target["ws_url"] is None:
+    target = _reader_targets(port, timeout=max(0.1, min(5, timeout)))
+    if target is None or target["target"] is None:
         return None
-    return _grab_page_tokens(target["ws_url"], timeout)
+    return _grab_page_tokens(target["target"], timeout)
 
 
 def _browser_ws_for_record(record, timeout=2):
@@ -357,10 +340,10 @@ def _browser_ws_for_record(record, timeout=2):
     version = _http_get_json(
         "http://127.0.0.1:%d/json/version" % port, timeout)
     ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
-    try:
-        return _ws_parts(ws_url)
-    except ValueError:
+    prefix = "ws://127.0.0.1:%d" % port
+    if not ws_url.startswith(prefix + "/devtools/"):
         return None
+    return port, ws_url[len(prefix):]
 
 
 def _send_browser_close(port, path, timeout=2):
@@ -434,91 +417,3 @@ def grabber_window_state(port=None, timeout=5):
     if target is None:
         return {"window": False, "reader_tab": False}
     return {"window": True, "reader_tab": target["reader_tab"]}
-
-
-def _raise_window_closed(progress):
-    """Stop the wait with the same clear error after repeated endpoint loss."""
-    if progress:
-        progress("Anmeldefenster geschlossen – abgebrochen.")
-    raise TolinoAuthError(
-        "Das Anmeldefenster wurde geschlossen, bevor die Übernahme fertig war. "
-        "Bitte erneut versuchen und es offen lassen.", code="B03")
-
-
-def collect_grab(port, timeout=180, progress=None):
-    """Poll the grabber window until the reader exposes the current token."""
-    deadline = time.time() + timeout
-    endpoint_misses = 0
-    saw_reader = False
-    while time.time() < deadline:
-        record = _verified_owner(port)
-        if record is None:
-            endpoint_misses += 1
-            if endpoint_misses >= 3:
-                _raise_window_closed(progress)
-            time.sleep(1)
-            continue
-        targets = _http_get_json("http://127.0.0.1:%d/json/list" % port)
-        if not isinstance(targets, list):
-            # Endpoint antwortet nicht (Fenster weg oder kurz gestoert).
-            # Erst mehrere Fehlschlaege in Folge sind ein geschlossenes
-            # Fenster -- ein einzelner war der False-Positive.
-            endpoint_misses += 1
-            if endpoint_misses >= 3:
-                _raise_window_closed(progress)
-            time.sleep(1)
-            continue
-        endpoint_misses = 0
-        ws_url, reader_found = _reader_target(targets, port)
-        if ws_url is None:
-            saw_reader = saw_reader or reader_found
-            foreign_page = any(
-                isinstance(target, dict) and target.get("type") == "page"
-                and not str(target.get("url") or "").startswith(
-                    ("about:", "chrome:", "edge:", "devtools://"))
-                and not _is_reader_url(target.get("url"))
-                for target in targets)
-            # Fenster lebt, aber kein Reader-Tab: die Anmeldung laeuft
-            # auf der Partner-/Keycloak-Seite (andere Domain) oder der
-            # Tab lädt gerade. Beides ist KEIN geschlossenes Fenster.
-            if progress:
-                if foreign_page:
-                    progress("Das Anmeldefenster ist offen – bitte dort "
-                             "anmelden, bis die Bücherliste lädt …")
-                else:
-                    progress("Der Web Reader wird geladen …")
-            time.sleep(2)
-            continue
-        saw_reader = True
-        result = _grab_page_tokens(ws_url, 10)
-        if result and result.get("refresh"):
-            return result
-        if progress:
-            progress("Warte auf die Anmeldung im Web Reader …")
-        time.sleep(2)
-    if saw_reader:
-        raise TolinoAuthError(
-            "Zeitüberschreitung: keine Anmeldung erkannt. Bitte im "
-            "Anmeldefenster anmelden, bis die Bücherliste lädt. "
-            + RELOGIN_THEN, code="B04")
-    raise TolinoAuthError(
-        "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "
-        + RELOGIN, code="B04", detail="kein Web-Reader-Tab")
-
-
-def grab_live_tokens(timeout=300, progress=None):
-    """Open the grabber window and read the reader's CURRENT tokens.
-
-    Returns the grabbed dict ``{"refresh": [...], "hardware": [...]}``;
-    the token-endpoint exchange stays in tolino.py (single source of
-    truth for the client swap, testable without a browser).
-    """
-    port = launch_reader_window()
-    if progress:
-        progress("Anmeldefenster geöffnet – bitte anmelden und warten, "
-                 "bis die Bücherliste lädt.")
-    grabbed = collect_grab(port, timeout=timeout, progress=progress)
-    if progress:
-        progress("Zugang aus dem Web Reader gelesen – prüfe ihn jetzt "
-                 "bei Tolino …")
-    return grabbed

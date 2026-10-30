@@ -63,20 +63,20 @@ class TokenVault:
             return client._login()
 
     def keepalive_refresh(self, get_credentials):
-        """Refresh saved accounts through the same locked client factory."""
+        """Refresh saved accounts; return only the number of rotations."""
         snapshot = get_credentials() or {}
         accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else None
         if accounts is None:
             accounts = [snapshot] if isinstance(snapshot, dict) else []
-        rotated = []
+        rotated = 0
         for values in accounts:
             if not isinstance(values, dict):
                 continue
             account = str(values.get("account_name") or values.get("name") or "")
             store = CredentialStore(values, account)
             try:
-                client = self.login(store, lock_timeout=0)
-                rotated.append(client.refresh)
+                self.login(store, lock_timeout=0)
+                rotated += 1
             except Exception as exc:
                 # Ein belegter Lock (S91) ist kein Fehler -- nächste Runde.
                 if isinstance(exc, TolinoAuthError) and exc.code == "S91":
@@ -86,8 +86,11 @@ class TokenVault:
                                sanitize_error(exc, (store.refresh_token,))))
         if rotated:
             log_info("Tolino-Keep-alive: %d %s erneuert."
-                     % (len(rotated), "Konto" if len(rotated) == 1 else "Konten"))
-        return rotated[-1] if rotated else None
+                     % (rotated, "Konto" if rotated == 1 else "Konten"))
+        # Kein Token zurueckgeben: der Wert ist ein Geheimnis und wird nur
+        # zum Speichern durch den Client-Callback gebraucht. Die Anzahl
+        # genuegt fuer Logging und Tests.
+        return rotated
 
 TOKEN_VAULT = TokenVault()
 _KEEPALIVE_STOP = threading.Event()

@@ -59,6 +59,9 @@ def migrate_state_keys(metadata_by_id, state):
     """Migrate fallback state keys to real UUIDs when the UUID becomes known."""
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         return 0
+    # Der Index wird EINMAL gebaut. `state_key_for` durchsuchte den Zustand
+    # sonst fuer jedes Buch erneut -- quadratisch bei grossen Bibliotheken.
+    keys = state_keys_by_book_id(state)
     migrated = 0
     for book_id, metadata in metadata_by_id.items():
         if not isinstance(metadata, dict):
@@ -66,8 +69,11 @@ def migrate_state_keys(metadata_by_id, state):
         key = valid_book_uuid(metadata.get("uuid"))
         if not key or key in state:
             continue
-        old_key = state_key_for(state, book_id)
-        if not old_key or old_key == key:
+        try:
+            old_key = keys.get(int(book_id), "")
+        except (TypeError, ValueError):
+            continue
+        if not old_key or old_key == key or old_key not in state:
             continue
         entry = state.pop(old_key)
         if isinstance(entry, dict):

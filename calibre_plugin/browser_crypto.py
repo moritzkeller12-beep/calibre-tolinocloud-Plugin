@@ -2,8 +2,6 @@
 import base64
 import hashlib
 
-from Crypto.Cipher import AES
-
 
 # CryptoJS.AES.encrypt(value, VERSION.PHRASE) -> Base64 in IndexedDB
 # (userToken/userInfos): OpenSSL-"Salted__"-KDF, AES-256-CBC; jede
@@ -31,6 +29,13 @@ def _pkcs7_unpad(data):
 
 def cryptojs_decrypt(b64_text, passphrase=""):
     """Decrypt a CryptoJS.AES.encrypt Base64 blob; return "" on any mismatch."""
+    # PyCryptodome ist eine optionale Abhaengigkeit: ohne sie bleibt der
+    # Web-Reader-Pfad einfach leer, statt das ganze Plugin beim Import zu
+    # blockieren. Calibre bringt das Paket nicht in jeder Installation mit.
+    try:
+        from Crypto.Cipher import AES
+    except ImportError:
+        return ""
     try:
         raw = base64.b64decode("".join(str(b64_text or "").split()), validate=False)
     except Exception:

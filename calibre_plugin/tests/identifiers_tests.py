@@ -103,6 +103,17 @@ class BookIdentifierSourceTests(unittest.TestCase):
         self.assertEqual(7, state[self.UUID]["calibre_id"])
         self.assertEqual(self.UUID, state_key_for(state, 7))
 
+    def test_migration_does_not_pop_a_missing_key_twice(self):
+        """Der einmal gebaute Index darf nach dem Verschieben nicht stale poppen."""
+        from ..identifiers import migrate_state_keys
+        other = "9f3c5f0e-1a2b-4c3d-9e8f-001122334466"
+        state = {"alt-a": {"calibre_id": 1, "tolino_id": "a"},
+                 "alt-b": {"calibre_id": 1, "tolino_id": "b"}}
+        migrated = migrate_state_keys(
+            {1: {"uuid": self.UUID}, 2: {"uuid": other}}, state)
+        self.assertEqual(1, migrated)
+        self.assertIn("alt-a", state)
+
     def test_a_known_state_entry_is_found_by_calibre_id(self):
         from ..identifiers import state_key_for
         state = {"alter-schluessel": {"calibre_id": 7, "tolino_id": "t1"},

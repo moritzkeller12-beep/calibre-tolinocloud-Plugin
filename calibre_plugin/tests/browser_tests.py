@@ -14,7 +14,7 @@ from ..tolino import TolinoAuthError
 from ..browser_login import browser_login
 from ._support import (
     _REAL_CLOSE_WINDOW, _full, start_cdp_stubs, stop_cdp_stubs)
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 
 # Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
@@ -163,8 +163,10 @@ class LiveGrabTests(unittest.TestCase):
                 self.refresh = "rotated-token"
 
         grabbed = {"refresh": [stale, fresh], "hardware": ["hw-live"]}
-        with patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=grabbed), \
              patch("calibre_plugin.cdp.close_grabber_window") as closer:
             refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
@@ -174,21 +176,21 @@ class LiveGrabTests(unittest.TestCase):
         # Nach dem Tausch gehört die Sitzung Calibre: das Anmeldefenster
         # wird geschlossen, damit der Reader die übernommene Kopie nicht
         # weiter rotiert.
-        closer.assert_called_once_with()
+        self.assertEqual([call(timeout=2)], closer.call_args_list)
 
     def test_grab_live_refresh_rejects_only_stale_candidates(self):
         """Nur veraltete Kandidaten scheitern klar, ohne Replay."""
         from ..browser_login import grab_live_refresh
         stale = self._jwt(time.time() - 7200, "sess-old")  # 2 h alt
-        with patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [stale], "hardware": []}), \
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   return_value=None), \
+                   return_value={"refresh": [stale], "hardware": []}), \
              patch("calibre_plugin.cdp.close_grabber_window") as closer, \
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value={"window": False, "reader_tab": False}), \
              patch("calibre_plugin.browser_login.time.monotonic",
-                   side_effect=[0, 2]):
+                   side_effect=[0, 0, 1, 1]):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual("B02", ctx.exception.code)
@@ -214,12 +216,19 @@ class LiveGrabTests(unittest.TestCase):
 
         fresh = self._jwt(time.time() - 5, "sess-live")
         other = self._jwt(time.time() - 8, "sess-other")
-        with patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [fresh, other],
-                                 "hardware": []}), \
+        grabs = []
+
+        def next_grab(*_args, **_kwargs):
+            grabs.append(1)
+            if len(grabs) == 1:
+                return {"refresh": [fresh, other], "hardware": []}
+            return None
+
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   return_value=None), \
+                   side_effect=next_grab), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
@@ -249,9 +258,9 @@ class LiveGrabTests(unittest.TestCase):
                 logins.append(self.refresh)
                 raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
 
-        with patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [spent], "hardware": []}), \
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value={"refresh": [spent], "hardware": [],
                                  "idb": []}), \
@@ -326,6 +335,36 @@ class LiveGrabTests(unittest.TestCase):
         self.assertTrue(message["result"]["value"].startswith(
             '{"id": 1, "method": "Runtime.evaluate"'))
 
+    def test_ws_connect_closes_socket_when_handshake_times_out(self):
+        """Ein recv-Timeout beim Handshake darf den Socket nicht offen lassen."""
+        import socket as socket_module
+        from ..cdp_transport import _Ws
+
+        closed = []
+
+        class FakeSocket(object):
+            @staticmethod
+            def sendall(_data):
+                pass
+
+            @staticmethod
+            def settimeout(_timeout):
+                pass
+
+            @staticmethod
+            def recv(_size):
+                raise socket_module.timeout("handshake timeout")
+
+            @staticmethod
+            def close():
+                closed.append(True)
+
+        with patch("calibre_plugin.cdp_transport.socket.create_connection",
+                   return_value=FakeSocket()):
+            with self.assertRaises(OSError):
+                _Ws.connect("127.0.0.1", 9223, "/devtools/page/x", timeout=1)
+        self.assertEqual([True], closed)
+
     def test_exchange_prefers_refresh_typ_over_newer_access_token(self):
         """Access-JWTs (kurzlebig) werden nicht vor dem Refresh-JWT
         verbraten, auch wenn ihr iat neuer ist."""
@@ -372,12 +411,12 @@ class LiveGrabTests(unittest.TestCase):
             def _login(self):
                 self.refresh = "rotated-after-wait"
 
-        with patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [], "hardware": [],
-                                 "idb": []}), \
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   return_value={"refresh": [later],
-                                 "hardware": ["hw-live"], "idb": []}), \
+                   side_effect=[{"refresh": [], "hardware": [], "idb": []},
+                                {"refresh": [later],
+                                 "hardware": ["hw-live"], "idb": []}]), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
              patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
             refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
@@ -418,13 +457,14 @@ class LiveGrabTests(unittest.TestCase):
             return clients.pop(0)(partner_id, hw)
 
         reader_hw = "eb22e4cf-bb01-4550-bff7-334446bb20b1"
-        with patch("calibre_plugin.browser_login.TolinoClient", fake_client), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [spent], "hardware": []}), \
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.browser_login.TolinoClient", fake_client), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   return_value={"refresh": [fresh],
+                   side_effect=[{"refresh": [spent], "hardware": []},
+                                {"refresh": [fresh],
                                  "hardware": [reader_hw],
-                                 "idb": []}), \
+                                 "idb": []}]), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual("rotated-after-wait", refresh)
@@ -471,11 +511,19 @@ class LiveGrabTests(unittest.TestCase):
             def _login(self):
                 raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
 
-        with patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [spent], "hardware": []}), \
+        grabs = []
+
+        def next_grab(*_args, **_kwargs):
+            grabs.append(1)
+            if len(grabs) == 1:
+                return {"refresh": [spent], "hardware": []}
+            return None
+
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   return_value=None), \
+                   side_effect=next_grab), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
@@ -487,59 +535,76 @@ class LiveGrabTests(unittest.TestCase):
         self.assertIn("Sekunden alt", message)
         self.assertNotIn(spent, message)
 
-    def test_collect_grab_waits_while_window_is_on_partner_login_page(self):
-        """Feldbefund: Waehrend der Anmeldung verlaesst der Tab
-        mytolino.com zugunsten der Keycloak-Seite des Partners (andere
-        Domain) – das darf NIEMALS als "Fenster geschlossen" gemeldet
-        werden, solange der DevTools-Endpunkt antwortet."""
-        from .. import cdp as cdp_module
-        pages = [
-            [{"type": "page",
-              "url": "https://www.orellfuessli.ch/keycloak/realms/37/"
-                     "protocol/openid-connect/auth",
-              "webSocketDebuggerUrl": "ws://x"}],
-            [{"type": "page",
-              "url": "https://webreader.mytolino.com/library/index.html",
-              "webSocketDebuggerUrl":
-                  "ws://127.0.0.1:9223/devtools/page/x"}],
-        ]
+    def test_grab_live_refresh_waits_while_window_is_on_partner_login_page(self):
+        """Der Partner-Login-Tab ist kein geschlossenes Fenster.
+
+        Das gilt auch fuer den zusammengelegten Wartepfad: erst der
+        Partner-Login, dann schreibt der Reader den Token.
+        """
+        from ..browser_login import grab_live_refresh
+        fresh = self._jwt(time.time() - 5)
         messages = []
-        with patch("calibre_plugin.cdp._verified_owner",
-                   return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._http_get_json",
-                   side_effect=pages), \
-             patch("calibre_plugin.cdp._grab_page_tokens",
-                   return_value={"refresh": ["fresh-from-reader-token"],
-                                 "hardware": [], "idb": []}), \
-             patch("calibre_plugin.cdp.time.sleep", lambda _s: None):
-            result = cdp_module.collect_grab(9223, timeout=30,
-                                             progress=messages.append)
-        self.assertEqual(["fresh-from-reader-token"], result["refresh"])
-        self.assertTrue(any("offen" in text for text in messages))
-        self.assertTrue(all("geschlossen" not in text
+        calls = []
+
+        def fake_grab(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                return None
+            return {"refresh": [fresh], "hardware": [], "idb": []}
+
+        class FakeClient(object):
+            def __init__(self, partner_id, hw):
+                self.refresh = None
+                self.hardware = hw
+
+            def _login(self):
+                self.refresh = "rotated"
+
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   side_effect=fake_grab), \
+             patch("calibre_plugin.cdp.grabber_window_state",
+                   return_value={"window": True, "reader_tab": False}), \
+             patch("calibre_plugin.cdp.close_grabber_window"), \
+             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
+             patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
+            result = grab_live_refresh(4, "cfg-hw", timeout=1,
+                                       progress=messages.append)
+        self.assertEqual("rotated", result[0])
+        self.assertTrue(any("anmelden" in text for text in messages))
+        self.assertTrue(all("wurde geschlossen" not in text
                             for text in messages))
 
-    def test_collect_grab_reports_closed_only_when_endpoint_is_gone(self):
-        """Erst wenn das DevTools-Endpunkt mehrfach in Folge nicht
+    def test_grab_live_refresh_reports_closed_only_when_endpoint_is_gone(self):
+        """Erst wenn der DevTools-Endpunkt mehrfach in Folge nicht
         antwortet, ist das Fenster wirklich zu (kein Einzel-Aussetzer)."""
-        from .. import cdp as cdp_module
-        with patch("calibre_plugin.cdp._verified_owner", return_value=None), \
-             patch("calibre_plugin.cdp._http_get_json",
+        from ..browser_login import grab_live_refresh
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=None), \
-             patch("calibre_plugin.cdp.time.sleep", lambda _s: None):
+             patch("calibre_plugin.cdp.grabber_window_state",
+                   return_value={"window": False, "reader_tab": False}), \
+             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.collect_grab(9223, timeout=30,
-                                        progress=lambda _t: None)
+                grab_live_refresh(4, "cfg-hw", timeout=30,
+                                  progress=lambda _t: None)
         self.assertIn("geschlossen", str(ctx.exception))
         self.assertEqual("B03", ctx.exception.code)
 
-    def test_collect_grab_timeout_without_reader_tab_has_login_hint(self):
-        """Bleibt der Tab die ganze Zeit ohne Web-Reader (z. B. Anmeldung
-        nicht abgeschlossen), gibt es einen Timeout-Hinweis – keine
-        geschlossene-Fenster-Meldung."""
-        from .. import cdp as cdp_module
-        with self.assertRaises(TolinoAuthError) as ctx:
-            cdp_module.collect_grab(9223, timeout=0)
+    def test_grab_live_refresh_timeout_without_reader_tab_has_login_hint(self):
+        """Bleibt der Tab ohne Web-Reader, gibt es einen Timeout-Hinweis –
+        keine Meldung ueber ein geschlossenes Fenster."""
+        from ..browser_login import grab_live_refresh
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value=None), \
+             patch("calibre_plugin.cdp.grabber_window_state",
+                   return_value={"window": True, "reader_tab": False}):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                grab_live_refresh(4, "cfg-hw", timeout=0)
         message = str(ctx.exception)
         self.assertIn("Zeitüberschreitung", message)
         self.assertIn("nicht abgeschlossen", message)
@@ -642,7 +707,7 @@ class LiveGrabTests(unittest.TestCase):
         state = self._ws_start_server(handler)
         self.assertTrue(state["ready"].wait(5))
         result = cdp_module._evaluate_in_target(
-            "ws://127.0.0.1:%d/devtools/page/x" % state["port"],
+            (state["port"], "/devtools/page/x"),
             "JSON.stringify(out)", timeout=5)
         self.assertIsNotNone(result)
         self.assertEqual(["string-reply-caught-token-xyz"],
@@ -672,7 +737,7 @@ class LiveGrabTests(unittest.TestCase):
         state = self._ws_start_server(handler, connections=2)
         self.assertTrue(state["ready"].wait(5))
         grabbed = cdp_module._grab_page_tokens(
-            "ws://127.0.0.1:%d/devtools/page/x" % state["port"], timeout=5)
+            (state["port"], "/devtools/page/x"), timeout=5)
         self.assertEqual(["storage-token-abc", "idb-token-xyz"],
                          grabbed["refresh"])
         self.assertEqual([reader_hw], grabbed["hardware"])
@@ -703,6 +768,22 @@ class LoginWindowWaitTests(_SidJwtTest):
 
     SID = "sess-wait"
 
+    def test_close_window_retries_after_first_exception(self):
+        """Ein Fehler beim ersten Close darf den zweiten Versuch nicht verhindern."""
+        from ..browser_login import _close_window_after_grab
+        calls = []
+
+        def close(timeout=2):
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise RuntimeError("Fenster beschäftigt")
+            return True
+
+        with patch("calibre_plugin.cdp.close_grabber_window",
+                   side_effect=close):
+            self.assertTrue(_close_window_after_grab())
+        self.assertEqual([2, 5], calls)
+
     def test_grab_live_refresh_keeps_login_page_window_open(self):
         """Fenster offen, Tab auf der Anmeldeseite: NICHT schliessen,
         zur Neu-Anmeldung vor Ort auffordern und LÄNGER warten."""
@@ -718,18 +799,22 @@ class LoginWindowWaitTests(_SidJwtTest):
             def _login(self):
                 raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
 
+        def next_grab(*_args, **_kwargs):
+            grabs.append(1)
+            if len(grabs) == 1:
+                return {"refresh": [fresh], "hardware": []}
+            return None
+
         login_state = {"window": True, "reader_tab": False}
-        with patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [fresh], "hardware": []}), \
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   side_effect=lambda *a, **k: grabs.append(1) or None), \
+                   side_effect=next_grab), \
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value=login_state), \
              patch("calibre_plugin.cdp.close_grabber_window") as closer, \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
-             patch("calibre_plugin.browser_login.time.monotonic",
-                   side_effect=[0, 0, 0.1, 2]):
+             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         closer.assert_not_called()
@@ -748,20 +833,21 @@ class LoginWindowWaitTests(_SidJwtTest):
         stale = self._refresh_jwt(time.time() - 7200)
         grabs = []
 
-        def no_tab(*args, **kwargs):
+        def next_grab(*_args, **_kwargs):
             grabs.append(1)
+            if len(grabs) == 1:
+                return {"refresh": [stale], "hardware": []}
             return None
 
         dead = {"window": False, "reader_tab": False}
-        with patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [stale], "hardware": []}), \
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   side_effect=no_tab), \
+                   side_effect=next_grab), \
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value=dead), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
-             patch("calibre_plugin.browser_login.time.monotonic",
-                   side_effect=[0, 1, 2, 3]):
+             patch("calibre_plugin.browser_login._WINDOW_CHECK_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertLessEqual(len(grabs), 4)
@@ -812,6 +898,15 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         data += bytes([pad]) * pad
         ct = AES.new(key, AES.MODE_CBC, iv).encrypt(data)
         return base64.b64encode(b"Salted__" + salt + ct).decode()
+
+    def test_decrypt_without_pycryptodome_returns_empty(self):
+        """Ohne das optionale Paket bleibt der Import des Plugins heil."""
+        from ..browser_crypto import cryptojs_decrypt
+        blob = base64.b64encode(
+            b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
+        with patch.dict("sys.modules", {"Crypto": None,
+                                       "Crypto.Cipher": None}):
+            self.assertEqual("", cryptojs_decrypt(blob))
 
     def test_unwrap_decrypts_reader_user_token_blob(self):
         """Der verschluesselte Kandidat wird zum echten JWT – und ist
@@ -878,8 +973,10 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
                 logins.append(self.refresh)
                 self.refresh = "rotated-token"
 
-        with patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value={"refresh": [blob], "hardware": []}):
             refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual(("rotated-token", "fake-hw"),
@@ -1305,18 +1402,33 @@ class CdpOwnershipTests(unittest.TestCase):
             "profile": profile or tempfile.mkdtemp(prefix="cdp-test-")})
         return self.cdp._verified_owner(port, require_endpoint=False)
 
-    def test_devtools_address_reduces_to_port_and_path(self):
-        """Aus der eigenen Adresse zaehlen nur Port und Pfad; Host ist fix."""
-        parse = self.cdp._ws_parts
-        for url in ("ws://127.0.0.1:9223/devtools/page/x",
-                    "ws://localhost:9223/devtools/page/x"):
-            with self.subTest(url=url):
-                self.assertEqual((9223, "/devtools/page/x"), parse(url))
-        for url in ("wss://127.0.0.1:9223/devtools/page/x",
-                    "ws://127.0.0.1:9223/json/version",
-                    "ws://127.0.0.1/devtools/page/x", ""):
-            with self.subTest(url=url), self.assertRaises(ValueError):
-                parse(url)
+    def test_reader_target_builds_only_port_and_path(self):
+        """Der Reader-Tab liefert (Port, Pfad); die gemeldete URL zaehlt nicht."""
+        reader = [{"type": "page", "id": "x",
+                   "url": "https://webreader.mytolino.com/library/",
+                   "webSocketDebuggerUrl": "ws://evil.invalid/devtools/page/x"}]
+        self.assertEqual(((9223, "/devtools/page/x"), True),
+                         self.cdp._reader_target(reader, 9223))
+        no_id = [{"type": "page", "id": "",
+                  "url": "https://webreader.mytolino.com/library/",
+                  "webSocketDebuggerUrl": "ws://127.0.0.1:9223/devtools/page/x"}]
+        self.assertEqual((None, True), self.cdp._reader_target(no_id, 9223))
+        self.assertEqual((None, False), self.cdp._reader_target(
+            [{"type": "page", "url": "https://example.invalid/"}], 9223))
+
+    def test_browser_ws_address_never_leaves_the_owned_loopback_port(self):
+        record = {"port": 9223}
+        with patch.object(self.cdp, "_http_get_json", return_value={
+                "webSocketDebuggerUrl":
+                    "ws://127.0.0.1:9223/devtools/browser/x"}):
+            self.assertEqual((9223, "/devtools/browser/x"),
+                             self.cdp._browser_ws_for_record(record))
+        for url in ("ws://evil.invalid:9223/devtools/browser/x",
+                    "ws://127.0.0.1:9223/json/version", ""):
+            with self.subTest(url=url), \
+                 patch.object(self.cdp, "_http_get_json",
+                              return_value={"webSocketDebuggerUrl": url}):
+                self.assertIsNone(self.cdp._browser_ws_for_record(record))
 
     def test_browser_close_uses_the_owned_loopback_port(self):
         calls = []
