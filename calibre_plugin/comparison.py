@@ -369,9 +369,6 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
             disputed.update(free_titles)
             if len(free_titles) > 1:
                 match_reason = "ambiguous"
-        else:
-            status = "new_in_calibre"
-            tolino_id = ""
 
     row = {
         "book_id": book_id,

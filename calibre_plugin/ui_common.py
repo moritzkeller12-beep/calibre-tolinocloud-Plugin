@@ -158,6 +158,23 @@ class CallWorker(QObject):
         self.done.emit(result)
 
 
+def _start_thread(dialog, worker, thread, thread_name, worker_name,
+                  stop_on=(), extra_slots=()):
+    """Worker mit Thread verdrahten, Referenzen halten und starten."""
+    worker.moveToThread(thread)
+    thread.started.connect(worker.run)
+    for signal in stop_on:
+        signal.connect(thread.quit)
+    for signal, slot in extra_slots:
+        signal.connect(slot)
+    thread.finished.connect(thread.deleteLater)
+    _keep_thread_alive(thread)
+    setattr(dialog, thread_name, thread)
+    setattr(dialog, worker_name, worker)
+    thread.start()
+    return thread
+
+
 def start_call(dialog, call, on_done, on_failed):
     """Einen Netzaufruf in einem eigenen QThread ausfuehren.
 
@@ -168,20 +185,12 @@ def start_call(dialog, call, on_done, on_failed):
     """
     thread = QThread()
     worker = CallWorker(call)
-    worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-    worker.done.connect(thread.quit)
-    worker.failed.connect(thread.quit)
-    worker.done.connect(on_done)
-    worker.failed.connect(on_failed)
-    thread.finished.connect(thread.deleteLater)
-    _keep_thread_alive(thread)
-    dialog._call_thread = thread
-    # Der Worker muss den Dialog ueberleben: ohne diese Referenz kann Qt ihn
+    # Der Worker muss den Dialog ueberleben: ohne die Referenz kann Qt ihn
     # vor dem Thread-Start einsammeln, und der Dialog bleibt gesperrt.
-    dialog._call_worker = worker
-    thread.start()
-    return thread
+    return _start_thread(
+        dialog, worker, thread, "_call_thread", "_call_worker",
+        (worker.done, worker.failed),
+        ((worker.done, on_done), (worker.failed, on_failed)))
 
 
 def start_worker(dialog, worker, thread, thread_name, worker_name, stop_on=()):
@@ -192,16 +201,8 @@ def start_worker(dialog, worker, thread, thread_name, worker_name, stop_on=()):
     selbst (``_stop_thread``). Der Dialog haelt die Referenzen, damit ein
     geschlossenes Fenster den laufenden Thread nicht zerstoert.
     """
-    worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-    for signal in stop_on:
-        signal.connect(thread.quit)
-    thread.finished.connect(thread.deleteLater)
-    _keep_thread_alive(thread)
-    setattr(dialog, thread_name, thread)
-    setattr(dialog, worker_name, worker)
-    thread.start()
-    return thread
+    return _start_thread(dialog, worker, thread, thread_name, worker_name,
+                         stop_on)
 
 
 def _discard_item(collection, item):

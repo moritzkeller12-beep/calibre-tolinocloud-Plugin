@@ -437,6 +437,7 @@ class TolinoClient:
         `retry` führt die drei Wiederholungsgründe: abgelaufener
         Access-Token, unbekannte Geräte-Registrierung, WAF-Block.
         """
+        detail = raw_detail
         try:
             payload = json.loads(raw_detail)
         except ValueError:
@@ -450,8 +451,6 @@ class TolinoClient:
                 detail.setdefault("message",
                                   str(response_info["message"])[:300])
             detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
-        else:
-            detail = raw_detail
         self.last_error_text = sanitize_error(
             detail, (self.refresh, self.access))[:500]
 
@@ -483,12 +482,10 @@ class TolinoClient:
                 return
 
         if exc.code in (401, 403):
-            is_waf_retry = (
-                exc.code == 403
-                and url == self.partner.get("token_url")
-                and retry["waf"] < len(_WAF_RETRY_SECONDS)
-                and _bot_check_detected(self.last_error_text))
-            if is_waf_retry:
+            if (exc.code == 403
+                    and url == self.partner.get("token_url")
+                    and retry["waf"] < len(_WAF_RETRY_SECONDS)
+                    and _bot_check_detected(self.last_error_text)):
                 time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
                 retry["waf"] += 1
                 return

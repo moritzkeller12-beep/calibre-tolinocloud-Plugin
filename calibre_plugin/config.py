@@ -128,7 +128,7 @@ def merge_state_journal(state, account_name):
         if entry is None:
             state.pop(key, None)
         else:
-            state[key] = _copy(entry)
+            state[key] = copy.deepcopy(entry)
     return len(entries)
 
 
@@ -146,16 +146,8 @@ def clear_state_journal(account_name):
     return True
 
 
-def _copy(value):
-    """Tiefe Kopie: Zustandseinträge teilen sich keine Objekte mehr.
-
-    Eine flache Kopie liess die Einträge im `state` dieselben Dicts und
-    Listen benutzen wie PREFERENCES; ein Worker hätte damit unbestätigte
-    Änderungen in die Einstellungen geschrieben.
-    """
-    return copy.deepcopy(value)
-
-
+# Zustandseinträge müssen tief kopiert werden: sonst teilen Worker und
+# Einstellungen dieselben Dicts und Listen.
 def _account(value, fallback_name=DEFAULT_ACCOUNT_NAME):
     """Return one clean account record with an independent state mapping."""
     source = value if isinstance(value, dict) else {}
@@ -163,7 +155,7 @@ def _account(value, fallback_name=DEFAULT_ACCOUNT_NAME):
     result.update({key: source[key] for key in ACCOUNT_KEYS if key in source})
     result["name"] = str(source.get("name") or fallback_name).strip() or fallback_name
     state = source.get("state")
-    result["state"] = _copy(state) if isinstance(state, dict) else {}
+    result["state"] = copy.deepcopy(state) if isinstance(state, dict) else {}
     return result
 
 
@@ -202,9 +194,9 @@ def settings():
     with _SETTINGS_LOCK:
         accounts, active = _accounts_and_active()
         current = next(item for item in accounts if item["name"] == active)
-        values = {PREFERRED_FORMATS: _copy(PREFERENCES.get(
+        values = {PREFERRED_FORMATS: copy.deepcopy(PREFERENCES.get(
             PREFERRED_FORMATS, ["EPUB"]))}
-        values.update({key: _copy(current[key]) for key in ACCOUNT_KEYS})
+        values.update({key: copy.deepcopy(current[key]) for key in ACCOUNT_KEYS})
         values.update({
             "name": current["name"],
             "accounts": accounts,
@@ -238,14 +230,29 @@ def save_account(name, values, active=None, preferred_formats=None):
         PREFERENCES["accounts"] = accounts
         PREFERENCES["active_account"] = chosen
         if preferred_formats is not None:
-            PREFERENCES[PREFERRED_FORMATS] = _copy(list(preferred_formats))
+            PREFERENCES[PREFERRED_FORMATS] = copy.deepcopy(
+                list(preferred_formats))
         PREFERENCES.commit()
 
 
 def account_by_name(name, accounts=None):
     """Return the stored account dict for ``name`` -- never a different one."""
-    items = settings()["accounts"] if accounts is None else accounts
-    for item in items:
+    if accounts is None:
+        # Schneller Pfad: exakt gespeicherter Name. `settings()` würde alle
+        # Konten samt Zuständen tief kopieren, obwohl nur eines gebraucht wird.
+        if isinstance(name, str) and name:
+            with _SETTINGS_LOCK:
+                raw = PREFERENCES.get("accounts", None)
+                if isinstance(raw, list):
+                    for index, item in enumerate(raw):
+                        if not isinstance(item, dict):
+                            continue
+                        fallback = "account-%d" % (index + 1)
+                        stored = str(item.get("name") or fallback).strip()
+                        if stored == name:
+                            return _account(item, name)
+        accounts = settings()["accounts"]
+    for item in accounts:
         if isinstance(item, dict) and item.get("name") == name:
             return item
     return {}
@@ -344,5 +351,4 @@ def save_settings(values):
                 _account(item, item.get("name", DEFAULT_ACCOUNT_NAME))
                 for item in accounts]
             PREFERENCES["active_account"] = active
-            PREFERENCES.commit()
             PREFERENCES.commit()

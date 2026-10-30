@@ -141,10 +141,6 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def setRowCount(self, count):
                 self.row_count = count
 
-            def setCellWidget(self, row, column, widget):
-                self.cell_widgets = getattr(self, "cell_widgets", [])
-                self.cell_widgets.append((row, column, widget))
-
             def setItem(self, row, column, item):
                 self.items = getattr(self, "items", {})
                 self.items[(row, column)] = item.text

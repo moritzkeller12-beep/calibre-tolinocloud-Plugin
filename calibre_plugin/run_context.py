@@ -76,14 +76,6 @@ class RunContext:
             credentials=self.credentials,
         )
 
-    def account_values(self):
-        """Nur die Kontofelder fuer ``save_account``."""
-        values = {"partner_id": self.partner_id,
-                  "hardware_id": self.hardware_id}
-        if self.refresh_token:
-            values["refresh_token"] = self.refresh_token
-        return values
-
     def secrets(self):
         """Zugangsdaten fuer die Redaktion von Fehlertexten."""
         return (self.refresh_token,)

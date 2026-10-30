@@ -69,16 +69,14 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
         # or server error is ambiguous: the server may already have consumed
         # this single-use grant. Only a positively identified WAF block is a
         # safe reason to try the legacy transport with the same candidate.
-        if status != 403 or not _bot_check_detected(body):
-            detail = "Browser-Tausch HTTP %s: %s" % (
-                status, _compact_error_text(sanitize_error(body))[:200])
-            raise TolinoAuthError(
-                "Der Zugang konnte nicht sicher geprüft werden. " + RELOGIN,
-                code="A06", detail=detail)
-        log_info("Tolino-Token-Tausch: Browser-Reader durch WAF geblockt; "
-                 "HTTP-Fallback folgt.")
         browser_note = "Browser-Tausch HTTP %s: %s" % (
             status, _compact_error_text(sanitize_error(body))[:200])
+        if status != 403 or not _bot_check_detected(body):
+            raise TolinoAuthError(
+                "Der Zugang konnte nicht sicher geprüft werden. " + RELOGIN,
+                code="A06", detail=browser_note)
+        log_info("Tolino-Token-Tausch: Browser-Reader durch WAF geblockt; "
+                 "HTTP-Fallback folgt.")
     else:
         log_info("Tolino-Token-Tausch: kein Reader-WebSocket; "
                  "HTTP-Fallback folgt.")
@@ -114,10 +112,8 @@ def _close_window_after_grab(progress=None):
     weil der Reader ihn weiterrotieren wuerde (Reuse-Schutz).
     """
     try:
-        if cdp_module.close_grabber_window():
-            return True
-        if cdp_module.close_grabber_window(timeout=5):
-            return True
+        return bool(cdp_module.close_grabber_window()
+                    or cdp_module.close_grabber_window(timeout=5))
     except Exception as exc:
         log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
                     % sanitize_error(exc))

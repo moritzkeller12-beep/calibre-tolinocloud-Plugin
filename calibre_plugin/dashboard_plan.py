@@ -22,8 +22,9 @@ def local_metadata(dialog, context, state=None):
     state = load_state(state)
     state_keys = state_keys_by_book_id(state)
     database = dialog.gui.current_db
-    for book_id in database.new_api.all_book_ids():
-        item = database.new_api.get_metadata(book_id)
+    api = database.new_api
+    for book_id in api.all_book_ids():
+        item = api.get_metadata(book_id)
         identifier = book_uuid(item)
         if not identifier:
             identifier = (state_keys.get(book_id)
@@ -55,7 +56,7 @@ def local_metadata(dialog, context, state=None):
         item["formats"] = normalize_formats(item["formats"])
         preferred = [fmt for fmt in preferred_formats if fmt in item["formats"]]
         item["format_signatures"] = format_signatures(
-            dialog.gui.current_db, book_id, preferred)
+            database, book_id, preferred)
     return metadata
 
 
@@ -231,8 +232,7 @@ def nothing_to_do_text(preparation):
     uploads = int(gaps.get("uploads") or 0)
     metadata = int(gaps.get("metadata") or 0)
     if uploads or metadata:
-        note = NOTHING_TO_DO_TEXT + (
+        return NOTHING_TO_DO_TEXT + (
             "\n\n%d ausgewählte Aktionen konnten nicht eingeplant werden."
             % (uploads + metadata))
-        return note
     return NOTHING_TO_DO_TEXT

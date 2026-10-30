@@ -37,38 +37,18 @@ def row_capabilities(row):
         # damit lässt sich die Datei vor dem Löschen noch retten.
         "download": in_cloud,
         "delete": bool(in_cloud and not ignored),
+        "usable": usable,
     }
 
 
-class _CellSignal:
-    """Sehr kleiner Signal-Ersatz für die Check-Zellen (Tests/Kompatibilität)."""
-
-    def __init__(self):
-        self._slots = []
-
-    def connect(self, slot):
-        self._slots.append(slot)
-
-    def emit(self, *args):
-        for slot in list(self._slots):
-            slot(*args)
-
-
 class _ActionCheck:
-    """Steuert eine Check-Zelle, ohne ein eigenes Widget zu erzeugen.
-
-    Der Zustand liegt im `QTableWidgetItem`; dieses Objekt hält nur die
-    Schnittstelle, die die Oberfläche und die Tests von der früheren
-    Checkbox kannten (`isChecked`, `setChecked`, `enabled`, `tooltip`).
-    """
+    """Steuert eine Check-Zelle; der Zustand liegt im QTableWidgetItem."""
 
     def __init__(self, item, on_changed=None):
         self.item = item
         self.enabled = True
         self.tooltip = ""
-        self._blocked = False
         self._on_changed = on_changed
-        self.clicked = _CellSignal()
 
     def isChecked(self):
         return self.item.checkState() == check_state("Checked")
@@ -77,13 +57,8 @@ class _ActionCheck:
         state = check_state("Checked" if value else "Unchecked")
         if self.item.checkState() != state:
             self.item.setCheckState(state)
-            if not self._blocked and self._on_changed is not None:
+            if self._on_changed is not None:
                 self._on_changed()
-
-    def blockSignals(self, blocked):
-        previous = self._blocked
-        self._blocked = bool(blocked)
-        return previous
 
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
@@ -126,6 +101,10 @@ class InventoryDialog(QDialog):
 
     # Ein Klick ändert die Auswahl. Die Zusammenfassung zählt die Änderungen.
     READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
+    IGNORED_TOOLTIP = ("In Calibre ignoriert (%s) – wird nicht "
+                       "abgeglichen." % TOLINO_IGNORE_COLUMN)
+    DELETE_TOOLTIP = ("Zum Löschen aus tolino markiert – zuerst "
+                      "«Löschmarkierung aufheben».")
     INTRO_TEXT = ("Wähle pro Buch: Upload (Datei), Metadaten "
                   "(Titel, Autor, ISBN) oder Lesestatus. Geändert wird erst "
                   "mit «Synchronisierung starten».")
@@ -209,9 +188,8 @@ class InventoryDialog(QDialog):
         Upload-Vorschlag.
         """
         caps = row_capabilities(row)
-        # Ein ignoriertes Buch wird nie vorgeschlagen -- weder Upload noch
-        # Metadaten.
-        if row.get("ignored"):
+        # Ignorierte und zum Löschen markierte Zeilen bleiben unberührt.
+        if not caps["usable"]:
             return (False, False)
         # Bei unsicheren Zuordnungen könnte ein Upload Duplikate erzeugen.
         if row.get("status") == "review":
@@ -345,8 +323,8 @@ class InventoryDialog(QDialog):
             if item is not None:
                 item.setToolTip(text)
         # Spaltenkopf-Klick sortiert (QTableWidget-eigenes Sortieren würde
-        # die Zell-Widgets/Auswahl nicht mit den Zeilen mitziehen -- alles
-        # wird deshalb über _rebuild_table neu aufgebaut).
+        # die Check-Zellen nicht mit den Zeilen mitziehen -- alles wird
+        # deshalb über _rebuild_table neu aufgebaut).
         self._sort_column = 0
         self._sort_descending = False
         table_header = self.table.horizontalHeader()
@@ -356,7 +334,7 @@ class InventoryDialog(QDialog):
         item_changed = getattr(self.table, "itemChanged", None)
         if item_changed is not None:
             item_changed.connect(self._item_changed)
-        self._rebuild_table(self.rows)
+        self._rebuild_table(self.rows, resize_columns=True)
         layout.addWidget(self.table)
 
     def _build_footer(self, layout):
@@ -418,36 +396,33 @@ class InventoryDialog(QDialog):
         return state
 
     def _choice_changed(self, index, key):
-        """Die Zeile hält die Auswahl; die Checkbox zeigt sie nur an."""
+        """Die Zeile hält die Auswahl; die Zelle zeigt sie nur an."""
         if 0 <= index < len(self.rows):
             row = self.rows[index]
-            checked = bool(
-                (self.checks if key == "upload" else
-                 self.meta_checks if key == "metadata" else
-                 self.read_checks)[index].isChecked())
+            checked = bool(self._check_at(index, key).isChecked())
             if key == "read":
                 self._read_state(row).chosen = checked
             else:
                 row[key] = checked
             self._update_summary()
 
-    def _set_checked_quietly(self, check_widget, value):
-        """Auswahlkästchen ohne Signal setzen.
+    def _check_at(self, index, key):
+        """Check-Controller einer Aktion -- eine Zuordnung für alle Pfade."""
+        checks = (self.checks if key == "upload" else
+                  self.meta_checks if key == "metadata" else
+                  self.read_checks)
+        return checks[index]
 
-        Sammelaktionen setzten bisher jedes Kästchen einzeln und jede
-        Änderung rief `_update_summary()` -- bei einigen hundert Büchern
-        quadratisch. Die Signale bleiben hier aus; die Zusammenfassung
-        schreibt der Aufrufer genau einmal.
+    def _set_check_quietly(self, check, value):
+        """Check-Zelle ohne Einzelaktualisierung setzen.
+
+        Sammelaktionen setzen viele Zellen; die Zusammenfassung schreibt
+        der Aufrufer danach genau einmal.
         """
         previous = getattr(self, "_syncing_checks", False)
         self._syncing_checks = True
         try:
-            blocker = getattr(check_widget, "blockSignals", None)
-            if callable(blocker):
-                blocker(True)
-            check_widget.setChecked(value)
-            if callable(blocker):
-                blocker(False)
+            check.setChecked(value)
         finally:
             self._syncing_checks = previous
 
@@ -464,36 +439,34 @@ class InventoryDialog(QDialog):
                     return
 
     def _set_selection(self, chooser, clear_deletions=False):
-        """Auswahl in einem Schritt setzen (Zeilen und Widgets synchron).
+        """Auswahl in einem Schritt setzen (Zeilen und Zellen synchron).
 
         Der Lesestatus bleibt bei Empfehlungen unverändert. Zum Löschen
         markierte Zeilen bleiben unberührt; «Auswahl zurücksetzen» hebt auch
         die Löschmarkierung auf.
         """
         if clear_deletions:
-            for index, row in enumerate(self.rows):
+            for row in self.rows:
                 row.pop("delete_cloud", None)
                 row["upload"] = row["metadata"] = False
                 state = self._read_state(row)
                 state.chosen = state.cloud
-                for check in (self.checks[index], self.meta_checks[index]):
-                    self._set_checked_quietly(check, False)
             if getattr(self, "table", None) is not None:
                 self._rebuild_table(self.rows)
             else:
                 self._update_summary()
             return
         for index, row in enumerate(self.rows):
-            upload_check = self.checks[index]
-            metadata_check = self.meta_checks[index]
-            if row.get("delete_cloud") or row.get("ignored"):
+            caps = row_capabilities(row)
+            if not caps["usable"]:
                 continue
             wanted = tuple(chooser(row))
-            upload, metadata = bool(wanted[0]), bool(wanted[1])
+            upload = bool(wanted[0]) and caps["upload"]
+            metadata = bool(wanted[1]) and caps["metadata"]
             row.update(upload=upload, metadata=metadata)
-            for check, checked in ((upload_check, upload),
-                                   (metadata_check, metadata)):
-                self._set_checked_quietly(check, checked)
+            for check, checked in ((self.checks[index], upload),
+                                   (self.meta_checks[index], metadata)):
+                self._set_check_quietly(check, checked)
         self._update_summary()
 
     def apply_recommended(self):
@@ -504,23 +477,9 @@ class InventoryDialog(QDialog):
         self._set_selection(lambda _row: (False, False),
                             clear_deletions=True)
 
-    def _undecided_count(self):
-        """Zeilen, die eine Entscheidung brauchen (Gruppe «Zu prüfen»)."""
-        groups = ("review", "duplicate_tolino", "not_matchable")
-        # Eine bereits zugeordnete Cloud-Zeile ist entschieden: sie zaehlt
-        # nicht mehr als offene Frage.
-        return sum(1 for row in self.rows if row.get("group") in groups)
-
     def selected_work_count(self):
-        """Zahl der Aktionen, die die aktuelle Auswahl auslösen würde.
-
-        Genau die Zahl, die «Synchronisierung starten (n)» nennt -- und die
-        gleiche Grundlage für die Frage, ob ein Start überhaupt etwas tut.
-        """
-        return (len(self.selected_upload_ids())
-                + len(self.selected_metadata_ids())
-                + len(self.selected_read_changes())
-                + len(self.selected_cloud_deletions()))
+        """Zahl der Aktionen, die die aktuelle Auswahl auslösen würde."""
+        return self._selection_counts()["work"]
 
     def automatic_actions_enabled(self):
         """Tun Automatiken ohne Auswahl WIRKLICH etwas?
@@ -541,10 +500,11 @@ class InventoryDialog(QDialog):
         übertragen wurde, und sagte nichts dazu. Ohne ausgewählte Aktion und
         ohne Automatiken bleibt das Fenster jetzt offen und erklärt es.
         """
-        if not self.selected_work_count() and not self.automatic_actions_enabled():
+        counts = self._selection_counts()
+        if not counts["work"] and not self.automatic_actions_enabled():
             text = ("Wähle mindestens eine Aktion oder nutze "
                     "«Empfohlene Aktionen auswählen».")
-            undecided = self._undecided_count()
+            undecided = counts["undecided"]
             if undecided:
                 text += " %d %s «Zu prüfen»: nicht vorausgewählt." % (
                     undecided, plural(undecided, "Buch", "Bücher"))
@@ -558,14 +518,12 @@ class InventoryDialog(QDialog):
         return [(str(row.get("uuid") or ""), str(row["tolino_id"]),
                  str(row.get("title") or ""))
                 for row in self.rows
-                if row.get("delete_cloud") and row.get("tolino_id")
-                and not row.get("ignored")]
+                if row.get("delete_cloud") and row_capabilities(row)["delete"]]
 
     def _selected_book_ids(self, key):
         """Bücher, deren Aktion ``key`` (upload/metadata) gewählt ist."""
         return {row["book_id"] for row in self.rows
-                if row.get(key) and not row.get("ignored")
-                and row.get("book_id") is not None}
+                if row.get(key) and row_capabilities(row).get(key)}
 
     def selected_upload_ids(self):
         """Bücher, deren Datei hochgeladen werden soll."""
@@ -584,12 +542,11 @@ class InventoryDialog(QDialog):
         """
         changes = []
         for row in self.rows:
-            tolino_id = row.get("tolino_id")
             state = self._read_state(row)
-            if (not tolino_id or row.get("ignored") or row.get("delete_cloud")
-                    or not state.changed):
+            if not row_capabilities(row)["read"] or not state.changed:
                 continue
-            changes.append((str(tolino_id), row.get("book_id"), state.chosen))
+            changes.append((str(row["tolino_id"]), row.get("book_id"),
+                            state.chosen))
         return changes
 
     def _marked_row_indexes(self):
@@ -679,10 +636,11 @@ class InventoryDialog(QDialog):
         for index in marked:
             if not 0 <= index < len(self.rows):
                 continue
-            if not self._column_applies(key, self.rows[index]):
+            caps = row_capabilities(self.rows[index])
+            if not caps.get(key):
                 skipped += 1
                 continue
-            if self._set_row_choice(index, key, bool(value)):
+            if self._set_row_choice(index, key, bool(value), caps):
                 changed += 1
             else:
                 skipped += 1
@@ -731,34 +689,34 @@ class InventoryDialog(QDialog):
         """Geht diese Spalte bei dieser Zeile? -- dieselbe Capability-Regel."""
         return bool(row_capabilities(row).get(key))
 
-    def _set_row_choice(self, index, key, value):
-        """Zeile und Auswahlkästchen setzen; False = war schon so.
+    def _set_row_choice(self, index, key, value, caps=None):
+        """Zeile und Check-Zelle setzen; False = war schon so.
 
         Die Auswahl folgt dem Cloud-Lesestatus; übertragen wird sie beim Sync.
         """
         row = self.rows[index]
-        if row.get("delete_cloud") or row.get("ignored"):
+        caps = row_capabilities(row) if caps is None else caps
+        if not caps.get(key):
             return False
+        check = self._check_at(index, key)
         if key == "read":
-            check = self.read_checks[index]
             state = self._read_state(row)
-            if not state.known or state.chosen == bool(value):
+            if state.chosen == bool(value):
                 return False
             state.chosen = bool(value)
         else:
-            check = (self.checks if key == "upload" else self.meta_checks)[index]
             if bool(row.get(key)) == bool(value):
                 return False
             row[key] = bool(value)
-        self._set_checked_quietly(check, bool(value))
+        self._set_check_quietly(check, bool(value))
         return True
 
     def _sort_by_column(self, column):
         """Spaltenkopf anklicken: aufsteigend <-> absteigend umschalten."""
         if not 0 <= column < len(self._SORT_KEYS):
             return
-        # Die Zeilen sind die einzige Quelle der Auswahl; Checkboxen werden
-        # beim Neuaufbau aus ihnen erzeugt.
+        # Die Zeilen sind die einzige Quelle der Auswahl; die Check-Zellen
+        # entstehen beim Neuaufbau aus ihnen.
         if self._sort_column == column:
             self._sort_descending = not self._sort_descending
         else:
@@ -771,41 +729,27 @@ class InventoryDialog(QDialog):
                                else "AscendingOrder"))
         self._rebuild_table(ordered)
 
-    def _action_check_specs(self, row):
-        """Return enabled state and tooltips for this row's action checks."""
-        has_book = row.get("book_id") is not None
-        in_cloud = bool(row.get("tolino_id"))
-        delete_cloud = bool(row.get("delete_cloud"))
+    def _build_action_items(self, row_index, row, has_book, in_cloud):
+        """Die drei Check-Zellen einer Buchzeile anlegen."""
         caps = row_capabilities(row)
         ignored = bool(row.get("ignored"))
-        delete_tooltip = (
-            "Zum Löschen aus tolino markiert – zuerst "
-            "«Löschmarkierung aufheben».")
-        ignored_tooltip = ("In Calibre ignoriert (%s) – wird nicht "
-                           "abgeglichen." % TOLINO_IGNORE_COLUMN)
-        return (
+        delete_cloud = bool(row.get("delete_cloud"))
+        specs = (
             ("upload", caps["upload"],
              "Buchdatei in die Cloud hochladen.",
-             ("Nur in tolino – es gibt keine Calibre-Datei zum Hochladen."
-              if not has_book else
-              "Kein Buchformat aus den Upload-Formaten vorhanden.")),
+             "Nur in tolino – es gibt keine Calibre-Datei zum Hochladen."
+             if not has_book else
+             "Kein Buchformat aus den Upload-Formaten vorhanden."),
             ("metadata", caps["metadata"],
-             "Titel, Autor und ISBN in der Cloud aktualisieren, ohne "
-             "Upload.",
-             "Nur in Calibre – es gibt in tolino nichts zu "
-             "aktualisieren." if has_book else
-             "Kein Calibre-Buch – nichts zu aktualisieren."),
+             "Titel, Autor und ISBN in der Cloud aktualisieren, ohne Upload.",
+             "Nur in Calibre – es gibt in tolino nichts zu aktualisieren."
+             if has_book else "Kein Calibre-Buch – nichts zu aktualisieren."),
             ("read", caps["read"],
              self.READ_TOOLTIP + " Im ausgewählten tolino-Konto änderbar.",
              "Lesestatus unbekannt – nicht geladen." if in_cloud else
              "Geht erst, wenn das Buch in tolino liegt."),
-        ), delete_cloud, ignored, delete_tooltip, ignored_tooltip
-
-    def _build_action_checks(self, row_index, row):
-        """Create the three check cells for one book row -- ohne Widgets."""
-        checks, delete_cloud, ignored, delete_tooltip, ignored_tooltip = \
-            self._action_check_specs(row)
-        for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(checks):
+        )
+        for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(specs):
             item = QTableWidgetItem("")
             def changed(i=row_index, k=key):
                 if not getattr(self, "_syncing_checks", False):
@@ -819,9 +763,10 @@ class InventoryDialog(QDialog):
                     ("title_only", "ambiguous")):
                 tooltip = "Kann ein Duplikat erzeugen."
             check.setToolTip(
-                ignored_tooltip if ignored
+                self.IGNORED_TOOLTIP if ignored
                 else tooltip if enabled
-                else (delete_tooltip if delete_cloud else disabled_tooltip))
+                else (self.DELETE_TOOLTIP if delete_cloud
+                      else disabled_tooltip))
             (self.checks, self.meta_checks,
              self.read_checks)[column].append(check)
             self.table.setItem(row_index, column, item)
@@ -844,7 +789,7 @@ class InventoryDialog(QDialog):
             row.get("isbn", ""), row.get("tolino_id", ""), row.get("uuid", ""),
         )
 
-    def _rebuild_table(self, rows):
+    def _rebuild_table(self, rows, resize_columns=False):
         """Tabelle aus den (ggf. sortierten) Zeilen neu aufbauen."""
         self.table.setUpdatesEnabled(False)
         self._syncing_checks = True
@@ -861,12 +806,13 @@ class InventoryDialog(QDialog):
             for row_index, row in enumerate(self.rows):
                 has_book = row.get("book_id") is not None
                 in_cloud = bool(row.get("tolino_id"))
-                self._build_action_checks(row_index, row)
+                self._build_action_items(row_index, row, has_book, in_cloud)
                 values = self._row_display_values(row, has_book, in_cloud)
                 for column, value in enumerate(values, 3):
                     self.table.setItem(
                         row_index, column, QTableWidgetItem(str(value or "")))
-            self.table.resizeColumnsToContents()
+            if resize_columns:
+                self.table.resizeColumnsToContents()
             self._size_columns()
             self._apply_technical_visibility()
             self._apply_group_filter()
@@ -921,16 +867,14 @@ class InventoryDialog(QDialog):
         for row in self.rows:
             if row.get("group") in review_groups:
                 undecided += 1
-            if row.get("ignored"):
-                continue
-            if row.get("delete_cloud") and row.get("tolino_id"):
+            caps = row_capabilities(row)
+            if caps["delete"] and row.get("delete_cloud"):
                 deletions += 1
-            book_id = row.get("book_id")
-            if book_id is not None and row.get("upload"):
-                uploads.add(book_id)
-            if book_id is not None and row.get("metadata"):
-                metadata.add(book_id)
-            if not row.get("tolino_id") or row.get("delete_cloud"):
+            if caps["upload"] and row.get("upload"):
+                uploads.add(row["book_id"])
+            if caps["metadata"] and row.get("metadata"):
+                metadata.add(row["book_id"])
+            if not caps["read"]:
                 continue
             state = self._read_state(row)
             if not state.changed:
@@ -939,9 +883,12 @@ class InventoryDialog(QDialog):
                 marked_read += 1
             else:
                 marked_unread += 1
+        work = (len(uploads) + len(metadata) + marked_read
+                + marked_unread + deletions)
         return {"uploads": len(uploads), "metadata": len(metadata),
                 "read": marked_read, "unread": marked_unread,
-                "deletions": deletions, "undecided": undecided}
+                "deletions": deletions, "undecided": undecided,
+                "work": work}
 
     def _update_summary(self, *_args):
         """Kurzzeile: wie viele Aktionen gerade ausgewählt sind."""
@@ -973,7 +920,7 @@ class InventoryDialog(QDialog):
             summary.setText(summary_text)
         confirm = getattr(self, "confirm", None)
         if confirm is not None:
-            total = uploads + metadata + changes + deletions
+            total = counts["work"]
             confirm.setText("Synchronisierung starten (%d)" % total
                             if total else "Synchronisierung starten")
             confirm.setEnabled(total > 0 or self.automatic_actions_enabled())
@@ -1136,7 +1083,7 @@ class InventoryDialog(QDialog):
             if not 0 <= index < len(self.rows):
                 continue
             row = self.rows[index]
-            if not row.get("tolino_id") or row.get("delete_cloud"):
+            if row.get("delete_cloud") or not row_capabilities(row)["delete"]:
                 continue
             candidates.append(row)
         if not candidates:
@@ -1159,9 +1106,9 @@ class InventoryDialog(QDialog):
             return
         changed = 0
         for index in marked:
-            if 0 <= index < len(self.rows):
-                if self.rows[index].pop("delete_cloud", None) is not None:
-                    changed += 1
+            if (0 <= index < len(self.rows)
+                    and self.rows[index].pop("delete_cloud", None) is not None):
+                changed += 1
         if not changed:
             QMessageBox.information(
                 self, "Löschmarkierung aufheben",

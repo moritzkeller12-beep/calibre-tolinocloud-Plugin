@@ -7,9 +7,9 @@ import unittest
 from . import ui_base_tests
 from ..plan import merge_removals
 from ..run_context import RunContext
-from ._support import (FakeCheckBox, FakeMenu, FakeMessageBox,
-                      _ui_source_text, compare_inventory, start_cdp_stubs,
-                      stop_cdp_stubs, ui_module_for)
+from ._support import (FakeMenu, FakeMessageBox, _ui_source_text,
+                      compare_inventory, start_cdp_stubs, stop_cdp_stubs,
+                      ui_module_for)
 from unittest.mock import patch
 
 
@@ -79,8 +79,8 @@ class _QtDialogTest(unittest.TestCase):
 class InventoryDialogSortTests(unittest.TestCase):
     """Spaltenkopf-Klick sortiert den Bestandsvergleich und zieht die
     Auswahl mit (Feldbefund: „das sortieren funktioniert nicht").
-    Qt wird ueber den ToolbarIconTests-Stub geladen; die Zell-Widgets
-    werden durch einfache Fakes ersetzt."""
+    Qt wird ueber den ToolbarIconTests-Stub geladen; die Check-Zellen
+    laufen ueber einfache Item-Fakes."""
 
     def test_column_click_sorts_and_keeps_checks(self):
         """Ein Klick auf einen Spaltenkopf sortiert die Tabelle neu; die
@@ -103,9 +103,6 @@ class InventoryDialogSortTests(unittest.TestCase):
 
             def setRowCount(self, count):
                 self.row_count = count
-
-            def setCellWidget(self, row, column, widget):
-                pass
 
             def setItem(self, row, column, item):
                 pass
@@ -151,7 +148,6 @@ class InventoryDialogSortTests(unittest.TestCase):
 
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
-        ui_module.dialogs.QCheckBox = FakeCheckBox
         ui_module.dialogs.QTableWidgetItem = FakeItem
         try:
             dialog = ui_module.dialogs.InventoryDialog.__new__(
@@ -175,18 +171,6 @@ class InventoryDialogSortTests(unittest.TestCase):
                  "explanation": "Noch nicht in der Cloud – kann hochgeladen werden."},
             ]
             dialog.rows = rows
-            dialog.checks = [FakeCheckBox() for _ in rows]
-            dialog.meta_checks = [FakeCheckBox() for _ in rows]
-            dialog.read_checks = [FakeCheckBox() for _ in rows]
-            for index, (uploads, metadata, read, row) in enumerate(zip(
-                    dialog.checks, dialog.meta_checks,
-                    dialog.read_checks, rows)):
-                for key, check in (("upload", uploads),
-                                   ("metadata", metadata), ("read", read)):
-                    check.setChecked(row[key])
-                    check.stateChanged.connect(
-                        lambda value, i=index, k=key:
-                        dialog._choice_changed(i, k))
             dialog._sort_column = 0
             dialog._sort_descending = False
             dialog._technical_visible = False
@@ -304,7 +288,6 @@ class InventoryDialogSortTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
-            ui_module.dialogs.QCheckBox = FakeCheckBox
             dialog = ui_module.dialogs.InventoryDialog.__new__(
                 ui_module.dialogs.InventoryDialog)
             rows = [
@@ -316,16 +299,16 @@ class InventoryDialogSortTests(unittest.TestCase):
                 {"status": "only_tolino", "book_id": None, "tolino_id": "c9"},
             ]
             dialog.rows = rows
-            dialog.checks = [FakeCheckBox() for _ in rows]
-            dialog.meta_checks = [FakeCheckBox() for _ in rows]
-            dialog.read_checks = [FakeCheckBox() for _ in rows]
-            for index, (uploads, metadata, read) in enumerate(zip(
-                    dialog.checks, dialog.meta_checks, dialog.read_checks)):
-                for key, check in (("upload", uploads),
-                                   ("metadata", metadata), ("read", read)):
-                    check.stateChanged.connect(
-                        lambda _state, i=index, k=key:
-                        dialog._choice_changed(i, k))
+            dialog.checks, dialog.meta_checks, dialog.read_checks = [], [], []
+            for index in range(len(rows)):
+                for key, controls in (("upload", dialog.checks),
+                                      ("metadata", dialog.meta_checks),
+                                      ("read", dialog.read_checks)):
+                    def changed(i=index, k=key):
+                        if not getattr(dialog, "_syncing_checks", False):
+                            dialog._choice_changed(i, k)
+                    controls.append(ui_module.dialogs._ActionCheck(
+                        ui_module.dialogs.QTableWidgetItem(""), changed))
             dialog.apply_recommended()
             # Neu -> hochladen, geänderte Datei -> hochladen, sonst
             # Metadaten; nichts für unveränderte oder reine Cloud-Bücher.
@@ -340,8 +323,8 @@ class InventoryDialogSortTests(unittest.TestCase):
                              [dialog._read_state(row).chosen for row in rows])
             self.assertEqual([], _read_ids(dialog, True))
             # Ausdrücklich angehakt zählt sie aber -- nur mit Tolino-ID.
-            dialog.read_checks[0].setChecked(True)
-            dialog.read_checks[4].setChecked(True)
+            dialog._set_row_choice(0, "read", True)
+            dialog._set_row_choice(4, "read", True)
             self.assertEqual(["c1", "c9"], _read_ids(dialog, True))
             dialog.clear_all_selection()
             self.assertEqual(set(), dialog.selected_upload_ids())
@@ -572,8 +555,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             cell = self._cells_by_title(dialog)["Gelesen"]
-            cell.setChecked(False)
-            cell.clicked.emit()   # in einem Klick abwaehlen
+            cell.setChecked(False)   # in einem Klick abwaehlen
             dialog._sort_by_column(0)
             dialog._sort_by_column(0)
             self.assertEqual(["t-1"], _read_ids(dialog, False))
@@ -581,7 +563,6 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             self.assertFalse(rebuilt.isChecked())
             # Ein Klick hakt sie wieder an.
             rebuilt.setChecked(True)
-            rebuilt.clicked.emit()
             self.assertEqual([], _read_ids(dialog, False))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -631,7 +612,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             ui_module._restore_stubs_for_tests()
 
     def test_marked_rows_can_be_chosen_for_upload_and_metadata(self):
-        """Hochladen/Metadaten für markierte Zeilen – wie die Kästchen."""
+        """Hochladen/Metadaten für markierte Zeilen – wie die Check-Zellen."""
         ui_module = self._ui()
         try:
             self._messages(ui_module)

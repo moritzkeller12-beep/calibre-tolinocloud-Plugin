@@ -319,8 +319,7 @@ def cover_bytes(database, book_id):
     api = database.new_api
     if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
-    cover = api.cover(book_id, as_file=False)
-    return cover
+    return api.cover(book_id, as_file=False)
 
 
 def image_suffix(data):
