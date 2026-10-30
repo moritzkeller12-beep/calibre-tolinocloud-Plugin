@@ -6,23 +6,18 @@ Qt-Stub in den Tests nur an einer Stelle greift.
 import functools
 import re
 
+from qt.core import (QCheckBox, QComboBox, QDialog,
+                     QFormLayout, QGroupBox, QHeaderView, QLabel,
+                     QLineEdit, QMessageBox, QMenu,
+                     QProgressBar, QPushButton, QThread,
+                     QVBoxLayout, QHBoxLayout, QTableWidget,
+                     QTableWidgetItem, QObject, QInputDialog,
+                     QFileDialog, Qt)
 try:
-    from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QHeaderView, QLabel,
-                         QLineEdit, QMessageBox, QMenu,
-                         QProgressBar, QPushButton, QThread,
-                         QVBoxLayout, QHBoxLayout, QTableWidget,
-                         QTableWidgetItem, QObject, QInputDialog,
-                         QFileDialog, Qt, pyqtSignal)
+    from qt.core import pyqtSignal
 except ImportError:
     # Some Calibre Qt builds expose the signal type as Signal.
-    from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QHeaderView, QLabel,
-                         QLineEdit, QMessageBox, QMenu,
-                         QProgressBar, QPushButton, QThread,
-                         QVBoxLayout, QHBoxLayout, QTableWidget,
-                         QTableWidgetItem, QObject, QInputDialog,
-                         QFileDialog, Qt, Signal as pyqtSignal)
+    from qt.core import Signal as pyqtSignal
 
 # Namen, die andere UI-Module ueber dieses Modul beziehen.
 __all__ = [

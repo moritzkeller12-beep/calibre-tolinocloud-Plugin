@@ -44,11 +44,10 @@ def row_capabilities(row):
 class _ActionCheck:
     """Steuert eine Check-Zelle; der Zustand liegt im QTableWidgetItem."""
 
-    def __init__(self, item, on_changed=None):
+    def __init__(self, item):
         self.item = item
         self.enabled = True
         self.tooltip = ""
-        self._on_changed = on_changed
 
     def isChecked(self):
         return self.item.checkState() == check_state("Checked")
@@ -57,8 +56,6 @@ class _ActionCheck:
         state = check_state("Checked" if value else "Unchecked")
         if self.item.checkState() != state:
             self.item.setCheckState(state)
-            if self._on_changed is not None:
-                self._on_changed()
 
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
@@ -746,10 +743,7 @@ class InventoryDialog(QDialog):
         )
         for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(specs):
             item = QTableWidgetItem("")
-            def changed(i=row_index, k=key):
-                if not getattr(self, "_syncing_checks", False):
-                    self._choice_changed(i, k)
-            check = _ActionCheck(item, changed)
+            check = _ActionCheck(item)
             check.setEnabled(enabled)
             # Eine deaktivierte Aktion nie angehakt zeigen -- sonst sähe eine
             # ignorierte oder zum Löschen markierte Zeile ausgewählt aus.

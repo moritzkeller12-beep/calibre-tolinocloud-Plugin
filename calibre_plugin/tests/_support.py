@@ -74,7 +74,11 @@ class FakeTableItem:
         return self._flags
 
     def setCheckState(self, state):
+        changed = state != self._check_state
         self._check_state = state
+        table = getattr(self, "_table", None)
+        if changed and table is not None:
+            table.itemChanged.emit(self)
 
     def checkState(self):
         return self._check_state

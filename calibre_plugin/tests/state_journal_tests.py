@@ -95,10 +95,13 @@ class StateJournalTests(unittest.TestCase):
                                           "calibre_id": 1}})
         metadata = {1: {"uuid": "u1", "title": "A", "authors": "",
                         "formats": ["EPUB"], "last_modified": "1"}}
+        # start_sync liest das Journal genau einmal, bevor die Worker starten.
+        state = {}
+        config.merge_state_journal(state, "A")
         try:
             worker = ui_module.workers.SyncWorker(
                 RunContext.from_values({"account_name": "A", "state": {}}),
-                [], [], state={})
+                [], [], state=state)
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual("t-1", worker.state["u1"]["tolino_id"])
@@ -163,8 +166,8 @@ class StateJournalTests(unittest.TestCase):
              patch.object(ui_module.dashboard, "button", lambda _name: 1), \
              patch.object(ui_module.dashboard, "settings", lambda: {
                  "accounts": [{"name": "A"}, {"name": "B"}]}), \
-             patch.object(ui_module.dashboard, "save_settings",
-                          lambda _values: None), \
+             patch.object(ui_module.dashboard, "remove_saved_account",
+                          lambda _name: True), \
              patch.object(ui_module.dashboard, "clear_state_journal",
                           lambda name: cleared.append(name) or True):
             ui_module.dashboard.SyncDashboard.remove_account(dashboard)

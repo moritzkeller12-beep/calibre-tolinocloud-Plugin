@@ -6,7 +6,7 @@ import threading
 import time
 import traceback
 import uuid
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import urlencode, quote as _url_quote, urlsplit
 from urllib.request import Request, urlopen
 
@@ -413,7 +413,7 @@ class TolinoClient:
                                         exc.read().decode("utf-8", "replace"),
                                         url, authenticated, retry)
                 continue
-            except (URLError, OSError, TimeoutError) as exc:
+            except OSError as exc:
                 _raise_transport_error(exc, (self.refresh, self.access))
             return _decode_json(raw)
 
@@ -569,7 +569,8 @@ class TolinoClient:
                       content_type=content_type)
 
     def delete(self, deliverable_id):
-        self._request(BASE_URL + "/deletecontent?deliverableId=" + str(deliverable_id))
+        self._request(BASE_URL + "/deletecontent?deliverableId="
+                      + _url_quote(str(deliverable_id)))
 
     # --- In-place metadata: update an existing book via /meta -----------
     META_URL = BASE_URL + "/meta"
@@ -728,7 +729,7 @@ class TolinoClient:
                         code="N05",
                         short="tolino hat einen unsicheren Download-Link geliefert.")
                 content = response.read()
-        except (HTTPError, URLError, OSError) as exc:
+        except OSError as exc:
             raise TolinoApiError("Download von Tolino fehlgeschlagen: %s" %
                                  sanitize_error(exc, (self.refresh, self.access)),
                                  code="N05", short="Der Download von Tolino ist fehlgeschlagen.")

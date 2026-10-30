@@ -286,18 +286,24 @@ def normalize_formats(value):
 
 
 
-def safe_format_path(database, book_id, format_name):
-    """Resolve a real Calibre id without falling back to view-index semantics."""
+def _api_for(database, book_id):
+    """Validate a Calibre book id and return the database API."""
     if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
         raise ValueError("Invalid Calibre book id: %r" % (book_id,))
+    api = database.new_api
+    if not api.has_id(book_id):
+        raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    return api
+
+
+def safe_format_path(database, book_id, format_name):
+    """Resolve a real Calibre id without falling back to view-index semantics."""
     if not isinstance(format_name, str):
         raise ValueError("Invalid format name: %r" % (format_name,))
     format_name = format_name.strip().lstrip(".").upper()
     if not format_name or not re.match(r"^[A-Z0-9][A-Z0-9._-]*$", format_name):
         raise ValueError("Invalid format name: %r" % (format_name,))
-    api = database.new_api
-    if not api.has_id(book_id):
-        raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    api = _api_for(database, book_id)
     try:
         path = api.format_abspath(book_id, format_name)
     except ValueError as exc:
@@ -314,26 +320,20 @@ def safe_format_path(database, book_id, format_name):
 
 def cover_bytes(database, book_id):
     """Normalize cover() results from bytes, paths, or wrapped Calibre values."""
-    if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
-        raise ValueError("Invalid Calibre book id: %r" % (book_id,))
-    api = database.new_api
-    if not api.has_id(book_id):
-        raise ValueError("Calibre database has no book with id %r." % (book_id,))
-    return api.cover(book_id, as_file=False)
+    return _api_for(database, book_id).cover(book_id, as_file=False)
 
 
 def image_suffix(data):
     """Return a recognized image suffix, or '' for unknown cover bytes."""
     if not isinstance(data, bytes) or not data:
         return ""
-    raw = data
-    if raw.startswith(b"\xff\xd8\xff"):
+    if data.startswith(b"\xff\xd8\xff"):
         return ".jpg"
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return ".png"
-    if raw.startswith((b"GIF87a", b"GIF89a")):
+    if data.startswith((b"GIF87a", b"GIF89a")):
         return ".gif"
-    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return ".webp"
     return ""
 

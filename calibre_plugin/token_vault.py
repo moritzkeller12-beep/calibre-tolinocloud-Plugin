@@ -91,7 +91,6 @@ class TokenVault:
 
 TOKEN_VAULT = TokenVault()
 _KEEPALIVE_STOP = threading.Event()
-_KEEPALIVE_STARTED = threading.Event()
 _KEEPALIVE_THREAD = None
 
 
@@ -102,10 +101,9 @@ def make_client(store, lock_timeout=5):
 
 def start_token_keepalive(get_credentials, interval=45 * 60):
     """Rotate saved refresh tokens periodically in a daemon thread."""
-    if _KEEPALIVE_STARTED.is_set():
-        return None
     global _KEEPALIVE_THREAD
-    _KEEPALIVE_STARTED.set()
+    if _KEEPALIVE_THREAD is not None:
+        return None
     _KEEPALIVE_STOP.clear()
 
     def loop():
@@ -131,7 +129,6 @@ def stop_token_keepalive(timeout=2):
     global _KEEPALIVE_THREAD
     _KEEPALIVE_STOP.set()
     thread, _KEEPALIVE_THREAD = _KEEPALIVE_THREAD, None
-    _KEEPALIVE_STARTED.clear()
     if thread is not None and thread.is_alive():
         thread.join(timeout=max(0.1, timeout))
 

@@ -147,6 +147,8 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.items[(row, column)] = item.text
                 self.raw_items = getattr(self, "raw_items", {})
                 self.raw_items[(row, column)] = item
+                # Wie QTableWidget: Zustandsaenderungen melden itemChanged.
+                item._table = self
 
             def item(self, row, column):
                 return getattr(self, "raw_items", {}).get((row, column))

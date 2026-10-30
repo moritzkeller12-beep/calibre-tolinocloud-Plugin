@@ -5,7 +5,7 @@ from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
 from .planning_values import plural
 from .token_vault import make_client
 from .config import (CredentialStore, clear_state_journal, journal_state,
-                     merge_state_journal, save_account)
+                     save_account)
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
@@ -61,14 +61,6 @@ class SyncWorker(QObject):
         # Eine private Kopie je Lauf: Uploads und Löschungen schreiben in
         # dasselbe Objekt, das `_persist_state` sichert.
         self.state = copy.deepcopy(state) if isinstance(state, dict) else {}
-        # Ein Journalrest eines abgebrochenen Laufs zaehlt vor jedem
-        # Vergleich: nur so bleibt die Tolino-ID eines fertigen Uploads
-        # bekannt und wird nicht ein zweites Mal hochgeladen.
-        try:
-            merge_state_journal(self.state, self.account_name)
-        except Exception as exc:
-            log_warning("Teilstand konnte nicht geladen werden: %s"
-                        % sanitize_error(exc))
         self._journal_dirty = False
         self.updates = []
         # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
@@ -325,8 +317,6 @@ class SyncWorker(QObject):
             self._finish_operation(
                 operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
                 **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
-            if deleted:
-                self._journal_state(job.book_uuid)
 
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
@@ -651,11 +641,6 @@ class PrepareWorker(QObject):
         comparison writes tolino IDs, so it must get an independent copy.
         """
         state = copy.deepcopy(load_state(self.state))
-        try:
-            merge_state_journal(state, self.account_name)
-        except Exception as exc:
-            log_warning("Teilstand konnte nicht geladen werden: %s"
-                        % sanitize_error(exc))
         # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
         # wenn Calibre spaeter eine echte UUID liefert.
         migrated = migrate_state_keys(self.metadata, state)

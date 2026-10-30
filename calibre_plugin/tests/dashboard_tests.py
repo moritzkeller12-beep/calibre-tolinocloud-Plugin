@@ -1079,8 +1079,8 @@ class LoginMessageTests(unittest.TestCase):
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
             dashboard)
 
-        with patch.object(ui_module.dashboard, "_verified_owner",
-                          return_value=None, create=True) as alive, \
+        with patch.object(ui_module.dashboard, "grabber_window_state",
+                          return_value={"window": False}, create=True) as alive, \
              patch.object(ui_module.dashboard, "close_grabber_window",
                           create=True) as close:
             dashboard.login_completed("tok-neu", "hw-neu")

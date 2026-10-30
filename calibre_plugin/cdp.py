@@ -104,9 +104,6 @@ def _evaluate_message(ws, expression, timeout, await_promise, message_id):
             text = str((details.get("exception") or {}).get("description")
                        or details.get("text") or "page error")
             return {"ok": False, "value": None, "exception": text[:300]}
-        if result.get("type") == "string":
-            return {"ok": True, "value": result.get("value"),
-                    "exception": None}
         if "value" in result:
             return {"ok": True, "value": result.get("value"),
                     "exception": None}
@@ -145,13 +142,7 @@ def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
         return None
     if not isinstance(parsed, dict):
         return None
-    return {
-        "refresh": [t for t in parsed.get("refresh", [])
-                    if isinstance(t, str)],
-        "hardware": [t for t in parsed.get("hardware", [])
-                     if isinstance(t, str)],
-        "idb": [t for t in parsed.get("idb", []) if isinstance(t, str)],
-    }
+    return parsed
 
 
 # ---------------------------------------------------------------- Fenster-Flow
@@ -179,15 +170,15 @@ def _wait_for_debug_port(port, timeout=20):
 
 def launch_reader_window():
     """Start Chromium with an isolated temporary profile and random port."""
+    previous = _verified_owner()
+    if previous:
+        return previous["port"]
     candidate, status = pick_chromium()
     binary, label = candidate or (None, None)
     if not binary:
         message, code = browser_finder.missing_browser_error(status)
         raise TolinoAuthError(message, code=code,
                               detail="Host-Sonde: %s" % status)
-    previous = _verified_owner()
-    if previous:
-        return previous["port"]
     if _LAUNCHED["process"] is not None:
         close_grabber_window()
         if _LAUNCHED["process"] is not None:
@@ -229,7 +220,7 @@ def launch_reader_window():
     log_info("Tolino-Anmeldefenster: Chromium auf 127.0.0.1:%d." % port)
     if _wait_for_debug_port(port):
         return port
-    _abandon_failed_launch(process, {"profile": profile})
+    _shutdown({"process": process, "port": port, "profile": profile})
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
         "und es erneut versuchen.", code="B07", detail="Port %d" % port)
@@ -245,13 +236,6 @@ def _stop_launched_process(process, timeout=2):
         return process.poll() is not None
     except Exception:
         return False
-
-
-def _abandon_failed_launch(process, record):
-    """Close the launched browser before removing its temporary profile."""
-    live = {"process": process, "port": int(_LAUNCHED["port"] or 0),
-            "profile": record["profile"]}
-    return _shutdown(live)
 
 
 def read_idb_tokens(ws_url, db_names, timeout=10):
@@ -348,6 +332,20 @@ def _reader_target(targets, port):
     return None, reader_found
 
 
+def _reader_targets(port=None, timeout=5):
+    """Owned window's reader target, resolved in one place."""
+    record = _verified_owner(port)
+    if record is None:
+        return None
+    port = int(record["port"])
+    targets = _http_get_json(
+        "http://127.0.0.1:%d/json/list" % port, timeout)
+    if not isinstance(targets, list):
+        return None
+    ws_url, reader_found = _reader_target(targets, port)
+    return {"window": True, "reader_tab": reader_found, "ws_url": ws_url}
+
+
 def grab_once_from_grabber(port=None, timeout=12):
     """ONE grab attempt against OUR grabber window (no polling).
 
@@ -357,15 +355,10 @@ def grab_once_from_grabber(port=None, timeout=12):
     waiting for a sign-in that may not happen – the user just clicks the
     button again after signing in.
     """
-    record = _verified_owner(port)
-    if record is None:
+    target = _reader_targets(port)
+    if target is None or target["ws_url"] is None:
         return None
-    port = int(record["port"])
-    ws_url = _reader_target(
-        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)[0]
-    if ws_url is None:
-        return None
-    return _grab_page_tokens(ws_url, timeout)
+    return _grab_page_tokens(target["ws_url"], timeout)
 
 
 def _oauth_rejection_reason(body):
@@ -436,12 +429,8 @@ def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
 
 def reader_ws_url(port=None):
     """WebSocket-Debugger-URL des ersten mytolino-Reader-Tabs (oder None)."""
-    record = _verified_owner(port)
-    if record is None:
-        return None
-    port = int(record["port"])
-    return _reader_target(
-        _http_get_json("http://127.0.0.1:%d/json/list" % port), port)[0]
+    target = _reader_targets(port)
+    return target["ws_url"] if target is not None else None
 
 
 def _browser_ws_for_record(record, timeout=2):
@@ -523,15 +512,10 @@ def close_grabber_window(timeout=2, port=None):
 
 def grabber_window_state(port=None, timeout=5):
     """Return whether the grabber window and a reader tab are available."""
-    record = _verified_owner(port)
-    if record is None:
+    target = _reader_targets(port, timeout)
+    if target is None:
         return {"window": False, "reader_tab": False}
-    port = int(record["port"])
-    targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
-    if not isinstance(targets, list):
-        return {"window": False, "reader_tab": False}
-    _ws_url, reader_tab = _reader_target(targets, port)
-    return {"window": True, "reader_tab": reader_tab}
+    return {"window": True, "reader_tab": target["reader_tab"]}
 
 
 def _raise_window_closed(progress):

@@ -1299,7 +1299,8 @@ class SyncPlanTests(unittest.TestCase):
         try:
             config.PREFERENCES = config.JSONConfig("test")
             config.settings()
-            config.save_settings({config.PREFERRED_FORMATS: ["PDF"]})
+            config.save_account(config.DEFAULT_ACCOUNT_NAME, {},
+                                preferred_formats=["PDF"])
             values = config.settings()
             for key in legacy_global:
                 self.assertIn(key, values)

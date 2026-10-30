@@ -194,7 +194,7 @@ def settings():
     with _SETTINGS_LOCK:
         accounts, active = _accounts_and_active()
         current = next(item for item in accounts if item["name"] == active)
-        # Reines Lesen: geschrieben wird nur in save_account/save_settings.
+        # Reines Lesen: geschrieben wird nur in save_account/remove_account.
         return {
             PREFERRED_FORMATS: copy.deepcopy(
                 PREFERENCES.get(PREFERRED_FORMATS, ["EPUB"])),
@@ -209,7 +209,7 @@ def save_account(name, values, active=None, preferred_formats=None):
     """Persist one account without changing any other account's state.
 
     `preferred_formats` schreibt die globalen Formate im selben Commit mit;
-    der Dialog braucht dafür keinen zweiten `save_settings`-Aufruf.
+    der Dialog braucht dafür keinen zweiten Schreibaufruf.
     """
     with _SETTINGS_LOCK:
         accounts, current_active = _accounts_and_active()
@@ -332,22 +332,17 @@ class CredentialStore:
         return self.snapshot()
 
 
-def save_settings(values):
-    """Persist global options and the selected account."""
+def remove_account(name):
+    """Remove one saved account and select a remaining account."""
     with _SETTINGS_LOCK:
-        accounts, current_active = _accounts_and_active()
-        if PREFERRED_FORMATS in values:
-            PREFERENCES[PREFERRED_FORMATS] = values[PREFERRED_FORMATS]
-        given = values.get("accounts")
-        if isinstance(given, list):
-            accounts = given
-        active = values.get("active_account", current_active)
-        active_values = {key: values[key] for key in ACCOUNT_KEYS if key in values}
-        if active_values:
-            save_account(active, dict(active_values, name=active), active=active)
-        else:
-            PREFERENCES["accounts"] = [
-                _account(item, item.get("name", DEFAULT_ACCOUNT_NAME))
-                for item in accounts]
-            PREFERENCES["active_account"] = active
-            PREFERENCES.commit()
+        accounts, active = _accounts_and_active()
+        remaining = [item for item in accounts if item["name"] != name]
+        if not remaining or len(remaining) == len(accounts):
+            return False
+        PREFERENCES["accounts"] = [
+            _account(item, item.get("name", DEFAULT_ACCOUNT_NAME))
+            for item in remaining]
+        PREFERENCES["active_account"] = (
+            active if active != name else remaining[0]["name"])
+        PREFERENCES.commit()
+        return True

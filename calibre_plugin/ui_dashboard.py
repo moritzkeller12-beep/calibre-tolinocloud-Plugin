@@ -15,7 +15,8 @@ from calibre.gui2 import error_dialog, info_dialog
 from .token_vault import make_client
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
                      clear_state_journal, load_state, merge_state_journal,
-                     save_account, save_credentials, save_settings,
+                     remove_account as remove_saved_account,
+                     save_account, save_credentials,
                      set_active_account, settings)
 from .run_context import RunContext
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
@@ -27,7 +28,7 @@ from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
 from .tolino import (RELOGIN, hardware_id, log_warning,
                      normalize_refresh_token, report_error, sanitize_error)
-from .cdp import _verified_owner
+from .cdp import grabber_window_state
 from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
@@ -81,7 +82,7 @@ def _running_text(dialog):
     """Was läuft gerade? Nur der Dialog kennt seine Worker-Attribute."""
     if dialog.thread is not None:
         return "Synchronisierung läuft …"
-    if getattr(dialog, "prepare_thread", None) is not None:
+    if dialog.prepare_thread is not None:
         return "Vergleich läuft …"
     return "Anmeldung wird geprüft …"
 
@@ -150,6 +151,13 @@ def _sync_failure_heading(outcome):
 
 
 class SyncDashboard(QDialog):
+    thread = None
+    worker = None
+    login_thread = None
+    login_worker = None
+    prepare_thread = None
+    prepare_worker = None
+
     def __init__(self, gui):
         QDialog.__init__(self, gui)
         self.gui = gui
@@ -330,9 +338,9 @@ class SyncDashboard(QDialog):
     def _save_visible_account(self, values=None):
         """Das sichtbare Konto und die globalen Optionen EINMAL einlesen.
 
-        Vorher lasen save_settings() und save_account() dieselben Widgets
-        getrennt (inklusive zweimaliger Format-Liste). `values()` ist die
-        eine Quelle; die globalen Schluessel stehen in config.
+        Vorher lasen zwei getrennte Pfade dieselben Widgets (inklusive
+        zweimaliger Format-Liste). `values()` ist die eine Quelle; die
+        globalen Schluessel stehen in config.
         """
         if not getattr(self, "account_name", None):
             return
@@ -420,9 +428,8 @@ class SyncDashboard(QDialog):
             button("Yes") | button("No"), button("No"))
         if answer != button("Yes"):
             return
-        remaining = [item for item in settings()["accounts"] if item["name"] != name]
-        save_settings({"accounts": remaining,
-                       "active_account": remaining[0]["name"]})
+        if not remove_saved_account(name):
+            return
         if not clear_state_journal(name):
             log_warning("Zustandsjournal des entfernten Kontos konnte nicht "
                         "gelöscht werden.")
@@ -474,7 +481,7 @@ class SyncDashboard(QDialog):
         Das Anmelden hat wieder seinen eigenen Knopf darüber,
         damit es auch bei abgelaufenem Zugang sofort erreichbar ist.
         """
-        if self.thread is not None or getattr(self, "prepare_thread", None) is not None:
+        if self.thread is not None or self.prepare_thread is not None:
             self.cancel_sync()
         else:
             self.start_sync()
@@ -605,7 +612,7 @@ class SyncDashboard(QDialog):
 
     def _login_running(self):
         """Läuft gerade eine Anmeldeprüfung oder ein Anmeldefenster?"""
-        return _thread_running(getattr(self, "login_thread", None))
+        return _thread_running(self.login_thread)
 
     def browser_login(self):
         """Anmeldeknopf: erst die gespeicherte Anmeldung prüfen.
@@ -694,7 +701,7 @@ class SyncDashboard(QDialog):
         self.status.setText("Angemeldet.")
         # Der Grabber schliesst sein Fenster bereits. Die UI fragt nur
         # den Zustand ab; ein fehlender Besitzsatz heisst nicht «offen».
-        if _verified_owner():
+        if grabber_window_state()["window"]:
             self.status.setText(
                 "Angemeldet. Das Anmeldefenster ist noch offen.")
         _offer_next_step(self)
@@ -751,7 +758,7 @@ class SyncDashboard(QDialog):
         im GUI-Thread. Login und Cloud-Inventar laufen in `PrepareWorker`;
         der Vergleich und die Auswahl kommen über Qt-Signale zurück.
         """
-        if self.thread is not None or getattr(self, "prepare_thread", None) is not None:
+        if self.thread is not None or self.prepare_thread is not None:
             return
         values = self.values()
         if not self._effective_refresh():
@@ -798,7 +805,7 @@ class SyncDashboard(QDialog):
 
     def _finish_prepare(self):
         """Vorbereitungs-Thread sauber abräumen (ohne unbegrenzt zu warten)."""
-        thread = getattr(self, "prepare_thread", None)
+        thread = self.prepare_thread
         self.prepare_thread = None
         self.prepare_worker = None
         self.progress.setRange(0, 1)
@@ -1106,10 +1113,10 @@ class SyncDashboard(QDialog):
 
     def closeEvent(self, event):
         """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
-        if self.thread is not None or getattr(self, "prepare_thread", None) is not None:
+        if self.thread is not None or self.prepare_thread is not None:
             self.cancel_sync()
         _stop_thread(self.thread)
-        _stop_thread(getattr(self, "prepare_thread", None))
+        _stop_thread(self.prepare_thread)
         self.thread = None
         self.worker = None
         self.prepare_thread = None

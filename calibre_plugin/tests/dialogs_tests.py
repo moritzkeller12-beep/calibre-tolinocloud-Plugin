@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 from . import ui_base_tests
-from ..plan import merge_removals
+from ..plan import normalize_removals
 from ..run_context import RunContext
 from ._support import (FakeMenu, FakeMessageBox, FakeTableItem,
                       _ui_source_text, compare_inventory, start_cdp_stubs,
@@ -280,11 +280,8 @@ class InventoryDialogSortTests(unittest.TestCase):
                 for key, controls in (("upload", dialog.checks),
                                       ("metadata", dialog.meta_checks),
                                       ("read", dialog.read_checks)):
-                    def changed(i=index, k=key):
-                        if not getattr(dialog, "_syncing_checks", False):
-                            dialog._choice_changed(i, k)
                     controls.append(ui_module.dialogs._ActionCheck(
-                        ui_module.dialogs.QTableWidgetItem(""), changed))
+                        ui_module.dialogs.QTableWidgetItem("")))
             dialog.apply_recommended()
             # Neu -> hochladen, geänderte Datei -> hochladen, sonst
             # Metadaten; nichts für unveränderte oder reine Cloud-Bücher.
@@ -1139,8 +1136,8 @@ class CloudDeletionPlanTests(unittest.TestCase):
                          selection["cloud_deletions"])
         self.assertNotIn("deletions", seen["options"])
 
-    def test_merge_ignores_malformed_entries_and_blank_ids(self):
-        pairs, titles = merge_removals(
+    def test_normalize_ignores_malformed_entries_and_blank_ids(self):
+        pairs, titles = normalize_removals(
             [None, ("u-2", "", "ohne ID"), ("u-2", "t-1", "doppelt"),
              ("u-3", "t-3", "Drei")])
         self.assertEqual([("u-2", "t-1"), ("u-3", "t-3")], pairs)

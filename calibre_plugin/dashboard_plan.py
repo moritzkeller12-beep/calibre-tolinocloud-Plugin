@@ -8,7 +8,7 @@ from .identifiers import (book_uuid, state_keys_by_book_id,
 from .library import (TOLINO_READ_COLUMN, bool_column_value, cover_bytes,
                       image_suffix, metadata_ignored, metadata_tolino_id,
                       normalize_formats, safe_format_path)
-from .plan import (merge_removals, plan_collection_updates,
+from .plan import (normalize_removals, plan_collection_updates,
                    plan_metadata_updates, plan_sync, series_map_from_metadata)
 from .config import load_state
 from .tolino import log_warning
@@ -99,7 +99,7 @@ def plan_actions(dialog, context, metadata, state, selection):
         skipped_formats.append(
             "Buch %s (%s): kein Format %s." %
             (book_id, title, display))
-    removals, removal_titles = merge_removals(
+    removals, removal_titles = normalize_removals(
         (selection or {}).get("cloud_deletions"))
     titles = titles_for(metadata, removal_titles)
     meta_updates = plan_metadata_updates(
