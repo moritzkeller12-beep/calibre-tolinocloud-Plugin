@@ -11,7 +11,7 @@ Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino
 2. In Calibre: **Einstellungen → Plugins → Plugin aus Datei laden** und ZIP auswählen.
 3. Calibre neu starten.
 
-Voraussetzung: Calibre 5 oder neuer. Für automatische Anmeldung wird Chrome, Chromium, Brave oder Edge benötigt.
+Voraussetzung: Calibre 6 oder neuer. Für automatische Anmeldung wird Chrome, Chromium, Brave oder Edge benötigt.
 
 ## Benutzung
 

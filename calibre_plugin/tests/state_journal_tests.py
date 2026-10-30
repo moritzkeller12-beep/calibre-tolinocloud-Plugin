@@ -158,12 +158,14 @@ class StateJournalTests(unittest.TestCase):
         dashboard.load_values = lambda: None
 
         class Box:
+            StandardButton = type(
+                "StandardButton", (), {"Yes": 1, "No": 0})
+
             @staticmethod
             def question(*_args, **_kwargs):
                 return 1
 
         with patch.object(ui_module.dashboard, "QMessageBox", Box), \
-             patch.object(ui_module.dashboard, "button", lambda _name: 1), \
              patch.object(ui_module.dashboard, "settings", lambda: {
                  "accounts": [{"name": "A"}, {"name": "B"}]}), \
              patch.object(ui_module.dashboard, "remove_saved_account",

@@ -146,28 +146,6 @@ __TOKEN_SCAN_HELPERS__
 """.replace("__TOKEN_SCAN_HELPERS__", _TOKEN_SCAN_HELPERS)
 
 
-_EXCHANGE_SNIPPET = r"""
-(function (tokenUrl, body) {
-  return fetch(tokenUrl, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: body,
-    credentials: 'omit',
-    referrer: 'https://webreader.mytolino.com/'
-  }).then(function (response) {
-    return response.text().then(function (text) {
-      return JSON.stringify({
-        status: response.status,
-        body: text.substring(0, 4096)
-      });
-    });
-  }).catch(function (err) {
-    return JSON.stringify({status: 0, body: 'fetch failed: ' + err});
-  });
-})(TOKEN_URL_PLACEHOLDER, BODY_PLACEHOLDER)
-"""
-
-
 def idb_expression(db_name):
     """Build a scan expression for one IndexedDB database."""
     return _IDB_SNIPPET.replace("__DB_NAME__", json.dumps(str(db_name)))

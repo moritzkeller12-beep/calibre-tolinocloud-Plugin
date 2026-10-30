@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from .partners import WEBREADER_URL
 from .tolino import RELOGIN, RELOGIN_THEN, TolinoAuthError
 from .cdp_transport import _Ws, _http_get_json
-from .cdp_scripts import _EXCHANGE_SNIPPET, _GRAB_SNIPPET, idb_expression
+from .cdp_scripts import _GRAB_SNIPPET, idb_expression
 
 
 # ---------------------------------------------------------------- Vorbedingungen
@@ -82,9 +82,10 @@ def _open_target(ws_url, timeout):
 def _evaluate_message(ws, expression, timeout, await_promise, message_id):
     """Eine Runtime.evaluate-Anfrage über eine bereits offene Verbindung.
 
-    Rückgabe wie ``_evaluate_raw_in_target``; der Aufrufer besitzt die
-    Verbindung und schliesst sie. So braucht eine Reihe von Ausdrücken
-    (z. B. alle IndexedDB-Datenbanken) nur EINEN WebSocket.
+    Rückgabe: ``{\"ok\": bool, \"value\": ..., \"exception\": ...}``.
+    Der Aufrufer besitzt die Verbindung und schliesst sie. So braucht eine
+    Reihe von Ausdrücken (z. B. alle IndexedDB-Datenbanken) nur EINEN
+    WebSocket.
     """
     ws.send_json({"id": message_id, "method": "Runtime.evaluate",
                   "params": {"expression": expression,
@@ -111,29 +112,18 @@ def _evaluate_message(ws, expression, timeout, await_promise, message_id):
     return {"ok": False, "value": None, "exception": "evaluate timeout"}
 
 
-def _evaluate_raw_in_target(ws_url, expression, timeout=10,
-                            await_promise=False):
-    """Like _evaluate_in_target but returns CDP's full result dict.
-
-    Returns ``{"ok": bool, "value": <decoded JSON value or raw string>,
-    "exception": str}`` – callers that need the exceptionDetails (e.g.
-    an in-page fetch whose failure text matters) use this variant.
-    """
+def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
+    """Run a JS expression in a DevTools page target, return its JSON value."""
     try:
         ws = _open_target(ws_url, timeout)
     except (OSError, ValueError):
-        return {"ok": False, "value": None, "exception": "connect failed"}
+        return None
     try:
-        return _evaluate_message(ws, expression, timeout, await_promise, 1)
-    except OSError as exc:
-        return {"ok": False, "value": None, "exception": str(exc)[:200]}
+        raw = _evaluate_message(ws, expression, timeout, await_promise, 1)
+    except OSError:
+        return None
     finally:
         ws.close()
-
-
-def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
-    """Run a JS expression in a DevTools page target, return its JSON value."""
-    raw = _evaluate_raw_in_target(ws_url, expression, timeout, await_promise)
     if not raw["ok"]:
         return None
     try:
@@ -359,78 +349,6 @@ def grab_once_from_grabber(port=None, timeout=12):
     if target is None or target["ws_url"] is None:
         return None
     return _grab_page_tokens(target["ws_url"], timeout)
-
-
-def _oauth_rejection_reason(body):
-    """Short 'error: description' for a Keycloak/OAuth error frame; '' otherwise."""
-    text = str(body or "")
-    lowered = text.casefold()
-    for marker in ("invalid_grant", "invalid_client",
-                   "unauthorized_client", "invalid_request",
-                   "unsupported_grant_type"):
-        if marker not in lowered:
-            continue
-        try:
-            data = json.loads(text)
-        except ValueError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        code = str(data.get("error") or marker)
-        description = str(data.get("error_description") or "").strip()[:200]
-        if description and description.casefold() != code.casefold():
-            return "%s: %s" % (code, description)
-        return code
-    return ""
-
-
-def exchange_refresh_in_browser(ws_url, token_url, form_body, timeout=25):
-    """Run the refresh-token grant inside the reader page via in-page fetch.
-
-    Returns ``(status, body_text)``. ``status`` mirrors the endpoint's
-    HTTP code (0 when the in-page fetch itself failed). The bot-protection
-    WAF in front of the token endpoint accepts this request because it is
-    the reader's own fingerprint – the exact request family the reader
-    performs on every background rotation.
-
-    Raises TolinoAuthError on a definitive OAuth rejection of this
-    candidate (invalid_grant & friends): replaying a spent grant cannot
-    succeed, so the callers fail fast with instructions instead of
-    retrying the same token.
-    """
-    if _verified_owner() is None:
-        return 0, "browser ownership could not be verified"
-    expression = (_EXCHANGE_SNIPPET
-                  .replace("TOKEN_URL_PLACEHOLDER",
-                           json.dumps(str(token_url)))
-                  .replace("BODY_PLACEHOLDER", json.dumps(str(form_body))))
-    raw = _evaluate_raw_in_target(ws_url, expression, timeout,
-                                  await_promise=True)
-    if not raw.get("ok"):
-        return 0, "page evaluate failed: %s" % (raw.get("exception") or "?")
-    try:
-        payload = json.loads(raw.get("value") or "{}")
-    except ValueError:
-        return 0, "unparseable page reply"
-    status = int(payload.get("status") or 0)
-    body = str(payload.get("body") or "")
-    # 400/401/403 mit OAuth-Fehlerframe = ECHTE Antwort des Token-Endpunkts:
-    # sofort TolinoAuthError (kein eigener Fallback-POST -- ein Replay
-    # wurde nur erneut abgewiesen); die Rufer warten auf NEUE Kandidaten.
-    reason = _oauth_rejection_reason(body) if status in (400, 401, 403) else ""
-    if reason:
-        raise TolinoAuthError(
-            "Tolino hat den gelesenen Zugang abgelehnt. " + RELOGIN,
-            code="A02", detail="HTTP %d, %s" % (status, reason))
-    # Pass through non-OAuth responses (page failures, WAF HTML pages,
-    # unexpected payloads) for the caller to classify.
-    return status, body
-
-
-def reader_ws_url(port=None):
-    """WebSocket-Debugger-URL des ersten mytolino-Reader-Tabs (oder None)."""
-    target = _reader_targets(port)
-    return target["ws_url"] if target is not None else None
 
 
 def _browser_ws_for_record(record, timeout=2):

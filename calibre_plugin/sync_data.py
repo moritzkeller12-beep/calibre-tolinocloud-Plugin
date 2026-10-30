@@ -68,38 +68,5 @@ def read_ids(patches):
         patches, "system", READ_TAG)}
 
 
-def add_to_collection(client, book_id, collection_name, revision=None):
-    patch = client._tag_patch("add", book_id, collection_name, "collection")
-    data = client._sync_patch({
-        "revision": client._current_revision(revision), "patches": [patch]})
-    return data.get("revision")
-
-
-def mark_read_many(client, book_ids, finished, error_type):
-    ids = [str(book_id) for book_id in book_ids or []
-           if str(book_id or "").strip()]
-    if not ids:
-        raise error_type(
-            "Gelesen-Markierung ohne Buch.", code="S90",
-            short="Es wurde kein Buch ausgewählt.")
-    revision, patches = client.sync_snapshot()
-    updates = []
-    for book_id in ids:
-        existing = tag_state(patches, book_id, READ_TAG, "system")
-        if finished:
-            if existing is None:
-                updates.append(client._tag_patch(
-                    "add", book_id, READ_TAG, "system"))
-        elif existing is not None:
-            updates.append(client._tag_patch(
-                "remove", book_id, READ_TAG, "system",
-                revision=existing["value"].get("revision"),
-                tag_id=tag_id_from_patch(existing)))
-    if not updates:
-        return revision
-    data = client._sync_patch({"revision": revision, "patches": updates})
-    return data.get("revision")
-
-
 def collection_pairs(patches):
     return set(active_tags(patches, "collection"))

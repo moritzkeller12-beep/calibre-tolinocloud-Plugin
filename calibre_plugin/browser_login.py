@@ -1,13 +1,9 @@
 """Browser sign-in and token extraction from Tolino's Web Reader."""
-import json
 import time
-from urllib.parse import urlencode
 
 from . import cdp as cdp_module
-from .partners import PARTNERS
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
-                     TolinoClient, _bot_check_detected,
-                     _compact_error_text, log_info, log_warning,
+                     TolinoClient, log_info, log_warning,
                      normalize_hardware_id, sanitize_error)
 from .token_candidates import (
     _candidate_age_note, _filter_live_candidates, _jwt_payload,
@@ -15,55 +11,6 @@ from .token_candidates import (
 )
 
 LOGIN_TIMEOUT = 300
-
-
-def _token_from_response(candidate, hardware, data):
-    """Read the rotated refresh token straight from a token response."""
-    return str(data.get("refresh_token") or candidate), hardware
-
-
-def _reader_token_exchange(candidate, partner):
-    """Token-Tausch in der Reader-Seite; (Daten, Hinweis) oder Fehler."""
-    # Grant zuerst IN der Reader-Seite (in-page fetch): dieselben TLS-/Header-
-    # Fingerprints wie der Reader selbst -- der eigene POST wird vom
-    # Bot-Schutz gelegentlich mit WAF-403 abgewiesen.
-    try:
-        ws_url = cdp_module.reader_ws_url()
-    except Exception:
-        ws_url = None
-    if not ws_url:
-        log_info("Tolino-Token-Tausch: kein Reader-WebSocket; "
-                 "HTTP-Fallback folgt.")
-        return None, "kein Anmeldefenster offen"
-    form = urlencode({
-        "client_id": partner["client_id"],
-        "grant_type": "refresh_token",
-        "refresh_token": candidate,
-        "scope": partner["scope"],
-    })
-    status, body = cdp_module.exchange_refresh_in_browser(
-        ws_url, partner["token_url"], form)
-    if status == 200:
-        try:
-            data = json.loads(body)
-        except ValueError:
-            data = {}
-        if isinstance(data, dict) and data.get("access_token"):
-            log_info("Tolino-Token-Tausch: Browser-Reader (in-page fetch).")
-            return data, ""
-    # A fetch rejection (status 0), malformed success, OAuth response,
-    # or server error is ambiguous: the server may already have consumed
-    # this single-use grant. Only a positively identified WAF block is a
-    # safe reason to try the legacy transport with the same candidate.
-    note = "Browser-Tausch HTTP %s: %s" % (
-        status, _compact_error_text(sanitize_error(body))[:200])
-    if status != 403 or not _bot_check_detected(body):
-        raise TolinoAuthError(
-            "Der Zugang konnte nicht sicher geprüft werden. " + RELOGIN,
-            code="A06", detail=note)
-    log_info("Tolino-Token-Tausch: Browser-Reader durch WAF geblockt; "
-             "HTTP-Fallback folgt.")
-    return None, note
 
 
 def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
@@ -76,32 +23,23 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
         payload = _jwt_payload(token) or {}
         return str(payload.get("typ", "")).casefold() == "refresh"
 
-    ordered = sorted(fresh, key=_refresh_token_iat_sort_key, reverse=True)
-    ordered.sort(key=lambda token: 0 if _is_refresh_typ(token) else 1)
-    candidate = ordered[0]
+    candidate = min(
+        fresh,
+        key=lambda token: (not _is_refresh_typ(token),
+                           -_refresh_token_iat_sort_key(token)))
     hardware_candidates = [normalize_hardware_id(value)
                            for value in (grabbed.get("hardware") or ())]
     hardware_candidates = [value for value in hardware_candidates if value]
     hardware_id = hardware_candidates[0] if hardware_candidates else hardware
-    partner = PARTNERS[int(partner_id)]
-
-    data, browser_note = _reader_token_exchange(candidate, partner)
-    if data:
-        return _token_from_response(candidate, hardware_id, data)
-
-    # Fallback is permitted only when the browser request was never attempted
-    # (no reader websocket) or a recognizable WAF response rejected it before
-    # OAuth. An indeterminate fetch failure must never replay the grant.
     client = TolinoClient(partner_id, hardware_id or "")
     client.refresh = candidate
     try:
         client._login()
     except TolinoAuthError as exc:
-        # The exchange consumed one grant; a retry would only replay.
         raise TolinoAuthError(
             "Tolino hat den Zugang aus dem Anmeldefenster abgelehnt. "
-            + RELOGIN, code="A02",
-            detail="%s; Browser-Tausch: %s" % (exc, browser_note)) from exc
+            + RELOGIN, code="A02", detail=str(exc)) from exc
+    log_info("Tolino-Token-Tausch: HTTP (Plugin).")
     return client.refresh or candidate, client.hardware or hardware_id
 
 

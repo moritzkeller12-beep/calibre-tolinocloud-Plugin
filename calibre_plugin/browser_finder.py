@@ -245,11 +245,6 @@ def _options_with_status(home=None):
     return found + _platform_browser_paths(), status
 
 
-def chromium_candidates(home=None):
-    """Installed Chromium-family browsers, most common first."""
-    return _collect_candidates(home)[0]
-
-
 def chromium_options():
     """All candidates, including standard Windows/macOS install paths."""
     return _options_with_status()[0]

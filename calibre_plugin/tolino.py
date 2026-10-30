@@ -184,7 +184,7 @@ def _raise_transport_error(exc, secrets):
 
 
 _JWT_PATTERN = re.compile(
-    r"\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
+    r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"
 )
 _BEARER_PATTERN = re.compile(
     r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"
@@ -748,13 +748,6 @@ class TolinoClient:
                              content_type="application/json")
         return data if isinstance(data, dict) else {}
 
-    @staticmethod
-    def _tag_patch(op, book_id, name, category, revision=None, tag_id=None):
-        """Kompatibler Einstieg zum gemeinsamen sync-data-Patch-Builder."""
-        return _sync_data.tag_patch(
-            op, book_id, name, category, TolinoApiError,
-            revision=revision, tag_id=tag_id)
-
     def sync_snapshot(self):
         """(revision, patches) aus EINEM Lesevorgang, mehrfach nutzbar.
 
@@ -796,8 +789,11 @@ class TolinoClient:
         `revision` kann aus dem vorigen Aufruf weitergereicht werden, damit
         mehrere Zuordnungen nur eine Cloud-Anfrage zum Lesen brauchen.
         """
-        return _sync_data.add_to_collection(
-            self, book_id, collection_name, revision)
+        patch = _sync_data.tag_patch(
+            "add", book_id, collection_name, "collection", TolinoApiError)
+        data = self._sync_patch({
+            "revision": self._current_revision(revision), "patches": [patch]})
+        return data.get("revision")
 
     def mark_read_many(self, book_ids, finished=True):
         """Set (or clear) the finished mark for several books at once.
@@ -806,8 +802,33 @@ class TolinoClient:
         Bereits gesetzte Marken werden nicht erneut geschrieben, fehlende
         beim Entfernen übersprungen.
         """
-        return _sync_data.mark_read_many(
-            self, book_ids, finished, TolinoApiError)
+        ids = [str(book_id) for book_id in book_ids or []
+               if str(book_id or "").strip()]
+        if not ids:
+            raise TolinoApiError(
+                "Gelesen-Markierung ohne Buch.", code="S90",
+                short="Es wurde kein Buch ausgewählt.")
+        revision, patches = self.sync_snapshot()
+        active = _sync_data.active_tags(
+            patches, "system", _sync_data.READ_TAG)
+        updates = []
+        for book_id in ids:
+            existing = active.get((str(book_id), _sync_data.READ_TAG))
+            if finished:
+                if existing is None:
+                    updates.append(_sync_data.tag_patch(
+                        "add", book_id, _sync_data.READ_TAG, "system",
+                        TolinoApiError))
+            elif existing is not None:
+                updates.append(_sync_data.tag_patch(
+                    "remove", book_id, _sync_data.READ_TAG, "system",
+                    TolinoApiError,
+                    revision=existing["value"].get("revision"),
+                    tag_id=_sync_data.tag_id_from_patch(existing)))
+        if not updates:
+            return revision
+        data = self._sync_patch({"revision": revision, "patches": updates})
+        return data.get("revision")
 
     def collection_pairs(self):
         """Return the {(deliverable, collection)} pairs set in the cloud.

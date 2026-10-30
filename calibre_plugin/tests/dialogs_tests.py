@@ -32,7 +32,53 @@ def _read_ids(dialog, finished):
 
 def _action_cell(dialog, index, column):
     """Check-Controller einer Aktionsspalte (0 Upload, 1 Metadaten, 2 Read)."""
-    return (dialog.checks, dialog.meta_checks, dialog.read_checks)[column][index]
+    return (dialog.cells["upload"], dialog.cells["metadata"],
+            dialog.cells["read"])[column][index]
+
+
+class _CheckStateItem:
+    """QTableWidgetItem, der den ersten CheckState-Aufruf festhält."""
+
+    def __init__(self):
+        self.states = []
+        self.flags_value = 0
+
+    def setCheckState(self, state):
+        self.states.append(state)
+
+    def checkState(self):
+        return 0
+
+    def flags(self):
+        return self.flags_value
+
+    def setFlags(self, flags):
+        self.flags_value = flags
+
+
+class ActionCheckTests(unittest.TestCase):
+    def test_unchecked_state_is_set_explicitly(self):
+        """Auch ein leeres Kästchen braucht eine explizite CheckStateRole."""
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            item = _CheckStateItem()
+            ui_module.dialogs._ActionCheck(item).setChecked(False)
+            self.assertEqual([0], item.states)
+        finally:
+            ui_module._restore_stubs_for_tests()
+
+    def test_disabled_check_stays_checkable_for_drawing(self):
+        """Deaktiviert heisst grau, nicht unsichtbar."""
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        try:
+            item = _CheckStateItem()
+            ui_module.dialogs._ActionCheck(item).setEnabled(False)
+            self.assertFalse(item.flags_value & 1)  # ItemIsEnabled
+            self.assertTrue(item.flags_value & 2)   # ItemIsUserCheckable
+        finally:
+            ui_module._restore_stubs_for_tests()
 
 
 class _QtDialogTest(unittest.TestCase):
@@ -275,11 +321,9 @@ class InventoryDialogSortTests(unittest.TestCase):
                 {"status": "only_tolino", "book_id": None, "tolino_id": "c9"},
             ]
             dialog.rows = rows
-            dialog.checks, dialog.meta_checks, dialog.read_checks = [], [], []
+            dialog.cells = {"upload": [], "metadata": [], "read": []}
             for index in range(len(rows)):
-                for key, controls in (("upload", dialog.checks),
-                                      ("metadata", dialog.meta_checks),
-                                      ("read", dialog.read_checks)):
+                for controls in dialog.cells.values():
                     controls.append(ui_module.dialogs._ActionCheck(
                         ui_module.dialogs.QTableWidgetItem("")))
             dialog.apply_recommended()
@@ -347,25 +391,19 @@ class ComparisonLayoutTests(unittest.TestCase):
             actions = ui_module.dialogs.InventoryDialog.ROW_ACTIONS
         finally:
             ui_module._restore_stubs_for_tests()
-        keys = [key for _label, key in actions]
-        self.assertEqual(["upload_on", "upload_off", "metadata_on",
-                          "metadata_off", "read", "read_off", "download",
-                          "cloud_delete", "cloud_delete_off"], keys)
-        labels = [label for label, _key in actions]
-        for wanted in ("Upload aktivieren", "Upload deaktivieren",
-                       "Metadaten aktivieren",
-                       "Metadaten deaktivieren",
-                       "Als gelesen markieren", "Als ungelesen markieren",
-                       "Aus tolino herunterladen …",
-                       "Aus der tolino Cloud löschen …",
-                       "Löschmarkierung aufheben"):
-            self.assertIn(wanted, labels)
-        # Jeder Menüpunkt steht auch im Verteiler, sonst wäre er tot.
-        handlers = ui_module.dialogs.InventoryDialog.ROW_ACTION_HANDLERS
-        self.assertEqual(set(keys), set(handlers))
-        for name, _args in handlers.values():
-            self.assertTrue(hasattr(ui_module.dialogs.InventoryDialog, name),
-                            "Handler %s fehlt" % name)
+        labels = [action[0] for action in actions]
+        self.assertEqual(["Upload aktivieren", "Upload deaktivieren",
+                          "Metadaten aktivieren", "Metadaten deaktivieren",
+                          "Als gelesen markieren", "Als ungelesen markieren",
+                          "Aus tolino herunterladen …",
+                          "Aus der tolino Cloud löschen …",
+                          "Löschmarkierung aufheben"], labels)
+        # Jeder Menüpunkt nennt eine vorhandene Methode und ein Prädikat.
+        for _label, method, args, predicate in actions:
+            self.assertTrue(hasattr(ui_module.dialogs.InventoryDialog, method),
+                            "Handler %s fehlt" % method)
+            self.assertIsInstance(args, tuple)
+            self.assertTrue(callable(predicate))
 
     def test_every_row_action_still_has_a_handler(self):
         """Ein Menüpunkt ohne Handler wäre ein toter Eintrag."""
@@ -373,15 +411,15 @@ class ComparisonLayoutTests(unittest.TestCase):
             lambda *args, **kwargs: None)
         try:
             dialog = ui_module.dialogs.InventoryDialog
-            used = {name for name, _args
-                    in dialog.ROW_ACTION_HANDLERS.values()}
+            used = {method for _label, method, _args, _predicate
+                    in dialog.ROW_ACTIONS}
         finally:
             ui_module._restore_stubs_for_tests()
         handlers = {"mark_read_for_marked_rows", "clear_read_for_marked_rows",
                     "set_column_for_marked_rows", "download_selected",
                     "delete_marked_from_cloud",
                     "clear_cloud_delete_for_marked_rows"}
-        self.assertEqual(set(), handlers - used)
+        self.assertEqual(handlers, used)
 
 class InventoryDialogReadStateTests(_QtDialogTest):
     """Spalte «Gelesen» kommt aus der Cloud und lässt sich mehrfach setzen.
@@ -425,7 +463,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
     @staticmethod
     def _cells_by_title(dialog):
         """Lese-Checkzellen nach Titel – das Fenster sortiert beim Bau."""
-        return {row["title"]: dialog.read_checks[index]
+        return {row["title"]: dialog.cells["read"][index]
                 for index, row in enumerate(dialog.rows)}
 
     def test_cloud_read_book_is_prechecked_and_unlockable(self):
@@ -608,10 +646,14 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             self.assertEqual("Aktionen für markierte Bücher …",
                              dialog.row_actions.text())
             self.assertIn("Strg", dialog.row_actions.tooltip)
-            keys = [key for _label, key in dialog.ROW_ACTIONS]
-            self.assertEqual(["upload_on", "upload_off", "metadata_on",
-                              "metadata_off", "read", "read_off", "download",
-                              "cloud_delete", "cloud_delete_off"], keys)
+            labels = [action[0] for action in dialog.ROW_ACTIONS]
+            self.assertEqual(["Upload aktivieren", "Upload deaktivieren",
+                              "Metadaten aktivieren", "Metadaten deaktivieren",
+                              "Als gelesen markieren",
+                              "Als ungelesen markieren",
+                              "Aus tolino herunterladen …",
+                              "Aus der tolino Cloud löschen …",
+                              "Löschmarkierung aufheben"], labels)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -668,7 +710,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             self.assertFalse(self._row(dialog, "Gelesen")["upload"])
             # Zeile UND Auswahlfeld in der Tabelle sind gesetzt.
             self.assertTrue(_action_cell(dialog, index, 0).isChecked())
-            self.assertTrue(dialog.checks[index].isChecked())
+            self.assertTrue(dialog.cells["upload"][index].isChecked())
             self.assertEqual(
                 "Upload aktiviert für 1 von 1 markierten Büchern.",
                 dialog.action_feedback.text())
@@ -691,7 +733,8 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
                 dialog.action_feedback.text())
             for index, row in enumerate(dialog.rows):
                 wanted = bool(row["tolino_id"])
-                self.assertEqual(wanted, dialog.meta_checks[index].isChecked())
+                self.assertEqual(wanted,
+                                 dialog.cells["metadata"][index].isChecked())
                 self.assertEqual(wanted,
                                  _action_cell(dialog, index, 1).isChecked())
             self.assertEqual([], calls)
@@ -1102,7 +1145,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
             seen = {}
 
             class FakeQDialog:
-                Accepted = 1
+                DialogCode = type("DialogCode", (), {"Accepted": 1})
 
             class FakeInventory:
                 def __init__(self, rows, parent, client_factory=None,
@@ -1110,7 +1153,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
                     seen["options"] = options
 
                 def exec(self):
-                    return FakeQDialog.Accepted
+                    return FakeQDialog.DialogCode.Accepted
 
                 def selected_upload_ids(self):
                     return []
@@ -1339,9 +1382,9 @@ class IgnoredRowDialogTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
             self.assertEqual(1, len(dialog.rows))
             self.assertEqual("ignored", dialog.rows[0]["group"])
-            self.assertFalse(dialog.checks[0].enabled)
-            self.assertFalse(dialog.checks[0].isChecked())
-            self.assertIn("ignoriert", dialog.checks[0].tooltip)
+            self.assertFalse(dialog.cells["upload"][0].enabled)
+            self.assertFalse(dialog.cells["upload"][0].isChecked())
+            self.assertIn("ignoriert", dialog.cells["upload"][0].tooltip)
             self.assertEqual(
                 (False, False),
                 ui_module.dialogs.InventoryDialog.default_actions(
@@ -1357,7 +1400,7 @@ class IgnoredRowDialogTests(_QtDialogTest):
         ui_module = self._ui()
         try:
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-            dialog.checks[0].setChecked(True)
+            dialog.cells["upload"][0].setChecked(True)
             dialog.rows[0]["delete_cloud"] = True
             self.assertEqual(set(), dialog.selected_upload_ids())
             self.assertEqual([], dialog.selected_cloud_deletions())

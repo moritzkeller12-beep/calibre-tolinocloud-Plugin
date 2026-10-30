@@ -1,5 +1,7 @@
 """Hintergrund-Worker für Vorbereitung, Synchronisierung und Anmeldung."""
 import copy
+from collections import Counter
+
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
 from .planning_values import plural
@@ -66,13 +68,6 @@ class SyncWorker(QObject):
         # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
         self.read_updates = []
         self.operations = []
-        # Fortlaufende Zählung je Status und Art: `_refresh_counts` gibt sie
-        # nur noch aus, statt bei jedem Schritt alle Operationen zu zählen
-        # (das war O(n²) ueber den ganzen Lauf).
-        self._status_counts = {OP_SUCCEEDED: 0, OP_SKIPPED: 0,
-                               OP_FAILED: 0, OP_NOT_STARTED: 0}
-        self._kind_counts = {"upload": 0, "metadata": 0, "read": 0,
-                             "unread": 0, "collection": 0, "delete": 0}
         self.outcome = {
             "uploaded": 0, "updated": 0, "deleted": 0,
             "metadata": 0, "read_marked": 0, "read_unmarked": 0,
@@ -103,46 +98,33 @@ class SyncWorker(QObject):
     def _add_operation(self, kind, label, status=OP_NOT_STARTED, **extra):
         operation = dict(extra, kind=kind, label=label, status=status)
         self.operations.append(operation)
-        self._status_counts[status] = self._status_counts.get(status, 0) + 1
         return operation
 
     def _finish_operation(self, operation, status, **extra):
-        """Statuswechsel zählen -- ohne erneuten Durchlauf über alles."""
-        if operation is None:
-            return
-        previous = operation.get("status")
-        operation.update(extra)
-        operation["status"] = status
-        if previous == status:
-            return
-        self._status_counts[previous] = max(
-            0, self._status_counts.get(previous, 0) - 1)
-        self._status_counts[status] = self._status_counts.get(status, 0) + 1
-        count = int(operation.get("count") or 1)
-        kind = operation.get("kind")
-        if previous == OP_SUCCEEDED:
-            self._kind_counts[kind] = max(
-                0, self._kind_counts.get(kind, 0) - count)
-        if status == OP_SUCCEEDED:
-            self._kind_counts[kind] = self._kind_counts.get(kind, 0) + count
+        """Den Status am Schritt fortschreiben; gezählt wird am Abschluss."""
+        if operation is not None:
+            operation.update(extra, status=status)
 
     def _refresh_counts(self):
-        counts = self._status_counts
-        kinds = self._kind_counts
-        self.outcome.update({
-            "uploaded": kinds["upload"],
-            "updated": kinds["metadata"] + kinds["read"] + kinds["unread"]
-                       + kinds["collection"],
-            "deleted": kinds["delete"],
-            "metadata": kinds["metadata"],
-            "read_marked": kinds["read"],
-            "read_unmarked": kinds["unread"],
-            "collections": kinds["collection"],
-            "skipped": counts.get(OP_SKIPPED, 0),
-            "failed": counts.get(OP_FAILED, 0),
-            "not_started": counts.get(OP_NOT_STARTED, 0),
-            "cancelled": bool(self.cancelled),
-        })
+        """Ergebnis EINMAL aus allen Operationen neu berechnen."""
+        kinds, states = Counter(), Counter()
+        for operation in self.operations:
+            states[operation["status"]] += 1
+            if operation["status"] == OP_SUCCEEDED:
+                kinds[operation["kind"]] += int(operation.get("count") or 1)
+        self.outcome.update(
+            uploaded=kinds["upload"],
+            updated=(kinds["metadata"] + kinds["read"] + kinds["unread"]
+                     + kinds["collection"]),
+            deleted=kinds["delete"],
+            metadata=kinds["metadata"],
+            read_marked=kinds["read"],
+            read_unmarked=kinds["unread"],
+            collections=kinds["collection"],
+            skipped=states[OP_SKIPPED],
+            failed=states[OP_FAILED],
+            not_started=states[OP_NOT_STARTED],
+            cancelled=bool(self.cancelled))
 
     def _record_failure(self, operation, exc, client=None):
         """Einen einzelnen Schritt als gescheitert zaehlen.
@@ -158,7 +140,6 @@ class SyncWorker(QObject):
         self._finish_operation(operation, OP_FAILED, error=detail)
         log_warning("Schritt gescheitert (%s): %s"
                     % ((operation or {}).get("label") or "?", detail))
-        self._refresh_counts()
 
     def _count_failure(self, operation, exc, client=None):
         """Schritt als gescheitert zählen -- fatal beendet den Lauf.
@@ -202,7 +183,6 @@ class SyncWorker(QObject):
             self._finish_operation(operation, OP_SUCCEEDED)
         else:
             finish(result)
-        self._refresh_counts()
         return True, result
 
     def _persist_state(self):
@@ -437,7 +417,6 @@ class SyncWorker(QObject):
                                        reason="schon in der Cloud")
                 changed = True
                 done += 1
-                self._refresh_counts()
                 continue
 
             ok, new_revision = self._step(

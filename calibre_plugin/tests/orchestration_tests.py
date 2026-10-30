@@ -846,8 +846,8 @@ class ReplacementConfirmationTests(unittest.TestCase):
         asked = []
 
         class Box:
-            Yes = 1
-            No = 0
+            StandardButton = type(
+                "StandardButton", (), {"Yes": 1, "No": 0})
 
             @staticmethod
             def question(*args):

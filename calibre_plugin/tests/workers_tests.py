@@ -1637,10 +1637,10 @@ class ReadStatusUnknownTests(unittest.TestCase):
                  "book_id": 1, "tolino_id": "t1", "read_known": False,
                  "read_in_cloud": False,
                  "explanation": "In beiden vorhanden."}], options={})
-            self.assertEqual(1, len(dialog.read_checks))
-            self.assertFalse(dialog.read_checks[0].enabled)
-            self.assertFalse(dialog.read_checks[0].isChecked())
-            self.assertIn("unbekannt", dialog.read_checks[0].tooltip)
+            self.assertEqual(1, len(dialog.cells["read"]))
+            self.assertFalse(dialog.cells["read"][0].enabled)
+            self.assertFalse(dialog.cells["read"][0].isChecked())
+            self.assertIn("unbekannt", dialog.cells["read"][0].tooltip)
             self.assertIn("Lesestatus unbekannt",
                           dialog.table.items[(0, 7)])
             self.assertIn("Lesestatus unbekannt", dialog.note.text())

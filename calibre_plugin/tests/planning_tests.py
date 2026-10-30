@@ -1229,6 +1229,18 @@ class SyncPlanTests(unittest.TestCase):
         self.assertNotIn(jwt, rendered)
         self.assertIn("[REDACTED]", rendered)
 
+    def test_sanitize_error_keeps_hostnames_versions_and_plain_dots(self):
+        """Nur echte JWTs (Kopf beginnt mit eyJ) werden geschwärzt."""
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"
+        text = ("bosh.pageplace.de, Version 5.2.0, Pfad a.b.c; "
+                "Anmeldung: %s" % jwt)
+        rendered = sanitize_error(text)
+        self.assertIn("bosh.pageplace.de", rendered)
+        self.assertIn("5.2.0", rendered)
+        self.assertIn("a.b.c", rendered)
+        self.assertNotIn(jwt, rendered)
+        self.assertIn("[REDACTED]", rendered)
+
     def test_http_error_keeps_safe_fields_without_echoing_tokens(self):
         from urllib.error import HTTPError
 
@@ -1319,7 +1331,7 @@ class SyncPlanTests(unittest.TestCase):
             plugin.actual_plugin)
         self.assertFalse(hasattr(plugin, "icon"))
         self.assertFalse(hasattr(plugin, "has_html"))
-        self.assertEqual((5, 0, 0), tuple(plugin.minimum_calibre_version))
+        self.assertEqual((6, 0, 0), tuple(plugin.minimum_calibre_version))
         self.assertEqual("InterfaceAction", plugin.type)
 
     def test_report_error_logs_no_tokens_passwords_or_cookies(self):

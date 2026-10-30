@@ -3,9 +3,8 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
                         QLabel, QLineEdit, QMessageBox, QProgressBar,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
-                        _dialog_busy, button, echo_mode, gui_guard,
+                        _dialog_busy, gui_guard, qt_enum,
                         start_worker,
-                        dialog_code,
                         _login_failure_guidance,
                         _stop_thread, _thread_running, _worker_account_name,
                         _worker_outcome,
@@ -278,7 +277,8 @@ class SyncDashboard(QDialog):
         self.account_remove.clicked.connect(self.remove_account)
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
-        self.refresh.setEchoMode(echo_mode("Password"))
+        self.refresh.setEchoMode(
+            qt_enum(QLineEdit, "Password", "EchoMode"))
         # Das Feld zeigt den Token nicht an: das Konto ist die Quelle, ein
         # leeres Feld heisst «gespeicherten Zugang behalten».
         self.refresh.setPlaceholderText(
@@ -421,12 +421,14 @@ class SyncDashboard(QDialog):
         if len(self.account_names) <= 1:
             return
         name = self.account_name
+        yes = qt_enum(QMessageBox, "Yes", "StandardButton")
+        no = qt_enum(QMessageBox, "No", "StandardButton")
         answer = QMessageBox.question(
             self, "Konto entfernen",
             "Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
             "werden gelöscht. Bücher in tolino und Calibre bleiben." % name,
-            button("Yes") | button("No"), button("No"))
-        if answer != button("Yes"):
+            yes | no, no)
+        if answer != yes:
             return
         if not remove_saved_account(name):
             return
@@ -881,6 +883,8 @@ class SyncDashboard(QDialog):
                      or (entry.get("title") if isinstance(entry, dict) else "")
                      or key)
             lines.append("- %s" % title)
+        yes = qt_enum(QMessageBox, "Yes", "StandardButton")
+        no = qt_enum(QMessageBox, "No", "StandardButton")
         answer = QMessageBox.question(
             self, "Bücher aus tolino löschen?",
             ("1 Buch wird aus tolino gelöscht (in Calibre bleibt es):\n\n%s"
@@ -888,8 +892,8 @@ class SyncDashboard(QDialog):
              "%d Bücher werden aus tolino gelöscht (in Calibre bleiben sie):\n\n%s")
             % (("\n".join(lines),) if len(removals) == 1 else
                (len(removals), "\n".join(lines))),
-            button("Yes") | button("No"), button("No"))
-        return answer == button("Yes")
+            yes | no, no)
+        return answer == yes
 
     def _confirm_comparison(self, comparison, context, client_factory=None,
                             automatic=0):
@@ -906,7 +910,7 @@ class SyncDashboard(QDialog):
                 "ignore_column": ignore_column_available(
                     getattr(getattr(self, "gui", None), "current_db", None)),
             })
-        if dialog.exec() != dialog_code("Accepted"):
+        if dialog.exec() != qt_enum(QDialog, "Accepted", "DialogCode"):
             return None
         # Die Auswahl des bestätigten Fensters entscheidet, was
         # passiert -- jede Aktion für sich; eine leere Auswahl ändert
@@ -942,11 +946,11 @@ class SyncDashboard(QDialog):
                     % (count, "\n".join(titles)))
         if len(jobs) > 20:
             text += "\n- … und %d weitere" % (len(jobs) - 20)
+        yes = qt_enum(QMessageBox, "Yes", "StandardButton")
+        no = qt_enum(QMessageBox, "No", "StandardButton")
         answer = QMessageBox.question(
-            self, "Cloud-Kopie ersetzen?",
-            text,
-            button("Yes") | button("No"), button("No"))
-        return answer == button("Yes")
+            self, "Cloud-Kopie ersetzen?", text, yes | no, no)
+        return answer == yes
 
     def _report_skipped_uploads(self, skipped_uploads, nothing_else=False):
         """Bücher ohne verwendbare Datei melden; True heisst «nichts zu tun».

@@ -65,7 +65,7 @@ class LiveGrabTests(unittest.TestCase):
     def _jwt(self, iat, sid=None):
         return _jwt_token(iat, sid)
 
-    def test_chromium_candidates_detects_flatpak_installs(self):
+    def test_collect_candidates_detects_flatpak_installs(self):
         """Flatpak-Browser werden als `flatpak run`-Launcher erkannt."""
         import tempfile
         from unittest.mock import patch as _patch
@@ -81,7 +81,7 @@ class LiveGrabTests(unittest.TestCase):
             with _patch("shutil.which",
                         side_effect=lambda name: fake_flatpak
                         if name == "flatpak" else None):
-                candidates = browser_finder.chromium_candidates(home=home)
+                candidates = browser_finder._collect_candidates(home=home)[0]
         labels = [label for _argv, label in candidates]
         candidates_by_label = dict((label, argv) for argv, label in candidates)
         for app_id, command, label, _host_label in browser_finder._FLATPAK_BROWSER_APPS:
@@ -90,7 +90,7 @@ class LiveGrabTests(unittest.TestCase):
                              candidates_by_label[label][1:])
             self.assertTrue(candidates_by_label[label][0].endswith("flatpak"))
 
-    def test_chromium_candidates_skips_flatpak_without_launcher(self):
+    def test_collect_candidates_skips_flatpak_without_launcher(self):
         """Ohne `flatpak`-Binary im PATH gibt es keinen Flatpak-Kandidaten."""
         import tempfile
         from unittest.mock import patch as _patch
@@ -99,7 +99,7 @@ class LiveGrabTests(unittest.TestCase):
             os.makedirs(os.path.join(home, ".var", "app", "com.brave.Browser"))
             with _patch("shutil.which", return_value=None), \
                  _patch.object(browser_finder, "_EXTRA_BROWSER_PATHS", ()):
-                candidates = browser_finder.chromium_candidates(home=home)
+                candidates = browser_finder._collect_candidates(home=home)[0]
         self.assertEqual([], candidates)
 
     def test_launch_reader_window_appends_flags_to_argv_prefix(self):
@@ -384,139 +384,6 @@ class LiveGrabTests(unittest.TestCase):
         self.assertEqual("rotated-after-wait", refresh)
         self.assertEqual("hw-live", hardware)
 
-    def test_exchange_refresh_in_browser_parses_page_reply(self):
-        """In-page-fetch-Antwort (status/body) wird korrekt geparst."""
-        from .. import cdp as cdp_module
-        page_reply = json.dumps({
-            "status": 200,
-            "body": json.dumps({"access_token": "a", "refresh_token": "r"}),
-        })
-        with patch("calibre_plugin.cdp._verified_owner",
-                   return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._evaluate_raw_in_target",
-                   return_value={"ok": True, "value": page_reply,
-                                 "exception": None}):
-            status, body = cdp_module.exchange_refresh_in_browser(
-                "ws://127.0.0.1:9223/devtools/page/x",
-                "https://www.orellfuessli.ch/auth/oauth2/token",
-                "client_id=webreader&grant_type=refresh_token")
-        self.assertEqual(200, status)
-        self.assertIn("refresh_token", body)
-
-    def test_exchange_refresh_in_browser_reports_page_failure(self):
-        """Ein fehlgeschlagener Page-Evaluate gibt status=0 zurueck."""
-        from .. import cdp as cdp_module
-        with patch("calibre_plugin.cdp._verified_owner",
-                   return_value={"port": 9223}), \
-             patch("calibre_plugin.cdp._evaluate_raw_in_target",
-                   return_value={"ok": False, "value": None,
-                                 "exception": "page blew up"}):
-            status, body = cdp_module.exchange_refresh_in_browser(
-                "ws://127.0.0.1:9223/devtools/page/x", "https://x/token",
-                "a=b")
-        self.assertEqual(0, status)
-        self.assertIn("page blew up", body)
-
-    def test_exchange_grabbed_token_prefers_browser_exchange(self):
-        """200er Browser-Tausch schlaegt den Plugin-POST – kein WAF-403."""
-        from ..browser_login import _exchange_grabbed_token
-        fresh = self._jwt(time.time() - 5, "sess-live")
-        logins = []
-
-        def fake_browser_exchange(ws_url, token_url, form_body, timeout=25):
-            self.assertIn("grant_type=refresh_token", form_body)
-            return 200, json.dumps({
-                "access_token": "a", "refresh_token": "rotated-browser"})
-
-        with patch("calibre_plugin.cdp.reader_ws_url",
-                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
-             patch("calibre_plugin.cdp.exchange_refresh_in_browser",
-                   side_effect=fake_browser_exchange), \
-             patch("calibre_plugin.browser_login.TolinoClient") as client_cls:
-            client_cls.return_value.refresh = fresh
-            client_cls.return_value.hardware = "hw-grab"
-            client_cls.return_value._apply_token_response.side_effect = \
-                lambda data: logins.append(data) or setattr(
-                    client_cls.return_value, "refresh",
-                    data["refresh_token"])
-            refresh, hardware = _exchange_grabbed_token(
-                4, "hw-grab", {"refresh": [fresh], "hardware": ["hw-grab"]},
-                [fresh])
-        self.assertEqual("rotated-browser", refresh)
-        self.assertEqual("hw-grab", hardware)
-        # Der Plugin-Client (und damit der Plugin-POST) wurde nie erzeugt:
-        client_cls.assert_not_called()
-
-    def test_browser_waf_403_falls_back_to_plugin_post(self):
-        """Eindeutige WAF-403 im Browser -> Plugin-POST."""
-        from ..browser_login import _exchange_grabbed_token
-        fresh = self._jwt(time.time() - 5, "sess-live")
-
-        class FakeClient(object):
-            def __init__(self, partner_id, hw):
-                self.refresh = fresh
-                self.hardware = hw
-
-            def _login(self):
-                self.refresh = "rotated-plugin"
-
-        for body in ("Zugriff geblockt", "Access denied by CloudFront"):
-            with self.subTest(body=body), \
-                 patch("calibre_plugin.cdp.reader_ws_url",
-                       return_value="ws://127.0.0.1:9223/devtools/page/x"), \
-                 patch("calibre_plugin.cdp.exchange_refresh_in_browser",
-                       return_value=(403, body)), \
-                 patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
-                refresh, _hardware = _exchange_grabbed_token(
-                    4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
-                self.assertEqual("rotated-plugin", refresh)
-
-    def test_browser_exchange_ambiguous_failure_never_replays_refresh_grant(self):
-        """Unklarer fetch-Fehler kann nach Token-Verbrauch auftreten;
-        derselbe Single-Use-Grant darf dann nicht erneut gesendet werden."""
-        from ..browser_login import _exchange_grabbed_token
-        fresh = self._jwt(time.time() - 5, "sess-live")
-
-        class MustNotLogin:
-            def __init__(self, *_args):
-                self.refresh = fresh
-                self.hardware = "hw"
-
-            def _login(self):
-                raise AssertionError("ambiguous grant must not be replayed")
-
-        with patch("calibre_plugin.cdp.reader_ws_url",
-                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
-             patch("calibre_plugin.cdp.exchange_refresh_in_browser",
-                   return_value=(0, "fetch failed: connection reset")), \
-             patch("calibre_plugin.browser_login.TolinoClient", MustNotLogin):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                _exchange_grabbed_token(
-                    4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
-        self.assertEqual("A06", ctx.exception.code)
-        self.assertIn("nicht sicher geprüft", str(ctx.exception))
-
-    def test_browser_exchange_non_waf_http_error_never_replays_refresh_grant(self):
-        from ..browser_login import _exchange_grabbed_token
-        fresh = self._jwt(time.time() - 5, "sess-live")
-
-        class MustNotLogin:
-            def __init__(self, *_args):
-                raise AssertionError("non-WAF response must not retry the grant")
-
-        for status, body in ((400, "Token expired"),
-                             (500, "Internal Server Error"),
-                             (403, "Authorization failed")):
-            with self.subTest(status=status), \
-                 patch("calibre_plugin.cdp.reader_ws_url",
-                       return_value="ws://127.0.0.1:9223/devtools/page/x"), \
-                 patch("calibre_plugin.cdp.exchange_refresh_in_browser",
-                       return_value=(status, body)), \
-                 patch("calibre_plugin.browser_login.TolinoClient", MustNotLogin):
-                with self.assertRaises(TolinoAuthError):
-                    _exchange_grabbed_token(
-                        4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
-
     def test_grab_live_refresh_adopts_new_candidate_and_reader_hardware(self):
         """Nach einer Ablehnung uebernimmt das Plugin die NEU geschriebene
         Kopie des Readers – und die Hardware-ID der aktuellen Sitzung
@@ -581,8 +448,7 @@ class LiveGrabTests(unittest.TestCase):
             def _login(self):
                 self.refresh = "rotated"
 
-        with patch("calibre_plugin.cdp.reader_ws_url", return_value=None), \
-             patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
+        with patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
             _exchange_grabbed_token(
                 4, "da284d4b-6348-43c8-b0ab-17edcddfb25d",
                 {"refresh": [fresh],
@@ -920,79 +786,6 @@ class LoginWindowWaitTests(_SidJwtTest):
         jwt = self._refresh_jwt(time.time() - 7)
         self.assertIn("Sekunden alt", _candidate_age_note([jwt]))
 
-class WrappedCandidateTests(_SidJwtTest):
-    """Der Seiten-Speicher des Readers kann Token-Teile gekodiert
-    ablegen – Feldbefund der Extrahier-Schaltfläche: genau EIN
-    Refresh-Kandidat, "1 Teil, 920 Zeichen", am Endpunkt abgelehnt
-    (invalid_grant) und ohne datierbares JWT-alter. Ein JWT traegt immer
-    zwei Punkte; die Hülle muss vor dem Tausch abgezogen werden.
-    """
-
-    SID = "sess-wrap"
-
-    def test_unwrap_recovers_wrapped_jwts(self):
-        """base64-, doppelt-, JSON- und prozentgehuellte JWTs werden entpackt."""
-        from ..token_candidates import _unwrap_refresh_candidate
-        fresh = self._refresh_jwt(time.time() - 5)
-        wrapped = base64.urlsafe_b64encode(
-            fresh.encode("utf-8")).decode().rstrip("=")
-        double = base64.b64encode(wrapped.encode("utf-8")).decode()
-        percent = fresh.replace(".", "%2E")
-        for value in (wrapped, double, json.dumps(fresh), percent):
-            self.assertEqual(fresh, _unwrap_refresh_candidate(value))
-
-    def test_unwrap_leaves_opaque_and_broken_values_untouched(self):
-        """Opake (echt punktlose) Tokens und unlesbare Zeichenketten
-        bleiben unverändert – nur ein JWT-Treffer gewinnt."""
-        from ..token_candidates import _unwrap_refresh_candidate
-        opaque = "a3f9" * 230  # 920 Zeichen wie im Feldbefund
-        self.assertEqual(opaque, _unwrap_refresh_candidate(opaque))
-        broken = "aaa.bbb.ccc"
-        self.assertEqual(broken, _unwrap_refresh_candidate(broken))
-        short = "plainopaquevalue-not-a-jwt"
-        self.assertEqual(short, _unwrap_refresh_candidate(short))
-
-    def test_normalize_makes_wrapped_stale_copy_fail_age_filter(self):
-        """Gekodete alte Kopien passieren den 30-Minuten-Filter NICHT
-        mehr: erst nach dem Entpacken sind sie datierbar und fallen
-        unter den Cutoff statt am Endpunkt verbrannt zu werden."""
-        from ..token_candidates import _filter_live_candidates, _normalize_live_grab
-        stale = self._refresh_jwt(time.time() - 7200)
-        wrapped = base64.urlsafe_b64encode(stale.encode("utf-8")).decode()
-        normalized = _normalize_live_grab({"refresh": [wrapped],
-                                           "hardware": []})
-        self.assertEqual([stale], normalized["refresh"])
-        self.assertEqual([], _filter_live_candidates(normalized["refresh"]))
-        # Unveränderte Grabs werden nicht umsonst kopiert.
-        plain = {"refresh": [stale], "hardware": []}
-        self.assertIs(plain, _normalize_live_grab(plain))
-
-    def test_grab_live_refresh_exchanges_the_unwrapped_jwt(self):
-        """Der Endpunkt sieht das entpackte JWT – nie die Hülle."""
-        from ..browser_login import grab_live_refresh
-        fresh = self._refresh_jwt(time.time() - 5)
-        wrapped = base64.urlsafe_b64encode(
-            fresh.encode("utf-8")).decode().rstrip("=")
-        logins = []
-
-        class FakeClient(object):
-            def __init__(self, partner_id, hw):
-                self.refresh = None
-                self.hardware = "fake-hw"
-
-            def _login(self):
-                logins.append(self.refresh)
-                self.refresh = "rotated-token"
-
-        with patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
-             patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [wrapped], "hardware": []}), \
-             patch("calibre_plugin.cdp.reader_ws_url", return_value=None):
-            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
-        self.assertEqual(("rotated-token", "fake-hw"),
-                         (refresh, hardware))
-        self.assertEqual([fresh], logins)
-
 class ReaderBlobLiveGrabTests(_SidJwtTest):
     """Der Live-Grab entpackt die CryptoJS-verschluesselten
     userToken/userInfos-Bloebe des Readers.
@@ -1087,8 +880,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
 
         with patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
              patch("calibre_plugin.cdp.grab_live_tokens",
-                   return_value={"refresh": [blob], "hardware": []}), \
-             patch("calibre_plugin.cdp.reader_ws_url", return_value=None):
+                   return_value={"refresh": [blob], "hardware": []}):
             refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual(("rotated-token", "fake-hw"),
                          (refresh, hardware))
@@ -1105,18 +897,18 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                                      "profile": ""})
 
 
-    def test_chromium_candidates_finds_extra_binary_names(self):
+    def test_collect_candidates_finds_extra_binary_names(self):
         """Auch `chrome`, Beta/Dev-Varianten etc. werden als Befehlsname
         erkannt – nicht nur die klassischen zehn."""
         with tempfile.TemporaryDirectory() as home:
             with patch("shutil.which",
                        side_effect=lambda name: "/usr/bin/%s" % name
                        if name == "chrome" else None):
-                found = browser_finder.chromium_candidates(home=home)
+                found = browser_finder._collect_candidates(home=home)[0]
         argvs = [argv for argv, _label in found]
         self.assertIn(["/usr/bin/chrome"], argvs)
 
-    def test_chromium_candidates_falls_back_to_known_paths(self):
+    def test_collect_candidates_falls_back_to_known_paths(self):
         """Fest verdrahtete Installationsorte finden auch dann eine
         installierte Chromium-Variante, wenn Calibre mit reduziertem
         PATH startet (Desktop-Start)."""
@@ -1127,7 +919,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
             os.chmod(path, 0o755)
             with patch.object(browser_finder, "_EXTRA_BROWSER_PATHS", (path,)), \
                  patch("shutil.which", return_value=None):
-                found = browser_finder.chromium_candidates(home=home)
+                found = browser_finder._collect_candidates(home=home)[0]
         self.assertIn([path], [argv for argv, _label in found])
         self.assertIn("Chromium", [label for _argv, label in found])
 
@@ -1148,7 +940,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                    if name == "flatpak-spawn" else None), \
              patch.object(cdp_module.subprocess, "run",
                           return_value=EmptyProc()):
-            browser_finder.chromium_candidates(home="/nonexistent-home")
+            browser_finder._collect_candidates(home="/nonexistent-home")[0]
             self.assertEqual("empty", browser_finder.pick_chromium()[1])
 
     def test_launch_names_installation_when_host_probe_empty(self):
@@ -1329,7 +1121,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertNotIn("flatpak override", message)
 
-    def test_chromium_candidates_probe_host_browser_via_flatpak_spawn(self):
+    def test_collect_candidates_probe_host_browser_via_flatpak_spawn(self):
         """Die Sandbox-Sonde liest native Host-Pfade und Host-Flatpak-
         Apps und baut Launcher mit `flatpak-spawn --host` als Präfix."""
         from unittest.mock import patch as _patch
@@ -1349,7 +1141,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
                     if name == "flatpak-spawn" else None), \
              _patch.object(cdp_module.subprocess, "run",
                            return_value=FakeProc()):
-            found = browser_finder.chromium_candidates(home="/nonexistent-home")
+            found = browser_finder._collect_candidates(home="/nonexistent-home")[0]
         argvs = [argv for argv, _label in found]
         self.assertIn(["/usr/bin/flatpak-spawn", "--host",
                        "/usr/bin/chromium"], argvs)
@@ -1361,7 +1153,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
             self.assertIn(host_label, labels)
 
 
-    def test_chromium_candidates_never_probe_outside_sandbox(self):
+    def test_collect_candidates_never_probe_outside_sandbox(self):
         """Ausserhalb einer Sandbox wird für die Host-Sonde nie ein
         Prozess gestartet."""
         from unittest.mock import patch as _patch
@@ -1373,7 +1165,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
              _patch("shutil.which", return_value=None), \
              _patch.object(cdp_module.subprocess, "run",
                            side_effect=AssertionError("probe started")):
-            found = browser_finder.chromium_candidates(home="/nonexistent-home")
+            found = browser_finder._collect_candidates(home="/nonexistent-home")[0]
         self.assertEqual([], found)
 
 class FlatpakHostProbeReportTests(unittest.TestCase):
@@ -1402,7 +1194,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
                    if name == "flatpak-spawn" else None), \
              patch.object(cdp_module.subprocess, "run",
                           return_value=Proc()):
-            found = browser_finder.chromium_candidates(home="/nonexistent-home")
+            found = browser_finder._collect_candidates(home="/nonexistent-home")[0]
             # Status hier pruefen: der Patch stellt den alten Wert wieder
             # her, sobald der Block endet (Verhalten wie die
             # Bestandstests in ChromiumOpensRegardlessOfDefaultTests).
@@ -1434,7 +1226,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
                    if name == "flatpak-spawn" else None), \
              patch.object(cdp_module.subprocess, "run",
                           side_effect=fake_run):
-            browser_finder.chromium_candidates(home="/nonexistent-home")
+            browser_finder._collect_candidates(home="/nonexistent-home")[0]
         script = captured["argv"][-1]
         self.assertTrue(script.rstrip().endswith("exit 0"), script)
         for app_id, _command, _label, _host_label in browser_finder._FLATPAK_BROWSER_APPS:
@@ -1458,7 +1250,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
                    if name == "flatpak-spawn" else None), \
              patch.object(cdp_module.subprocess, "run",
                           return_value=Proc()):
-            found = browser_finder.chromium_candidates(home="/nonexistent-home")
+            found = browser_finder._collect_candidates(home="/nonexistent-home")[0]
             self.assertEqual("denied", browser_finder.pick_chromium()[1])
         self.assertEqual([], found)
 

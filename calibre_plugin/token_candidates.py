@@ -3,7 +3,6 @@ import base64
 import json
 import re
 import time
-from urllib.parse import unquote as _unquote
 
 from .browser_crypto import cryptojs_decrypt
 
@@ -92,48 +91,16 @@ def _filter_live_candidates(candidates, max_age_seconds=1800):
     return kept
 
 
-def _peel_candidate_wrappers(value):
-    """One unwrapping step for a stored candidate; returns peel results."""
-    out = []
-    stripped = value.strip()
-    if (len(stripped) >= 2 and stripped.startswith('"')
-            and stripped.endswith('"')):
-        try:
-            unquoted = json.loads(stripped)
-        except ValueError:
-            unquoted = None
-        if isinstance(unquoted, str) and unquoted:
-            out.append(unquoted)
-    if "%" in value:
-        decoded = _unquote(value)
-        if decoded and decoded != value:
-            out.append(decoded)
-    compact = "".join(value.split())
-    if len(compact) >= 24 and re.fullmatch(
-            r"[A-Za-z0-9+/\-_]+={0,2}", compact):
-        padded = compact + "=" * (-len(compact) % 4)
-        try:
-            decoded = base64.urlsafe_b64decode(
-                padded.encode("ascii")).decode("utf-8")
-        except Exception:
-            decoded = ""
-        if decoded:
-            out.append(decoded)
-    return out
-
-
 def _decrypt_reader_blob(value):
-    """Plaintexts of a CryptoJS "Salted__" reader blob ([] when none)."""
+    """Plaintext of a CryptoJS "Salted__" reader blob ("" when none)."""
     text = str(value or "")
     if not text or ("Salted__" not in text
                     and not text.lstrip().startswith("U2FsdGVk")):
-        return []
+        return ""
     try:
-        plain = cryptojs_decrypt(text, "")
+        return (cryptojs_decrypt(text, "") or "").strip()
     except Exception:
-        return []
-    plain = (plain or "").strip()
-    return [plain] if plain else []
+        return ""
 
 
 def _refresh_field_text(json_text):
@@ -153,73 +120,57 @@ def _refresh_field_text(json_text):
 
 def _hardware_from_reader_blob(value):
     """hardwareId from a decrypted userInfos blob; '' when there is none."""
-    for plain in _decrypt_reader_blob(value):
-        try:
-            parsed = json.loads(plain)
-        except ValueError:
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        for name in HARDWARE_VALUE_KEYS:
-            nested = parsed.get(name)
-            if isinstance(nested, str) and nested.strip():
-                return nested.strip()
+    plain = _decrypt_reader_blob(value)
+    if not plain:
+        return ""
+    try:
+        parsed = json.loads(plain)
+    except ValueError:
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    for name in HARDWARE_VALUE_KEYS:
+        nested = parsed.get(name)
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
     return ""
 
 
 def _unwrap_refresh_candidate(token, max_depth=3):
-    """Recover the JWT behind a wrapped, undatable candidate."""
+    """Recover the JWT behind an encrypted, undatable candidate."""
     text = str(token or "")
     if not text or _jwt_shaped(text):
         return text
-    frontier = [text]
-    seen = {text}
+    current = text
     for _depth in range(max_depth):
-        nxt = []
-
-        def enqueue(value):
-            if value not in seen:
-                seen.add(value)
-                nxt.append(value)
-
-        for value in frontier:
-            # CryptoJS/OpenSSL AES layer (reader userToken/userInfos).
-            for plain in _decrypt_reader_blob(value):
-                plain = plain.strip()
-                if not plain:
-                    continue
-                if _jwt_shaped(plain):
-                    # Trusted plaintext under a refresh-ish key, even without iat.
-                    return plain
-                if plain.startswith("U2FsdGVk"):
-                    enqueue(plain)
-                    continue
-                if plain.startswith(("{", "[")):
-                    if plain.startswith("{"):
-                        nested = _refresh_field_text(plain)
-                        if nested:
-                            if _jwt_shaped(nested):
-                                return nested
-                            if nested.startswith("U2FsdGVk"):
-                                enqueue(nested)
-                            elif (len(nested) > 20
-                                  and nested.isprintable()
-                                  and not nested.startswith(("{", "["))):
-                                return nested
-                    continue
-                # Trusted raw plaintext: an opaque real token beats ciphertext.
-                if len(plain) > 20 and plain.isprintable():
-                    return plain
-            # Structural wrappers (JSON quotes / percent / base64).
-            for peeled in _peel_candidate_wrappers(value):
-                if peeled in seen:
-                    continue
-                if _jwt_shaped(peeled) and _jwt_payload(peeled):
-                    return peeled
-                enqueue(peeled)
-        if not nxt:
+        plain = _decrypt_reader_blob(current)
+        if not plain:
             break
-        frontier = nxt
+        if _jwt_shaped(plain):
+            # Trusted plaintext under a refresh-ish key, even without iat.
+            return plain
+        if plain.startswith("U2FsdGVk"):
+            current = plain
+            continue
+        if plain.startswith("{"):
+            nested = _refresh_field_text(plain)
+            if not nested:
+                break
+            if _jwt_shaped(nested):
+                return nested
+            if nested.startswith("U2FsdGVk"):
+                current = nested
+                continue
+            if (len(nested) > 20 and nested.isprintable()
+                    and not nested.startswith(("{", "["))):
+                return nested
+            break
+        if plain.startswith("["):
+            break
+        # Trusted raw plaintext: an opaque real token beats ciphertext.
+        if len(plain) > 20 and plain.isprintable():
+            return plain
+        break
     return text
 
 

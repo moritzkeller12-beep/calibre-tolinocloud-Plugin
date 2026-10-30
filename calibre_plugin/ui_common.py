@@ -29,10 +29,7 @@ __all__ = [
     "QThread", "QVBoxLayout", "Qt",
     "_THREADS", "_apply_busy", "_dialog_busy",
     "_login_failure_guidance",
-    "button", "dialog_code", "echo_mode",
-    "gui_guard", "header_mode", "item_flag",
-    "check_state", "selection_behavior",
-    "selection_mode", "sort_order",
+    "gui_guard", "qt_enum",
     "start_worker", "_stop_thread",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
     "_keep_thread_alive", "_thread_running",
@@ -42,60 +39,9 @@ __all__ = [
 ]
 
 
-def _qt_value(owner, name, scope):
-    """Qt-Konstante in alter und skopierter Schreibweise.
-
-    Qt6 (Calibre 9) kennt nur ``QHeaderView.ResizeMode.Stretch``; die alte
-    Form ``QHeaderView.Stretch`` fehlt dort und wirft AttributeError. Die
-    Test-Stubs kennen wiederum keine Enums. Der Helfer nimmt, was da ist.
-    """
-    holder = getattr(owner, scope, None)
-    return getattr(holder, name) if holder is not None else getattr(owner, name)
-
-
-def header_mode(name):
-    """Resize-Modus einer Tabellenspalte, unabhängig von der Qt-Version."""
-    return _qt_value(QHeaderView, name, "ResizeMode")
-
-
-def button(name):
-    """Standardknopf eines Meldungsfensters, unabhängig von der Qt-Version."""
-    return _qt_value(QMessageBox, name, "StandardButton")
-
-
-def dialog_code(name):
-    """Ergebniscode eines Dialogs, unabhängig von der Qt-Version."""
-    return _qt_value(QDialog, name, "DialogCode")
-
-
-def selection_behavior(name):
-    """Auswahlverhalten einer Tabelle (Qt5 unskopiert, Qt6 als Enum)."""
-    return _qt_value(QTableWidget, name, "SelectionBehavior")
-
-
-def selection_mode(name):
-    """Auswahlmodus einer Tabelle (Strg-/Shift-Klick)."""
-    return _qt_value(QTableWidget, name, "SelectionMode")
-
-
-def echo_mode(name):
-    """Anzeigemodus eines Eingabefelds (z. B. Password)."""
-    return _qt_value(QLineEdit, name, "EchoMode")
-
-
-def sort_order(name):
-    """Sortierreihenfolge einer Tabellenspalte."""
-    return _qt_value(Qt, name, "SortOrder")
-
-
-def item_flag(name):
-    """Flag eines Tabelleneintrags (Qt5 unskopiert, Qt6 als Enum)."""
-    return _qt_value(Qt, name, "ItemFlag")
-
-
-def check_state(name):
-    """Checkzustand eines Tabelleneintrags (Qt5 unskopiert, Qt6 als Enum)."""
-    return _qt_value(Qt, name, "CheckState")
+def qt_enum(owner, name, scope):
+    """Qt-Konstante aus ihrem skopierten Enum lesen (Calibre 6/Qt6)."""
+    return getattr(getattr(owner, scope), name)
 
 
 def gui_guard(function):

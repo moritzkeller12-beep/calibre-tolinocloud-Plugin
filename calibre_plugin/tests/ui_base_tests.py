@@ -218,6 +218,8 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 return self.header_items.setdefault(index, Widget())
 
         class Dialog(Widget):
+            DialogCode = type("DialogCode", (), {"Accepted": 1})
+
             def __init__(self, parent=None):
                 Widget.__init__(self)
                 self.parent = parent
@@ -346,8 +348,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
             "QPushButton": Button,
             "QCheckBox": CheckBox,
             "QComboBox": ComboBox,
-            "QHeaderView": type("QHeaderView", (),
-                               {"Stretch": 1, "ResizeToContents": 2}),
+            "QHeaderView": type("QHeaderView", (), {
+                "ResizeMode": type(
+                    "ResizeMode", (), {"Stretch": 1, "ResizeToContents": 2})}),
             "QGroupBox": Widget,
             "QTableWidget": Table,
             "QTableWidgetItem": FakeTableItem,
@@ -388,11 +391,11 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 in_cloud = bool(row["tolino_id"])
                 # Drei Auswahlfelder je Buch ...
                 self.assertIs(dialog.table.item(index, 0),
-                              dialog.checks[index].item)
+                              dialog.cells["upload"][index].item)
                 self.assertIs(dialog.table.item(index, 1),
-                              dialog.meta_checks[index].item)
+                              dialog.cells["metadata"][index].item)
                 self.assertIs(dialog.table.item(index, 2),
-                              dialog.read_checks[index].item)
+                              dialog.cells["read"][index].item)
                 # ... die zwei Orts-Spalten mit je einem Häkchen ...
                 self.assertEqual("✓" if row["book_id"] is not None else "",
                                  dialog.table.items[(index, 3)])
@@ -410,9 +413,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
                                  dialog.table.items[(index, 10)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
-                upload = dialog.checks[index]
-                metadata = dialog.meta_checks[index]
-                mark_read = dialog.read_checks[index]
+                upload = dialog.cells["upload"][index]
+                metadata = dialog.cells["metadata"][index]
+                mark_read = dialog.cells["read"][index]
                 self.assertTrue(upload.enabled)
                 self.assertEqual(in_cloud, metadata.enabled)
                 self.assertEqual(in_cloud, mark_read.enabled)

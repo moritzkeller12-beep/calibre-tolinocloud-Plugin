@@ -1,11 +1,9 @@
 """Dialoge für den tolino-Bibliotheksvergleich."""
 import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                        QHBoxLayout, QLabel, QMessageBox,
+                        QHBoxLayout, QHeaderView, QLabel, QMessageBox,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, _set_enabled, check_state, header_mode,
-                        item_flag, selection_behavior, selection_mode,
-                        sort_order, start_call)
+                        QVBoxLayout, Qt, _set_enabled, qt_enum, start_call)
 from .planning_values import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import (ReadState, comparison_group, comparison_sort_key,
@@ -50,22 +48,27 @@ class _ActionCheck:
         self.tooltip = ""
 
     def isChecked(self):
-        return self.item.checkState() == check_state("Checked")
+        return self.item.checkState() == qt_enum(Qt, "Checked", "CheckState")
 
     def setChecked(self, value):
-        state = check_state("Checked" if value else "Unchecked")
-        if self.item.checkState() != state:
-            self.item.setCheckState(state)
+        # Auch «Unchecked» explizit setzen: Ein frisches QTableWidgetItem
+        # meldet zwar Unchecked, hat aber noch keine CheckStateRole. Ohne
+        # setCheckState zeichnet Qt kein leeres Kästchen.
+        self.item.setCheckState(
+            qt_enum(Qt, "Checked" if value else "Unchecked", "CheckState"))
 
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
         flags = self.item.flags()
-        enabled_flag = item_flag("ItemIsEnabled")
-        checkable_flag = item_flag("ItemIsUserCheckable")
+        enabled_flag = qt_enum(Qt, "ItemIsEnabled", "ItemFlag")
+        checkable_flag = qt_enum(Qt, "ItemIsUserCheckable", "ItemFlag")
+        # Checkbar bleibt das Feld auch deaktiviert: Qt zeichnet das
+        # Kästchen dann grau, statt es ganz zu verstecken.
+        flags |= checkable_flag
         if self.enabled:
-            flags |= enabled_flag | checkable_flag
+            flags |= enabled_flag
         else:
-            flags &= ~(enabled_flag | checkable_flag)
+            flags &= ~enabled_flag
         self.item.setFlags(flags)
 
     def setToolTip(self, text):
@@ -106,43 +109,40 @@ class InventoryDialog(QDialog):
                   "(Titel, Autor, ISBN) oder Lesestatus. Geändert wird erst "
                   "mit «Synchronisierung starten».")
 
-    # Aktionen für markierte Zeilen, zusammen an einer Stelle.
+    # (Label, Methode, feste Argumente, Prädikat): EINE Tabelle für Menü,
+    # Sichtbarkeit und Ausführung.
     ROW_ACTIONS = (
-        ("Upload aktivieren", "upload_on"),
-        ("Upload deaktivieren", "upload_off"),
-        ("Metadaten aktivieren", "metadata_on"),
-        ("Metadaten deaktivieren", "metadata_off"),
-        ("Als gelesen markieren", "read"),
-        ("Als ungelesen markieren", "read_off"),
+        ("Upload aktivieren", "set_column_for_marked_rows",
+         ("upload", True, "haben schon diese Auswahl oder keine Datei"),
+         lambda row: (row_capabilities(row)["upload"]
+                      and not row.get("upload"))),
+        ("Upload deaktivieren", "set_column_for_marked_rows",
+         ("upload", False, "waren schon abgewählt oder haben keine Datei"),
+         lambda row: bool(row.get("upload"))),
+        ("Metadaten aktivieren", "set_column_for_marked_rows",
+         ("metadata", True,
+          "haben schon diese Auswahl oder liegen nicht in der Cloud"),
+         lambda row: (row_capabilities(row)["metadata"]
+                      and not row.get("metadata"))),
+        ("Metadaten deaktivieren", "set_column_for_marked_rows",
+         ("metadata", False,
+          "waren schon abgewählt oder liegen nicht in der Cloud"),
+         lambda row: bool(row.get("metadata"))),
+        ("Als gelesen markieren", "mark_read_for_marked_rows", (),
+         lambda row: (row_capabilities(row)["read"]
+                      and not row.get("read"))),
+        ("Als ungelesen markieren", "clear_read_for_marked_rows", (),
+         lambda row: (row_capabilities(row)["read"]
+                      and row.get("read"))),
         # Download arbeitet nur für eine markierte Cloud-Kopie.
-        ("Aus tolino herunterladen …", "download"),
-        ("Aus der tolino Cloud löschen …", "cloud_delete"),
-        ("Löschmarkierung aufheben", "cloud_delete_off"),
+        ("Aus tolino herunterladen …", "download_selected", (),
+         lambda row: row_capabilities(row)["download"]),
+        ("Aus der tolino Cloud löschen …", "delete_marked_from_cloud", (),
+         lambda row: (row_capabilities(row)["delete"]
+                      and not row.get("delete_cloud"))),
+        ("Löschmarkierung aufheben", "clear_cloud_delete_for_marked_rows", (),
+         lambda row: bool(row.get("delete_cloud"))),
     )
-
-    # Menüschlüssel -> (Methode, feste Argumente). Die Reihenfolge im Menü
-    # steht in ROW_ACTIONS; hier steht nur noch, was ausgeführt wird.
-    ROW_ACTION_HANDLERS = {
-        "read": ("mark_read_for_marked_rows", ()),
-        "read_off": ("clear_read_for_marked_rows", ()),
-        "upload_on": ("set_column_for_marked_rows",
-                      ("upload", True,
-                       "haben schon diese Auswahl oder keine Datei")),
-        "upload_off": ("set_column_for_marked_rows",
-                       ("upload", False,
-                        "waren schon abgewählt oder haben keine Datei")),
-        "metadata_on": ("set_column_for_marked_rows",
-                        ("metadata", True,
-                         "haben schon diese Auswahl oder liegen nicht in "
-                         "der Cloud")),
-        "metadata_off": ("set_column_for_marked_rows",
-                         ("metadata", False,
-                          "waren schon abgewählt oder liegen nicht in "
-                          "der Cloud")),
-        "download": ("download_selected", ()),
-        "cloud_delete": ("delete_marked_from_cloud", ()),
-        "cloud_delete_off": ("clear_cloud_delete_for_marked_rows", ()),
-    }
 
     _SORT_KEYS = (
         # 0 Hochladen / 1 Metadaten: Ausgewähltes zuerst, dann Titel/Autor(en)
@@ -298,10 +298,12 @@ class InventoryDialog(QDialog):
         """Tabelle samt Kopfzeilen-Tooltips und Sortierung aufbauen."""
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.table.setSelectionBehavior(selection_behavior("SelectRows"))
+        self.table.setSelectionBehavior(
+            qt_enum(QTableWidget, "SelectRows", "SelectionBehavior"))
         # Strg-/Shift-Klick und Strg+A werden in Tooltips und Menue
         # versprochen -- Qt6 kennt den Modus nur als skopiertes Enum.
-        self.table.setSelectionMode(selection_mode("ExtendedSelection"))
+        self.table.setSelectionMode(
+            qt_enum(QTableWidget, "ExtendedSelection", "SelectionMode"))
         header_tooltips = (
             "Buchdatei in die Cloud hochladen.",
             "Titel, Autor und ISBN ohne Upload aktualisieren.",
@@ -326,7 +328,8 @@ class InventoryDialog(QDialog):
         self._sort_descending = False
         table_header = self.table.horizontalHeader()
         table_header.setSortIndicatorShown(True)
-        table_header.setSortIndicator(0, sort_order("AscendingOrder"))
+        table_header.setSortIndicator(
+            0, qt_enum(Qt, "AscendingOrder", "SortOrder"))
         table_header.sectionClicked.connect(self._sort_by_column)
         item_changed = getattr(self.table, "itemChanged", None)
         if item_changed is not None:
@@ -405,10 +408,7 @@ class InventoryDialog(QDialog):
 
     def _check_at(self, index, key):
         """Check-Controller einer Aktion -- eine Zuordnung für alle Pfade."""
-        checks = (self.checks if key == "upload" else
-                  self.meta_checks if key == "metadata" else
-                  self.read_checks)
-        return checks[index]
+        return self.cells[key][index]
 
     def _set_check_quietly(self, check, value):
         """Check-Zelle ohne Einzelaktualisierung setzen.
@@ -427,9 +427,7 @@ class InventoryDialog(QDialog):
         """Eine Check-Zelle wurde vom Nutzer umgeschaltet."""
         if getattr(self, "_syncing_checks", False):
             return
-        for key, checks in (("upload", self.checks),
-                            ("metadata", self.meta_checks),
-                            ("read", self.read_checks)):
+        for key, checks in self.cells.items():
             for index, check in enumerate(checks):
                 if getattr(check, "item", None) is item:
                     self._choice_changed(index, key)
@@ -461,8 +459,8 @@ class InventoryDialog(QDialog):
             upload = bool(wanted[0]) and caps["upload"]
             metadata = bool(wanted[1]) and caps["metadata"]
             row.update(upload=upload, metadata=metadata)
-            for check, checked in ((self.checks[index], upload),
-                                   (self.meta_checks[index], metadata)):
+            for check, checked in ((self.cells["upload"][index], upload),
+                                   (self.cells["metadata"][index], metadata)):
                 self._set_check_quietly(check, checked)
         self._update_summary()
 
@@ -569,34 +567,15 @@ class InventoryDialog(QDialog):
         actions = {}
         row_indexes = [index for index in marked
                        if 0 <= index < len(self.rows)]
-        predicates = {
-            "upload_on": lambda row: (
-                row_capabilities(row)["upload"] and not row.get("upload")),
-            "upload_off": lambda row: bool(row.get("upload")),
-            "metadata_on": lambda row: (
-                row_capabilities(row)["metadata"]
-                and not row.get("metadata")),
-            "metadata_off": lambda row: bool(row.get("metadata")),
-            "read": lambda row: (
-                row_capabilities(row)["read"] and not row.get("read")),
-            "read_off": lambda row: (
-                row_capabilities(row)["read"] and row.get("read")),
-            "download": lambda row: row_capabilities(row)["download"],
-            "cloud_delete": lambda row: (
-                row_capabilities(row)["delete"] and not row.get("delete_cloud")),
-            "cloud_delete_off": lambda row: bool(row.get("delete_cloud")),
-        }
-        for label, key in self.ROW_ACTIONS:
-            if not any(predicates[key](self.rows[index])
-                       for index in row_indexes):
+        for label, method, args, predicate in self.ROW_ACTIONS:
+            if not any(predicate(self.rows[index]) for index in row_indexes):
                 continue
-            actions[menu.addAction(label)] = key
+            actions[menu.addAction(label)] = (method, args)
         position = self.row_actions.mapToGlobal(
             self.row_actions.rect().bottomLeft())
         execute = getattr(menu, "exec", None) or menu.exec_
         chosen = execute(position)
-        key = actions.get(chosen)
-        handler = self.ROW_ACTION_HANDLERS.get(key)
+        handler = actions.get(chosen)
         if handler is None:
             return
         method, args = handler
@@ -717,8 +696,8 @@ class InventoryDialog(QDialog):
         ordered = sorted(self.rows, key=self._SORT_KEYS[column],
                          reverse=self._sort_descending)
         self.table.horizontalHeader().setSortIndicator(
-            column, sort_order("DescendingOrder" if self._sort_descending
-                               else "AscendingOrder"))
+            column, qt_enum(Qt, "DescendingOrder" if self._sort_descending
+                             else "AscendingOrder", "SortOrder"))
         self._rebuild_table(ordered)
 
     def _build_action_items(self, row_index, row, has_book, in_cloud):
@@ -756,8 +735,7 @@ class InventoryDialog(QDialog):
                 else tooltip if enabled
                 else (self.DELETE_TOOLTIP if delete_cloud
                       else disabled_tooltip))
-            (self.checks, self.meta_checks,
-             self.read_checks)[column].append(check)
+            self.cells[key].append(check)
             self.table.setItem(row_index, column, item)
 
     def _row_display_values(self, row, has_book, in_cloud):
@@ -787,9 +765,7 @@ class InventoryDialog(QDialog):
             # Test sie als rohes Dict übergibt.
             self.rows = [dict(row, read=ReadState.from_row(row))
                          for row in rows]
-            self.checks = []
-            self.meta_checks = []
-            self.read_checks = []
+            self.cells = {"upload": [], "metadata": [], "read": []}
             self.table.setRowCount(0)
             self.table.setRowCount(len(self.rows))
             for row_index, row in enumerate(self.rows):
@@ -828,9 +804,12 @@ class InventoryDialog(QDialog):
         """
         header = self.table.horizontalHeader()
         for column in (5, 7):
-            header.setSectionResizeMode(column, header_mode("Stretch"))
+            header.setSectionResizeMode(
+                column, qt_enum(QHeaderView, "Stretch", "ResizeMode"))
         for column in (0, 1, 2, 3, 4, 6):
-            header.setSectionResizeMode(column, header_mode("ResizeToContents"))
+            header.setSectionResizeMode(
+                column, qt_enum(QHeaderView, "ResizeToContents",
+                                "ResizeMode"))
 
     def _apply_group_filter(self, *_args):
         """Gruppenfilter ohne die Zeilen/Wahlzustaende zu verlieren.

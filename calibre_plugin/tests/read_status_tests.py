@@ -150,7 +150,7 @@ class ReadColumnDialogTests(_QtDialogTest):
     def _cell(dialog, title):
         index = next(i for i, row in enumerate(dialog.rows)
                      if row["title"] == title)
-        return index, dialog.read_checks[index]
+        return index, dialog.cells["read"][index]
 
     def test_calibre_value_is_a_note_not_a_default_or_action(self):
         ui_module = self._ui()
@@ -186,7 +186,7 @@ class ReadColumnDialogTests(_QtDialogTest):
         row = dict(self._rows()[0], read_known=False, read_local=True,
                    read=True, read_in_cloud=True)
         dialog = ui_module.dialogs.InventoryDialog([row])
-        self.assertFalse(dialog.read_checks[0].enabled)
+        self.assertFalse(dialog.cells["read"][0].enabled)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
 
