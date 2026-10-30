@@ -7,6 +7,7 @@ from . import ui_base_tests, worker_base_tests
 from .. import config
 from ..identifiers import display_title
 from ..plan import MetaUpdateRecord, plan_sync
+from ..planning_values import SyncJob
 from ..run_context import RunContext
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
 from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
@@ -96,8 +97,8 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     @staticmethod
     def _job(ui_module, book_id, uuid, cover=None, title=""):
-        return ui_module.common.SyncJob(book_id, uuid, "EPUB", None,
-                                 "/library/%s.epub" % uuid, cover, title)
+        return SyncJob(book_id, uuid, "EPUB", None,
+                       "/library/%s.epub" % uuid, cover, title)
 
     def _run(self, ui_module, settings, jobs, fake_client,
              removals=(), meta_updates=(), read_marks=(), read_unmarks=(),
@@ -1343,7 +1344,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
             self):
         ui_module = self._ui()
         deleted = []
-        job = ui_module.common.SyncJob(1, "u1", "EPUB", "t-alt",
+        job = SyncJob(1, "u1", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
         state = {"u1": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
         worker, emitted, _saved = self._run(
@@ -1360,7 +1361,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         """HTTP 404 beim Aufräumen ist ein übersprungener, kein fehlgeschlagener Schritt."""
         ui_module = self._ui()
         deleted = []
-        job = ui_module.common.SyncJob(1, "u1", "EPUB", "t-alt",
+        job = SyncJob(1, "u1", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
         state = {"u1": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
         client = self._client(deleted)
@@ -1403,7 +1404,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         """Ein Fehler beim direkten Löschaufruf wird im Bericht gezählt."""
         ui_module = self._ui()
         deleted = []
-        job = ui_module.common.SyncJob(1, "u1", "EPUB", "t-alt",
+        job = SyncJob(1, "u1", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
         client = self._client(deleted)
         def fail_old_delete(tolino_id):

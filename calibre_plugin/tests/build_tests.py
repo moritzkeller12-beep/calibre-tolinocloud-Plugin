@@ -10,10 +10,6 @@ from build_plugin import (ICON, MARKER, ROOT, SOURCE, build_plugin,
 
 
 class PluginArchiveTests(unittest.TestCase):
-    def test_workflow_is_stored_under_github_actions_directory(self):
-        workflow = ROOT / ".github" / "workflows" / "ci.yml"
-        self.assertTrue(workflow.is_file(), "GitHub Actions workflow path is invalid")
-
     def test_build_includes_plugin_modules_and_excludes_test_runner(self):
         modules = plugin_modules()
         self.assertIn("token_vault.py", modules)

@@ -684,11 +684,6 @@ class InventoryDialog(QDialog):
             return
         label.setText(text)
 
-    @staticmethod
-    def _column_applies(key, row):
-        """Geht diese Spalte bei dieser Zeile? -- dieselbe Capability-Regel."""
-        return bool(row_capabilities(row).get(key))
-
     def _set_row_choice(self, index, key, value, caps=None):
         """Zeile und Check-Zelle setzen; False = war schon so.
 

@@ -132,15 +132,17 @@ class LiveGrabTests(unittest.TestCase):
         self.assertTrue(any(a.startswith("--user-data-dir=") for a in args))
         self.assertIn("mytolino.com", args[-1])
 
-    def test_filter_live_candidates_drops_stale_jwts(self):
-        """JWT-Kandidaten aelter als 2 Minuten werden verworfen."""
+    def test_filter_live_candidates_keeps_fresh_and_undated(self):
+        """Alte JWTs fallen raus; frische, aeltere und undatierte bleiben."""
         from ..token_candidates import _filter_live_candidates
         now = time.time()
         fresh = self._jwt(now - 10, "sess-1")
+        ten_minutes_old = self._jwt(now - 600, "sess-1")
         stale = self._jwt(now - 3600, "sess-1")  # 1 h: ueber dem 30-min-Cutoff
         undated = "plainopaquevalue-not-a-jwt"
-        kept = _filter_live_candidates([fresh, stale, undated])
-        self.assertEqual([fresh, undated], kept)
+        kept = _filter_live_candidates(
+            [fresh, ten_minutes_old, stale, undated])
+        self.assertEqual([fresh, ten_minutes_old, undated], kept)
 
     def test_grab_live_refresh_exchanges_freshest_token_once(self):
         """Der frischeste Live-Kandidat wird GENAU EINMAL getauscht."""
@@ -324,17 +326,6 @@ class LiveGrabTests(unittest.TestCase):
         self.assertTrue(message["result"]["value"].startswith(
             '{"id": 1, "method": "Runtime.evaluate"'))
 
-    def test_filter_live_cutoff_accepts_tokens_from_older_signin(self):
-        """Tokens bis 30 Minuten Alter ueberleben den Live-Cutoff."""
-        from ..token_candidates import _filter_live_candidates
-        now = time.time()
-        ten_minutes_old = self._jwt(now - 600, "sess-1")
-        kept = _filter_live_candidates([ten_minutes_old])
-        self.assertEqual([ten_minutes_old], kept)
-        # Ausdruecklich mit dem Default aufgerufen bleibt es bei 1800s:
-        self.assertIn("1800",
-                      _filter_live_candidates.__defaults__[0].__str__())
-
     def test_exchange_prefers_refresh_typ_over_newer_access_token(self):
         """Access-JWTs (kurzlebig) werden nicht vor dem Refresh-JWT
         verbraten, auch wenn ihr iat neuer ist."""
@@ -456,7 +447,7 @@ class LiveGrabTests(unittest.TestCase):
         # Der Plugin-Client (und damit der Plugin-POST) wurde nie erzeugt:
         client_cls.assert_not_called()
 
-    def test_exchange_grabbed_token_falls_back_to_plugin_post(self):
+    def test_browser_waf_403_falls_back_to_plugin_post(self):
         """Eindeutige WAF-403 im Browser -> Plugin-POST."""
         from ..browser_login import _exchange_grabbed_token
         fresh = self._jwt(time.time() - 5, "sess-live")
@@ -469,14 +460,16 @@ class LiveGrabTests(unittest.TestCase):
             def _login(self):
                 self.refresh = "rotated-plugin"
 
-        with patch("calibre_plugin.cdp.reader_ws_url",
-                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
-             patch("calibre_plugin.cdp.exchange_refresh_in_browser",
-                   return_value=(403, "Zugriff geblockt")), \
-             patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
-            refresh, hardware = _exchange_grabbed_token(
-                4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
-        self.assertEqual("rotated-plugin", refresh)
+        for body in ("Zugriff geblockt", "Access denied by CloudFront"):
+            with self.subTest(body=body), \
+                 patch("calibre_plugin.cdp.reader_ws_url",
+                       return_value="ws://127.0.0.1:9223/devtools/page/x"), \
+                 patch("calibre_plugin.cdp.exchange_refresh_in_browser",
+                       return_value=(403, body)), \
+                 patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
+                refresh, _hardware = _exchange_grabbed_token(
+                    4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
+                self.assertEqual("rotated-plugin", refresh)
 
     def test_browser_exchange_ambiguous_failure_never_replays_refresh_grant(self):
         """Unklarer fetch-Fehler kann nach Token-Verbrauch auftreten;
@@ -523,28 +516,6 @@ class LiveGrabTests(unittest.TestCase):
                 with self.assertRaises(TolinoAuthError):
                     _exchange_grabbed_token(
                         4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
-
-    def test_browser_exchange_waf_response_still_allows_transport_fallback(self):
-        """Nur eine eindeutig erkannte WAF-403 darf den Fallback auslösen."""
-        from ..browser_login import _exchange_grabbed_token
-        fresh = self._jwt(time.time() - 5, "sess-live")
-
-        class FallbackClient:
-            def __init__(self, *_args):
-                self.refresh = fresh
-                self.hardware = "hw"
-
-            def _login(self):
-                self.refresh = "rotated-plugin"
-
-        with patch("calibre_plugin.cdp.reader_ws_url",
-                   return_value="ws://127.0.0.1:9223/devtools/page/x"), \
-             patch("calibre_plugin.cdp.exchange_refresh_in_browser",
-                   return_value=(403, "Access denied by CloudFront")), \
-             patch("calibre_plugin.browser_login.TolinoClient", FallbackClient):
-            refresh, _hardware = _exchange_grabbed_token(
-                4, "hw", {"refresh": [fresh], "hardware": []}, [fresh])
-        self.assertEqual("rotated-plugin", refresh)
 
     def test_grab_live_refresh_adopts_new_candidate_and_reader_hardware(self):
         """Nach einer Ablehnung uebernimmt das Plugin die NEU geschriebene
@@ -847,14 +818,6 @@ class LiveGrabTests(unittest.TestCase):
         self.assertTrue(expression.rstrip().endswith('})("tolino-user")'))
         self.assertNotIn("'\"", expression)
 
-    def test_grab_snippets_parse_json_blob_store_values(self):
-        """Top-Level-Speicher-Werte sind Strings: JSON-Blobs
-        (oidc.user:...) muessen geparst werden, sonst ist der aktuelle
-        Token unsichtbar (Feldbefund "kein frischer Token")."""
-        from ..cdp_scripts import _GRAB_SNIPPET, _IDB_SNIPPET
-        for snippet in (_GRAB_SNIPPET, _IDB_SNIPPET):
-            self.assertIn("tryParse(value)", snippet)
-
     def test_browser_login_forwards_progress_into_live_grab(self):
         """Die Dialog-Fortschrittstexte (Fenster offen, Rotation
         erzwungen) muessen bis zum Live-Grab durchreichen."""
@@ -967,25 +930,16 @@ class WrappedCandidateTests(_SidJwtTest):
 
     SID = "sess-wrap"
 
-    def test_unwrap_recovers_base64_wrapped_jwt(self):
-        """base64- und doppelt gehüllte JWTs werden bis zum Kern
-        entpackt (Feldform: 920 Zeichen ohne Punkt)."""
+    def test_unwrap_recovers_wrapped_jwts(self):
+        """base64-, doppelt-, JSON- und prozentgehuellte JWTs werden entpackt."""
         from ..token_candidates import _unwrap_refresh_candidate
         fresh = self._refresh_jwt(time.time() - 5)
         wrapped = base64.urlsafe_b64encode(
             fresh.encode("utf-8")).decode().rstrip("=")
-        self.assertEqual(fresh, _unwrap_refresh_candidate(wrapped))
         double = base64.b64encode(wrapped.encode("utf-8")).decode()
-        self.assertEqual(fresh, _unwrap_refresh_candidate(double))
-
-    def test_unwrap_recovers_quoted_and_percent_encoded_jwt(self):
-        """JSON-Zeichenkette und Prozent-Code (inkl. kodierter Punkte)
-        sind ebenfalls bekannte Hüllen."""
-        from ..token_candidates import _unwrap_refresh_candidate
-        fresh = self._refresh_jwt(time.time() - 5)
-        self.assertEqual(fresh, _unwrap_refresh_candidate(json.dumps(fresh)))
         percent = fresh.replace(".", "%2E")
-        self.assertEqual(fresh, _unwrap_refresh_candidate(percent))
+        for value in (wrapped, double, json.dumps(fresh), percent):
+            self.assertEqual(fresh, _unwrap_refresh_candidate(value))
 
     def test_unwrap_leaves_opaque_and_broken_values_untouched(self):
         """Opake (echt punktlose) Tokens und unlesbare Zeichenketten

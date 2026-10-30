@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from . import ui_base_tests
 from .. import config
+from ..planning_values import SyncJob
 from ..run_context import RunContext
 from ._support import compare_inventory, start_cdp_stubs, stop_cdp_stubs
 from unittest.mock import patch
@@ -831,7 +832,7 @@ class ReplacementConfirmationTests(unittest.TestCase):
 
     @staticmethod
     def _job(ui_module, book_id, title, old_id):
-        return ui_module.common.SyncJob(book_id, "u%d" % book_id, "EPUB",
+        return SyncJob(book_id, "u%d" % book_id, "EPUB",
                                         old_id, "/library/b.epub", None, title)
 
     def _run(self, ui_module, answer, jobs):

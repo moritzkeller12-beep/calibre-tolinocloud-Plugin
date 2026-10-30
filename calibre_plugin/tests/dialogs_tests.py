@@ -7,9 +7,9 @@ import unittest
 from . import ui_base_tests
 from ..plan import merge_removals
 from ..run_context import RunContext
-from ._support import (FakeMenu, FakeMessageBox, _ui_source_text,
-                      compare_inventory, start_cdp_stubs, stop_cdp_stubs,
-                      ui_module_for)
+from ._support import (FakeMenu, FakeMessageBox, FakeTableItem,
+                      _ui_source_text, compare_inventory, start_cdp_stubs,
+                      stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -124,31 +124,9 @@ class InventoryDialogSortTests(unittest.TestCase):
             def horizontalHeader(self):
                 return FakeHeader()
 
-        class FakeItem:
-            def __init__(self, text):
-                self.text = text
-                self._check_state = 0
-                self._flags = 0
-                self.tooltip = ""
-
-            def setFlags(self, flags):
-                self._flags = flags
-
-            def flags(self):
-                return self._flags
-
-            def setCheckState(self, state):
-                self._check_state = state
-
-            def checkState(self):
-                return self._check_state
-
-            def setToolTip(self, text):
-                self.tooltip = text
-
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
-        ui_module.dialogs.QTableWidgetItem = FakeItem
+        ui_module.dialogs.QTableWidgetItem = FakeTableItem
         try:
             dialog = ui_module.dialogs.InventoryDialog.__new__(
                 ui_module.dialogs.InventoryDialog)
@@ -232,30 +210,28 @@ class InventoryDialogSortTests(unittest.TestCase):
 
     def test_columns_sort_keys_and_technical_columns_stay_in_sync(self):
         """Spaltenzahl, Sortierschlüssel und technische Spalten müssen
-        zusammenpassen – sonst sortiert ein Klick falsch. Die doppelte
-        Statusspalte entfällt, die beiden Orts-Spalten stehen wieder
-        einzeln da (Feldbefund)."""
+        zusammenpassen – sonst sortiert ein Klick falsch."""
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)
         try:
             dialog_cls = ui_module.dialogs.InventoryDialog
+            headers = dialog_cls.HEADERS
+            self.assertEqual(
+                ("Datei hochladen", "Metadaten aktualisieren", "Gelesen",
+                 "In Calibre", "In tolino", "Buchtitel", "Autor(en)",
+                 "Hinweis", "ISBN", "tolino-ID", "UUID"), headers)
             # 8 sichtbare Spalten + 3 technische.
-            self.assertEqual(11, len(dialog_cls.HEADERS))
-            visible = [name for index, name in enumerate(dialog_cls.HEADERS)
+            self.assertEqual(11, len(headers))
+            visible = [name for index, name in enumerate(headers)
                        if index not in dialog_cls.TECHNICAL_COLUMNS]
             self.assertEqual(8, len(visible))
-            self.assertEqual(["Datei hochladen", "Metadaten aktualisieren",
-                              "Gelesen", "In Calibre", "In tolino",
-                              "Buchtitel", "Autor(en)",
-                              "Hinweis"], visible)
-            self.assertEqual(len(dialog_cls.HEADERS),
-                             len(dialog_cls._SORT_KEYS))
-            # Jede Spalte hat einen eigenen Sortierschlüssel: "Wo" gibt es
-            # nicht mehr, die beiden Orts-Spalten sind getrennt sortierbar.
-            self.assertNotIn("Wo", dialog_cls.HEADERS)
-            for column in dialog_cls.TECHNICAL_COLUMNS:
-                self.assertLess(column, len(dialog_cls.HEADERS))
+            self.assertEqual(8, len(headers) - len(dialog_cls.TECHNICAL_COLUMNS))
+            self.assertEqual(len(headers), len(dialog_cls._SORT_KEYS))
             self.assertEqual((8, 9, 10), dialog_cls.TECHNICAL_COLUMNS)
+            for gone in ("Wo", "Status"):
+                self.assertNotIn(gone, headers)
+            for column in dialog_cls.TECHNICAL_COLUMNS:
+                self.assertLess(column, len(headers))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -365,28 +341,6 @@ class ComparisonLayoutTests(unittest.TestCase):
         source = ComparisonLayoutTests._source()
         return source.split("class InventoryDialog(QDialog):", 1)[1].split(
             "\nclass ", 1)[0]
-
-    def test_two_location_columns_plus_technical_ones(self):
-        """Die zwei Orts-Spalten stehen wieder einzeln da.
-
-        Feldbefund: «Bring mir die zwei Spalten zurück, wo die Bücher
-        sind.» Die doppelte Statusspalte bleibt entfallen.
-        """
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        try:
-            headers = ui_module.dialogs.InventoryDialog.HEADERS
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual(("Datei hochladen", "Metadaten aktualisieren", "Gelesen",
-                          "In Calibre", "In tolino", "Buchtitel", "Autor(en)",
-                          "Hinweis", "ISBN", "tolino-ID", "UUID"), headers)
-        technical = ui_module.dialogs.InventoryDialog.TECHNICAL_COLUMNS
-        self.assertEqual((8, 9, 10), technical)
-        self.assertEqual(8, len(headers) - len(technical))
-        # Die eine zusammengefasste Spalte und der doppelte Status sind weg.
-        for gone in ("Wo", "Status"):
-            self.assertNotIn(gone, headers)
 
     def test_the_menu_offers_every_row_action(self):
         """Die Spalten-Aktionen gelten auch für markierte Zeilen."""
@@ -1410,7 +1364,8 @@ class IgnoredRowDialogTests(_QtDialogTest):
             dialog.rows[0]["delete_cloud"] = True
             self.assertEqual(set(), dialog.selected_upload_ids())
             self.assertEqual([], dialog.selected_cloud_deletions())
-            self.assertFalse(dialog._column_applies("upload", dialog.rows[0]))
+            self.assertFalse(
+                ui_module.dialogs.row_capabilities(dialog.rows[0])["upload"])
             self.assertFalse(dialog._set_row_choice(0, "upload", True))
         finally:
             ui_module._restore_stubs_for_tests()

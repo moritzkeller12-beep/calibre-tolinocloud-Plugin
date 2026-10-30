@@ -275,6 +275,25 @@ def _decode_json(raw):
             short="tolino hat eine ungültige Antwort geliefert.")
 
 
+def _http_error_detail(raw_detail):
+    """Normalize a Tolino error body for logs and user-facing messages."""
+    detail = raw_detail
+    try:
+        payload = json.loads(raw_detail)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        detail = {key: payload[key] for key in
+                  ("error", "error_description", "message")
+                  if key in payload}
+        response_info = payload.get("ResponseInfo")
+        if isinstance(response_info, dict) and response_info.get("message"):
+            detail.setdefault("message",
+                              str(response_info["message"])[:300])
+        detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+    return detail
+
+
 class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
@@ -338,15 +357,14 @@ class TolinoClient:
         return self.refresh
 
     def _login(self):
-        if self.refresh:
-            payload = {
-                "client_id": self.partner["client_id"],
-                "grant_type": "refresh_token",
-                "refresh_token": self.refresh,
-                "scope": self.partner["scope"],
-            }
-        else:
+        if not self.refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN, code="A03")
+        payload = {
+            "client_id": self.partner["client_id"],
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh,
+            "scope": self.partner["scope"],
+        }
         try:
             data = self._request(self.partner["token_url"], "POST", payload,
                                  form=True, authenticated=False)
@@ -437,22 +455,9 @@ class TolinoClient:
         `retry` führt die drei Wiederholungsgründe: abgelaufener
         Access-Token, unbekannte Geräte-Registrierung, WAF-Block.
         """
-        detail = raw_detail
-        try:
-            payload = json.loads(raw_detail)
-        except ValueError:
-            payload = None
-        if isinstance(payload, dict):
-            detail = {key: payload[key] for key in
-                      ("error", "error_description", "message")
-                      if key in payload}
-            response_info = payload.get("ResponseInfo")
-            if isinstance(response_info, dict) and response_info.get("message"):
-                detail.setdefault("message",
-                                  str(response_info["message"])[:300])
-            detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
         self.last_error_text = sanitize_error(
-            detail, (self.refresh, self.access))[:500]
+            _http_error_detail(raw_detail),
+            (self.refresh, self.access))[:500]
 
         if (exc.code == 401 and authenticated and self.refresh
                 and retry["auth"]

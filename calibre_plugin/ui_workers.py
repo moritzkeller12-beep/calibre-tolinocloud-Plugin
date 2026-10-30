@@ -396,14 +396,10 @@ class SyncWorker(QObject):
             done += 1
         return done
 
-    def _run_collections(self, client, collection_ops, checkpoint, done,
-                         total):
-        """Serien → Cloud-Sammlungen: nur die offenen Zuordnungen."""
-        if not collection_ops:
-            return done
-        known = None
+    def _load_collection_pairs(self, client, collection_ops, done, total):
+        """Cloud-Zuordnungen lesen; ein Fehler zaehlt jede Aktion als beendet."""
         try:
-            known = client.collection_pairs()
+            return client.collection_pairs(), done
         except Exception as exc:
             # Ohne Bestand liesse sich nicht erkennen, was schon zugeordnet
             # ist -- jede Zuordnung gilt als gescheitert.
@@ -417,6 +413,27 @@ class SyncWorker(QObject):
                     % (operation.get("label") or "Sammlung"))
             if self._fatal_error(exc):
                 raise
+            return None, done
+
+    def _plan_collection_operations(self):
+        """Offene Serienzuordnungen als Operationen vormerken."""
+        operations = []
+        for book_uuid, tolino_id, series in plan_collection_updates(
+                self.series_map, self.state):
+            operations.append((
+                book_uuid, tolino_id, series,
+                self._add_operation(
+                    "collection", "Serie in tolino: %s" % series,
+                    book_uuid=book_uuid, series=series)))
+        return operations
+
+    def _run_collections(self, client, collection_ops, checkpoint, done,
+                         total):
+        """Serien → Cloud-Sammlungen: nur die offenen Zuordnungen."""
+        if not collection_ops:
+            return done
+        known, done = self._load_collection_pairs(
+            client, collection_ops, done, total)
         revision = None
         changed = False
         # Ohne Bestand ist keine Zuordnung möglich: dann startet kein
@@ -555,14 +572,7 @@ class SyncWorker(QObject):
             # ausgewählte Bücher übertragen.
             done = self._run_read_marks(
                 client, read_op, unread_op, checkpoint, done, total)
-            series_items = plan_collection_updates(self.series_map, state)
-            collection_ops = []
-            for book_uuid, tolino_id, series in series_items:
-                collection_ops.append((
-                    book_uuid, tolino_id, series,
-                    self._add_operation(
-                        "collection", "Serie in tolino: %s" % series,
-                        book_uuid=book_uuid, series=series)))
+            collection_ops = self._plan_collection_operations()
             total += len(collection_ops)
             self.outcome["total"] = total
             done = self._run_collections(
@@ -634,60 +644,75 @@ class PrepareWorker(QObject):
         """Vergleich vorbereiten, ohne Keep-alive oder UI zu blockieren."""
         self._run()
 
+    def _load_comparison_state(self):
+        """Load and migrate the state for this comparison.
+
+        `load_state` may return the preferences mapping unchanged; the
+        comparison writes tolino IDs, so it must get an independent copy.
+        """
+        state = copy.deepcopy(load_state(self.state))
+        try:
+            merge_state_journal(state, self.account_name)
+        except Exception as exc:
+            log_warning("Teilstand konnte nicht geladen werden: %s"
+                        % sanitize_error(exc))
+        # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
+        # wenn Calibre spaeter eine echte UUID liefert.
+        migrated = migrate_state_keys(self.metadata, state)
+        if migrated:
+            log_warning("Zustand auf die echte Kennung umgestellt: %d %s."
+                        % (migrated, plural(migrated, "Buch", "Bücher")))
+        return state
+
+    def _load_inventory(self, client):
+        """Load cloud inventory and read status without hiding failures."""
+        inventory = client.inventory()
+        read_known = True
+        try:
+            read_ids = client.read_ids()
+        except Exception as exc:
+            # «Unbekannt» ist ein eigener Zustand: niemals als
+            # «nichts gelesen» ausgeben.
+            read_ids = None
+            read_known = False
+            secrets = (self.initial_refresh_token,
+                       self.context.refresh_token)
+            log_warning("Lesestatus konnte nicht geladen werden: "
+                        + sanitize_error(exc, secrets))
+        return inventory, read_ids, read_known
+
+    def _build_comparison(self, state, inventory, read_ids):
+        """Build comparison rows and drop stale cloud IDs from state."""
+        columns = self.context.columns
+        comparison = compare_inventory(
+            self.metadata, state, inventory, self.context.preferred_formats,
+            use_metadata_ids=columns.get("id", True),
+            read_ids=read_ids,
+            read_column=bool(columns.get("read")))
+        for row in comparison:
+            stale_id = str(row.get("stale_cloud_id") or "").strip()
+            book_uuid = str(row.get("uuid") or "").strip()
+            if stale_id and book_uuid:
+                entry = state.get(book_uuid)
+                if isinstance(entry, dict) and str(
+                        entry.get("tolino_id") or "").strip() == stale_id:
+                    entry.pop("tolino_id", None)
+        return comparison
+
     def _run(self):
         client = None
         try:
-            # Kopie: `load_state` gibt ein Dict unveraendert zurueck, und der
-            # Vergleich schreibt tolino-IDs hinein. Ohne die Kopie landeten
-            # diese Schreibvorgaenge im Speicher von PREFERENCES, bevor der
-            # Lauf bestaetigt oder gespeichert wurde.
-            state = copy.deepcopy(load_state(self.state))
-            try:
-                merge_state_journal(state, self.account_name)
-            except Exception as exc:
-                log_warning("Teilstand konnte nicht geladen werden: %s"
-                            % sanitize_error(exc))
-            # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
-            # wenn Calibre spaeter eine echte UUID liefert.
-            migrated = migrate_state_keys(self.metadata, state)
-            if migrated:
-                log_warning("Zustand auf die echte Kennung umgestellt: %d %s."
-                            % (migrated, plural(migrated, "Buch", "Bücher")))
+            state = self._load_comparison_state()
             self.progress.emit("Verbinde mit tolino …")
             client = make_client(self.store, self.lock_timeout)
             if self._stop_requested():
                 return
             self.progress.emit("Lade Cloud-Bestand …")
-            inventory = client.inventory()
-            read_known = True
-            try:
-                read_ids = client.read_ids()
-            except Exception as exc:
-                # «Unbekannt» ist ein eigener Zustand: niemals als
-                # «nichts gelesen» ausgeben.
-                read_ids = None
-                read_known = False
-                secrets = (self.initial_refresh_token,
-                           self.context.refresh_token)
-                log_warning("Lesestatus konnte nicht geladen werden: "
-                            + sanitize_error(exc, secrets))
+            inventory, read_ids, read_known = self._load_inventory(client)
             if self._stop_requested():
                 return
             self.progress.emit("Vergleiche Bibliothek …")
-            columns = self.context.columns
-            comparison = compare_inventory(
-                self.metadata, state, inventory, self.context.preferred_formats,
-                use_metadata_ids=columns.get("id", True),
-                read_ids=read_ids,
-                read_column=bool(columns.get("read")))
-            for row in comparison:
-                stale_id = str(row.get("stale_cloud_id") or "").strip()
-                book_uuid = str(row.get("uuid") or "").strip()
-                if stale_id and book_uuid:
-                    entry = state.get(book_uuid)
-                    if isinstance(entry, dict) and str(
-                            entry.get("tolino_id") or "").strip() == stale_id:
-                        entry.pop("tolino_id", None)
+            comparison = self._build_comparison(state, inventory, read_ids)
             if self._stop_requested():
                 return
             self.ready.emit({

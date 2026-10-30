@@ -14,9 +14,7 @@ from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, active_tags, tag_id_from_patch, tag_state
 from ..run_context import RunContext
 from ..browser_login import browser_login
-from ._support import (
-    UI_SOURCE_FILES,compare_inventory,
-                       start_cdp_stubs, stop_cdp_stubs)
+from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
 from pathlib import Path
 from unittest.mock import patch
 
@@ -895,28 +893,12 @@ class ErrorCodeTests(unittest.TestCase):
     def test_code_without_message_defaults_to_e00(self):
         self.assertEqual("E00", tolino_module.TolinoError("x").code)
 
-    def test_every_code_in_the_source_is_documented_in_the_error_list(self):
-        """Die Code-Liste liegt in docs/fehlercodes.md (aus der README ausgelagert)."""
+    def test_error_codes_and_docs_stay_in_sync(self):
+        """Genutzte Codes stehen in der Liste; die README verweist dorthin."""
         base = Path(__file__).resolve().parent.parent
         error_list = (base.parent / "docs" / "fehlercodes.md").read_text(
             encoding="utf-8")
-        used = set()
-        for name in ("tolino.py", "cdp.py") + UI_SOURCE_FILES:
-            text = (base / name).read_text(encoding="utf-8")
-            used |= set(re.findall(r'code\s*=\s*"([A-Z][0-9]{2})"', text))
-        used.discard("E00")  # Standardwert der Basisklasse, kein Meldungscode
-        self.assertTrue(used)
-        for code in sorted(used):
-            self.assertIn("| %s |" % code, error_list, code)
-        self.assertIn("| E99 |", error_list)
-
-    def test_every_documented_code_is_used_except_e99(self):
-        """Die Liste enthält keine veralteten Codes (E99 ist generisch)."""
-        base = Path(__file__).resolve().parent.parent
-        error_list = (base.parent / "docs" / "fehlercodes.md").read_text(
-            encoding="utf-8")
-        documented = set(re.findall(r"^\| ([A-Z][0-9]{2}) \|", error_list,
-                                    re.MULTILINE))
+        readme = (base.parent / "README.md").read_text(encoding="utf-8")
         used = set()
         for path in base.rglob("*.py"):
             if "/tests/" in str(path):
@@ -925,14 +907,15 @@ class ErrorCodeTests(unittest.TestCase):
                                    path.read_text(encoding="utf-8")))
         used.discard("E00")
         used.discard("E99")
-        used.update(("B05", "B06", "B08"))  # Fehlercodes aus browser_finder-Strings
+        used.update(("B05", "B06", "B08"))  # Codes aus browser_finder-Strings
+        documented = set(re.findall(r"^\| ([A-Z][0-9]{2}) \|", error_list,
+                                    re.MULTILINE))
         documented.discard("E99")
+        self.assertTrue(used)
         self.assertEqual(documented, used)
-
-    def test_the_readme_points_to_the_error_list(self):
-        """Die README bleibt kurz und verweist auf die ausgelagerte Liste."""
-        base = Path(__file__).resolve().parent.parent
-        readme = (base.parent / "README.md").read_text(encoding="utf-8")
+        for code in sorted(used):
+            self.assertIn("| %s |" % code, error_list, code)
+        self.assertIn("| E99 |", error_list)
         self.assertIn("docs/fehlercodes.md", readme)
         self.assertNotIn("| A02 |", readme)
 

@@ -306,6 +306,16 @@ def _matched_status(metadata, remote, old, selected_format,
     return ("identical" if unchanged else "changed"), "", file_changed
 
 
+def _title_only_match(remote, title_key, matched, disputed):
+    """Title-only rows are hints; they never consume a cloud row."""
+    title_candidates = remote.by_title.get(title_key, ()) if title_key else ()
+    free_titles = [item for item in title_candidates if item not in matched]
+    if not free_titles:
+        return "new_in_calibre", ""
+    disputed.update(free_titles)
+    return ("review", "ambiguous" if len(free_titles) > 1 else "title_only")
+
+
 def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                           use_metadata_ids, matched,
                           disputed, read_known, read_ids, read_column=False):
@@ -358,17 +368,8 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         status = "review"
         disputed.update(candidates)
     else:
-        # A title alone is only a hint. It never consumes a remote row
-        # and never seeds the sync state.
-        title_candidates = remote.by_title.get(title_key, ()) if title_key else ()
-        free_titles = [item for item in title_candidates
-                       if item not in matched]
-        if free_titles:
-            status = "review"
-            match_reason = "title_only"
-            disputed.update(free_titles)
-            if len(free_titles) > 1:
-                match_reason = "ambiguous"
+        status, match_reason = _title_only_match(
+            remote, title_key, matched, disputed)
 
     row = {
         "book_id": book_id,

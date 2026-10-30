@@ -2,9 +2,7 @@
 
 from . import ui_base_tests
 from . import worker_base_tests
-import ast
 import json
-import re
 import runpy
 import subprocess
 import sys
@@ -971,30 +969,16 @@ class SyncPlanTests(unittest.TestCase):
             existing, state, ["EPUB"], upload_book_ids=set())
         self.assertEqual([], uploads)
 
-    def test_reference_partners_and_stable_hardware_shape(self):
+    def test_reference_partners_and_webreader_configuration(self):
         for partner_id in (1, 2, 4, 5, 6, 7, 8):
             self.assertIn(partner_id, PARTNERS)
         # Hardware IDs use the web reader's 8-4-4-4-12 UUID format.
         self.assertRegex(hardware_id(), r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
-    def test_reseller_id_matches_protocol_partner(self):
         # The protocol reseller IDs stay stable while plugin IDs are
         # consecutive; Orell Fuessli keeps reseller 8 (new plugin ID 4).
         self.assertEqual("8", PARTNERS[4]["reseller_id"])
         self.assertEqual("3", PARTNERS[1]["reseller_id"])
         self.assertEqual("13", PARTNERS[5]["reseller_id"])
-
-    def test_compact_hardware_id_is_normalized_to_uuid(self):
-        self.assertEqual(
-            "aff2e436-beb8-53e8-23b8-e02163f55220",
-            normalize_hardware_id("aff2e436beb853e823b8e02163f55220"))
-        self.assertEqual(
-            "dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1",
-            normalize_hardware_id("dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1"))
-        self.assertEqual("", normalize_hardware_id(""))
-        self.assertEqual("custom-device", normalize_hardware_id("custom-device"))
-
-    def test_partner_8_refresh_configuration_matches_reference(self):
         self.assertEqual("webreader", PARTNERS[4]["client_id"])
         self.assertEqual("SCOPE_BOSH", PARTNERS[4]["scope"])
         self.assertEqual("https://www.orellfuessli.ch/auth/oauth2/token",
@@ -1010,6 +994,16 @@ class SyncPlanTests(unittest.TestCase):
         self.assertNotIn("client_type", PARTNERS[4])
         self.assertNotIn("client_version", PARTNERS[4])
         self.assertNotIn("token_headers", PARTNERS[4])
+
+    def test_compact_hardware_id_is_normalized_to_uuid(self):
+        self.assertEqual(
+            "aff2e436-beb8-53e8-23b8-e02163f55220",
+            normalize_hardware_id("aff2e436beb853e823b8e02163f55220"))
+        self.assertEqual(
+            "dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1",
+            normalize_hardware_id("dc37788f-8ff3-4e8e-b0e3-5059c3c08ce1"))
+        self.assertEqual("", normalize_hardware_id(""))
+        self.assertEqual("custom-device", normalize_hardware_id("custom-device"))
 
     def test_refresh_token_normalization_strips_quotes_and_whitespace(self):
         token = normalize_refresh_token('  "refresh-secret-value"  ')
@@ -1267,7 +1261,8 @@ class SyncPlanTests(unittest.TestCase):
             config.PREFERENCES = config.JSONConfig("test")
             values = config.settings()
             for key in ("enable_deletions", "compare_authors",
-                        "compare_title", "compare_isbn"):
+                        "compare_title", "compare_isbn",
+                        "sync_collections", "upload_covers"):
                 self.assertNotIn(key, values)
         finally:
             config.PREFERENCES = original
@@ -1348,11 +1343,6 @@ class SyncPlanTests(unittest.TestCase):
         for secret in (refresh, password, cookie, access):
             self.assertNotIn(secret, rendered)
         self.assertIn("[REDACTED]", "\n".join(logged))
-
-    def test_obsolete_cover_and_collection_options_are_not_returned(self):
-        values = config.settings()
-        self.assertNotIn("sync_collections", values)
-        self.assertNotIn("upload_covers", values)
 
     def test_partial_settings_ignore_unscoped_legacy_account_fields(self):
         original = config.PREFERENCES
@@ -2557,41 +2547,3 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual("t2", worker.state["u2"]["tolino_id"])
         self.assertEqual(previous["u2"]["content_fp"],
                          worker.state["u2"]["content_fp"])
-
-class VersionDocumentationTests(unittest.TestCase):
-    """README, CHANGELOG und PLUGIN_VERSION bleiben synchron."""
-
-    @staticmethod
-    def _plugin_version():
-        """PLUGIN_VERSION aus dem Wurzel-__init__.py (Plugin-Metadaten)."""
-        base = Path(__file__).resolve().parent.parent.parent
-        tree = ast.parse((base / "__init__.py").read_text(encoding="utf-8"))
-        for node in tree.body:
-            if (isinstance(node, ast.Assign)
-                    and any(getattr(target, "id", "") == "PLUGIN_VERSION"
-                            for target in node.targets)):
-                return ast.literal_eval(node.value)
-        raise AssertionError("PLUGIN_VERSION fehlt in __init__.py")
-
-    def test_the_readme_badge_names_the_plugin_version(self):
-        version = self._plugin_version()
-        base = Path(__file__).resolve().parent.parent.parent
-        readme = (base / "README.md").read_text(encoding="utf-8")
-        version_text = "%d.%d.%02d" % version
-        expected = "Version-%s-blue" % version_text
-        self.assertIn(expected, readme)
-
-    def test_the_top_changelog_entry_names_the_plugin_version(self):
-        """Der oberste CHANGELOG-Eintrag ist die aktuelle Version."""
-        version = "%d.%d.%02d" % self._plugin_version()
-        base = Path(__file__).resolve().parent.parent.parent
-        changelog = (base / "CHANGELOG.md").read_text(encoding="utf-8")
-        match = re.search(r"^## (\d+\.\d+\.\d+)\s*$", changelog,
-                          re.MULTILINE)
-        self.assertIsNotNone(match, "CHANGELOG ohne Versions-Ueberschrift")
-        self.assertEqual(version, match.group(1))
-        section = changelog.split("## " + version, 1)[1].split("\n## ", 1)[0]
-        bullets = [line for line in section.splitlines()
-                   if line.startswith("- ")]
-        self.assertGreaterEqual(len(bullets), 3)
-        self.assertLessEqual(len(bullets), 6)

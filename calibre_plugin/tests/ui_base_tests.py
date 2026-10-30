@@ -2,7 +2,8 @@
 
 import os
 import unittest
-from ._support import load_ui_module, start_cdp_stubs, stop_cdp_stubs
+from ._support import (FakeTableItem, load_ui_module, start_cdp_stubs,
+                       stop_cdp_stubs)
 
 
 # Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
@@ -214,28 +215,6 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def horizontalHeaderItem(self, index):
                 return self.header_items.setdefault(index, Widget())
 
-        class Item:
-            def __init__(self, text):
-                self.text = text
-                self._check_state = 0
-                self._flags = 0
-                self.tooltip = ""
-
-            def setFlags(self, flags):
-                self._flags = flags
-
-            def flags(self):
-                return self._flags
-
-            def setCheckState(self, state):
-                self._check_state = state
-
-            def checkState(self):
-                return self._check_state
-
-            def setToolTip(self, text):
-                self.tooltip = text
-
         class Dialog(Widget):
             def __init__(self, parent=None):
                 Widget.__init__(self)
@@ -369,7 +348,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                                {"Stretch": 1, "ResizeToContents": 2}),
             "QGroupBox": Widget,
             "QTableWidget": Table,
-            "QTableWidgetItem": Item,
+            "QTableWidgetItem": FakeTableItem,
             "QMenu": type("Menu", (), {
                 "__init__": lambda self, parent=None: setattr(self, "actions", []),
                 "addAction": lambda self, label: self.actions.append(label) or label,

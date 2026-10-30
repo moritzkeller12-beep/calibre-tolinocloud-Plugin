@@ -58,6 +58,31 @@ def _full(exc):
     return "%s %s" % (exc, getattr(exc, "detail", ""))
 
 
+class FakeTableItem:
+    """QTableWidgetItem-Ersatz fuer alle Tabellentests."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self._check_state = 0
+        self._flags = 0
+        self.tooltip = ""
+
+    def setFlags(self, flags):
+        self._flags = flags
+
+    def flags(self):
+        return self._flags
+
+    def setCheckState(self, state):
+        self._check_state = state
+
+    def checkState(self):
+        return self._check_state
+
+    def setToolTip(self, text):
+        self.tooltip = text
+
+
 def load_ui_module(get_icons_result, qt_stub=None):
     """Import ui.py with Calibre and Qt imports stubbed.
 
@@ -115,29 +140,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     qt_core.QLineEdit.EchoMode = type("EchoMode", (), {"Password": 2})
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None
-    class _TableItem:
-        def __init__(self, text=""):
-            self.text = text
-            self._check_state = 0
-            self._flags = 0
-            self.tooltip = ""
-
-        def setFlags(self, flags):
-            self._flags = flags
-
-        def flags(self):
-            return self._flags
-
-        def setCheckState(self, state):
-            self._check_state = state
-
-        def checkState(self):
-            return self._check_state
-
-        def setToolTip(self, text):
-            self.tooltip = text
-
-    qt_core.QTableWidgetItem = _TableItem
+    qt_core.QTableWidgetItem = FakeTableItem
     if qt_stub:
         # Zuletzt, damit ein Stub auch pyqtSignal/Signal ersetzen darf.
         for name, value in qt_stub.items():

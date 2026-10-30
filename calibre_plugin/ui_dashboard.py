@@ -956,18 +956,23 @@ class SyncDashboard(QDialog):
             self, "Einige Bücher wurden nicht hochgeladen", text)
         return bool(nothing_else)
 
+    def _state_for_context(self, context, state):
+        """Explicit state or the stored snapshot of the run account.
+
+        A missing stored state must stay empty; seeding it would re-upload
+        existing cloud copies.
+        """
+        if state is not None:
+            return state
+        stored = account_by_name(getattr(context, "account_name", ""))
+        state = stored.get("state") if isinstance(stored, dict) else {}
+        return state if isinstance(state, dict) else {}
+
     def _start_sync_worker(self, context, preparation, state=None):
         """Übersprungene Uploads melden und den Hintergrundlauf starten."""
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
-        if state is None:
-            # Ohne ausdrücklichen Zustand den gespeicherten Zustand des
-            # LAUF-Kontos nehmen. Ein leerer Zustand würde bereits
-            # vorhandene Cloud-Kopien erneut hochladen.
-            stored = account_by_name(getattr(context, "account_name", ""))
-            state = stored.get("state") if isinstance(stored, dict) else {}
-            if not isinstance(state, dict):
-                state = {}
+        state = self._state_for_context(context, state)
         # Das Vergleichsfenster kann beliebig lange offen bleiben; in der
         # Zeit darf der Keep-alive den (single-use) Token rotieren. Deshalb
         # nimmt `make_client` im Worker den GESPEICHERTEN Zugang des Kontos

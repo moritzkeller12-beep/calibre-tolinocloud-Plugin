@@ -182,6 +182,12 @@ def _unwrap_refresh_candidate(token, max_depth=3):
     seen = {text}
     for _depth in range(max_depth):
         nxt = []
+
+        def enqueue(value):
+            if value not in seen:
+                seen.add(value)
+                nxt.append(value)
+
         for value in frontier:
             # CryptoJS/OpenSSL AES layer (reader userToken/userInfos).
             for plain in _decrypt_reader_blob(value):
@@ -192,9 +198,7 @@ def _unwrap_refresh_candidate(token, max_depth=3):
                     # Trusted plaintext under a refresh-ish key, even without iat.
                     return plain
                 if plain.startswith("U2FsdGVk"):
-                    if plain not in seen:
-                        seen.add(plain)
-                        nxt.append(plain)
+                    enqueue(plain)
                     continue
                 if plain.startswith(("{", "[")):
                     if plain.startswith("{"):
@@ -203,9 +207,7 @@ def _unwrap_refresh_candidate(token, max_depth=3):
                             if _jwt_shaped(nested):
                                 return nested
                             if nested.startswith("U2FsdGVk"):
-                                if nested not in seen:
-                                    seen.add(nested)
-                                    nxt.append(nested)
+                                enqueue(nested)
                             elif (len(nested) > 20
                                   and nested.isprintable()
                                   and not nested.startswith(("{", "["))):
@@ -220,8 +222,7 @@ def _unwrap_refresh_candidate(token, max_depth=3):
                     continue
                 if _jwt_shaped(peeled) and _jwt_payload(peeled):
                     return peeled
-                seen.add(peeled)
-                nxt.append(peeled)
+                enqueue(peeled)
         if not nxt:
             break
         frontier = nxt

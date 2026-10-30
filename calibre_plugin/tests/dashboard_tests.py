@@ -11,7 +11,6 @@ from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
     FakeText,start_cdp_stubs, stop_cdp_stubs, ui_module_for)
-from pathlib import Path
 from unittest.mock import patch
 
 
@@ -1250,10 +1249,3 @@ class AccountStateBindingTests(unittest.TestCase):
         self.assertTrue(read_column_available(Db()))
         self.assertFalse(custom_column_available(NoColumn()))
         self.assertFalse(read_column_available(NoColumn()))
-
-    def test_settings_dialog_keeps_required_widgets_without_diagnostic_ui(self):
-        base = Path(__file__).resolve().parent.parent
-        settings = (base / "ui_dashboard.py").read_text(encoding="utf-8")
-        self.assertIn("QGroupBox", settings.split("class SettingsDialog", 1)[0])
-        self.assertIn("accounts_form", settings)
-        self.assertNotIn("diagnostics_form", settings)

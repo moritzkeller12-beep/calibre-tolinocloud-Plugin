@@ -22,6 +22,50 @@ def _token_from_response(candidate, hardware, data):
     return str(data.get("refresh_token") or candidate), hardware
 
 
+def _reader_token_exchange(candidate, partner):
+    """Token-Tausch in der Reader-Seite; (Daten, Hinweis) oder Fehler."""
+    # Grant zuerst IN der Reader-Seite (in-page fetch): dieselben TLS-/Header-
+    # Fingerprints wie der Reader selbst -- der eigene POST wird vom
+    # Bot-Schutz gelegentlich mit WAF-403 abgewiesen.
+    try:
+        ws_url = cdp_module.reader_ws_url()
+    except Exception:
+        ws_url = None
+    if not ws_url:
+        log_info("Tolino-Token-Tausch: kein Reader-WebSocket; "
+                 "HTTP-Fallback folgt.")
+        return None, "kein Anmeldefenster offen"
+    form = urlencode({
+        "client_id": partner["client_id"],
+        "grant_type": "refresh_token",
+        "refresh_token": candidate,
+        "scope": partner["scope"],
+    })
+    status, body = cdp_module.exchange_refresh_in_browser(
+        ws_url, partner["token_url"], form)
+    if status == 200:
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = {}
+        if isinstance(data, dict) and data.get("access_token"):
+            log_info("Tolino-Token-Tausch: Browser-Reader (in-page fetch).")
+            return data, ""
+    # A fetch rejection (status 0), malformed success, OAuth response,
+    # or server error is ambiguous: the server may already have consumed
+    # this single-use grant. Only a positively identified WAF block is a
+    # safe reason to try the legacy transport with the same candidate.
+    note = "Browser-Tausch HTTP %s: %s" % (
+        status, _compact_error_text(sanitize_error(body))[:200])
+    if status != 403 or not _bot_check_detected(body):
+        raise TolinoAuthError(
+            "Der Zugang konnte nicht sicher geprüft werden. " + RELOGIN,
+            code="A06", detail=note)
+    log_info("Tolino-Token-Tausch: Browser-Reader durch WAF geblockt; "
+             "HTTP-Fallback folgt.")
+    return None, note
+
+
 def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     """Exchange the freshest grabbed candidate; returns (refresh, hardware)."""
     # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sind
@@ -41,46 +85,9 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     hardware_id = hardware_candidates[0] if hardware_candidates else hardware
     partner = PARTNERS[int(partner_id)]
 
-    # Grant zuerst IN der Reader-Seite (in-page fetch): dieselben TLS-/Header-
-    # Fingerprints wie der Reader selbst -- der eigene POST wird vom
-    # Bot-Schutz gelegentlich mit WAF-403 abgewiesen.
-    try:
-        ws_url = cdp_module.reader_ws_url()
-    except Exception:
-        ws_url = None
-    if ws_url:
-        form = urlencode({
-            "client_id": partner["client_id"],
-            "grant_type": "refresh_token",
-            "refresh_token": candidate,
-            "scope": partner["scope"],
-        })
-        status, body = cdp_module.exchange_refresh_in_browser(
-            ws_url, partner["token_url"], form)
-        if status == 200:
-            try:
-                data = json.loads(body)
-            except ValueError:
-                data = {}
-            if isinstance(data, dict) and data.get("access_token"):
-                log_info("Tolino-Token-Tausch: Browser-Reader (in-page fetch).")
-                return _token_from_response(candidate, hardware_id, data)
-        # A fetch rejection (status 0), malformed success, OAuth response,
-        # or server error is ambiguous: the server may already have consumed
-        # this single-use grant. Only a positively identified WAF block is a
-        # safe reason to try the legacy transport with the same candidate.
-        browser_note = "Browser-Tausch HTTP %s: %s" % (
-            status, _compact_error_text(sanitize_error(body))[:200])
-        if status != 403 or not _bot_check_detected(body):
-            raise TolinoAuthError(
-                "Der Zugang konnte nicht sicher geprüft werden. " + RELOGIN,
-                code="A06", detail=browser_note)
-        log_info("Tolino-Token-Tausch: Browser-Reader durch WAF geblockt; "
-                 "HTTP-Fallback folgt.")
-    else:
-        log_info("Tolino-Token-Tausch: kein Reader-WebSocket; "
-                 "HTTP-Fallback folgt.")
-        browser_note = "kein Anmeldefenster offen"
+    data, browser_note = _reader_token_exchange(candidate, partner)
+    if data:
+        return _token_from_response(candidate, hardware_id, data)
 
     # Fallback is permitted only when the browser request was never attempted
     # (no reader websocket) or a recognizable WAF response rejected it before
@@ -124,6 +131,35 @@ def _close_window_after_grab(progress=None):
     return False
 
 
+def _fresh_grab_tokens(grabbed, rejected):
+    """Candidates not yet rejected by the token endpoint."""
+    return [token for token in _filter_live_candidates(
+        (grabbed or {}).get("refresh") or ()) if token not in rejected]
+
+
+def _grabber_window_state(getter):
+    """Read the grabber window; a transient CDP error is no state."""
+    try:
+        return getter()
+    except Exception:
+        return None
+
+
+def _raise_grab_failure(last_error, grabbed, rejected):
+    """Raise the final B02 error with age/error context."""
+    details = []
+    if last_error:
+        details.append("Letzter Fehler: " + sanitize_error(last_error))
+    candidates = rejected or (grabbed or {}).get("refresh") or ()
+    age_note = _candidate_age_note(candidates)
+    if age_note:
+        details.append(age_note)
+    raise TolinoAuthError(
+        "Das Anmeldefenster wurde geschlossen, weil kein gültiger Zugang "
+        "gelesen werden konnte. " + RELOGIN,
+        code="B02", detail="; ".join(details))
+
+
 def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     """Read the Web Reader's CURRENT token via a private CDP window.
 
@@ -142,8 +178,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     last_window_check = -5.0
 
     while True:
-        fresh = [token for token in _filter_live_candidates(
-            (grabbed or {}).get("refresh") or ()) if token not in rejected]
+        fresh = _fresh_grab_tokens(grabbed, rejected)
         if fresh:
             if progress:
                 progress("Prüfe den gelesenen Zugang bei Tolino …")
@@ -180,10 +215,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         now = time.monotonic()
         if now - last_window_check >= 5:
             last_window_check = now
-            try:
-                window = grabber_window_state()
-            except Exception:
-                window = None
+            window = _grabber_window_state(grabber_window_state)
             if window is None:
                 continue
             if window.get("window"):
@@ -194,10 +226,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                     break
 
     if not window:
-        try:
-            window = grabber_window_state()
-        except Exception:
-            window = None
+        window = _grabber_window_state(grabber_window_state)
     if window and window.get("window") and not window.get("reader_tab"):
         # Leave the partner login page open so the user can finish signing in.
         raise TolinoAuthError(
@@ -206,18 +235,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             code="B01", detail=last_error)
 
     cdp_module.close_grabber_window()
-    details = []
-    if last_error:
-        details.append("Letzter Fehler: " + sanitize_error(last_error))
-    candidates = rejected or (grabbed or {}).get("refresh") or ()
-    age_note = _candidate_age_note(candidates)
-    if age_note:
-        details.append(age_note)
-    detail = "; ".join(details)
-    raise TolinoAuthError(
-        "Das Anmeldefenster wurde geschlossen, weil kein gültiger Zugang "
-        "gelesen werden konnte. " + RELOGIN,
-        code="B02", detail=detail)
+    _raise_grab_failure(last_error, grabbed, rejected)
 
 
 def browser_login(partner_id, hardware, timeout=LOGIN_TIMEOUT,

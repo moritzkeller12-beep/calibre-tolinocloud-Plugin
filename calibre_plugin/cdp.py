@@ -156,6 +156,27 @@ def _evaluate_in_target(ws_url, expression, timeout=10, await_promise=False):
 
 # ---------------------------------------------------------------- Fenster-Flow
 
+def _reader_flags(port, profile):
+    """Chromium flags for the private reader window."""
+    return [
+        "--user-data-dir=%s" % profile,
+        "--remote-debugging-port=%d" % port,
+        "--no-first-run", "--no-default-browser-check",
+        "--disable-session-crashed-bubble", "--disable-infobars",
+        "--window-size=1280,900", "--new-window", WEBREADER_URL,
+    ]
+
+
+def _wait_for_debug_port(port, timeout=20):
+    """Wait until Chromium's local CDP endpoint answers."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def launch_reader_window():
     """Start Chromium with an isolated temporary profile and random port."""
     candidate, status = pick_chromium()
@@ -177,13 +198,7 @@ def launch_reader_window():
 
     port = _start_port()
     profile = _new_profile_dir()
-    flags = [
-        "--user-data-dir=%s" % profile,
-        "--remote-debugging-port=%d" % port,
-        "--no-first-run", "--no-default-browser-check",
-        "--disable-session-crashed-bubble", "--disable-infobars",
-        "--window-size=1280,900", "--new-window", WEBREADER_URL,
-    ]
+    flags = _reader_flags(port, profile)
     creationflags = 0x00000008 if os.name == "nt" else 0
     candidates = [(list(binary), label)]
     last_error = None
@@ -212,11 +227,8 @@ def launch_reader_window():
     # aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
     from .tolino import log_info
     log_info("Tolino-Anmeldefenster: Chromium auf 127.0.0.1:%d." % port)
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
-            return port
-        time.sleep(0.5)
+    if _wait_for_debug_port(port):
+        return port
     _abandon_failed_launch(process, {"profile": profile})
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "

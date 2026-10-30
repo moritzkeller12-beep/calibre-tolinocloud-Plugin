@@ -24,25 +24,19 @@ except ImportError:
                          QTableWidgetItem, QObject, QInputDialog,
                          QFileDialog, Qt, Signal as pyqtSignal)
 
-# Weitergegeben an die anderen UI-Module (und teilweise nur dort benutzt):
-# die Liste ist absichtlich kurz. Fruehere Fassungen importierten hier das
-# halbe sync-/tolino-Modul, ohne es zu benutzen.
-from .planning_values import (SyncJob, display_value, format_signatures,
-                              metadata_value, plural)
-
-# Namen, die andere UI-Module und die Tests ueber dieses Modul beziehen.
+# Namen, die andere UI-Module ueber dieses Modul beziehen.
 __all__ = [
     "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
     "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog",
     "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView",
     "QMenu", "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QThread", "QVBoxLayout", "Qt", "SyncJob",
+    "QThread", "QVBoxLayout", "Qt",
     "_THREADS", "_apply_busy", "_dialog_busy",
     "_login_failure_guidance",
-    "button", "dialog_code", "display_value", "echo_mode",
-    "format_signatures", "gui_guard", "header_mode", "item_flag",
-    "check_state", "metadata_value", "plural", "selection_behavior",
+    "button", "dialog_code", "echo_mode",
+    "gui_guard", "header_mode", "item_flag",
+    "check_state", "selection_behavior",
     "selection_mode", "sort_order",
     "start_worker", "_stop_thread",
     "_worker_account_name", "_worker_outcome", "_set_enabled",
@@ -353,6 +347,12 @@ def _login_failure_guidance(error):
     return _LOGIN_GUIDANCE.get(code, _LOGIN_DEFAULT_GUIDANCE)
 
 
+def _failed_operations(outcome):
+    """Alle gescheiterten Schritte eines Laufs in ihrer Reihenfolge."""
+    return [item for item in (outcome.get("operations") or ())
+            if isinstance(item, dict) and item.get("status") == OP_FAILED]
+
+
 def sync_result_text(outcome, prefix="Fertig"):
     """Kurzbilanz der erfolgreich übertragenen Aktionen."""
     outcome = outcome if isinstance(outcome, dict) else {}
@@ -366,15 +366,12 @@ def sync_result_text(outcome, prefix="Fertig"):
         count = int(outcome.get(key) or 0)
         if count:
             parts.append("%d %s" % (count, label))
-    if not parts and prefix == "":
-        text = ""
-    else:
-        text = (("%s: %s" % (prefix, ", ".join(parts)) if parts else prefix)
-                if prefix else ", ".join(parts))
+    text = ", ".join(parts)
+    if prefix:
+        text = ("%s: %s" % (prefix, text)) if text else prefix
     # Ein einzelner Fehler haelt den Lauf nicht mehr auf -- dann
     # muss der Bericht sagen, WELCHE Schritte es getroffen hat.
-    failed = [item for item in (outcome.get("operations") or ())
-              if isinstance(item, dict) and item.get("status") == OP_FAILED]
+    failed = _failed_operations(outcome)
     if failed:
         lines = [_operation_line(item) for item in failed[:5]]
         if len(failed) > 5:
@@ -403,8 +400,7 @@ def sync_result_detail(outcome):
     mit Titel und Grund. Leer heisst: kein Detailtext noetig.
     """
     outcome = outcome if isinstance(outcome, dict) else {}
-    failed = [item for item in (outcome.get("operations") or ())
-              if isinstance(item, dict) and item.get("status") == OP_FAILED]
+    failed = _failed_operations(outcome)
     if len(failed) <= 5:
         return ""
     return "\n".join(_operation_line(item) for item in failed)

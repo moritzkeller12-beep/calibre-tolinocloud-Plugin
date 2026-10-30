@@ -194,16 +194,15 @@ def settings():
     with _SETTINGS_LOCK:
         accounts, active = _accounts_and_active()
         current = next(item for item in accounts if item["name"] == active)
-        values = {PREFERRED_FORMATS: copy.deepcopy(PREFERENCES.get(
-            PREFERRED_FORMATS, ["EPUB"]))}
-        values.update({key: copy.deepcopy(current[key]) for key in ACCOUNT_KEYS})
-        values.update({
+        # Reines Lesen: geschrieben wird nur in save_account/save_settings.
+        return {
+            PREFERRED_FORMATS: copy.deepcopy(
+                PREFERENCES.get(PREFERRED_FORMATS, ["EPUB"])),
+            **{key: copy.deepcopy(current[key]) for key in ACCOUNT_KEYS},
             "name": current["name"],
             "accounts": accounts,
             "active_account": active,
-        })
-        # Reines Lesen: geschrieben wird nur in save_account/save_settings.
-        return values
+        }
 
 
 def save_account(name, values, active=None, preferred_formats=None):

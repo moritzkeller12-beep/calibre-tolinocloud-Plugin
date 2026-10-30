@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from .. import config
+from ..planning_values import SyncJob
 from ..run_context import RunContext
 from . import worker_base_tests
 from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs,
@@ -43,7 +44,7 @@ class StateJournalTests(unittest.TestCase):
 
     @staticmethod
     def _job(ui_module, book_id, uuid, title):
-        return ui_module.common.SyncJob(
+        return SyncJob(
             book_id, uuid, "EPUB", None, "/library/%s.epub" % uuid, None,
             title)
 
