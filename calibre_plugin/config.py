@@ -1,8 +1,5 @@
 """Fresh settings store for tolino Cloud Sync."""
 import copy
-import hashlib
-import json
-import os
 import threading
 
 try:
@@ -39,111 +36,6 @@ _SETTINGS_LOCK = threading.RLock()
 def load_state(raw):
     """Load the saved state mapping; malformed or absent values are empty."""
     return raw if isinstance(raw, dict) else {}
-
-
-# Zustandsjournal: Ein Upload ist nicht rueckgaengig zu machen. Statt nach
-# jedem Schritt die ganze Konfiguration zu schreiben, haelt eine kleine
-# JSON-Lines-Datei je Konto den letzten Eintrag fest; der volle
-# Konto-Schnappschuss laeuft nur noch einmal je Phase. Beim naechsten Start
-# wird das Journal zuerst angewandt -- so bleibt die Tolino-ID eines fertigen
-# Uploads bekannt und wird nicht ein zweites Mal hochgeladen.
-STATE_JOURNAL_DIR = ""
-
-
-def _state_journal_dir():
-    """Ort fuer das Journal; leer heisst «kein Journal verfuegbar».
-
-    Calibres JSONConfig kennt seinen Dateipfad. Tests und eingebettete
-    Nutzung ohne Datei fallen auf den vollen Konto-Schnappschuss zurueck.
-    """
-    if STATE_JOURNAL_DIR:
-        return STATE_JOURNAL_DIR
-    path = str(getattr(PREFERENCES, "file_path", "") or "")
-    if not path:
-        return ""
-    return os.path.join(os.path.dirname(path) or ".", "tolino-state-journal")
-
-
-def state_journal_path(account_name):
-    """Datei des Kontos; der Name wird gehasht (keine Pfadteile darin)."""
-    directory = _state_journal_dir()
-    if not directory or not account_name:
-        return ""
-    digest = hashlib.sha256(str(account_name).encode("utf-8")).hexdigest()
-    return os.path.join(directory, digest[:16] + ".jsonl")
-
-
-def journal_state(account_name, entries):
-    """Eintraege sofort anhaengen und fsyncen; True, wenn das gelang."""
-    if not _state_journal_dir() or not account_name or not entries:
-        return False
-    lines = [json.dumps({"key": str(key), "entry": value},
-                        ensure_ascii=False)
-             for key, value in entries.items()]
-    path = state_journal_path(account_name)
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
-
-
-def read_state_journal(account_name):
-    """Letzter Eintrag je Schluessel; None bedeutet «entfernt»."""
-    path = state_journal_path(account_name)
-    if not path:
-        return {}
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError:
-        return {}
-    entries = {}
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            item = json.loads(line)
-        except ValueError:
-            # Abgeschnittene letzte Zeile nach einem Absturz: der Rest gilt.
-            continue
-        if not isinstance(item, dict) or "key" not in item:
-            continue
-        entry = item.get("entry")
-        entries[str(item["key"])] = entry if isinstance(entry, dict) else None
-    return entries
-
-
-def merge_state_journal(state, account_name):
-    """Journal auf einen Zustand anwenden; Rueckgabe: Zahl der Eintraege."""
-    if not isinstance(state, dict):
-        return 0
-    entries = read_state_journal(account_name)
-    for key, entry in entries.items():
-        if entry is None:
-            state.pop(key, None)
-        else:
-            state[key] = copy.deepcopy(entry)
-    return len(entries)
-
-
-def clear_state_journal(account_name):
-    """Journal nach erfolgreichem Vollschreiben loeschen."""
-    path = state_journal_path(account_name)
-    if not path:
-        return True
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 # Zustandseinträge müssen tief kopiert werden: sonst teilen Worker und
@@ -259,7 +151,7 @@ def account_by_name(name, accounts=None):
 
 def set_active_account(name):
     """Switch the active account without touching any stored values."""
-    if name not in {item.get("name") for item in settings()["accounts"]}:
+    if not account_by_name(name):
         return
     save_account(name, {}, active=name)
 
@@ -339,9 +231,7 @@ def remove_account(name):
         remaining = [item for item in accounts if item["name"] != name]
         if not remaining or len(remaining) == len(accounts):
             return False
-        PREFERENCES["accounts"] = [
-            _account(item, item.get("name", DEFAULT_ACCOUNT_NAME))
-            for item in remaining]
+        PREFERENCES["accounts"] = remaining
         PREFERENCES["active_account"] = (
             active if active != name else remaining[0]["name"])
         PREFERENCES.commit()

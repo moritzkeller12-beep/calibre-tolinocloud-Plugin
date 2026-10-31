@@ -51,10 +51,6 @@ def _verified_owner(port=None, require_endpoint=True):
     return record
 
 
-def _new_profile_dir():
-    return tempfile.mkdtemp(prefix="tolino-grab-")
-
-
 
 def _open_target(target, timeout):
     """Eine DevTools-WebSocket-Verbindung zum eigenen Fenster öffnen.
@@ -162,10 +158,10 @@ def launch_reader_window():
             raise TolinoAuthError(
                 "Das vorherige Anmeldefenster konnte nicht sicher "
                 "geschlossen werden. Bitte schliessen Sie es und versuchen "
-                "Sie es erneut.", code="B07")
+                "Sie es erneut.", code="B01")
 
     port = _start_port()
-    profile = _new_profile_dir()
+    profile = tempfile.mkdtemp(prefix="tolino-grab-")
     flags = _reader_flags(port, profile)
     creationflags = 0x00000008 if os.name == "nt" else 0
     def candidates():
@@ -188,7 +184,7 @@ def launch_reader_window():
     if process is None:
         shutil.rmtree(profile, ignore_errors=True)
         raise TolinoAuthError(
-            "Chromium konnte nicht gestartet werden.", code="B07",
+            "Chromium konnte nicht gestartet werden.", code="B01",
             detail="%s: %s" % last_error)
 
     _LAUNCHED.update({"process": process, "port": port, "profile": profile})
@@ -201,7 +197,7 @@ def launch_reader_window():
     _shutdown({"process": process, "port": port, "profile": profile})
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
-        "und es erneut versuchen.", code="B07", detail="Port %d" % port)
+        "und es erneut versuchen.", code="B01", detail="Port %d" % port)
 
 
 def _stop_launched_process(process, timeout=2):

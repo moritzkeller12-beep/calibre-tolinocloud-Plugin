@@ -74,11 +74,6 @@ def _field_info(database, column):
         return True, None
 
 
-def custom_column_available(database):
-    """Check Calibre's public field metadata for the configured custom column."""
-    return _field_info(database, TOLINO_COLUMN)[0]
-
-
 def bool_column_available(database, column):
     """True, wenn Calibre ``column`` als Ja/Nein-Feld kennt.
 
@@ -104,11 +99,6 @@ def bool_column_value(metadata, column):
     if text in _FALSE_VALUES:
         return False
     return None
-
-
-def ignore_column_available(database):
-    """True, wenn Calibre die Spalte ``#tolino_ignore`` kennt."""
-    return bool_column_available(database, TOLINO_IGNORE_COLUMN)
 
 
 def metadata_ignored(metadata):
@@ -193,18 +183,9 @@ def column_state(database):
     Lauf reicht es an den Worker weiter und schreibt nur in vorhandene
     Spalten.
     """
-    return {"id": custom_column_available(database),
-            "read": read_column_available(database),
-            "ignore": ignore_column_available(database)}
-
-
-def read_column_available(database):
-    """True, wenn Calibre die Ja/Nein-Spalte ``#tolino_read`` kennt.
-
-    Eine Spalte mit anderem Typ wird nicht beschrieben: ein Text- oder
-    Zahlenfeld würde ``True``/``False`` als fremden Wert speichern.
-    """
-    return bool_column_available(database, TOLINO_READ_COLUMN)
+    return {"id": _field_info(database, TOLINO_COLUMN)[0],
+            "read": bool_column_available(database, TOLINO_READ_COLUMN),
+            "ignore": bool_column_available(database, TOLINO_IGNORE_COLUMN)}
 
 
 def update_read_status(database, updates, enabled=True):
@@ -213,7 +194,8 @@ def update_read_status(database, updates, enabled=True):
     Die Spalte bleibt informativ: geschrieben wird nur, was tolino nach einem
     Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung.
     """
-    if not enabled or not updates or not read_column_available(database):
+    if not enabled or not updates or not bool_column_available(
+            database, TOLINO_READ_COLUMN):
         return 0
     api = database.new_api
     values = {}
@@ -229,7 +211,8 @@ def update_read_status(database, updates, enabled=True):
 
 def update_tolino_ids(database, updates, enabled=True, account_name=None):
     """Merge this account's IDs into the shared Calibre custom column."""
-    if not enabled or not updates or not custom_column_available(database):
+    if not enabled or not updates or not _field_info(
+            database, TOLINO_COLUMN)[0]:
         return 0
     api = database.new_api
     account_name = str(account_name or "").strip()
@@ -319,7 +302,7 @@ def safe_format_path(database, book_id, format_name):
 
 
 def cover_bytes(database, book_id):
-    """Normalize cover() results from bytes, paths, or wrapped Calibre values."""
+    """Return the cover image bytes from Calibre, or None when unavailable."""
     return _api_for(database, book_id).cover(book_id, as_file=False)
 
 

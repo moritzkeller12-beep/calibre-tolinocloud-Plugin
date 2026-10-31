@@ -7,18 +7,8 @@ _UUID_TEXT = re.compile(
 # Calibre's database path may return 'dummy' when the field is absent.
 _UUID_PLACEHOLDERS = frozenset(("none", "null", "undefined", "dummy"))
 def normalize_uuid_text(value):
-    """Normalize UUIDs represented as text, bytes, UUID objects, or reprs."""
-    if value is None:
-        return ""
-    if isinstance(value, (bytes, bytearray)):
-        value = bytes(value).decode("utf-8", "replace")
-    elif not isinstance(value, str):
-        value = str(value)
-    text = value.strip().strip("'\" \t\r\n")
-    match = _UUID_TEXT.search(text)
-    if match:
-        return match.group(0).casefold()
-    return text
+    """Normalize a UUID-shaped value to trimmed text; no byte/repr parsing."""
+    return str(value or "").strip().strip("'\" \t\r\n").casefold()
 
 
 def valid_book_uuid(value):
@@ -59,8 +49,7 @@ def migrate_state_keys(metadata_by_id, state):
     """Migrate fallback state keys to real UUIDs when the UUID becomes known."""
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         return 0
-    # Der Index wird EINMAL gebaut. `state_key_for` durchsuchte den Zustand
-    # sonst fuer jedes Buch erneut -- quadratisch bei grossen Bibliotheken.
+    # Der Index wird EINMAL gebaut; eine Suche je Buch waere quadratisch.
     keys = state_keys_by_book_id(state)
     migrated = 0
     for book_id, metadata in metadata_by_id.items():
@@ -86,8 +75,7 @@ def migrate_state_keys(metadata_by_id, state):
 def state_keys_by_book_id(state):
     """Calibre-Nummer → gespeicherter Zustandsschlüssel in EINEM Durchlauf.
 
-    ``state_key_for`` suchte für jedes Buch erneut linear über den Zustand;
-    wer mehrere Bücher prüft, baut den Index einmal.
+    Wer mehrere Bücher prüft, baut den Index einmal.
     """
     keys = {}
     if not isinstance(state, dict):
@@ -101,11 +89,3 @@ def state_keys_by_book_id(state):
         except (TypeError, ValueError):
             continue
     return keys
-
-
-def state_key_for(state, book_id):
-    """Find a stored state key by its recorded Calibre book id."""
-    try:
-        return state_keys_by_book_id(state).get(int(book_id), "")
-    except (TypeError, ValueError):
-        return ""

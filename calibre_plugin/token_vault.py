@@ -48,7 +48,7 @@ class TokenVault:
         refresh = normalize_refresh_token(values.get("refresh_token"))
         if not refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
-                                  code="A03")
+                                  code="A01")
         return values, refresh
 
     def relogin(self, client, timeout=5):
@@ -65,9 +65,7 @@ class TokenVault:
     def keepalive_refresh(self, get_credentials):
         """Refresh saved accounts; return only the number of rotations."""
         snapshot = get_credentials() or {}
-        accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else None
-        if accounts is None:
-            accounts = [snapshot] if isinstance(snapshot, dict) else []
+        accounts = snapshot.get("accounts") or () if isinstance(snapshot, dict) else ()
         rotated = 0
         for values in accounts:
             if not isinstance(values, dict):
@@ -95,11 +93,6 @@ class TokenVault:
 TOKEN_VAULT = TokenVault()
 _KEEPALIVE_STOP = threading.Event()
 _KEEPALIVE_THREAD = None
-
-
-def make_client(store, lock_timeout=5):
-    """Log in with the freshest stored token for an account."""
-    return TOKEN_VAULT.login(store, lock_timeout)
 
 
 def start_token_keepalive(get_credentials, interval=45 * 60):
@@ -141,9 +134,7 @@ def check_stored_login(store, lock_timeout=5):
     try:
         TOKEN_VAULT.login(store, lock_timeout)
         return "valid", ""
-    except TolinoAuthError as exc:
-        if exc.code == "S91":
-            return "busy", ""
-        return "invalid", sanitize_error(exc, (store.refresh_token,))
     except Exception as exc:
+        if isinstance(exc, TolinoAuthError) and exc.code == "S91":
+            return "busy", ""
         return "invalid", sanitize_error(exc, (store.refresh_token,))

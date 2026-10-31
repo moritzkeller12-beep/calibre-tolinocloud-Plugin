@@ -25,8 +25,6 @@ class MetaUpdateRecord(NamedTuple):
 
 def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
     """Build upload jobs for selected Calibre book IDs with a supported format."""
-    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
-        raise ValueError("Preparation requires metadata and sync state mappings.")
     selected_ids = set(upload_book_ids or ())
     preferred_formats = normalize_formats(preferred_formats)
     uploads = []
@@ -149,10 +147,7 @@ def metadata_update_fields(metadata):
     title = str(metadata.get("title") or "").strip()
     if title:
         fields["title"] = title
-    authors = metadata.get("authors")
-    if isinstance(authors, (list, tuple, set)):
-        authors = ", ".join(str(name) for name in authors)
-    authors = str(authors or "").strip()
+    authors = str(metadata.get("authors") or "").strip()
     if authors:
         fields["author"] = authors
     isbn = str(metadata.get("isbn") or "").strip()
@@ -172,8 +167,6 @@ def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
 
     Returns the planned metadata updates.
     """
-    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
-        raise ValueError("Preparation requires metadata and sync state mappings.")
     upload_uuids = {str(record.book_uuid) for record in uploads}
     # In Bibliotheksreihenfolge laufen, aber Schluessel als Text vergleichen:
     # Calibre liefert IDs als int, Aufrufer koennen sie als str uebergeben.

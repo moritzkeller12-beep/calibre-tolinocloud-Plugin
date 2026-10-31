@@ -1,13 +1,13 @@
 """Authentication and small asynchronous UI workers."""
 from .ui_common import QObject, pyqtSignal
 from .config import CredentialStore
-from .browser_login import browser_login
+from .browser_login import LOGIN_TIMEOUT, grab_live_refresh
 from .token_vault import check_stored_login
 from .tolino import report_error
 
 
 class BrowserLoginWorker(QObject):
-    """Runs browser_login off the GUI thread (it polls for minutes)."""
+    """Runs the browser login off the GUI thread (it polls for minutes)."""
     completed = pyqtSignal(object, object)
     failed = pyqtSignal(object)
     progress = pyqtSignal(str)
@@ -19,8 +19,8 @@ class BrowserLoginWorker(QObject):
 
     def run(self):
         try:
-            refresh, hardware = browser_login(
-                self.partner_id, self.hardware,
+            refresh, hardware = grab_live_refresh(
+                int(self.partner_id), self.hardware, timeout=LOGIN_TIMEOUT,
                 progress=self.progress.emit)
         except Exception as exc:
             self.failed.emit(exc)

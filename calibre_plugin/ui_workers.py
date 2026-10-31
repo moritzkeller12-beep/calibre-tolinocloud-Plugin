@@ -5,9 +5,8 @@ from collections import Counter
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
 from .planning_values import plural
-from .token_vault import make_client
-from .config import (CredentialStore, clear_state_journal, journal_state,
-                     save_account)
+from .token_vault import TOKEN_VAULT
+from .config import CredentialStore, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
@@ -63,7 +62,6 @@ class SyncWorker(QObject):
         # Eine private Kopie je Lauf: Uploads und Löschungen schreiben in
         # dasselbe Objekt, das `_persist_state` sichert.
         self.state = copy.deepcopy(state) if isinstance(state, dict) else {}
-        self._journal_dirty = False
         self.updates = []
         # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
         self.read_updates = []
@@ -72,8 +70,7 @@ class SyncWorker(QObject):
             "uploaded": 0, "updated": 0, "deleted": 0,
             "metadata": 0, "read_marked": 0, "read_unmarked": 0,
             "collections": 0, "skipped": 0, "failed": 0,
-            "cancelled": False, "not_started": 0,
-            "operations": self.operations,
+            "cancelled": False, "operations": self.operations,
         }
 
     def cancel(self):
@@ -123,7 +120,6 @@ class SyncWorker(QObject):
             collections=kinds["collection"],
             skipped=states[OP_SKIPPED],
             failed=states[OP_FAILED],
-            not_started=states[OP_NOT_STARTED],
             cancelled=bool(self.cancelled))
 
     def _record_failure(self, operation, exc, client=None):
@@ -149,18 +145,8 @@ class SyncWorker(QObject):
         gezählt, der Lauf macht weiter.
         """
         self._record_failure(operation, exc, client)
-        if self._fatal_error(exc):
+        if isinstance(exc, TolinoAuthError):
             raise exc
-
-    @staticmethod
-    def _fatal_error(exc):
-        """Fehler, nach denen jeder weitere Aufruf scheitern wuerde.
-
-        Nur die Anmeldung/Sitzung ist fatal: danach liefert jede weitere
-        Anfrage denselben Fehler und rotiert nur den Token weiter. Alles
-        andere (Netz, ein Buch, ein Cover) wird pro Schritt gezaehlt.
-        """
-        return isinstance(exc, TolinoAuthError)
 
     def _step(self, client, checkpoint, operation, text, action, done, total,
               finish=None):
@@ -186,12 +172,11 @@ class SyncWorker(QObject):
         return True, result
 
     def _persist_state(self):
-        """Den ganzen Zustand des Kontos sichern und das Journal leeren.
+        """Den Zustand des Kontos sofort sichern.
 
-        Laeuft einmal je Phase und am Laufende. Die Reihenfolge ist wichtig:
-        erst der volle Schnappschuss, dann das Journal loeschen -- bricht der
-        Lauf dazwischen ab, wird der Eintrag beim naechsten Start erneut
-        angewandt und ist dann bereits enthalten.
+        Nach jedem Upload ist die Tolino-ID nicht mehr rueckgaengig zu
+        machen; deshalb schreibt der Worker den vollen Konto-Zustand, statt
+        ein separates Journal zu fuehren.
         """
         if not self.account_name:
             return
@@ -201,38 +186,6 @@ class SyncWorker(QObject):
         except Exception as exc:
             log_warning("Teilstand konnte nicht gespeichert werden: %s"
                         % sanitize_error(exc))
-            return
-        self._journal_dirty = False
-        if not clear_state_journal(self.account_name):
-            # Beim naechsten Vollschreiben erneut versuchen; bis dahin ist
-            # das Journal harmlos, weil seine Eintraege schon gespeichert sind.
-            self._journal_dirty = True
-            log_warning("Zustandsjournal konnte nicht geleert werden.")
-
-    def _journal_state(self, book_uuid):
-        """Einen Eintrag sofort sichern, ohne das ganze JSON zu schreiben.
-
-        Eine Tolino-ID ist nach dem Upload nicht mehr rueckgaengig zu machen;
-        sie muss vor dem naechsten Schritt auf der Platte stehen. Ohne
-        Journalpfad (Tests, eingebettete Nutzung) bleibt der volle
-        Konto-Schnappschuss der sichere Weg.
-        """
-        key = str(book_uuid or "")
-        if not key or not self.account_name:
-            return
-        try:
-            written = journal_state(self.account_name,
-                                    {key: self.state.get(key)})
-        except Exception as exc:
-            written = False
-            log_warning("Teilstand konnte nicht gesichert werden: %s"
-                        % sanitize_error(exc))
-        self._journal_dirty = bool(written)
-        if not written:
-            self._persist_state()
-
-    def run(self):
-        self._run()
 
     @staticmethod
     def _delete_or_skip(client, deliverable_id):
@@ -279,7 +232,6 @@ class SyncWorker(QObject):
                  + (1 if read_op else 0)
                  + (1 if unread_op else 0))
         self._refresh_counts()
-        self.outcome["total"] = total
         return meta_ops, upload_ops, delete_ops, read_op, unread_op, total
 
     def _remove_replaced_copy(self, client, job):
@@ -326,7 +278,6 @@ class SyncWorker(QObject):
                     self.updates.append((entry.get("calibre_id"), ""))
                 state.pop(book_uuid, None)
                 changed = True
-            self._journal_state(book_uuid)
             done += 1
             if deleted:
                 self.progress.emit(done, total,
@@ -334,12 +285,6 @@ class SyncWorker(QObject):
         if changed:
             self._persist_state()
         return done
-
-    def _record_read_updates(self, finished):
-        """Bestätigten Lesestatus für die Calibre-Spalte vormerken."""
-        self.read_updates.extend(
-            (book_id, finished) for _tolino, book_id, state
-            in self.read_changes if state is finished and book_id is not None)
 
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
                         done, total):
@@ -355,13 +300,15 @@ class SyncWorker(QObject):
                 continue
             # `read_op`/`unread_op` entstehen nur bei nicht leeren Listen --
             # eine leere Auswahl kann hier also nicht mehr auftreten.
-            operation["count"] = len(book_ids)
             ok, _result = self._step(
                 client, checkpoint, operation, start_text,
                 lambda: client.mark_read_many(book_ids, finished=finished),
                 done, total)
             if ok:
-                self._record_read_updates(finished)
+                self.read_updates.extend(
+                    (book_id, finished) for _tolino, book_id, state
+                    in self.read_changes
+                    if state is finished and book_id is not None)
                 self.progress.emit(done, total, done_text)
             done += 1
         return done
@@ -381,7 +328,7 @@ class SyncWorker(QObject):
                 self.progress.emit(
                     done, total, "Fehlgeschlagen: %s"
                     % (operation.get("label") or "Sammlung"))
-            if self._fatal_error(exc):
+            if isinstance(exc, TolinoAuthError):
                 raise
             return None, done
 
@@ -470,7 +417,6 @@ class SyncWorker(QObject):
 
     def _run_uploads(self, client, operations, checkpoint, done, total):
         """Upload selected books and preserve each successful partial result."""
-        changed = False
         for job, operation in operations:
             ok, new_id = self._step(
                 client, checkpoint, operation,
@@ -492,10 +438,9 @@ class SyncWorker(QObject):
                 # Ein Upload bestätigt die Metadaten nicht per Read-back.
                 entry.pop("meta_verified_fp", None)
             self.updates.append((job.book_id, new_id))
-            # Kleines Journal statt des ganzen Kontos: eine spaetere Stoerung
-            # darf diese Zuordnung nicht verlieren.
-            self._journal_state(job.book_uuid)
-            changed = True
+            # Der Upload ist nicht rueckgaengig zu machen: die neue ID muss
+            # sofort im Konto stehen, nicht erst am Ende der Phase.
+            self._persist_state()
             if job.cover:
                 try:
                     client.upload_cover(new_id, job.cover,
@@ -508,15 +453,13 @@ class SyncWorker(QObject):
             self._remove_replaced_copy(client, job)
             done += 1
             self.progress.emit(done, total, "Hochgeladen: %s" % job.label())
-        if changed:
-            self._persist_state()
         return done
 
-    def _run(self):
+    def run(self):
         state = self.state
         client = None
         try:
-            client = make_client(self.store)
+            client = TOKEN_VAULT.login(self.store)
             (meta_ops, upload_ops, delete_ops, read_op, unread_op,
              total) = self._plan_operations()
             done = 0
@@ -543,12 +486,9 @@ class SyncWorker(QObject):
                 client, read_op, unread_op, checkpoint, done, total)
             collection_ops = self._plan_collection_operations()
             total += len(collection_ops)
-            self.outcome["total"] = total
             done = self._run_collections(
                 client, collection_ops, checkpoint, done, total)
             self._refresh_counts()
-            if self._journal_dirty:
-                self._persist_state()
             self.completed.emit(state, self.updates)
         except _SyncCancelled:
             return
@@ -609,10 +549,6 @@ class PrepareWorker(QObject):
         self.failed.emit(CANCEL_MESSAGE)
         return True
 
-    def run(self):
-        """Vergleich vorbereiten, ohne Keep-alive oder UI zu blockieren."""
-        self._run()
-
     def _load_comparison_state(self):
         """Load and migrate the state for this comparison.
 
@@ -663,12 +599,13 @@ class PrepareWorker(QObject):
                     entry.pop("tolino_id", None)
         return comparison
 
-    def _run(self):
+    def run(self):
+        """Vergleich vorbereiten, ohne Keep-alive oder UI zu blockieren."""
         client = None
         try:
             state = self._load_comparison_state()
             self.progress.emit("Verbinde mit tolino …")
-            client = make_client(self.store, self.lock_timeout)
+            client = TOKEN_VAULT.login(self.store, self.lock_timeout)
             if self._stop_requested():
                 return
             self.progress.emit("Lade Cloud-Bestand …")

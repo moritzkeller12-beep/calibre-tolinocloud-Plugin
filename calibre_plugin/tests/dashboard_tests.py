@@ -470,7 +470,7 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         # Die ECHTEN Methoden an das gefaelschte Fenster binden.
         for name in ("load_values", "values", "_selected_account",
                      "update_status", "_stored_refresh", "_typed_refresh",
-                     "_effective_refresh", "_secret_tokens", "store_refresh",
+                     "_effective_refresh", "store_refresh",
                      "logout", "_save_visible_account"):
             setattr(dashboard, name,
                     getattr(ui_module.dashboard.SyncDashboard, name).__get__(dashboard))
@@ -530,11 +530,13 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         self.assertEqual("", self._stored())
         self.assertEqual("", dashboard.refresh.text())
 
-    def test_untouched_hardware_field_keeps_the_adopted_id(self):
+    def test_the_visible_hardware_field_is_the_manual_override(self):
         _ui_module, dashboard = self._ui()
         config.save_account("konto", {"hardware_id": "adoptiert"},
                             active="konto")
-        self.assertEqual("adoptiert", dashboard.values()["hardware_id"])
+        self.assertEqual("hw-1", dashboard.values()["hardware_id"])
+        dashboard.hardware.setText("manuell")
+        self.assertEqual("manuell", dashboard.values()["hardware_id"])
 
     def test_a_missing_account_never_saves_another_accounts_state(self):
         """Ist der angezeigte Name weg, darf nicht das aktive Konto
@@ -1132,7 +1134,8 @@ class LoginMessageTests(unittest.TestCase):
         try:
             guide = ui_module.common._login_failure_guidance
             titles = {}
-            for code in ("B05", "B06", "B08", "N01", "A02", "B07", "B03", "B04", "A06"):
+            for code in ("A01", "B01", "B02", "N01", "N02", "N03",
+                         "S91", "E99"):
                 exc = tolino_module.TolinoAuthError("egal", code=code)
                 title, step = guide(exc)
                 titles[code] = title
@@ -1141,19 +1144,14 @@ class LoginMessageTests(unittest.TestCase):
                 self.assertLessEqual(len(title), 100, title)
             self.assertEqual(len(titles), len(set(titles.values())),
                              "jede Ursache braucht einen eigenen Titel")
-            self.assertEqual(
-                "Kein unterstützter Browser gefunden", titles["B05"])
-            self.assertEqual("Flatpak: Freigabe fehlt", titles["B08"])
+            self.assertEqual("Browser-Anmeldung nicht möglich", titles["B01"])
             self.assertEqual("Verbindung fehlgeschlagen", titles["N01"])
-            self.assertEqual("Zugang verbraucht", titles["A02"])
-            self.assertEqual("Anmeldung abgebrochen", titles["B03"])
-            self.assertEqual("Zeitüberschreitung bei der Anmeldung",
-                             titles["B04"])
-            self.assertEqual("Anmeldung abgelehnt", titles["A06"])
+            self.assertEqual("Anmeldung erforderlich", titles["A01"])
+            self.assertEqual("Anmeldung nicht abgeschlossen", titles["B02"])
             # Bereits formatierte Meldungen (ältere Worker) tragen den Code
             # im Text.
-            self.assertEqual(titles["B04"],
-                             guide("Zeitüberschreitung (Code B04)")[0])
+            self.assertEqual(titles["B02"],
+                             guide("Zeitüberschreitung (Code B02)")[0])
             self.assertEqual("Anmeldung nicht abgeschlossen",
                              guide(RuntimeError("kaputt"))[0])
         finally:
@@ -1171,7 +1169,8 @@ class LoginMessageTests(unittest.TestCase):
         dashboard = type("Dashboard", (), {})()
         dashboard.status = FakeText()
         dashboard.refresh = Refresh()
-        dashboard._secret_tokens = lambda: ("tok-geheim",)
+        dashboard._stored_refresh = lambda: ""
+        dashboard._typed_refresh = lambda: "tok-geheim"
         dashboard._login_cleanup = lambda: None
         dashboard.login_failed = ui_module.dashboard.SyncDashboard.login_failed.__get__(
             dashboard)
@@ -1183,12 +1182,12 @@ class LoginMessageTests(unittest.TestCase):
             with patch("calibre_plugin.ui_dashboard.log_warning",
                        lambda text: logged.append(text)):
                 dashboard.login_failed(tolino_module.TolinoAuthError(
-                    "Kein Chromium-Browser gefunden (tok-geheim)", code="B05"))
+                    "Kein Chromium-Browser gefunden (tok-geheim)", code="B01"))
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(boxes))
-        self.assertEqual("Kein unterstützter Browser gefunden (Code B05)", boxes[0][1])
-        self.assertIn("installieren", boxes[0][2])
+        self.assertEqual("Browser-Anmeldung nicht möglich (Code B01)", boxes[0][1])
+        self.assertIn("Browser installieren", boxes[0][2])
         self.assertNotIn("tok-geheim", boxes[0][2])
         self.assertNotIn("tok-geheim", " ".join(logged))
         self.assertIn("Anmeldung fehlgeschlagen.", dashboard.status.value)
@@ -1236,7 +1235,7 @@ class AccountStateBindingTests(unittest.TestCase):
         Die Spalte enthaelt pro Buch ein Mapping, daher bleibt sie bei
         mehreren Konten nutzbar.
         """
-        from ..library import custom_column_available, read_column_available
+        from ..library import column_state
 
         class Db:
             field_metadata = {TOLINO_COLUMN: {},
@@ -1245,7 +1244,7 @@ class AccountStateBindingTests(unittest.TestCase):
         class NoColumn:
             field_metadata = {}
 
-        self.assertTrue(custom_column_available(Db()))
-        self.assertTrue(read_column_available(Db()))
-        self.assertFalse(custom_column_available(NoColumn()))
-        self.assertFalse(read_column_available(NoColumn()))
+        self.assertTrue(column_state(Db())["id"])
+        self.assertTrue(column_state(Db())["read"])
+        self.assertFalse(column_state(NoColumn())["id"])
+        self.assertFalse(column_state(NoColumn())["read"])

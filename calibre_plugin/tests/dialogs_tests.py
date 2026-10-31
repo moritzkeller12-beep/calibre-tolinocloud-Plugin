@@ -143,9 +143,15 @@ class InventoryDialogSortTests(unittest.TestCase):
             def setSectionResizeMode(self, column, mode):
                 pass
 
+            def resizeSection(self, column, width):
+                pass
+
         class FakeTable:
             def __init__(self):
                 self.row_count = -1
+
+            def setItemDelegateForColumn(self, column, delegate):
+                pass
 
             def setRowCount(self, count):
                 self.row_count = count
@@ -263,8 +269,8 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog_cls = ui_module.dialogs.InventoryDialog
             headers = dialog_cls.HEADERS
             self.assertEqual(
-                ("Datei hochladen", "Metadaten aktualisieren", "Gelesen",
-                 "In Calibre", "In tolino", "Buchtitel", "Autor(en)",
+                ("Upload", "Metadaten", "Gelesen",
+                 "Calibre", "tolino", "Buchtitel", "Autor(en)",
                  "Hinweis", "ISBN", "tolino-ID", "UUID"), headers)
             # 8 sichtbare Spalten + 3 technische.
             self.assertEqual(11, len(headers))
@@ -329,8 +335,8 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog.apply_recommended()
             # Neu -> hochladen, geänderte Datei -> hochladen, sonst
             # Metadaten; nichts für unveränderte oder reine Cloud-Bücher.
-            self.assertEqual({2, 3}, dialog.selected_upload_ids())
-            self.assertEqual({4}, dialog.selected_metadata_ids())
+            self.assertEqual({2, 3}, dialog._selected_book_ids("upload"))
+            self.assertEqual({4}, dialog._selected_book_ids("metadata"))
             self.assertEqual([False, True, True, False, False],
                              [row["upload"] for row in rows])
             self.assertEqual([False, False, False, True, False],
@@ -344,8 +350,8 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog._set_row_choice(4, "read", True)
             self.assertEqual(["c1", "c9"], _read_ids(dialog, True))
             dialog.clear_all_selection()
-            self.assertEqual(set(), dialog.selected_upload_ids())
-            self.assertEqual(set(), dialog.selected_metadata_ids())
+            self.assertEqual(set(), dialog._selected_book_ids("upload"))
+            self.assertEqual(set(), dialog._selected_book_ids("metadata"))
             self.assertEqual([], _read_ids(dialog, True))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -608,14 +614,14 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             dialog.table = self._marked_table(range(len(dialog.rows)))
             dialog.set_column_for_marked_rows("upload", True, "keine Datei")
-            self.assertEqual({1, 2, 3, 4}, dialog.selected_upload_ids())
+            self.assertEqual({1, 2, 3, 4}, dialog._selected_book_ids("upload"))
             dialog.set_column_for_marked_rows("metadata", True, "keine Cloud")
             # «Nur lokal» hat keine Cloud-Kopie – dort geht kein Metadaten-Abgleich.
-            self.assertEqual({1, 2, 3}, dialog.selected_metadata_ids())
+            self.assertEqual({1, 2, 3}, dialog._selected_book_ids("metadata"))
             dialog.set_column_for_marked_rows("upload", False, "keine Datei")
-            self.assertEqual(set(), dialog.selected_upload_ids())
+            self.assertEqual(set(), dialog._selected_book_ids("upload"))
             dialog.set_column_for_marked_rows("metadata", False, "keine Cloud")
-            self.assertEqual(set(), dialog.selected_metadata_ids())
+            self.assertEqual(set(), dialog._selected_book_ids("metadata"))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1155,10 +1161,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
                 def exec(self):
                     return FakeQDialog.DialogCode.Accepted
 
-                def selected_upload_ids(self):
-                    return []
-
-                def selected_metadata_ids(self):
+                def _selected_book_ids(self, key):
                     return []
 
                 def selected_read_changes(self):
@@ -1390,8 +1393,8 @@ class IgnoredRowDialogTests(_QtDialogTest):
                 ui_module.dialogs.InventoryDialog.default_actions(
                     dialog.rows[0]))
             dialog.apply_recommended()
-            self.assertEqual(set(), dialog.selected_upload_ids())
-            self.assertEqual(0, dialog.selected_work_count())
+            self.assertEqual(set(), dialog._selected_book_ids("upload"))
+            self.assertEqual(0, dialog._selection_counts()["work"])
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1402,7 +1405,7 @@ class IgnoredRowDialogTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
             dialog.cells["upload"][0].setChecked(True)
             dialog.rows[0]["delete_cloud"] = True
-            self.assertEqual(set(), dialog.selected_upload_ids())
+            self.assertEqual(set(), dialog._selected_book_ids("upload"))
             self.assertEqual([], dialog.selected_cloud_deletions())
             self.assertFalse(
                 ui_module.dialogs.row_capabilities(dialog.rows[0])["upload"])

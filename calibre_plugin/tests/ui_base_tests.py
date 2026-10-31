@@ -91,6 +91,10 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def setToolTip(self, text):
                 self.tooltip = text
 
+            def setAttribute(self, attribute, value):
+                self.attributes = getattr(self, "attributes", {})
+                self.attributes[attribute] = value
+
             def setEnabled(self, value):
                 self.enabled = value
 
@@ -160,6 +164,10 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.hidden = getattr(self, "hidden", {})
                 self.hidden[column] = hidden
 
+            def setItemDelegateForColumn(self, column, delegate):
+                self.delegates = getattr(self, "delegates", {})
+                self.delegates[column] = delegate
+
         class Layout:
             def __init__(self, *args, **_kwargs):
                 self.children = []
@@ -179,6 +187,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
         class Header:
             def __init__(self):
                 self.sectionClicked = Signal()
+                self.widths = {}
 
             def setSortIndicatorShown(self, shown):
                 self.shown = shown
@@ -189,6 +198,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def setSectionResizeMode(self, column, mode):
                 self.section_modes = getattr(self, "section_modes", {})
                 self.section_modes[column] = mode
+
+            def resizeSection(self, column, width):
+                self.widths[column] = width
 
         class Table(Widget):
             def setSelectionMode(self, mode):
@@ -211,7 +223,8 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.headers = list(labels)
 
             def horizontalHeader(self):
-                self.header = Header()
+                if not hasattr(self, "header"):
+                    self.header = Header()
                 return self.header
 
             def horizontalHeaderItem(self, index):
@@ -338,6 +351,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
             "CheckState": type("CheckState", (),
                                {"Checked": 2, "Unchecked": 0}),
+            "AlignmentFlag": type("AlignmentFlag", (), {"AlignCenter": 132}),
+            "WidgetAttribute": type("WidgetAttribute", (),
+                                     {"WA_QuitOnClose": 55}),
         })
         return {
             "Qt": qt,
@@ -350,7 +366,13 @@ class InventoryDialogBuildTests(unittest.TestCase):
             "QComboBox": ComboBox,
             "QHeaderView": type("QHeaderView", (), {
                 "ResizeMode": type(
-                    "ResizeMode", (), {"Stretch": 1, "ResizeToContents": 2})}),
+                    "ResizeMode", (), {"Interactive": 0, "Stretch": 1,
+                                       "ResizeToContents": 2})}),
+            "QStyledItemDelegate": type(
+                "QStyledItemDelegate", (),
+                {"__init__": lambda self, *args, **kwargs: None}),
+            "QStyleOptionViewItem": type("QStyleOptionViewItem", (), {}),
+            "QEvent": type("QEvent", (), {}),
             "QGroupBox": Widget,
             "QTableWidget": Table,
             "QTableWidgetItem": FakeTableItem,
@@ -424,6 +446,30 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertEqual(bool(row["upload"]), upload.isChecked())
                 self.assertEqual(bool(row["metadata"]), metadata.isChecked())
                 self.assertFalse(mark_read.isChecked())
+            self.assertIsInstance(dialog._check_delegate,
+                                  ui_module.dialogs._CenteredCheckDelegate)
+            self.assertEqual({0: dialog._check_delegate,
+                              1: dialog._check_delegate,
+                              2: dialog._check_delegate},
+                             dialog.table.delegates)
+            self.assertEqual({0: 60, 1: 60, 2: 60, 3: 60, 4: 60},
+                             {column: dialog.table.header.widths[column]
+                              for column in (0, 1, 2, 3, 4)})
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[0])
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[3])
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[5])
+            self.assertEqual(160, dialog.table.header.widths[5])
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[6])
+            self.assertEqual(90, dialog.table.header.widths[6])
+            self.assertFalse(dialog.attributes[55])
             # Nur die technischen Spalten sind zunächst verborgen.
             self.assertEqual({8: True, 9: True, 10: True}, dialog.table.hidden)
             self.assertIn("Sammlungen in tolino übernommen",

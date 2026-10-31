@@ -71,15 +71,6 @@ def syncable_book_ids(metadata, book_ids):
     return set(book_ids or ()) & set(syncable_metadata(metadata))
 
 
-def automatic_action_count(metadata, state):
-    """Count automatic series updates waiting in the Cloud.
-
-    Ignorierte Bücher zählen nicht mit: für sie würde der Start nichts tun.
-    """
-    return len(plan_collection_updates(
-        series_map_from_metadata(syncable_metadata(metadata)), state))
-
-
 def plan_actions(dialog, context, metadata, state, selection):
     """Turn the confirmed selection into concrete jobs and next state."""
     preferred = normalize_formats(context.preferred_formats)
@@ -108,7 +99,12 @@ def plan_actions(dialog, context, metadata, state, selection):
     series_map = series_map_from_metadata(syncable_metadata(metadata))
     jobs, skipped_uploads = upload_jobs(dialog, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
-    gaps = selection_gaps(selection, uploads, meta_updates)
+    planned_uploads = {item.book_id for item in uploads}
+    planned_meta = {record[0] for record in meta_updates}
+    gaps = {
+        "uploads": len(set(selection["uploads"]) - planned_uploads),
+        "metadata": len(set(selection["metadata"]) - planned_meta),
+    }
     return {
         "jobs": jobs,
         "metadata": metadata,
@@ -135,15 +131,6 @@ def titles_for(metadata, removal_titles=None):
     for tolino_id, title in (removal_titles or {}).items():
         titles[str(tolino_id)] = str(title or "")
     return titles
-
-
-def selection_gaps(selection, uploads, meta_updates):
-    """Count selected actions that could not become work items."""
-    planned_uploads = {item.book_id for item in uploads}
-    planned_meta = {record[0] for record in meta_updates}
-    open_uploads = set(selection["uploads"]) - planned_uploads
-    open_meta = set(selection["metadata"]) - planned_meta
-    return {"uploads": len(open_uploads), "metadata": len(open_meta)}
 
 
 def upload_jobs(dialog, metadata, uploads):
@@ -196,11 +183,6 @@ def plan_counts(preparation, uploads):
                        + counts["metadata"] + counts["collections"]
                        + (1 if marked else 0) + (1 if unmarked else 0))
     return counts
-
-
-def planned_actions(preparation, uploads):
-    """Zahl der Schritte, die der Lauf abarbeitet."""
-    return plan_counts(preparation, uploads)["steps"]
 
 
 def plan_text(preparation, uploads):

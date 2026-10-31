@@ -1,3 +1,4 @@
+import base64
 import json
 import mimetypes
 import os
@@ -41,13 +42,13 @@ def _browser_sec_headers():
 
 
 class TolinoError(Exception):
-    """Fehler mit Code (z. B. A02), kurzem Nutzertext und Detail fürs Log.
+    """Fehler mit Code (z. B. A01), kurzem Nutzertext und Detail fürs Log.
 
     str(exc) bleibt der vollständige Text (auch Serverantwort) und dient
     der internen Auswertung; der Dialog zeigt nur `short` (falls gesetzt)
     plus Code. Alles Technische landet über report_error() im Calibre-Log.
     """
-    code = "E00"
+    code = "E99"
 
     def __init__(self, message="", *args, code=None, short=None, detail=""):
         super().__init__(message, *args)
@@ -88,7 +89,7 @@ def _trace_text(exc):
 def report_error(exc, context="", secrets=()):
     """Loggt Code, Text und Detail (ohne Token); gibt die Nutzermeldung zurück.
 
-    Rückgabe: genau eine Zeile, «Kurztext (Code A02)». Der Dialog bekommt
+    Rückgabe: genau eine Zeile, «Kurztext (Code A01)». Der Dialog bekommt
     nur diese Zeile; alles Weitere (Serverantwort, Traceback, Ursachenkette)
     steht im Calibre-Log.
     """
@@ -138,6 +139,17 @@ def log_warning(message):
 
 
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
+
+
+def _download_token(deliverable_id):
+    """Kennung fuer /cloud/downloadinfo: base64 im Pfad, nie roh.
+
+    Die Cloud erwartet die Deliverable-Kennung base64-kodiert (UTF-8) und
+    antwortet auf die rohe Kennung mit HTTP 404. base64 enthaelt ``+``,
+    ``/`` und ``=``, deshalb wird zusaetzlich prozentkodiert.
+    """
+    raw = str(deliverable_id).encode("utf-8")
+    return _url_quote(base64.b64encode(raw).decode("ascii"), safe="")
 # registerhw muss am BOSH-Dienst ankommen, bevor die ID akzeptiert wird
 # (Feldbefund: ein Verbindungstest direkt nach der Registrierung
 # warf noch 400, der naechste Versuch Sekunden spaeter lief) -- vor dem
@@ -153,27 +165,10 @@ _BOT_CHECK_MARKERS = (
 )
 
 
-def _bot_check_detected(detail):
-    """Distinguish bot-protection responses from OAuth rejection bodies."""
-    return any(marker in str(detail or "").casefold()
-               for marker in _BOT_CHECK_MARKERS)
-
-
-def _compact_error_text(detail):
-    """Collapse HTML bot-check pages to readable text."""
-    text = re.sub(r"<[^>]+>", " ", detail or "")
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _is_timeout(exc):
-    """Recognize stdlib timeouts, including urllib's wrapped reason."""
-    return (isinstance(exc, TimeoutError)
-            or isinstance(getattr(exc, "reason", None), TimeoutError))
-
-
 def _raise_transport_error(exc, secrets):
     """Raise a credential-safe error for the sole urllib transport."""
-    if _is_timeout(exc):
+    if (isinstance(exc, TimeoutError)
+            or isinstance(getattr(exc, "reason", None), TimeoutError)):
         raise TolinoApiError(
             "Zeitüberschreitung bei der Verbindung zu tolino.", code="N01",
             short="Zeitüberschreitung bei der Verbindung.") from exc
@@ -199,21 +194,7 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
 
 
 def sanitize_error(value, secrets=()):
-    """Remove configured credentials and token-shaped values from any output."""
-    if isinstance(value, dict):
-        return {
-            str(key): "[REDACTED]" if (
-                "token" in str(key).casefold()
-                or str(key).casefold() in {
-                    "authorization", "password", "secret", "t_auth_token"
-                }
-            ) else sanitize_error(item, secrets)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [sanitize_error(item, secrets) for item in value]
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "replace")
+    """Remove configured credentials and token-shaped values from any text."""
     text = str(value)
     candidates = set()
     for secret in secrets:
@@ -342,7 +323,7 @@ class TolinoClient:
     def _apply_token_response(self, data):
         """Store the token endpoint response; returns the rotated refresh."""
         if not data.get("access_token"):
-            raise TolinoAuthError("Ungültige Anmelde-Antwort.", code="A07", detail="kein access_token")
+            raise TolinoAuthError("Ungültige Anmelde-Antwort.", code="A01", detail="kein access_token")
         previous_refresh = self.refresh
         self.access = data["access_token"]
         new_refresh = data.get("refresh_token", self.refresh)
@@ -358,7 +339,7 @@ class TolinoClient:
 
     def _login(self):
         if not self.refresh:
-            raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN, code="A03")
+            raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN, code="A01")
         payload = {
             "client_id": self.partner["client_id"],
             "grant_type": "refresh_token",
@@ -386,9 +367,9 @@ class TolinoClient:
             if token_rejected:
                 raise TolinoAuthError(
                     "tolino hat die gespeicherte Anmeldung abgelehnt. " + RELOGIN,
-                    code="A02", detail=detail) from exc
+                    code="A01", detail=detail) from exc
             raise TolinoAuthError(
-                "Anmeldung bei tolino fehlgeschlagen: %s" % exc, code="A06",
+                "Anmeldung bei tolino fehlgeschlagen: %s" % exc, code="A01",
                 short="Die Anmeldung bei tolino ist fehlgeschlagen.")
 
         return self._apply_token_response(data)
@@ -490,18 +471,21 @@ class TolinoClient:
             if (exc.code == 403
                     and url == self.partner.get("token_url")
                     and retry["waf"] < len(_WAF_RETRY_SECONDS)
-                    and _bot_check_detected(self.last_error_text)):
+                    and any(marker in self.last_error_text.casefold()
+                            for marker in _BOT_CHECK_MARKERS)):
                 time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
                 retry["waf"] += 1
                 return
 
             self.access = None
 
-            message = (_compact_error_text(self.last_error_text)
-                       or "no response detail")
+            message = re.sub(
+                r"\s+", " ", re.sub(
+                    r"<[^>]+>", " ", self.last_error_text or "")).strip()
+            message = message or "no response detail"
             raise TolinoAuthError(
                 "tolino hat die Anmeldung abgelehnt (%s): %s"
-                % (exc.code, message), code="A06",
+                % (exc.code, message), code="A01",
                 short="tolino hat die Anmeldung abgelehnt.")
         raise TolinoApiError(
             "tolino-Fehler (HTTP %s): %s"
@@ -558,7 +542,7 @@ class TolinoClient:
                              content_type=content_type)
         deliverable = (data.get("metadata") or {}).get("deliverableId")
         if not deliverable:
-            raise TolinoApiError("Upload ohne deliverableId in der Antwort.", code="N04", short="tolino hat den Upload nicht bestätigt.")
+            raise TolinoApiError("Upload ohne deliverableId in der Antwort.", code="N02", short="tolino hat den Upload nicht bestätigt.")
         return str(deliverable)
 
     def upload_cover(self, deliverable_id, data, suffix=".jpg"):
@@ -583,14 +567,14 @@ class TolinoClient:
         dict; the merged dict goes back via PUT as {"uploadMetaData": …}.
         """
         if not isinstance(fields, dict) or not fields:
-            raise TolinoApiError("Metadaten-Update ohne Felder.", code="S90", short="Es gibt nichts zu aktualisieren.")
+            raise TolinoApiError("Metadaten-Update ohne Felder.", code="E99", short="Es gibt nichts zu aktualisieren.")
         url = self.META_URL + "/?deliverableId=" + _url_quote(str(deliverable_id))
         book = self._request(url)
         metadata = book.get("metadata") if isinstance(book, dict) else None
         if not isinstance(metadata, dict):
             raise TolinoApiError(
                 "Tolino hat keine Metadaten zu %s geliefert." % deliverable_id,
-                code="N06", short="tolino hat keine Daten zu diesem Buch geliefert.")
+                code="N02", short="tolino hat keine Daten zu diesem Buch geliefert.")
         metadata.update(fields)
         self._request(url, "PUT", {"uploadMetaData": metadata},
                       content_type="application/json")
@@ -605,7 +589,7 @@ class TolinoClient:
                 for key, value in fields.items()):
             raise TolinoApiError(
                 "tolino hat das Metadaten-Update nicht bestaetigt.",
-                code="N06",
+                code="N02",
                 short="tolino hat die Metadaten nicht übernommen.")
         return verified_metadata
 
@@ -628,11 +612,11 @@ class TolinoClient:
         devices = (data.get("deviceListResponse") or {}).get("devices") or []
         devices = [item for item in devices if isinstance(item, dict)]
         if not devices:
-            raise TolinoApiError("Geräteliste leer.", code="N06", short="tolino meldet kein registriertes Gerät.")
+            raise TolinoApiError("Geräteliste leer.", code="N02", short="tolino meldet kein registriertes Gerät.")
         devices.sort(key=lambda item: str(item.get("deviceLastUsage", "")))
         hardware = devices[-1].get("deviceId")
         if not hardware:
-            raise TolinoApiError("Gerät ohne deviceId.", code="N06", short="Die Geräteliste von tolino ist unvollständig.")
+            raise TolinoApiError("Gerät ohne deviceId.", code="N02", short="Die Geräteliste von tolino ist unvollständig.")
         return str(hardware)
 
     def _notify_hardware(self):
@@ -690,20 +674,20 @@ class TolinoClient:
 
     def download(self, deliverable_id):
         """Download one book from the cloud as bytes."""
+        token = _download_token(deliverable_id)
         info_url = (BASE_URL + "/cloud/downloadinfo/%s/%s/type/external-download"
-                    % (_url_quote(str(deliverable_id)),
-                       _url_quote(str(deliverable_id))))
+                    % (token, token))
         info = self._request(info_url)
         content_url = (info.get("DownloadInfo") or {}).get("contentUrl")
         if not content_url:
-            raise TolinoApiError("Kein Download-Link in der Antwort.", code="N05", short="tolino hat keinen Download-Link geliefert.")
+            raise TolinoApiError("Kein Download-Link in der Antwort.", code="N02", short="tolino hat keinen Download-Link geliefert.")
         try:
             parsed_content_url = urlsplit(str(content_url))
         except (TypeError, ValueError) as exc:
-            raise TolinoApiError("Ungültiger Download-Link.", code="N05",
+            raise TolinoApiError("Ungültiger Download-Link.", code="N02",
                                  short="tolino hat einen ungültigen Download-Link geliefert.") from exc
         if parsed_content_url.scheme.casefold() != "https" or not parsed_content_url.hostname:
-            raise TolinoApiError("Unsicherer Download-Link.", code="N05",
+            raise TolinoApiError("Unsicherer Download-Link.", code="N02",
                                  short="Der Download-Link verwendet keine sichere HTTPS-Verbindung.")
         headers = {"User-Agent": BROWSER_USER_AGENT}
         host = parsed_content_url.hostname.casefold().rstrip(".")
@@ -726,13 +710,13 @@ class TolinoClient:
                 if final_url.scheme.casefold() != "https" or not final_url.hostname:
                     raise TolinoApiError(
                         "Der Download wurde auf eine unsichere URL umgeleitet.",
-                        code="N05",
+                        code="N02",
                         short="tolino hat einen unsicheren Download-Link geliefert.")
                 content = response.read()
         except OSError as exc:
             raise TolinoApiError("Download von Tolino fehlgeschlagen: %s" %
                                  sanitize_error(exc, (self.refresh, self.access)),
-                                 code="N05", short="Der Download von Tolino ist fehlgeschlagen.")
+                                 code="N02", short="Der Download von Tolino ist fehlgeschlagen.")
         return content
 
     # --- Collections & read state via sync-data patches -----------------
@@ -806,7 +790,7 @@ class TolinoClient:
                if str(book_id or "").strip()]
         if not ids:
             raise TolinoApiError(
-                "Gelesen-Markierung ohne Buch.", code="S90",
+                "Gelesen-Markierung ohne Buch.", code="E99",
                 short="Es wurde kein Buch ausgewählt.")
         revision, patches = self.sync_snapshot()
         active = _sync_data.active_tags(

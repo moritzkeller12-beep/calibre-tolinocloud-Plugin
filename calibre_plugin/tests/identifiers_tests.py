@@ -40,15 +40,13 @@ class BookIdentifierSourceTests(unittest.TestCase):
 
     UUID = "8f3c5f0e-1a2b-4c3d-9e8f-001122334455"
 
-    def test_normalize_reads_every_representation(self):
+    def test_normalize_reads_text_and_uuid_objects_only(self):
         from ..identifiers import normalize_uuid_text
         import uuid
         self.assertEqual(self.UUID, normalize_uuid_text(uuid.UUID(self.UUID.upper())))
         self.assertEqual(self.UUID, normalize_uuid_text(self.UUID.upper()))
-        self.assertEqual(self.UUID, normalize_uuid_text("UUID('%s')" % self.UUID))
-        self.assertEqual(self.UUID, normalize_uuid_text("b'%s'" % self.UUID))
-        self.assertEqual(self.UUID, normalize_uuid_text(
-            self.UUID.encode("utf-8")))
+        self.assertEqual("uuid('%s')" % self.UUID,
+                         normalize_uuid_text("UUID('%s')" % self.UUID))
         self.assertEqual("", normalize_uuid_text(None))
 
     def test_the_database_placeholder_is_not_a_key(self):
@@ -64,11 +62,11 @@ class BookIdentifierSourceTests(unittest.TestCase):
     def test_is_real_uuid_accepts_every_real_representation(self):
         from ..identifiers import is_real_uuid
         import uuid
-        for value in (self.UUID, self.UUID.upper(), uuid.UUID(self.UUID),
-                      "UUID('%s')" % self.UUID):
+        for value in (self.UUID, self.UUID.upper(), uuid.UUID(self.UUID)):
             with self.subTest(value=value):
                 self.assertTrue(is_real_uuid(value))
-        for value in ("Dune", "Der Schwarm", "calibre-7", "dummy", "", None):
+        for value in ("Dune", "Der Schwarm", "calibre-7", "dummy", "", None,
+                      "UUID('%s')" % self.UUID, self.UUID.encode("utf-8")):
             with self.subTest(value=value):
                 self.assertFalse(is_real_uuid(value))
 
@@ -92,7 +90,7 @@ class BookIdentifierSourceTests(unittest.TestCase):
         self.assertEqual("alter-schluessel", valid_book_uuid("alter-schluessel"))
 
     def test_the_comparison_remembers_the_calibre_id(self):
-        from ..identifiers import state_key_for
+        from ..identifiers import state_keys_by_book_id
         metadata = {7: {"uuid": self.UUID, "title": "A", "authors": "B",
                         "formats": ["EPUB"], "last_modified": "1",
                         "format_signatures": {}}}
@@ -101,7 +99,7 @@ class BookIdentifierSourceTests(unittest.TestCase):
             "deliverableId": "t1", "title": "A", "authors": "B"}],
             ["EPUB"], use_metadata_ids=False)
         self.assertEqual(7, state[self.UUID]["calibre_id"])
-        self.assertEqual(self.UUID, state_key_for(state, 7))
+        self.assertEqual(self.UUID, state_keys_by_book_id(state).get(7, ""))
 
     def test_migration_does_not_pop_a_missing_key_twice(self):
         """Der einmal gebaute Index darf nach dem Verschieben nicht stale poppen."""
@@ -115,13 +113,14 @@ class BookIdentifierSourceTests(unittest.TestCase):
         self.assertIn("alt-a", state)
 
     def test_a_known_state_entry_is_found_by_calibre_id(self):
-        from ..identifiers import state_key_for
+        from ..identifiers import state_keys_by_book_id
         state = {"alter-schluessel": {"calibre_id": 7, "tolino_id": "t1"},
                  "anderer": {"calibre_id": "8", "tolino_id": "t2"}}
-        self.assertEqual("alter-schluessel", state_key_for(state, 7))
-        self.assertEqual("anderer", state_key_for(state, "8"))
-        self.assertEqual("", state_key_for(state, 9))
-        self.assertEqual("", state_key_for(None, 7))
+        keys = state_keys_by_book_id(state)
+        self.assertEqual("alter-schluessel", keys.get(7, ""))
+        self.assertEqual("anderer", keys.get(8, ""))
+        self.assertEqual("", keys.get(9, ""))
+        self.assertEqual({}, state_keys_by_book_id(None))
 
 class SilentIdentifierDeadEndTests(unittest.TestCase):
     """Ohne lesbare Kennung muss der Lauf trotzdem etwas tun."""

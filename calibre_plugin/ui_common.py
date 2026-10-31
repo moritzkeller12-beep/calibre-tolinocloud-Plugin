@@ -12,7 +12,8 @@ from qt.core import (QCheckBox, QComboBox, QDialog,
                      QProgressBar, QPushButton, QThread,
                      QVBoxLayout, QHBoxLayout, QTableWidget,
                      QTableWidgetItem, QObject, QInputDialog,
-                     QFileDialog, Qt)
+                     QFileDialog, QStyledItemDelegate, QStyle,
+                     QStyleOptionViewItem, QEvent, Qt)
 try:
     from qt.core import pyqtSignal
 except ImportError:
@@ -26,13 +27,14 @@ __all__ = [
     "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView",
     "QMenu", "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QThread", "QVBoxLayout", "Qt",
+    "QThread", "QVBoxLayout", "QStyledItemDelegate", "QStyle",
+    "QStyleOptionViewItem", "QEvent", "Qt",
     "_THREADS", "_apply_busy", "_dialog_busy",
     "_login_failure_guidance",
     "gui_guard", "qt_enum",
     "start_worker", "_stop_thread",
-    "_worker_account_name", "_worker_outcome", "_set_enabled",
-    "_keep_thread_alive", "_thread_running",
+    "_set_enabled",
+    "_keep_thread_alive",
     "pyqtSignal",
     "sync_result_detail",
     "sync_result_text",
@@ -118,8 +120,8 @@ class CallWorker(QObject):
         self.done.emit(result)
 
 
-def _start_thread(dialog, worker, thread, thread_name, worker_name,
-                  stop_on=(), extra_slots=()):
+def start_worker(dialog, worker, thread, thread_name, worker_name,
+                 stop_on=(), extra_slots=()):
     """Worker mit Thread verdrahten, Referenzen halten und starten."""
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
@@ -147,22 +149,10 @@ def start_call(dialog, call, on_done, on_failed):
     worker = CallWorker(call)
     # Der Worker muss den Dialog ueberleben: ohne die Referenz kann Qt ihn
     # vor dem Thread-Start einsammeln, und der Dialog bleibt gesperrt.
-    return _start_thread(
+    return start_worker(
         dialog, worker, thread, "_call_thread", "_call_worker",
         (worker.done, worker.failed),
         ((worker.done, on_done), (worker.failed, on_failed)))
-
-
-def start_worker(dialog, worker, thread, thread_name, worker_name, stop_on=()):
-    """Run ``worker.run`` in ``thread`` and remember both on the dialog.
-
-    ``stop_on`` sind die Signale, nach denen der Worker fertig ist; sie
-    beenden die Thread-Schleife. Ohne sie beendet der Aufrufer den Thread
-    selbst (``_stop_thread``). Der Dialog haelt die Referenzen, damit ein
-    geschlossenes Fenster den laufenden Thread nicht zerstoert.
-    """
-    return _start_thread(dialog, worker, thread, thread_name, worker_name,
-                         stop_on)
 
 
 def _discard_item(collection, item):
@@ -208,30 +198,14 @@ def _stop_thread(thread, timeout_ms=3000):
     return finished
 
 
-def _worker_account_name(dialog):
-    """Account of the running/finished worker -- never the visible one."""
-    worker = getattr(dialog, "worker", None)
-    name = getattr(worker, "account_name", None)
-    return str(name or getattr(dialog, "account_name", "") or "")
-
-
-def _worker_outcome(dialog):
-    worker = getattr(dialog, "worker", None)
-    return dict(getattr(worker, "outcome", None) or {})
-
-
-def _thread_running(thread):
-    """Läuft dieser Thread noch?"""
-    return thread is not None and thread.isRunning()
-
-
 def _dialog_busy(dialog):
     """Läuft Sync, Vorbereitung oder Anmeldung? (ohne Qt-Abhängigkeit)"""
     if getattr(dialog, "thread", None) is not None:
         return True
     if getattr(dialog, "prepare_thread", None) is not None:
         return True
-    return _thread_running(getattr(dialog, "login_thread", None))
+    login = getattr(dialog, "login_thread", None)
+    return login is not None and login.isRunning()
 
 
 def _set_enabled(owner, names, enabled):
@@ -256,42 +230,26 @@ def _apply_busy(dialog, busy):
                  not busy)
 
 
-# Titel + naechster Schritt je Anmelde-Fehlercode. Kurz, einzeilig und
-# ohne technische Antworten -- Details stehen nur im Log (report_error).
+# Titel + naechster Schritt je Fehlercode. Details stehen nur im Log.
 _LOGIN_GUIDANCE = {
-    "A01": ("Anmeldung beendet",
+    "A01": ("Anmeldung erforderlich",
             "Bitte neu bei tolino anmelden."),
-    "A02": ("Zugang verbraucht",
-            "Der gespeicherte Zugang ist verbraucht. Bitte neu anmelden."),
-    "A03": ("Nicht angemeldet",
-            "Bitte zuerst bei tolino anmelden."),
-    "A07": ("Anmelde-Antwort ungültig",
-            "Bitte erneut bei tolino anmelden."),
-    "B01": ("Nicht angemeldet",
-            "Im Browserfenster anmelden, bis die Bücherliste lädt."),
-    "B02": ("Zugang verbraucht",
-            "Bitte neu anmelden. Das Anmeldefenster wurde geschlossen."),
-    "S91": ("Anmeldung wird erneuert",
-            "Kurz warten und erneut versuchen."),
-    "B05": ("Kein unterstützter Browser gefunden",
-            "Chrome, Chromium, Brave oder Edge installieren und Calibre "
-            "neu starten."),
-    "B06": ("Flatpak: Hilfsprogramm fehlt",
-            "«flatpak update» ausführen, Calibre neu starten."),
-    "B08": ("Flatpak: Freigabe fehlt",
-            "Den angezeigten flatpak override-Befehl ausführen und Calibre neu starten."),
-    "B07": ("Anmeldefenster konnte nicht starten",
-            "Alle Chrome-/Chromium-Fenster schließen und erneut versuchen."),
+    "B01": ("Browser-Anmeldung nicht möglich",
+            "Browser installieren oder Token und Geräte-ID in den Einstellungen "
+            "eintragen."),
+    "B02": ("Anmeldung nicht abgeschlossen",
+            "Anmeldefenster offen lassen, bis die Bücherliste lädt, und "
+            "erneut versuchen."),
     "N01": ("Verbindung fehlgeschlagen",
             "Netzwerk prüfen. Nach einer Zeitüberschreitung ggf. neu anmelden."),
-    "B03": ("Anmeldung abgebrochen",
-            "Anmeldefenster offen lassen, bis die Bücherliste lädt, und "
-            "erneut starten."),
-    "B04": ("Zeitüberschreitung bei der Anmeldung",
-            "Im Fenster anmelden, bis die Bücherliste erscheint, und dann "
-            "erneut versuchen."),
-    "A06": ("Anmeldung abgelehnt",
-            "Details im Calibre-Log; Buchhändler und Zugang prüfen."),
+    "N02": ("tolino-Antwort unbrauchbar",
+            "Erneut versuchen; Details stehen im Calibre-Log."),
+    "N03": ("tolino meldet einen Fehler",
+            "Erneut versuchen; bei Bot-Schutz kurz warten."),
+    "S91": ("Anmeldung wird erneuert",
+            "Kurz warten und erneut versuchen."),
+    "E99": ("Unerwarteter Fehler",
+            "Details stehen im Calibre-Log; erneut versuchen."),
 }
 
 _LOGIN_DEFAULT_GUIDANCE = (
@@ -303,7 +261,7 @@ def _login_failure_guidance(error):
     """(Titel, nächster Schritt) für einen fehlgeschlagenen Browser-Login.
 
     Akzeptiert die Exception (mit ``.code``) oder die bereits formatierte
-    Meldung («… (Code B04)»). Unbekannte Ursachen bekommen einen neutralen,
+    Meldung («… (Code B02)»). Unbekannte Ursachen bekommen einen neutralen,
     aber umsetzbaren Hinweis; sensible Daten werden nie angezeigt.
     """
     code = str(getattr(error, "code", "") or "")

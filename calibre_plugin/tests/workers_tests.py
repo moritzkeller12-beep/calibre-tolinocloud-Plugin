@@ -240,7 +240,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertIsNotNone(emitted["completed"])
         self.assertEqual(2, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual(0, worker.outcome["not_started"])
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
         self.assertIsNone(worker.state["u2"]["tolino_id"])
         self.assertEqual("new-2", worker.state["u3"]["tolino_id"])
@@ -436,7 +435,8 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertIsNotNone(emitted["failed"])
         self.assertEqual(1, len(attempts))
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual(1, worker.outcome["not_started"])
+        self.assertEqual(1, sum(operation["status"] == "not_started"
+                                for operation in worker.operations))
 
     def test_progress_and_report_name_the_title_not_the_uuid(self):
         """«Lade hoch: 8f3c…» sagt niemandem etwas."""
@@ -572,7 +572,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertIsNotNone(emitted["completed"])
         self.assertTrue(worker.outcome["cancelled"])
         self.assertEqual(1, worker.outcome["uploaded"])
-        self.assertEqual(1, worker.outcome["not_started"])
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
         self.assertEqual(1, fake.calls)  # u2 wurde nicht begonnen
 
@@ -606,7 +605,8 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual(0, worker.outcome["not_started"])
+        self.assertFalse(any(operation["status"] == "not_started"
+                             for operation in worker.operations))
 
     def test_account_switch_during_a_run_never_writes_to_the_new_account(self):
         ui_module = self._ui()
@@ -673,7 +673,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker = type("Worker", (), {})()
         worker.account_name = "A"
         worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0, "not_started": 0}
+                          "skipped": 0, "failed": 0}
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         dashboard.worker = worker
@@ -712,8 +712,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0, "not_started": 1,
-                          "cancelled": True}
+                          "skipped": 0, "failed": 0, "cancelled": True}
         dashboard.worker = worker
         with patch("calibre_plugin.ui_dashboard.save_account", lambda *a, **k: None), \
              patch("calibre_plugin.ui_dashboard.save_credentials", lambda *a, **k: None), \
@@ -963,7 +962,7 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertIsInstance(payloads[0], dict)
         self.assertEqual([[{"tolino_id": "d1", "has_deliverable_id": True,
                             "identifier": "", "title": "", "authors": "",
-                            "isbn": "", "uuid": ""}]], compared)
+                            "isbn": ""}]], compared)
         self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_login_failure_is_reported_without_starting_a_sync(self):
@@ -1190,7 +1189,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
              "hardware_id": "hw", "refresh_token": "tok"}, "A")
         with TOKEN_VAULT._lock:
             with self.assertRaises(TolinoAuthError) as caught:
-                vault_module.make_client(store, lock_timeout=0)
+                vault_module.TOKEN_VAULT.login(store, lock_timeout=0)
         self.assertEqual("S91", caught.exception.code)
 
         class FailingClient:
@@ -1202,7 +1201,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
 
         with patch("calibre_plugin.token_vault.TolinoClient", FailingClient):
             with self.assertRaises(RuntimeError):
-                vault_module.make_client(store)
+                vault_module.TOKEN_VAULT.login(store)
         self.assertFalse(TOKEN_VAULT._lock.locked())
 
     def test_a_successful_rotation_is_logged(self):
@@ -1259,14 +1258,14 @@ class BackgroundCallTokenTests(unittest.TestCase):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
 
     def test_the_factory_refuses_without_a_stored_token(self):
-        """A03 vor jedem Netzaufruf -- wie die Dialogpruefung."""
+        """A01 vor jedem Netzaufruf -- wie die Dialogpruefung."""
         from ..token_vault import TOKEN_VAULT
         self._ui()
         store = config.CredentialStore(
             {"partner_id": 4, "refresh_token": ""})
         with self.assertRaises(tolino_module.TolinoAuthError) as caught:
             TOKEN_VAULT.login(store)
-        self.assertEqual("A03", caught.exception.code)
+        self.assertEqual("A01", caught.exception.code)
 
 class InventoryFailureDeletionTests(unittest.TestCase):
     """Ein nicht deutbarer Bestand loescht nichts.
@@ -1524,7 +1523,7 @@ class InventorySchemaTests(unittest.TestCase):
         records = client.inventory()
         self.assertEqual(
             ["authors", "has_deliverable_id", "identifier", "isbn",
-             "title", "tolino_id", "uuid"], sorted(records[0]))
+             "title", "tolino_id"], sorted(records[0]))
         self.assertTrue(records[0]["has_deliverable_id"])
         self.assertEqual("d1", records[0]["tolino_id"])
         self.assertFalse(records[1]["has_deliverable_id"])

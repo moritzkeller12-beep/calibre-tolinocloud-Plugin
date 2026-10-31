@@ -12,9 +12,8 @@ import unittest
 import uuid
 from .. import config
 from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
-                       cover_bytes, create_custom_columns,
-                       custom_column_available, ignore_column_available,
-                       metadata_ignored, metadata_tolino_id,
+                       bool_column_available, column_state, cover_bytes,
+                       create_custom_columns, metadata_ignored, metadata_tolino_id,
                        normalize_formats, safe_format_path,
                        selected_table_rows, update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
@@ -24,10 +23,6 @@ from ..plan import (metadata_update_fields, plan_collection_updates,
                     remember_collection, series_map_from_metadata)
 from ..plan import UploadRecord
 from ..inventory import normalize_inventory_record
-from ..comparison import compare_inventory as comparison_compare_inventory
-from ..plan import plan_sync as plan_module_plan_sync
-from ..plan import plan_collection_updates as plan_module_collection_plan
-from ..plan import plan_metadata_updates as plan_module_metadata_plan
 from ..library import (cover_bytes as library_cover_bytes,
                        normalize_formats as library_normalize_formats,
                        safe_format_path as library_safe_format_path,
@@ -365,7 +360,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("", rows[0]["tolino_id"])
         self.assertEqual("deleted-cloud-id", rows[0]["stale_cloud_id"])
 
-    def test_inventory_comparison_matches_uuid_and_marks_changed(self):
+    def test_inventory_comparison_matches_stored_id_and_marks_changed(self):
         metadata = {
             1: {"uuid": "u1", "title": "A", "authors": "Author",
                 "isbn": "123", "formats": ["EPUB"], "last_modified": "2"},
@@ -378,8 +373,8 @@ class SyncPlanTests(unittest.TestCase):
         }
         rows = compare_inventory(
             metadata, state,
-            [{"deliverableId": "t2", "uuid": "u2", "title": "B", "authors": "Writer"},
-             {"deliverableId": "t1", "uuid": "u1", "title": "A", "authors": "Author"}],
+            [{"deliverableId": "t2", "title": "B", "authors": "Writer"},
+             {"deliverableId": "t1", "title": "A", "authors": "Author"}],
             ["EPUB"],
         )
         self.assertEqual(["identical", "identical"], [row["status"] for row in rows])
@@ -394,7 +389,7 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual("changed", rows[0]["status"])
         self.assertEqual("bosh_8_saved", rows[0]["tolino_id"])
-        self.assertEqual("stored_id_or_uuid", rows[0]["match_reason"])
+        self.assertEqual("stored_id", rows[0]["match_reason"])
 
     def test_missing_columns_are_created_once_with_calibre_types(self):
         """Der Knopf legt nur fehlende Spalten an -- mit passendem Typ."""
@@ -490,7 +485,7 @@ class SyncPlanTests(unittest.TestCase):
             field_metadata = FieldMetadata()
 
         self.assertNotIsInstance(Database.field_metadata, dict)
-        self.assertTrue(custom_column_available(Database()))
+        self.assertTrue(column_state(Database())["id"])
 
     def test_custom_column_writer_uses_the_calibre_new_api(self):
         class DatabaseAPI:
@@ -546,7 +541,7 @@ class SyncPlanTests(unittest.TestCase):
                 self.new_api = DatabaseAPI()
 
         database = Database()
-        self.assertTrue(custom_column_available(database))
+        self.assertTrue(column_state(database)["id"])
         self.assertEqual(1, update_tolino_ids(database, [(7, "bosh_8_new")]))
         self.assertEqual(1, library_update_tolino_ids(
             database, [(7, "bosh_8_new")]))
@@ -577,7 +572,7 @@ class SyncPlanTests(unittest.TestCase):
         class Missing:
             field_metadata = {}
 
-        self.assertFalse(custom_column_available(Missing()))
+        self.assertFalse(column_state(Missing())["id"])
         self.assertEqual(0, update_tolino_ids(Missing(), [(7, "bosh_8_new")]))
 
     def test_account_column_update_preserves_and_clears_only_selected_account(self):
@@ -1349,7 +1344,7 @@ class SyncPlanTests(unittest.TestCase):
             error = TolinoAuthError(
                 "refresh_token=%s password=%s Cookie: session=%s"
                 % (refresh, password, cookie),
-                code="A02", detail="access_token=%s" % access)
+                code="A01", detail="access_token=%s" % access)
             message = report_error(error, secrets=(refresh, password, cookie,
                                                    access))
         rendered = "\n".join(logged) + "\n" + message
@@ -1588,8 +1583,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         """
         canonical = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
         state = {canonical: {"tolino_id": "d1", "meta_fp": "stale"}}
-        for raw in (uuid.UUID(canonical), canonical.upper(),
-                    "UUID('%s')" % canonical):
+        for raw in (uuid.UUID(canonical), canonical.upper()):
             with self.subTest(raw=raw):
                 book = self._book(uuid=raw)
                 updates = plan_metadata_updates(
@@ -1624,7 +1618,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         self.assertEqual({}, metadata_update_fields({"title": " ", "isbn": ""}))
         self.assertEqual({"title": "T", "author": "A, B"},
                          metadata_update_fields({"title": " T ",
-                                                 "authors": ["A", "B"]}))
+                                                 "authors": "A, B"}))
 
 class CollectionPlanTests(unittest.TestCase):
     """Serien → Sammlungen: Planung ohne Cloud-Zugriff.
@@ -1705,22 +1699,6 @@ class CollectionPlanTests(unittest.TestCase):
 class ConservativeMatchingTests(unittest.TestCase):
     """Titel allein, widersprechende Felder und Mehrdeutigkeit (P1/B)."""
 
-    def test_sync_planning_exports_are_compatible(self):
-        from ..plan import (            plan_collection_updates as sync_collections,
-                            plan_metadata_updates as sync_metadata,
-                            plan_sync as sync_plan_sync)
-
-        self.assertIs(sync_plan_sync, plan_module_plan_sync)
-        self.assertIs(sync_collections, plan_module_collection_plan)
-        self.assertIs(sync_metadata, plan_module_metadata_plan)
-
-    def test_sync_keeps_comparison_imports_compatible(self):
-        self.assertIs(comparison_compare_inventory,
-                      __import__("calibre_plugin.comparison",
-                                 fromlist=["compare_inventory"]).compare_inventory)
-        self.assertEqual("new_in_calibre", compare_inventory(
-            {1: {"uuid": "u1", "formats": ["EPUB"]}}, {}, [], ["EPUB"])[0]["status"])
-
     def test_comparison_groups_cover_every_status(self):
         from ..comparison import comparison_group
         self.assertEqual("action", comparison_group("new_in_calibre"))
@@ -1742,9 +1720,9 @@ class ConservativeMatchingTests(unittest.TestCase):
         class Missing:
             field_metadata = {}
 
-        self.assertTrue(ignore_column_available(Bool()))
-        self.assertFalse(ignore_column_available(Text()))
-        self.assertFalse(ignore_column_available(Missing()))
+        self.assertTrue(bool_column_available(Bool(), TOLINO_IGNORE_COLUMN))
+        self.assertFalse(bool_column_available(Text(), TOLINO_IGNORE_COLUMN))
+        self.assertFalse(bool_column_available(Missing(), TOLINO_IGNORE_COLUMN))
 
     def test_only_a_clear_yes_excludes_a_book(self):
         """Leer oder unlesbar ist KEIN Ausschluss."""
@@ -1834,11 +1812,12 @@ class ConservativeMatchingTests(unittest.TestCase):
 
     def test_automatic_collections_skip_ignored_books(self):
         """Ein ignoriertes Buch zählt auch automatisch nicht mit."""
-        from ..dashboard_plan import automatic_action_count
+        from ..dashboard_plan import syncable_metadata
         metadata = {1: {"uuid": "u1", "series": "Reihe", "ignored": True},
                     2: {"uuid": "u2", "series": "Reihe"}}
         state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": "t2"}}
-        self.assertEqual(1, automatic_action_count(metadata, state))
+        self.assertEqual(1, len(plan_collection_updates(
+            series_map_from_metadata(syncable_metadata(metadata)), state)))
 
     @staticmethod
     def _metadata(**values):
@@ -2552,7 +2531,8 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertIsNotNone(emitted.get("completed"))
         self.assertTrue(worker.outcome["cancelled"])
         self.assertEqual(1, worker.outcome["uploaded"])
-        self.assertEqual(1, worker.outcome["not_started"])
+        self.assertEqual(1, sum(operation["status"] == "not_started"
+                                for operation in worker.operations))
         self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
         self.assertEqual(content_fingerprint(changed[1], "EPUB"),
                          worker.state["u1"]["content_fp"])

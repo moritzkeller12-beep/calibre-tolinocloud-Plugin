@@ -3,7 +3,9 @@ import re
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QHBoxLayout, QHeaderView, QLabel, QMessageBox,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, Qt, _set_enabled, qt_enum, start_call)
+                        QVBoxLayout, QStyledItemDelegate, QStyle,
+                        QStyleOptionViewItem, QEvent, Qt, _set_enabled,
+                        qt_enum, start_call)
 from .planning_values import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import (ReadState, comparison_group, comparison_sort_key,
@@ -76,17 +78,71 @@ class _ActionCheck:
         self.item.setToolTip(self.tooltip)
 
 
+class _CenteredCheckDelegate(QStyledItemDelegate):
+    """Zeichnet Check-Indikatoren mittig; die ganze Zelle schaltet um."""
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        style = opt.widget.style() if opt.widget is not None else None
+        if style is None:
+            QStyledItemDelegate.paint(self, painter, option, index)
+            return
+        style.drawPrimitive(
+            qt_enum(QStyle, "PE_PanelItemViewItem", "PrimitiveElement"),
+            opt, painter, opt.widget)
+        if opt.features & qt_enum(
+                QStyleOptionViewItem, "HasCheckIndicator", "ViewItemFeature"):
+            if opt.checkState == qt_enum(Qt, "PartiallyChecked", "CheckState"):
+                opt.state |= qt_enum(QStyle, "State_NoChange", "StateFlag")
+            elif opt.checkState == qt_enum(Qt, "Checked", "CheckState"):
+                opt.state |= qt_enum(QStyle, "State_On", "StateFlag")
+            else:
+                opt.state |= qt_enum(QStyle, "State_Off", "StateFlag")
+            rect = style.subElementRect(
+                qt_enum(QStyle, "SE_ItemViewItemCheckIndicator", "SubElement"),
+                opt, opt.widget)
+            opt.rect = QStyle.alignedRect(
+                opt.direction, qt_enum(Qt, "AlignCenter", "AlignmentFlag"),
+                rect.size(), opt.rect)
+            opt.state &= ~qt_enum(QStyle, "State_HasFocus", "StateFlag")
+            style.drawPrimitive(
+                qt_enum(QStyle, "PE_IndicatorItemViewItemCheck",
+                        "PrimitiveElement"), opt, painter, opt.widget)
+        else:
+            QStyledItemDelegate.paint(self, painter, option, index)
+
+    def editorEvent(self, event, model, option, index):
+        if event.type() in (
+                qt_enum(QEvent, "MouseButtonRelease", "Type"),
+                qt_enum(QEvent, "MouseButtonDblClick", "Type")):
+            if event.button() != qt_enum(Qt, "LeftButton", "MouseButton"):
+                return False
+            flags = model.flags(index)
+            if not (flags & qt_enum(Qt, "ItemIsUserCheckable", "ItemFlag")):
+                return False
+            if not (flags & qt_enum(Qt, "ItemIsEnabled", "ItemFlag")):
+                return False
+            state = index.data(qt_enum(Qt, "CheckStateRole", "ItemDataRole"))
+            state = (qt_enum(Qt, "Unchecked", "CheckState")
+                     if state == qt_enum(Qt, "Checked", "CheckState")
+                     else qt_enum(Qt, "Checked", "CheckState"))
+            return model.setData(
+                index, state, qt_enum(Qt, "CheckStateRole", "ItemDataRole"))
+        return QStyledItemDelegate.editorEvent(self, event, model, option, index)
+
+
 class InventoryDialog(QDialog):
     """Bestandsvergleich: pro Buch drei Aktionen zum Auswählen.
 
     Links stehen **Upload** (Datei), **Metadaten** (Titel, Autor und ISBN)
-    oder **Lesestatus**. Die Spalten **In Calibre** und **In tolino** zeigen
+    oder **Lesestatus**. Die Spalten **Calibre** und **tolino** zeigen
     den Bestand; **Hinweis** erklärt die Zeile. Technische Angaben und
     Sammelaktionen sind getrennt erreichbar.
     """
 
-    HEADERS = ("Datei hochladen", "Metadaten aktualisieren", "Gelesen",
-               "In Calibre", "In tolino", "Buchtitel", "Autor(en)",
+    HEADERS = ("Upload", "Metadaten", "Gelesen",
+               "Calibre", "tolino", "Buchtitel", "Autor(en)",
                "Hinweis", "ISBN", "tolino-ID", "UUID")
     # Technische Spalten stehen ganz rechts und sind standardmässig aus.
     TECHNICAL_COLUMNS = (8, 9, 10)
@@ -213,6 +269,8 @@ class InventoryDialog(QDialog):
         self._technical_visible = False
         self.rows = []
         self._prepare_rows(rows)
+        self.setAttribute(
+            qt_enum(Qt, "WA_QuitOnClose", "WidgetAttribute"), False)
         self.setWindowTitle("Vergleich")
         # Schmal genug fuer 1366x768 bei 100-125 % Skalierung; die breiten
         # Textspalten wachsen mit (siehe _size_columns).
@@ -297,6 +355,9 @@ class InventoryDialog(QDialog):
     def _build_table(self, layout):
         """Tabelle samt Kopfzeilen-Tooltips und Sortierung aufbauen."""
         self.table = QTableWidget(0, len(self.HEADERS))
+        self._check_delegate = _CenteredCheckDelegate(self.table)
+        for column in (0, 1, 2):
+            self.table.setItemDelegateForColumn(column, self._check_delegate)
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setSelectionBehavior(
             qt_enum(QTableWidget, "SelectRows", "SelectionBehavior"))
@@ -399,16 +460,12 @@ class InventoryDialog(QDialog):
         """Die Zeile hält die Auswahl; die Zelle zeigt sie nur an."""
         if 0 <= index < len(self.rows):
             row = self.rows[index]
-            checked = bool(self._check_at(index, key).isChecked())
+            checked = bool(self.cells[key][index].isChecked())
             if key == "read":
                 self._read_state(row).chosen = checked
             else:
                 row[key] = checked
             self._update_summary()
-
-    def _check_at(self, index, key):
-        """Check-Controller einer Aktion -- eine Zuordnung für alle Pfade."""
-        return self.cells[key][index]
 
     def _set_check_quietly(self, check, value):
         """Check-Zelle ohne Einzelaktualisierung setzen.
@@ -472,10 +529,6 @@ class InventoryDialog(QDialog):
         self._set_selection(lambda _row: (False, False),
                             clear_deletions=True)
 
-    def selected_work_count(self):
-        """Zahl der Aktionen, die die aktuelle Auswahl auslösen würde."""
-        return self._selection_counts()["work"]
-
     def automatic_actions_enabled(self):
         """Tun Automatiken ohne Auswahl WIRKLICH etwas?
 
@@ -508,6 +561,10 @@ class InventoryDialog(QDialog):
             return
         QDialog.accept(self)
 
+    def reject(self):
+        """Abbrechen: Dialog ohne Übernahme schliessen."""
+        QDialog.reject(self)
+
     def selected_cloud_deletions(self):
         """(UUID, tolino-ID, Titel) der zum Löschen markierten Cloud-Kopien."""
         return [(str(row.get("uuid") or ""), str(row["tolino_id"]),
@@ -519,14 +576,6 @@ class InventoryDialog(QDialog):
         """Bücher, deren Aktion ``key`` (upload/metadata) gewählt ist."""
         return {row["book_id"] for row in self.rows
                 if row.get(key) and row_capabilities(row).get(key)}
-
-    def selected_upload_ids(self):
-        """Bücher, deren Datei hochgeladen werden soll."""
-        return self._selected_book_ids("upload")
-
-    def selected_metadata_ids(self):
-        """Bücher, deren Cloud-Metadaten aktualisiert werden sollen."""
-        return self._selected_book_ids("metadata")
 
     def selected_read_changes(self):
         """(tolino-ID, Calibre-Nummer, gelesen?) der offenen Änderungen.
@@ -630,7 +679,8 @@ class InventoryDialog(QDialog):
                 % (count, plural(count, "Buch", "Bücher"), summary))
             return
         feedback = "%s für %d von %d markierten Büchern" % (
-            self._action_label(key, value), changed, len(marked))
+            self.ACTION_LABELS.get((key, bool(value)), "Aktion ausgeführt"),
+            changed, len(marked))
         if skipped:
             feedback += "; %d übersprungen" % skipped
         self._show_action_feedback(feedback + ".")
@@ -643,11 +693,6 @@ class InventoryDialog(QDialog):
         ("read", True): "Als gelesen markiert",
         ("read", False): "Als ungelesen markiert",
     }
-
-    @classmethod
-    def _action_label(cls, key, value):
-        """Klartext der Spalten-Aktion für die Rückmeldung."""
-        return cls.ACTION_LABELS.get((key, bool(value)), "Aktion ausgeführt")
 
     def _show_action_feedback(self, text):
         """Bilanz unter der Tabelle setzen; leerer Text entfernt sie wieder.
@@ -669,7 +714,7 @@ class InventoryDialog(QDialog):
         caps = row_capabilities(row) if caps is None else caps
         if not caps.get(key):
             return False
-        check = self._check_at(index, key)
+        check = self.cells[key][index]
         if key == "read":
             state = self._read_state(row)
             if state.chosen == bool(value):
@@ -744,9 +789,11 @@ class InventoryDialog(QDialog):
         if in_cloud and not self._read_state(row).known:
             explanation = (explanation + " Lesestatus unbekannt.").strip()
         elif in_cloud and has_book and row.get("read_column"):
-            note = self._read_note(row)
-            if note:
-                explanation = (explanation + " " + note).strip()
+            local = self._read_state(row).local
+            note = ("Calibre-Lesestatus: leer." if local is None
+                    else "Calibre-Lesestatus: %s." % (
+                        "gelesen" if local else "ungelesen"))
+            explanation = (explanation + " " + note).strip()
         if row.get("delete_cloud"):
             explanation = (explanation + " Wird beim Start aus tolino gelöscht.").strip()
         return (
@@ -788,14 +835,6 @@ class InventoryDialog(QDialog):
             self.table.setUpdatesEnabled(True)
         self._update_summary()
 
-    def _read_note(self, row):
-        """Informative Calibre-Spaltenanzeige ohne Einfluss auf Auswahl."""
-        local = self._read_state(row).local
-        if local is None:
-            return "Calibre-Lesestatus: leer."
-        return "Calibre-Lesestatus: %s." % (
-            "gelesen" if local else "ungelesen")
-
     def _size_columns(self):
         """Schmale Standardansicht: Textspalten wachsen, Rest bleibt kompakt.
 
@@ -803,13 +842,44 @@ class InventoryDialog(QDialog):
         damit eine Mindestbreite weit über einem 1366x768-Fenster.
         """
         header = self.table.horizontalHeader()
-        for column in (5, 7):
+        header.setSectionResizeMode(
+            7, qt_enum(QHeaderView, "Stretch", "ResizeMode"))
+        # Der Titel ist manuell verstellbar; beim ersten Anzeigen und beim
+        # Fenster-Resize bekommt er den groesseren Textanteil.
+        header.setSectionResizeMode(
+            5, qt_enum(QHeaderView, "Interactive", "ResizeMode"))
+        header.resizeSection(5, 160)
+        # Der Autor bleibt schmal, damit der Titel nicht von langen Namen
+        # ueberholt wird.
+        header.setSectionResizeMode(
+            6, qt_enum(QHeaderView, "Interactive", "ResizeMode"))
+        header.resizeSection(6, 90)
+        # Aktions- und Ortsmarkierungen brauchen nur das Kästchen. Lange
+        # Ueberschriften machten den Titel sonst auf wenige Zeichen breit.
+        for column in (0, 1, 2, 3, 4):
             header.setSectionResizeMode(
-                column, qt_enum(QHeaderView, "Stretch", "ResizeMode"))
-        for column in (0, 1, 2, 3, 4, 6):
-            header.setSectionResizeMode(
-                column, qt_enum(QHeaderView, "ResizeToContents",
-                                "ResizeMode"))
+                column, qt_enum(QHeaderView, "Interactive", "ResizeMode"))
+            header.resizeSection(column, 60)
+
+    def _fit_title_column(self):
+        """Titelbreite an das Fenster anpassen, ohne den Autor zu ueberholen."""
+        table = getattr(self, "table", None)
+        if table is None:
+            return
+        header = table.horizontalHeader()
+        fixed = sum(header.sectionSize(column)
+                    for column in (0, 1, 2, 3, 4, 6))
+        available = table.viewport().width() - fixed
+        if available > 0:
+            header.resizeSection(5, max(120, available * 2 // 3))
+
+    def showEvent(self, event):
+        QDialog.showEvent(self, event)
+        self._fit_title_column()
+
+    def resizeEvent(self, event):
+        QDialog.resizeEvent(self, event)
+        self._fit_title_column()
 
     def _apply_group_filter(self, *_args):
         """Gruppenfilter ohne die Zeilen/Wahlzustaende zu verlieren.
@@ -920,15 +990,6 @@ class InventoryDialog(QDialog):
             return None
         return self.rows[row_index]
 
-    def _drop_client(self):
-        """Nach einem Fehler neu anmelden lassen.
-
-        Ein Client, dessen Aufruf gescheitert ist, kann einen toten Token
-        oder eine abgelaufene Sitzung halten; ihn weiterzureichen würde den
-        Fehler auf alle folgenden Aktionen übertragen.
-        """
-        self._cached_client = None
-
     def _cached_or_new_client(self):
         """Client holen -- im Worker-Thread, ohne Widget-Zugriff.
 
@@ -1026,7 +1087,7 @@ class InventoryDialog(QDialog):
     def _action_failed(self, title, summary, exc, context):
         """Nach einem gescheiterten Netzaufruf: aufräumen, neu anmelden, melden."""
         self._end_action()
-        self._drop_client()
+        self._cached_client = None
         error_dialog(self, title,
                      summary + "\n\n" + report_error(exc, context), show=True)
 

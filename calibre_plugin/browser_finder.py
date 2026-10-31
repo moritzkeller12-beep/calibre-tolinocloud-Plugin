@@ -32,18 +32,18 @@ def missing_browser_error(status=""):
     """
     message = (
         "Kein Chromium-Browser gefunden. Bitte Chrome, Chromium, Brave oder "
-        "Edge installieren – oder den Zugangsschlüssel in den "
-        "Einstellungen eintragen.")
+        "Edge installieren – oder in den Einstellungen Zugangstoken und "
+        "Geräte-ID eintragen.")
     if status == "unavailable" and in_flatpak_sandbox():
         message = (
             "Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt. "
             "Bitte «flatpak update» ausführen und Calibre danach "
             "vollständig neu starten.")
-        return message, "B06"
+        return message, "B01"
     if in_flatpak_sandbox() and status not in ("empty", "unavailable"):
         message += "\n\n" + flatpak_permission_hint()
-        return message, "B08"
-    return message, "B05"
+        return message, "B01"
+    return message, "B01"
 
 
 # PATH-independent locations for desktop-launched Calibre.

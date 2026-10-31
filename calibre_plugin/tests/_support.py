@@ -66,6 +66,10 @@ class FakeTableItem:
         self._check_state = 0
         self._flags = 0
         self.tooltip = ""
+        self.text_alignment = None
+
+    def setTextAlignment(self, alignment):
+        self.text_alignment = alignment
 
     def setFlags(self, flags):
         self._flags = flags
@@ -121,8 +125,19 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # nicht mehr. Ein Stub mit nur ResizeMode deckt genau diesen Fehler auf.
     header_view = type("QHeaderView", (), {})
     header_view.ResizeMode = type(
-        "ResizeMode", (), {"Stretch": 1, "ResizeToContents": 2})
+        "ResizeMode", (), {"Interactive": 0, "Stretch": 1,
+                           "ResizeToContents": 2})
     qt_core.QHeaderView = header_view
+    qt_core.QStyledItemDelegate = type(
+        "QStyledItemDelegate", (),
+        {"__init__": lambda self, *args, **kwargs: None})
+    qt_core.QStyleOptionViewItem = type("QStyleOptionViewItem", (), {})
+    qt_core.QEvent = type("QEvent", (), {})
+    qt_core.QStyle = type("QStyle", (), {
+        "SubElement": type("SubElement", (), {
+            "SE_ItemViewItemCheckIndicator": 1}),
+        "alignedRect": staticmethod(lambda *args: None),
+    })
     qt_core.QDialog.Accepted = 1
     qt_core.QDialog.DialogCode = qt_core.QDialog
     qt_core.QMessageBox.Yes = 1
@@ -136,7 +151,14 @@ def load_ui_module(get_icons_result, qt_stub=None):
             "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
         "CheckState": type("CheckState", (),
                            {"Checked": 2, "Unchecked": 0}),
+        "AlignmentFlag": type("AlignmentFlag", (), {"AlignCenter": 132}),
+        "WidgetAttribute": type("WidgetAttribute", (),
+                                 {"WA_QuitOnClose": 55}),
     })
+    qt_core.QDialog.setAttribute = lambda self, attribute, value: (
+        setattr(self, "attributes", getattr(self, "attributes", {})),
+        self.attributes.__setitem__(attribute, value),
+    )
     qt_core.QTableWidget.SelectionBehavior = type(
         "SelectionBehavior", (), {"SelectRows": 1})
     qt_core.QTableWidget.SelectionMode = type(

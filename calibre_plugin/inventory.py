@@ -66,7 +66,7 @@ def normalize_inventory_record(item):
         {"tolino_id": <Deliverable-Kennung oder "">,
          "has_deliverable_id": bool,
          "identifier": <Ersatzkennung/ISBN oder "">,
-         "title": str, "authors": str, "isbn": str, "uuid": str}
+         "title": str, "authors": str, "isbn": str}
 
     ``tolino_id`` bleibt leer, wenn nur ``identifier`` existiert: diese
     Kennung taugt weder fuer ``/downloadinfo`` noch fuer
@@ -79,8 +79,6 @@ def normalize_inventory_record(item):
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
     isbn = _nested_inventory_value(
         item, ("isbn", "ISBN", "isbn13", "isbn10", "identifier"))
-    uuid_value = _nested_inventory_value(
-        item, ("uuid", "calibreUuid", "calibre_uuid"))
     return {
         "tolino_id": deliverable,
         "has_deliverable_id": bool(deliverable),
@@ -88,7 +86,6 @@ def normalize_inventory_record(item):
         "title": str(title or "").strip(),
         "authors": _inventory_author(author),
         "isbn": str(isbn or "").strip(),
-        "uuid": str(uuid_value or "").strip(),
     }
 
 

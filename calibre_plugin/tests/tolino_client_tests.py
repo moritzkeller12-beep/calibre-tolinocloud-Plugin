@@ -1,6 +1,7 @@
 """Tolino-Client, Transport, Tokens und Fehlertexte."""
 
 import ast
+import base64
 import calibre_plugin.tolino as tolino_module
 import os
 import re
@@ -11,9 +12,9 @@ from . import ui_base_tests, worker_base_tests
 from .. import config
 from ..partners import PARTNERS, WEBREADER_URL
 from ..tolino import TolinoAuthError, TolinoClient
-from ..sync_data import READ_TAG, active_tags, tag_id_from_patch, tag_state
+from ..sync_data import READ_TAG, active_tags, tag_id_from_patch
 from ..run_context import RunContext
-from ..browser_login import browser_login
+from ..browser_login import grab_live_refresh
 from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
 from pathlib import Path
 from unittest.mock import patch
@@ -277,7 +278,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
         client, calls = self._patching_client([existing, {"ok": True}, stale])
         with self.assertRaises(TolinoApiError) as caught:
             client.update_metadata("b-1", {"title": "Neu"})
-        self.assertEqual("N06", caught.exception.code)
+        self.assertEqual("N02", caught.exception.code)
         self.assertEqual(["GET", "PUT", "GET"],
                          [call["method"] for call in calls])
 
@@ -448,7 +449,7 @@ class TolinoClientFeatureTests(unittest.TestCase):
         from ..tolino import TolinoApiError
         with self.assertRaises(TolinoApiError) as caught:
             run_download("http://cdn.pageplace.de/file")
-        self.assertEqual("N05", caught.exception.code)
+        self.assertEqual("N02", caught.exception.code)
 
     def test_download_credentials_are_not_forwarded_across_redirects(self):
         from urllib.request import HTTPRedirectHandler, Request
@@ -492,6 +493,39 @@ class TolinoClientFeatureTests(unittest.TestCase):
             data = client.download("b-9")
         self.assertEqual(content, data)
         self.assertIn("downloadinfo", calls[0]["url"])
+        # Die Cloud will die Kennung base64-kodiert; roh antwortet sie 404.
+        encoded = base64.b64encode(b"b-9").decode("ascii")
+        self.assertEqual(2, calls[0]["url"].count(encoded))
+        self.assertNotIn("/b-9/", calls[0]["url"])
+
+    def test_download_encodes_an_urn_id_without_leaking_path_separators(self):
+        client, calls = self._patching_client([
+            {"DownloadInfo": {"contentUrl": "https://cdn.example/epub"}},
+        ])
+
+        class RawResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def geturl(self):
+                return "https://example.invalid/book"
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"content"
+
+        urn = "urn:uuid:0f8fad5b-d9cb-469f-a165-70867728950e"
+        with patch("calibre_plugin.tolino.urlopen",
+                   return_value=RawResponse()):
+            client.download(urn)
+        url = calls[0]["url"]
+        self.assertEqual(2, url.count(
+            base64.b64encode(urn.encode("utf-8")).decode("ascii")))
+        self.assertTrue(url.endswith("/type/external-download"))
 
 class BoshDeviceRecoveryTests(unittest.TestCase):
     """Ein authentifizierter BOSH-400 (leeres "{}") loest eine
@@ -790,12 +824,12 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                              captured.get("client_type"), pid)
             self.assertEqual("5.2.0", captured.get("client_version"), pid)
 
-    def test_browser_login_reports_a_missing_chromium(self):
+    def test_grab_live_refresh_reports_a_missing_chromium(self):
         """Shops auf dem gemeinsamen Reader: fehlt Chromium, wird der
         Fehler sichtbar statt still ein fremder Browser geoeffnet."""
         for pid in (1, 5, 8):
             with self.assertRaises(TolinoAuthError) as ctx:
-                browser_login(pid, "test_hardware")
+                grab_live_refresh(pid, "test_hardware")
             self.assertIn("Kein Chromium-Browser gefunden",
                           str(ctx.exception))
 
@@ -871,7 +905,7 @@ class ErrorCodeTests(unittest.TestCase):
 
     def test_secrets_never_reach_the_dialog_the_log_or_the_history(self):
         exc = tolino_module.TolinoAuthError(
-            "Fehler mit geheimwert-123", code="A06",
+            "Fehler mit geheimwert-123", code="A01",
             detail="auch hier geheimwert-123")
         with patch.object(tolino_module, "log_warning") as log:
             shown = tolino_module.report_error(
@@ -890,8 +924,8 @@ class ErrorCodeTests(unittest.TestCase):
         logged = " ".join(call[0][0] for call in log.call_args_list)
         self.assertIn("Traceback", logged)
 
-    def test_code_without_message_defaults_to_e00(self):
-        self.assertEqual("E00", tolino_module.TolinoError("x").code)
+    def test_code_without_message_defaults_to_e99(self):
+        self.assertEqual("E99", tolino_module.TolinoError("x").code)
 
     def test_error_codes_and_docs_stay_in_sync(self):
         """Genutzte Codes stehen in der Liste; die README verweist dorthin."""
@@ -905,9 +939,7 @@ class ErrorCodeTests(unittest.TestCase):
                 continue
             used |= set(re.findall(r'code\s*=\s*"([A-Z][0-9]{2})"',
                                    path.read_text(encoding="utf-8")))
-        used.discard("E00")
         used.discard("E99")
-        used.update(("B05", "B06", "B08"))  # Codes aus browser_finder-Strings
         documented = set(re.findall(r"^\| ([A-Z][0-9]{2}) \|", error_list,
                                     re.MULTILINE))
         documented.discard("E99")
@@ -983,11 +1015,11 @@ class UserTextTests(unittest.TestCase):
 
     def test_report_error_without_a_traceback_logs_a_single_line(self):
         """Ohne Traceback (z. B. selbst gebaute Meldung) bleibt es eine Zeile."""
-        exc = tolino_module.TolinoError("Fehler ohne Traceback", code="S90")
+        exc = tolino_module.TolinoError("Fehler ohne Traceback", code="E99")
         with patch.object(tolino_module, "log_warning") as log:
             shown = tolino_module.report_error(exc)
         self.assertEqual(1, log.call_count)
-        self.assertEqual("Fehler ohne Traceback (Code S90)", shown)
+        self.assertEqual("Fehler ohne Traceback (Code E99)", shown)
 
 
 class DownloadMetadataTests(unittest.TestCase):
@@ -1026,7 +1058,7 @@ class DownloadMetadataTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".epub") as source:
             with self.assertRaises(TolinoApiError) as caught:
                 client.upload(source.name)
-        self.assertEqual("N04", caught.exception.code)
+        self.assertEqual("N02", caught.exception.code)
 
     def test_download_returns_content_without_an_inventory_request(self):
         calls = []
@@ -1210,15 +1242,15 @@ class TagStateReducerTests(unittest.TestCase):
     def test_add_remove_leaves_no_tag(self):
         patches = [self._patch("add", "gelesen"),
                    self._patch("remove", "gelesen")]
-        self.assertIsNone(tag_state(
-            patches, self.BOOK, "gelesen", "system"))
+        self.assertIsNone(active_tags(
+            patches, "system", "gelesen").get((self.BOOK, "gelesen")))
 
     def test_add_remove_add_leaves_an_active_tag(self):
         patches = [self._patch("add", "gelesen"),
                    self._patch("remove", "gelesen"),
                    self._patch("add", "gelesen", tag_id="2")]
-        active = tag_state(
-            patches, self.BOOK, "gelesen", "system")
+        active = active_tags(
+            patches, "system", "gelesen").get((self.BOOK, "gelesen"))
         self.assertIsNotNone(active)
         self.assertEqual("2", tag_id_from_patch(active))
 
@@ -1229,8 +1261,8 @@ class TagStateReducerTests(unittest.TestCase):
             self._patch("add", "gelesen"),
             self._patch("remove", "gelesen", book="book-2"),
         ]
-        active = tag_state(
-            patches, self.BOOK, "gelesen", "system")
+        active = active_tags(
+            patches, "system", "gelesen").get((self.BOOK, "gelesen"))
         self.assertIsNotNone(active)
         pairs = active_tags(patches, "collection")
         self.assertEqual({("book-1", "SciFi")}, set(pairs))

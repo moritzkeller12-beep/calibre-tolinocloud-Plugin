@@ -11,7 +11,6 @@ import time
 import unittest
 from . import ui_base_tests
 from ..tolino import TolinoAuthError
-from ..browser_login import browser_login
 from ._support import (
     _REAL_CLOSE_WINDOW, _full, start_cdp_stubs, stop_cdp_stubs)
 from unittest.mock import call, patch
@@ -591,7 +590,7 @@ class LiveGrabTests(unittest.TestCase):
                 grab_live_refresh(4, "cfg-hw", timeout=30,
                                   progress=lambda _t: None)
         self.assertIn("geschlossen", str(ctx.exception))
-        self.assertEqual("B03", ctx.exception.code)
+        self.assertEqual("B02", ctx.exception.code)
 
     def test_grab_live_refresh_timeout_without_reader_tab_has_login_hint(self):
         """Bleibt der Tab ohne Web-Reader, gibt es einen Timeout-Hinweis –
@@ -748,18 +747,6 @@ class LiveGrabTests(unittest.TestCase):
         expression = idb_expression("tolino-user")
         self.assertTrue(expression.rstrip().endswith('})("tolino-user")'))
         self.assertNotIn("'\"", expression)
-
-    def test_browser_login_forwards_progress_into_live_grab(self):
-        """Die Dialog-Fortschrittstexte (Fenster offen, Rotation
-        erzwungen) muessen bis zum Live-Grab durchreichen."""
-        progress_cb = lambda _text: None
-        with patch("calibre_plugin.browser_login.grab_live_refresh",
-                   return_value=("rotated", "hw-live")) as grab:
-            result = browser_login(4, "test_hardware",
-                                   progress=progress_cb)
-        self.assertEqual(("rotated", "hw-live"), result)
-        grab.assert_called_once()
-        self.assertIs(progress_cb, grab.call_args[1].get("progress"))
 
 class LoginWindowWaitTests(_SidJwtTest):
     """die Wartezeit nach einer Ablehnung unterscheidet, OB das

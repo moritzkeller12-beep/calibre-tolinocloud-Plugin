@@ -17,7 +17,7 @@ def tag_patch(op, book_id, name, category, error_type, revision=None,
         if not str(tag_id or "").strip():
             raise error_type(
                 "Marken-ID fehlt (%s / %s)." % (book_id, name),
-                code="N06", short="Die Sammlung ist in der Cloud nicht auffindbar.")
+                code="N02", short="Die Sammlung ist in der Cloud nicht auffindbar.")
         path = "%s/%s" % (path, tag_id)
     return {"op": op, "value": value, "path": path}
 
@@ -56,11 +56,6 @@ def active_tags(patches, category, name=None):
         else:
             active[key] = item
     return active
-
-
-def tag_state(patches, book_id, name, category):
-    """Return the active patch for one book/tag, or None."""
-    return active_tags(patches, category, name).get((str(book_id), name))
 
 
 def read_ids(patches):

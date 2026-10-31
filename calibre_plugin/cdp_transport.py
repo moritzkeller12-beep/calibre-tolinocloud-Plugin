@@ -5,7 +5,6 @@ import secrets
 import socket
 import struct
 import time
-from urllib.parse import urlsplit
 
 
 # ---------------------------------------------------------------- WebSocket
@@ -144,19 +143,8 @@ class _Ws:
             pass
 
 
-def _is_loopback_url(url):
-    """True fuer 127.0.0.1/localhost/::1 -- der Browser-Debug-Port."""
-    try:
-        host = urlsplit(str(url or "")).hostname or ""
-    except (TypeError, ValueError):
-        return False
-    return host in ("127.0.0.1", "localhost", "::1")
-
-
 def _http_get_json(url, timeout=5):
     """Fetch a local DevTools JSON endpoint without using environment proxies."""
-    if not _is_loopback_url(url):
-        return None
     try:
         from urllib.request import ProxyHandler, build_opener
         opener = build_opener(ProxyHandler({}))

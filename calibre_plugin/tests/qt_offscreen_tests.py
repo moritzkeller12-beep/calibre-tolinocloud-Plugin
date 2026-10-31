@@ -10,12 +10,14 @@ if importlib.util.find_spec("PyQt6") is None:  # die CI installiert PyQt6
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                              QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                              QHeaderView, QInputDialog, QLabel, QLineEdit,
                              QMenu, QMessageBox, QProgressBar, QPushButton,
-                             QTableWidget, QTableWidgetItem, QVBoxLayout)
+                             QStyle, QStyledItemDelegate,
+                             QStyleOptionViewItem, QTableWidget,
+                             QTableWidgetItem, QVBoxLayout)
 
 
 def _read_ids(dialog, finished):
@@ -38,7 +40,10 @@ def _install_calibre_qt_shim():
         "QLineEdit": QLineEdit, "QMenu": QMenu, "QMessageBox": QMessageBox,
         "QProgressBar": QProgressBar, "QPushButton": QPushButton,
         "QTableWidget": QTableWidget, "QTableWidgetItem": QTableWidgetItem,
-        "QVBoxLayout": QVBoxLayout, "Qt": Qt,
+        "QVBoxLayout": QVBoxLayout,
+        "QStyledItemDelegate": QStyledItemDelegate,
+        "QStyle": QStyle, "QStyleOptionViewItem": QStyleOptionViewItem,
+        "QEvent": QEvent, "Qt": Qt,
         "pyqtSignal": pyqtSignal,
     }
     for name, value in names.items():
@@ -85,6 +90,25 @@ class InventoryDialogQtTests(unittest.TestCase):
         check.setChecked(False)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
+        dialog.close()
+
+    def test_title_column_stays_wider_than_author_column(self):
+        dialog = InventoryDialog([{
+            "title": "Der Lehrling des Feldschers und die Reise durch das Königreich",
+            "authors": "Christoph Magnus Freiherr von und zu Hohenstein-Waldburg",
+            "status": "identical", "group": "unchanged", "book_id": 1,
+            "tolino_id": "cloud-1", "isbn": "9781234567890",
+            "read_in_cloud": False, "read_local": False,
+            "read_column": True,
+        }])
+        dialog.show()
+        self.app.processEvents()
+        for width in (640, 760, 960):
+            dialog.resize(width, 560)
+            self.app.processEvents()
+            header = dialog.table.horizontalHeader()
+            self.assertGreater(header.sectionSize(5), header.sectionSize(6))
+            self.assertGreaterEqual(header.sectionSize(5), 100)
         dialog.close()
 
     def test_explicit_unread_selection_changes_only_the_cloud_target(self):

@@ -38,7 +38,7 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
     except TolinoAuthError as exc:
         raise TolinoAuthError(
             "Tolino hat den Zugang aus dem Anmeldefenster abgelehnt. "
-            + RELOGIN, code="A02", detail=str(exc)) from exc
+            + RELOGIN, code="A01", detail=str(exc)) from exc
     log_info("Tolino-Token-Tausch: HTTP (Plugin).")
     return client.refresh or candidate, client.hardware or hardware_id
 
@@ -69,12 +69,6 @@ def _close_window_after_grab(progress=None):
                  "automatisch schliessen. Bitte von Hand schliessen, damit "
                  "der Zugang gültig bleibt.")
     return False
-
-
-def _fresh_grab_tokens(grabbed, rejected):
-    """Candidates not yet rejected by the token endpoint."""
-    return [token for token in _filter_live_candidates(
-        (grabbed or {}).get("refresh") or ()) if token not in rejected]
 
 
 def _grabber_window_state(getter):
@@ -132,7 +126,9 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             grabbed = more
             saw_reader = True
             endpoint_misses = 0
-            fresh = _fresh_grab_tokens(grabbed, rejected)
+            fresh = [token for token in _filter_live_candidates(
+                (grabbed or {}).get("refresh") or ())
+                if token not in rejected]
             if fresh:
                 if progress:
                     progress("Prüfe den gelesenen Zugang bei Tolino …")
@@ -174,7 +170,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                         raise TolinoAuthError(
                             "Das Anmeldefenster wurde geschlossen, bevor die "
                             "Übernahme fertig war. Bitte erneut versuchen und "
-                            "es offen lassen.", code="B03")
+                            "es offen lassen.", code="B02")
 
         if (progress and window and window.get("window")
                 and not window.get("reader_tab")):
@@ -196,23 +192,14 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
             raise TolinoAuthError(
                 "Das Anmeldefenster ist offen, aber noch nicht angemeldet. "
                 "Bitte dort anmelden, bis die Bücherliste lädt. " + RELOGIN_THEN,
-                code="B01", detail=last_error)
+                code="B02", detail=last_error)
         raise TolinoAuthError(
             "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "
-            + RELOGIN, code="B04", detail="kein Web-Reader-Tab")
+            + RELOGIN, code="B02", detail="kein Web-Reader-Tab")
 
     cdp_module.close_grabber_window()
     if saw_reader:
         _raise_grab_failure(last_error, grabbed, rejected)
     raise TolinoAuthError(
         "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "
-        + RELOGIN, code="B04", detail="kein Web-Reader-Tab")
-
-
-def browser_login(partner_id, hardware, timeout=LOGIN_TIMEOUT,
-                  progress=None):
-    """Sign in via the partner's OAuth authorization endpoint."""
-    # Die OAuth-Seite speichert den Token im gemeinsamen Web Reader. Lies
-    # ihn aus dem Plugin-Browser; ein lokaler Callback funktioniert hier nicht.
-    return grab_live_refresh(int(partner_id), hardware, timeout=timeout,
-                             progress=progress)
+        + RELOGIN, code="B02", detail="kein Web-Reader-Tab")

@@ -2,8 +2,8 @@
 import unittest
 from ._support import compare_inventory
 from .dialogs_tests import _QtDialogTest
-from ..library import (TOLINO_READ_COLUMN, bool_column_value,
-                       read_column_available, update_read_status)
+from ..library import (TOLINO_READ_COLUMN, bool_column_value, column_state,
+                       update_read_status)
 
 
 def _read_ids(dialog, finished):
@@ -20,11 +20,11 @@ class ReadColumnLibraryTests(unittest.TestCase):
         return Db()
 
     def test_only_a_yes_no_column_is_recognized(self):
-        self.assertTrue(read_column_available(self._db(
-            {TOLINO_READ_COLUMN: {"datatype": "bool"}})))
-        self.assertFalse(read_column_available(self._db(
-            {TOLINO_READ_COLUMN: {"datatype": "text"}})))
-        self.assertFalse(read_column_available(self._db({})))
+        self.assertTrue(column_state(self._db(
+            {TOLINO_READ_COLUMN: {"datatype": "bool"}}))["read"])
+        self.assertFalse(column_state(self._db(
+            {TOLINO_READ_COLUMN: {"datatype": "text"}}))["read"])
+        self.assertFalse(column_state(self._db({}))["read"])
 
     def test_values_are_read_only_as_true_false_or_empty(self):
         self.assertTrue(bool_column_value({TOLINO_READ_COLUMN: True},
@@ -158,9 +158,11 @@ class ReadColumnDialogTests(_QtDialogTest):
         dialog = ui_module.dialogs.InventoryDialog(self._rows())
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
-        note = dialog._read_note(self._rows()[0])
-        self.assertEqual("Calibre-Lesestatus: gelesen.", note)
-        self.assertEqual(0, dialog.selected_work_count())
+        index = next(index for index, row in enumerate(dialog.rows)
+                     if row["title"] == "Calibre only")
+        self.assertIn("Calibre-Lesestatus: gelesen.",
+                      dialog.table.items[(index, 7)])
+        self.assertEqual(0, dialog._selection_counts()["work"])
 
     def test_clicking_read_creates_only_the_explicit_cloud_selection(self):
         ui_module = self._ui()
@@ -170,7 +172,7 @@ class ReadColumnDialogTests(_QtDialogTest):
         cell.setChecked(True)
         self.assertEqual(["t-1"], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
-        self.assertEqual(1, dialog.selected_work_count())
+        self.assertEqual(1, dialog._selection_counts()["work"])
 
     def test_recommendations_do_not_change_read_selection_from_calibre(self):
         ui_module = self._ui()

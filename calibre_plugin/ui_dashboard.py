@@ -6,21 +6,17 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         _dialog_busy, gui_guard, qt_enum,
                         start_worker,
                         _login_failure_guidance,
-                        _stop_thread, _thread_running, _worker_account_name,
-                        _worker_outcome,
-                        sync_result_detail,
-                        sync_result_text)
+                        _stop_thread, sync_result_detail,
+                        sync_result_text, Qt)
 from calibre.gui2 import error_dialog, info_dialog
-from .token_vault import make_client
+from .token_vault import TOKEN_VAULT
 from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
-                     clear_state_journal, load_state, merge_state_journal,
-                     remove_account as remove_saved_account,
+                     load_state, remove_account as remove_saved_account,
                      save_account, save_credentials,
                      set_active_account, settings)
 from .run_context import RunContext
-from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
-                      create_custom_columns, column_state,
-                      ignore_column_available,
+from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS, TOLINO_IGNORE_COLUMN,
+                      create_custom_columns, column_state, bool_column_available,
                       update_read_status, update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
@@ -77,15 +73,6 @@ def _offer_next_step(dialog):
     primary.setFocus()
 
 
-def _running_text(dialog):
-    """Was läuft gerade? Nur der Dialog kennt seine Worker-Attribute."""
-    if dialog.thread is not None:
-        return "Synchronisierung läuft …"
-    if dialog.prepare_thread is not None:
-        return "Vergleich läuft …"
-    return "Anmeldung wird geprüft …"
-
-
 def _persist_sync_result(dialog, state, updates):
     """Sync-Zustand, Tolino-IDs und bestätigten Lesestatus sichern.
 
@@ -93,12 +80,20 @@ def _persist_sync_result(dialog, state, updates):
     abgesichert: ein Fehler in einer Spalte darf weder den anderen
     Schreibvorgang noch den Abschluss des Laufs verhindern.
     """
-    _persist_run(dialog, state)
+    account_name = str(
+        getattr(getattr(dialog, "worker", None), "account_name", None)
+        or getattr(dialog, "account_name", "") or "")
+    try:
+        if account_name:
+            save_account(account_name, {"state": state}, active=account_name)
+    except Exception as exc:
+        log_warning("Ergebnis der Synchronisierung konnte nicht "
+                    "gespeichert werden: %s" % sanitize_error(exc))
     if dialog.columns.get("id"):
         try:
             update_tolino_ids(
                 dialog.gui.current_db, updates, enabled=True,
-                account_name=_worker_account_name(dialog))
+                account_name=account_name)
         except Exception as exc:
             log_warning("Tolino-IDs konnten nicht in Calibre geschrieben "
                         "werden: %s" % sanitize_error(exc))
@@ -111,19 +106,6 @@ def _persist_sync_result(dialog, state, updates):
         except Exception as exc:
             log_warning("Lesestatus konnte nicht in Calibre geschrieben "
                         "werden: %s" % sanitize_error(exc))
-
-
-def _persist_run(dialog, state):
-    """Sync-Zustand unter dem beim Lauf erfassten Konto sichern."""
-    account_name = _worker_account_name(dialog)
-    try:
-        if account_name:
-            save_account(account_name, {"state": state}, active=account_name)
-            if not clear_state_journal(account_name):
-                log_warning("Zustandsjournal konnte nicht geleert werden.")
-    except Exception as exc:
-        log_warning("Ergebnis der Synchronisierung konnte nicht "
-                    "gespeichert werden: %s" % sanitize_error(exc))
 
 
 def _sync_cancelled_text(outcome):
@@ -160,6 +142,9 @@ class SyncDashboard(QDialog):
     def __init__(self, gui):
         QDialog.__init__(self, gui)
         self.gui = gui
+        # Ein Plugin-Fenster darf beim Schliessen nicht die Anwendung beenden.
+        self.setAttribute(
+            qt_enum(Qt, "WA_QuitOnClose", "WidgetAttribute"), False)
         self.thread = None
         self.worker = None
         self.login_thread = None
@@ -432,9 +417,6 @@ class SyncDashboard(QDialog):
             return
         if not remove_saved_account(name):
             return
-        if not clear_state_journal(name):
-            log_warning("Zustandsjournal des entfernten Kontos konnte nicht "
-                        "gelöscht werden.")
         self.load_values()
 
     def load_values(self):
@@ -463,9 +445,6 @@ class SyncDashboard(QDialog):
         # zweiter Ort, der einen im Hintergrund rotierten Token mit der
         # alten Kopie ueberschreiben konnte -- jetzt bleibt es leer.
         self.refresh.setText("")
-        # Vergleichsstand fuer values(): nur was der Nutzer WIRKLICH aendert,
-        # darf die gespeicherte Geraetekennung ersetzen.
-        self._loaded_hardware = self.hardware.text().strip()
         self.formats.setText(", ".join(values["preferred_formats"]))
         self.update_status()
 
@@ -493,7 +472,13 @@ class SyncDashboard(QDialog):
         running = _dialog_busy(self)
         if running:
             _apply_busy(self, True)
-            self.status.setText(_running_text(self))
+            if self.thread is not None:
+                running_text = "Synchronisierung läuft …"
+            elif self.prepare_thread is not None:
+                running_text = "Vergleich läuft …"
+            else:
+                running_text = "Anmeldung wird geprüft …"
+            self.status.setText(running_text)
         elif logged_in:
             self.status.setText("Angemeldet.")
         else:
@@ -540,11 +525,6 @@ class SyncDashboard(QDialog):
         """Der Token, mit dem gearbeitet wird: eingetippt vor gespeichert."""
         return self._typed_refresh() or self._stored_refresh()
 
-    def _secret_tokens(self):
-        """Zugangsdaten fuer die Redaktion von Fehlertexten."""
-        return tuple(token for token in
-                     (self._stored_refresh(), self._typed_refresh()) if token)
-
     def store_refresh(self, refresh, hardware=""):
         """Token im Konto speichern -- der einzige Ort fuer Zugangsdaten."""
         token = normalize_refresh_token(refresh)
@@ -554,6 +534,7 @@ class SyncDashboard(QDialog):
             self.account_name, token,
             str(hardware or "").strip() or self.hardware.text().strip()
             or hardware_id())
+        self.refresh.setText("")
         self.update_status()
 
     def logout(self):
@@ -591,10 +572,6 @@ class SyncDashboard(QDialog):
         if not isinstance(account, dict):
             account = {}
         hardware = self.hardware.text().strip() or hardware_id()
-        if hardware == getattr(self, "_loaded_hardware", None):
-            stored_hardware = str(account.get("hardware_id") or "").strip()
-            if stored_hardware:
-                hardware = stored_hardware
         values = {
             "account_name": str(account.get("name") or ""),
             "partner_id": self.partner.currentData(),
@@ -614,7 +591,7 @@ class SyncDashboard(QDialog):
 
     def _login_running(self):
         """Läuft gerade eine Anmeldeprüfung oder ein Anmeldefenster?"""
-        return _thread_running(self.login_thread)
+        return self.login_thread is not None and self.login_thread.isRunning()
 
     def browser_login(self):
         """Anmeldeknopf: erst die gespeicherte Anmeldung prüfen.
@@ -628,10 +605,8 @@ class SyncDashboard(QDialog):
             return  # eine Prüfung oder Anmeldung läuft bereits
         values = self.values()
         if self._typed_refresh():
-            # Von Hand eingetippt: erst ins Konto speichern, dann pruefen --
-            # danach ist das Feld wieder leer.
+            # Von Hand eingetippt: erst ins Konto speichern, dann pruefen.
             self.store_refresh(self._typed_refresh())
-            self.refresh.setText("")
             values = self.values()
         context = RunContext.from_values(values, self.columns)
         if self._effective_refresh():
@@ -715,7 +690,8 @@ class SyncDashboard(QDialog):
         # Technische Details (inkl. Traceback) nur ins Log.
         # Der sichtbare Zugang ist ein bekanntes Geheimnis: er darf
         # weder im Dialog noch im Log auftauchen.
-        secrets = self._secret_tokens()
+        secrets = tuple(token for token in
+                        (self._stored_refresh(), self._typed_refresh()) if token)
         if isinstance(error, BaseException):
             detail = report_error(error, "Anmeldefenster", secrets)
         else:
@@ -744,7 +720,7 @@ class SyncDashboard(QDialog):
     def _worker_client(context):
         """Client aus dem Lauf-Kontext bauen."""
         store = CredentialStore(context.credentials, context.account_name)
-        return make_client(store)
+        return TOKEN_VAULT.login(store)
 
     def _show_prepare_error(self, exc, context):
         """Nur den kurzen Fehlertext zeigen; technische Details protokollieren."""
@@ -772,11 +748,6 @@ class SyncDashboard(QDialog):
         self.columns = column_state(self.gui.current_db)
         context = RunContext.from_values(values, self.columns)
         state = load_state(values.get("state"))
-        try:
-            merge_state_journal(state, context.account_name)
-        except Exception as exc:
-            log_warning("Teilstand konnte nicht geladen werden: %s"
-                        % sanitize_error(exc))
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
             metadata = _dashboard_plan.local_metadata(self, context, state)
@@ -847,7 +818,6 @@ class SyncDashboard(QDialog):
         if (payload.get("hardware") and hardware is not None
                 and self.account_name == account_name):
             hardware.setText(str(payload["hardware"]))
-            self._loaded_hardware = hardware.text().strip()
         if payload.get("read_status_known") is False:
             # Der Dialog zeigt denselben Hinweis in der Tabelle.
             log_warning("Lesestatus unbekannt – er bleibt unverändert.")
@@ -855,7 +825,9 @@ class SyncDashboard(QDialog):
             selection = self._confirm_comparison(
                 payload["comparison"], context,
                 client_factory=lambda: self._worker_client(context),
-                automatic=_dashboard_plan.automatic_action_count(metadata, state))
+                automatic=len(_dashboard_plan.plan_collection_updates(
+                    _dashboard_plan.series_map_from_metadata(
+                        _dashboard_plan.syncable_metadata(metadata)), state)))
             if selection is None:
                 return
             preparation = _dashboard_plan.plan_actions(
@@ -909,8 +881,9 @@ class SyncDashboard(QDialog):
                 "automatic": int(automatic or 0),
                 # Für den Hinweis im Fenster: ohne diese Spalte bleiben
                 # gekaufte Bücher Upload-Kandidaten.
-                "ignore_column": ignore_column_available(
-                    getattr(getattr(self, "gui", None), "current_db", None)),
+                "ignore_column": bool_column_available(
+                    getattr(getattr(self, "gui", None), "current_db", None),
+                    TOLINO_IGNORE_COLUMN),
             })
         if dialog.exec() != qt_enum(QDialog, "Accepted", "DialogCode"):
             return None
@@ -918,8 +891,8 @@ class SyncDashboard(QDialog):
         # passiert -- jede Aktion für sich; eine leere Auswahl ändert
         # nichts.
         return {
-            "uploads": dialog.selected_upload_ids(),
-            "metadata": dialog.selected_metadata_ids(),
+            "uploads": dialog._selected_book_ids("upload"),
+            "metadata": dialog._selected_book_ids("metadata"),
             "read_changes": dialog.selected_read_changes(),
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
@@ -969,29 +942,16 @@ class SyncDashboard(QDialog):
             self, "Einige Bücher wurden nicht hochgeladen", text)
         return bool(nothing_else)
 
-    def _state_for_context(self, context, state):
-        """Explicit state or the stored snapshot of the run account.
-
-        A missing stored state must stay empty; seeding it would re-upload
-        existing cloud copies.
-        """
-        if state is not None:
-            return state
-        stored = account_by_name(getattr(context, "account_name", ""))
-        state = stored.get("state") if isinstance(stored, dict) else {}
-        return state if isinstance(state, dict) else {}
-
-    def _start_sync_worker(self, context, preparation, state=None):
+    def _start_sync_worker(self, context, preparation, state):
         """Übersprungene Uploads melden und den Hintergrundlauf starten."""
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
-        state = self._state_for_context(context, state)
         # Das Vergleichsfenster kann beliebig lange offen bleiben; in der
         # Zeit darf der Keep-alive den (single-use) Token rotieren. Deshalb
-        # nimmt `make_client` im Worker den GESPEICHERTEN Zugang des Kontos
+        # nimmt der Vault im Worker den GESPEICHERTEN Zugang des Kontos
         # unmittelbar vor dem Login -- ein zweiter Snapshot hier waere
         # derselbe Aufruf mit demselben Ergebnis.
-        total = _dashboard_plan.planned_actions(preparation, len(jobs))
+        total = _dashboard_plan.plan_counts(preparation, len(jobs))["steps"]
         if not total and not skipped_uploads:
             # Kein stiller Lauf: ohne ausführbare Aktion gibt es eine
             # Antwort statt eines Hintergrundstarts.
@@ -1064,7 +1024,7 @@ class SyncDashboard(QDialog):
         Persistiert wird unter dem KONTO DES LAUFS. UI-Felder werden nur
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
-        outcome = _worker_outcome(self)
+        outcome = dict(getattr(self.worker, "outcome", None) or {})
         try:
             _persist_sync_result(self, state, updates)
         finally:
@@ -1086,7 +1046,7 @@ class SyncDashboard(QDialog):
 
     @gui_guard
     def sync_failed(self, message):
-        outcome = _worker_outcome(self)
+        outcome = dict(getattr(self.worker, "outcome", None) or {})
         worker = self.worker
         cancelled = bool(getattr(worker, "cancelled", False)) or \
             str(message) == CANCEL_MESSAGE

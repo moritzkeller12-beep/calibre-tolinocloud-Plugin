@@ -1,13 +1,18 @@
 # Änderungen
 
-## 0.1.05
+Die aktuelle Version steht in [`__init__.py`](__init__.py).
+
+## Aktuell
 
 - Qt6-Enums werden durchgängig in der skopierten Schreibweise gesetzt (`Qt.AscendingOrder`, `QTableWidget.SelectRows`, `QLineEdit.Password`); die Test-Stubs kennen keine unscharfen Aliase mehr, die solche Fehler verdeckt hätten.
 - Konto und Optionen eines Laufs stehen in einem expliziten `RunContext`; Metadaten und Sync-Zustand sind eigene Parameter. Die Planungsschicht ist Qt-frei und wird durch einen eigenen Test davor bewahrt, `qt.core` zu laden.
-- Tolino-IDs werden nach Upload und Löschung sofort per fsync in einem kleinen Journal je Konto gesichert; die ganze Konfiguration wird nur noch einmal je Phase und am Laufende geschrieben. Ein Restjournal wird beim Start angewandt und verhindert doppelte Uploads nach einem Abbruch.
+- Nach jedem Upload wird der vollständige Konto-Zustand sofort gespeichert; ein separates Zustandsjournal entfällt. Das verhindert doppelte Uploads nach einem Abbruch mit einer einzigen Persistenzschicht.
 - Der `SyncWorker` bündelt Abbruchprüfung, Fortschritt, Fehlerzählung und Erfolg in `_step()` und pflegt seine Zähler inkrementell, statt nach jedem Schritt über alle Operationen zu laufen.
 - Bulk-«Upload aktivieren» respektiert das bevorzugte Format; die Web-Reader-Erkennung verlangt mindestens 80 Zeichen, die Autoren-Normalisierung trennt «Joe» und «Jo», und die Inventar-Erkennung nutzt kein generisches `id` als Löschkennung.
-- Weitere Härtungen: `config._copy` kopiert tief, `SessionCheckWorker` verträgt fehlende Tokens, `_rebuild_table` gibt die Anzeige auch bei Fehlern wieder frei, `start_call` hält seinen Worker, die Token-Rotation wird nur noch an einer Stelle gespeichert; Tests um Qt-Freiheit und das Zustandsjournal ergänzt.
+- Fehlercodes sind auf acht zusammengeführt; UUID-Ersatzformen und die manuelle Zugangseingabe wurden gestrafft, während `calibre-<Nr>` als Zustandsschlüssel erhalten bleibt.
+- Buchdownloads laden die Cloud-Kopie über eine base64-kodierte Kennung; die rohe Kennung beantwortete der Server mit 404.
+- Behebt den Absturz beim Schließen des Vergleichsfensters unter Calibre 9: ein Item-Delegate ersetzt das ProxyStyle.
+- Die Tolino-Action hängt am dokumentierten `shutting_down()`-Rückruf, zusätzlich an `aboutToQuit`; der Token-Keep-alive endet damit beim Beenden wirklich.
 
 ## 0.1.04
 

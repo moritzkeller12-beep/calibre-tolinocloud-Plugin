@@ -401,7 +401,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 "jobs": [], "removals": [], "meta_updates": [], "series_map": {},
                 "skipped_uploads": ["Buch 1 (Titel), Format EPUB: fehlt"],
                 "read_changes": [],
-            })
+            }, {})
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(warnings))
@@ -470,7 +470,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         messages = []
         ui_module = self._ui_with_messages(messages)
         dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-        self.assertEqual(1, dialog.selected_work_count())
+        self.assertEqual(1, dialog._selection_counts()["work"])
         dialog.accept()
         self.assertEqual([True], ui_module.common.QDialog.closed)
         self.assertEqual([], messages)
@@ -480,7 +480,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         ui_module = self._ui_with_messages(messages)
         dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
         dialog.clear_all_selection()
-        self.assertEqual(0, dialog.selected_work_count())
+        self.assertEqual(0, dialog._selection_counts()["work"])
         dialog.accept()
         # Kein stilles Schliessen: das Fenster bleibt offen und sagt warum.
         self.assertEqual([], ui_module.common.QDialog.closed)
@@ -543,7 +543,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
             lambda *args, **kwargs: infos.append(args))
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(RunContext.from_values(dashboard.values()),
-                                     _preparation())
+                                     _preparation(), {})
         self.assertIsNone(dashboard.thread)
         self.assertIsNone(getattr(dashboard, "worker", None))
         self.assertEqual(1, len(infos))
@@ -553,9 +553,9 @@ class NoSilentDeadEndTests(unittest.TestCase):
     def test_the_sync_worker_adopts_the_stored_token_at_login(self):
         """Zwischen Vergleichsfenster und Start kann der Keep-alive den
         Token rotiert haben. Der Worker muss den GESPEICHERTEN nehmen --
-        sonst loest er einen verbrauchten Token ein (A02).
+        sonst loest er einen verbrauchten Token ein (A01).
 
-        Das passiert an EINER Stelle: `make_client` ruft `freshest`, nicht
+        Das passiert an EINER Stelle: der Vault ruft `freshest`, nicht
         schon der Aufrufer des Workers.
         """
         ui_module = self._ui_module()
@@ -565,7 +565,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
             RunContext.from_values(settings),
-            _preparation(jobs=["job-1"]))
+            _preparation(jobs=["job-1"]), {})
         self.assertEqual(1, dashboard.thread.starts)
         passed = dashboard.worker.arguments[0]
         # Der GUI-Snapshot wird unveraendert weitergereicht ...
@@ -587,7 +587,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
             RunContext.from_values(dashboard.values()),
-            _preparation(jobs=["job-1", "job-2"]))
+            _preparation(jobs=["job-1", "job-2"]), {})
         self.assertEqual(1, dashboard.thread.starts)
         self.assertIn("2", dashboard.progress_label.text_value)
         self.assertIn("Upload", dashboard.progress_label.text_value)
@@ -615,7 +615,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
                 "tolino_id": "t-2", "series": ""},
         }
         state = {"u2": {"tolino_id": "t-2", "calibre_id": 2}}
-        inventory = [{"deliverableId": "t-2", "uuid": "u2", "title": "Alt",
+        inventory = [{"deliverableId": "t-2", "title": "Alt",
                       "authors": "B", "isbn": "222"}]
         rows = compare_inventory(metadata, state, inventory, ["EPUB"])
         with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
@@ -641,8 +641,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
             selection)
         self.assertEqual(1, len(preparation["jobs"]))
         self.assertEqual([], preparation["skipped_uploads"])
-        self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 1))
+        self.assertEqual(1, ui_module.dashboard._dashboard_plan.plan_counts(
+            preparation, 1)["steps"])
         # Und der geplante Lauf nennt den Upload auch im Fenster.
         self.assertIn(
             "1 Upload",
@@ -657,7 +657,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard.update_status = lambda: None
         StartSyncOrchestrationTests._install_fake_qt(ui_module)
         dashboard._start_sync_worker(RunContext.from_values(settings),
-                                     preparation)
+                                     preparation, {})
         self.assertEqual(1, dashboard.thread.starts)
         self.assertIn("Läuft: 1 Upload",
                       dashboard.progress_label.text_value)
@@ -702,7 +702,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0, "not_started": 0}
+                          "skipped": 0, "failed": 0}
         dashboard.worker = worker
 
         def boom(*_args, **_kwargs):
@@ -738,7 +738,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0, "not_started": 0}
+                          "skipped": 0, "failed": 0}
         dashboard.worker = worker
 
         def boom(*_args, **_kwargs):
@@ -856,7 +856,7 @@ class ReplacementConfirmationTests(unittest.TestCase):
 
         ui_module.dashboard.QMessageBox = Box
         dashboard._start_sync_worker(
-            RunContext.from_values(settings), _preparation(jobs=jobs))
+            RunContext.from_values(settings), _preparation(jobs=jobs), {})
         return dashboard, asked
 
     def test_no_means_no_run(self):
@@ -979,7 +979,7 @@ class VisibleResultTests(unittest.TestCase):
         dashboard.start_sync = lambda: None
         dashboard._start_sync_worker(
             StartSyncOrchestrationTests._settings(),
-            _preparation())
+            _preparation(), {})
         self.assertEqual(1, len(seen))
         self.assertIs(True, seen[0].get("show"))
 
@@ -988,7 +988,7 @@ class EmptyRunAccountingTests(unittest.TestCase):
 
     Feldbefund: «Abgleich abgeschlossen: 0 hochgeladen, 0
     aktualisiert …», obwohl 5 Uploads und 400 Metadaten ausgewählt waren.
-    Ursache: `_planned_actions` zählte den ROHEN Serien-Zustand
+    Ursache: Die Schrittzaehlung nutzte den ROHEN Serien-Zustand
     (`series_map` = jedes Buch mit Serie) als auszuführende Aktion. Der
     Lauf startete damit auch dann, wenn alle Serien längst geschrieben und
     Uploads/Metadaten nicht geplant waren – und der Worker meldete
@@ -1015,15 +1015,15 @@ class EmptyRunAccountingTests(unittest.TestCase):
                  "u2": {"tolino_id": "t2", "collections": ["Reihe"]}}
         preparation = self._prepared(
             ui_module, {"u1": "Reihe", "u2": "Reihe"}, state)
-        self.assertEqual(0, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0))
+        self.assertEqual(0, ui_module.dashboard._dashboard_plan.plan_counts(
+            preparation, 0)["steps"])
 
     def test_open_collections_still_count(self):
         ui_module = self._ui()
         preparation = self._prepared(
             ui_module, {"u1": "Reihe"}, {"u1": {"tolino_id": "t1"}})
-        self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0))
+        self.assertEqual(1, ui_module.dashboard._dashboard_plan.plan_counts(
+            preparation, 0)["steps"])
 
     def test_plan_text_does_not_promise_remembered_collections(self):
         ui_module = self._ui()
