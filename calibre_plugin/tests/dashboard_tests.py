@@ -557,6 +557,17 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         dashboard._save_visible_account(values)
         self.assertEqual("alt-token", self._stored("konto"))
 
+    def test_saving_the_visible_values_keeps_a_concurrent_state_write(self):
+        """Der Snapshot ohne Zustand darf keinen Worker-Fortschritt ersetzen."""
+        _ui_module, dashboard = self._ui("alt-token")
+        self.assertNotIn("state", dashboard.values())
+        values = dashboard.values()
+        config.save_account(
+            "konto", {"state": {"u": {"tolino_id": "neu"}}}, active="konto")
+        dashboard._save_visible_account(values)
+        self.assertEqual({"u": {"tolino_id": "neu"}},
+                         config.account_by_name("konto")["state"])
+
 class LoginPreflightTests(unittest.TestCase):
     """Der Anmeldeknopf prueft zuerst den GESPEICHERTEN Zugang.
 

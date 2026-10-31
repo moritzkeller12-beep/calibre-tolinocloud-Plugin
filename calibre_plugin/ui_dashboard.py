@@ -302,7 +302,8 @@ class SyncDashboard(QDialog):
 
         Vorher lasen zwei getrennte Pfade dieselben Widgets (inklusive
         zweimaliger Format-Liste). `values()` ist die eine Quelle; die
-        globalen Schluessel stehen in config.
+        globalen Schluessel stehen in config. Der Zustand fehlt bewusst:
+        `save_account()` merged ihn aus dem Konto, statt ihn zu ersetzen.
         """
         if not getattr(self, "account_name", None):
             return
@@ -538,6 +539,9 @@ class SyncDashboard(QDialog):
         Der Token steht ausschliesslich im Konto (config). Ein eingetippter
         Wert wird von `store_refresh()` gespeichert; `save_account()` mischt
         nur die hier vorhandenen Schluessel und laesst ihn unberuehrt.
+        Der Sync-Zustand gehoert ebenfalls nicht in diesen Snapshot: sonst
+        wuerde ein spaeteres Speichern einen parallelen Worker-Fortschritt
+        ueberschreiben.
         """
         # Nur ohne Kontonamen auf das aktive Konto zurückfallen. Ist der
         # angezeigte Name gesetzt, aber nicht mehr vorhanden, bleibt der
@@ -556,8 +560,6 @@ class SyncDashboard(QDialog):
                     x.strip().upper() for x in self.formats.text().split(",")
                     if x.strip()) if value in ("EPUB", "PDF")
             ] or ["EPUB"]),
-            "state": (account.get("state")
-                      if isinstance(account.get("state"), dict) else {}),
         }
         return values
 
@@ -706,7 +708,8 @@ class SyncDashboard(QDialog):
         self._save_visible_account(values)
         context = RunContext.from_values(
             values, column_state(self.gui.current_db))
-        state = load_state(values.get("state"))
+        account = account_by_name(context.account_name) or {}
+        state = load_state(account.get("state"))
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
             metadata = _dashboard_plan.local_metadata(self, context, state)
