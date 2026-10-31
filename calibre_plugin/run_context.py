@@ -12,7 +12,7 @@ from .config import account_secrets
 DEFAULT_PREFERRED_FORMATS = ("EPUB",)
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunContext:
     """Konto und Optionen eines Laufs."""
 
@@ -22,11 +22,11 @@ class RunContext:
     columns: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        self.account_name = str(self.account_name or "")
-        self.partner_id = self.partner_id or 1
-        self.preferred_formats = tuple(
-            self.preferred_formats or DEFAULT_PREFERRED_FORMATS)
-        self.columns = dict(self.columns or {})
+        object.__setattr__(self, "account_name", str(self.account_name or ""))
+        object.__setattr__(self, "partner_id", self.partner_id or 1)
+        object.__setattr__(self, "preferred_formats", tuple(
+            self.preferred_formats or DEFAULT_PREFERRED_FORMATS))
+        object.__setattr__(self, "columns", dict(self.columns or {}))
 
     @classmethod
     def from_values(cls, values, columns=None):
@@ -37,17 +37,7 @@ class RunContext:
             partner_id=values.get("partner_id", 1),
             preferred_formats=(values.get("preferred_formats")
                                or DEFAULT_PREFERRED_FORMATS),
-            columns=(columns if columns is not None
-                     else values.get("columns") or {}),
-        )
-
-    def clone(self):
-        """Unabhaengige Kopie fuer einen Worker."""
-        return RunContext(
-            account_name=self.account_name,
-            partner_id=self.partner_id,
-            preferred_formats=self.preferred_formats,
-            columns=self.columns,
+            columns=columns or {},
         )
 
     def secrets(self):

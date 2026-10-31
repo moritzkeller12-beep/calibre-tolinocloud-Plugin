@@ -28,7 +28,7 @@ class SyncWorker(QObject):
         QObject.__init__(self)
         # Eigene Kopie: Jede Persistenz (Tokenrotation, Zustand, tolino-ID)
         # gehoert zu dem beim Start erfassten Konto dieses Laufs.
-        self.context = context.clone()
+        self.context = context
         self.account_name = self.context.account_name
         self.jobs = list(jobs or ())
         self.removals = list(removals or ())
@@ -509,7 +509,7 @@ class PrepareWorker(QObject):
 
     def __init__(self, context, metadata, state=None, lock_timeout=5):
         QObject.__init__(self)
-        self.context = context.clone()
+        self.context = context
         self.metadata = metadata
         # Ausgangszustand des Kontos; der Worker kopiert ihn vor dem
         # Vergleich, damit nichts Unbestaetigtes in den Einstellungen landet.

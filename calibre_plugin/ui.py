@@ -9,7 +9,6 @@ class TolinoSyncAction(InterfaceAction):
                    "tolino Cloud Sync öffnen", None)
 
     def genesis(self):
-        self._connect_quit_hook()
         self.qaction.triggered.connect(self.show_dashboard)
         icon = self._toolbar_icon()
         if icon is not None and not icon.isNull():
@@ -34,25 +33,12 @@ class TolinoSyncAction(InterfaceAction):
             parent()
 
     def _finish_session(self):
-        """Keep-alive anhalten -- genau einmal."""
-        if getattr(self, "_tolino_cleanup_done", False):
-            return
-        self._tolino_cleanup_done = True
+        """Keep-alive anhalten; Calibre ruft `shutting_down` genau einmal."""
         try:
             from .token_vault import stop_token_keepalive
             stop_token_keepalive()
         except Exception:
             pass  # der Shutdown darf nie an der Aufräumung scheitern
-
-    def _connect_quit_hook(self):
-        """Zweiter Weg: greift auch ohne den Rückruf der InterfaceAction."""
-        try:
-            from qt.core import QApplication
-            app = QApplication.instance()
-            if app is not None:
-                app.aboutToQuit.connect(lambda: self._finish_session())
-        except Exception:
-            pass  # darf das Laden nie verhindern
 
     def show_dashboard(self):
         from .ui_dashboard import SyncDashboard

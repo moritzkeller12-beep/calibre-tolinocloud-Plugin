@@ -116,24 +116,9 @@ def save_account(name, values, active=None, preferred_formats=None):
 def account_by_name(name, accounts=None):
     """Return the stored account dict for ``name`` -- never a different one."""
     if accounts is None:
-        # Schneller Pfad: exakt gespeicherter Name. `settings()` würde alle
-        # Konten samt Zuständen tief kopieren, obwohl nur eines gebraucht wird.
-        if isinstance(name, str) and name:
-            with _SETTINGS_LOCK:
-                raw = PREFERENCES.get("accounts", None)
-                if isinstance(raw, list):
-                    for index, item in enumerate(raw):
-                        if not isinstance(item, dict):
-                            continue
-                        fallback = "account-%d" % (index + 1)
-                        stored = str(item.get("name") or fallback).strip()
-                        if stored == name:
-                            return _account(item, name)
         accounts = settings()["accounts"]
-    for item in accounts:
-        if isinstance(item, dict) and item.get("name") == name:
-            return item
-    return {}
+    return next((item for item in accounts
+                 if isinstance(item, dict) and item.get("name") == name), {})
 
 
 def set_active_account(name):
