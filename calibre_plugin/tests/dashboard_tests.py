@@ -512,9 +512,10 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         _ui_module, dashboard = self._ui("alt-token")
         self._rotate("rotiert")
         dashboard.refresh.setText("selbst-eingetragen")
-        self.assertEqual("selbst-eingetragen",
-                         dashboard.values()["refresh_token"])
-        dashboard._save_visible_account()
+        self.assertEqual("selbst-eingetragen", dashboard._typed_refresh())
+        # `values()` traegt keine Zugangsdaten; gespeichert wird ausdruecklich.
+        self.assertNotIn("refresh_token", dashboard.values())
+        dashboard.store_refresh("selbst-eingetragen")
         self.assertEqual("selbst-eingetragen", self._stored())
         # Feld geleert: der gespeicherte Zugang bleibt -- abgemeldet wird
         # ausdruecklich ueber den Knopf.
@@ -572,49 +573,45 @@ class LoginPreflightTests(unittest.TestCase):
     # --- tolino.check_stored_login --------------------------------------
 
     @staticmethod
-    def _patch_client(records, error=None, rotate=True):
+    def _patch_client(records, token="tok-1", hardware="hw-1",
+                      error=None, rotate=True):
         """Replace the vault's client factory with a deterministic fake."""
-        def login(store, _timeout=5):
-            token = store.refresh_token
-            records.append((store.values.get("partner_id"), store.hardware_id, token))
+        class FakeClient:
+            def __init__(self, partner, hw, refresh, token_callback=None,
+                         hardware_callback=None):
+                records.append((partner, hw, refresh))
+                self.refresh = refresh
+                self.token_callback = token_callback
 
-            class FakeClient:
-                refresh = token
+            def login(self):
+                if error is not None:
+                    raise error
+                if rotate:
+                    self.refresh = token + "-rotated"
+                    self.token_callback(self.refresh)
+                    records.append(("persisted", self.refresh))
+                return self.refresh
 
-                def login(self):
-                    if error is not None:
-                        raise error
-                    if rotate:
-                        self.refresh = token + "-rotated"
-                        self.token_callback(self.refresh)
-                        records.append(("persisted", self.refresh))
-                    return self.refresh
-
-            client = FakeClient()
-            client.token_callback = lambda value: store.save_refresh(value)
-            client.login()
-            return client
-
-        return patch("calibre_plugin.token_vault.TOKEN_VAULT.login", login)
+        return patch.multiple(
+            "calibre_plugin.token_vault",
+            TolinoClient=FakeClient,
+            account_by_name=lambda _name: ({} if token is None else {
+                "refresh_token": token, "hardware_id": hardware}),
+            account_secrets=lambda _name: () if token is None else (token,),
+        )
 
     def test_a_working_access_is_renewed_and_saved(self):
         records = []
-        store = config.CredentialStore(
-            {"partner_id": 4, "hardware_id": "hw-1",
-             "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records):
-            status, detail = vault_module.check_stored_login(store)
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual(("valid", ""), (status, detail))
         self.assertEqual((4, "hw-1", "tok-1"), records[0])
-        self.assertEqual("tok-1-rotated", store.refresh_token)
+        self.assertEqual(("persisted", "tok-1-rotated"), records[1])
 
     def test_a_successful_check_does_not_return_a_token_to_the_ui(self):
         records = []
-        store = config.CredentialStore(
-            {"partner_id": 4, "hardware_id": "hw-1",
-             "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records, rotate=False):
-            status, detail = vault_module.check_stored_login(store)
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual(("valid", ""), (status, detail))
         self.assertEqual((4, "hw-1", "tok-1"), records[0])
 
@@ -623,53 +620,38 @@ class LoginPreflightTests(unittest.TestCase):
         error = TolinoAuthError(
             "invalid_grant: refresh_token tok-1 wurde abgelehnt")
         with self._patch_client(records, error=error):
-            status, detail = vault_module.check_stored_login(
-                config.CredentialStore({"partner_id": 4,
-                                        "hardware_id": "hw-1",
-                                        "refresh_token": "tok-1"}, "konto"))
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual("invalid", status)
         self.assertNotIn("tok-1", detail)
         self.assertIn("[REDACTED]", detail)
         self.assertIn("invalid_grant", detail)
 
     def test_without_a_stored_token_nothing_is_asked(self):
-        store = config.CredentialStore(
-            {"partner_id": 4, "hardware_id": "hw-1", "refresh_token": ""},
-            "konto")
-        # Andere Tests hinterlassen ein gespeichertes Konto «konto» mit Token;
-        # ohne diese Abschirmung loeste der Test einen echten Login aus.
-        with patch("calibre_plugin.config.account_by_name",
-                   lambda *_args, **_kwargs: {}):
-            status, detail = vault_module.check_stored_login(store)
+        with self._patch_client([], token=None):
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual("invalid", status)
         self.assertIn("Bitte bei tolino anmelden", detail)
 
     def test_a_running_sync_blocks_the_check(self):
         records = []
-        with vault_module.TOKEN_VAULT._lock:
-            status, detail = vault_module.check_stored_login(
-                config.CredentialStore({"partner_id": 4,
-                                        "hardware_id": "hw-1",
-                                        "refresh_token": "tok-1"}, "konto"))
+        with self._patch_client(records):
+            with vault_module.TOKEN_VAULT._lock:
+                status, detail = vault_module.check_stored_login("konto", 4)
         # NICHT „invalid": der Zugang ist ungeprueft, nicht abgelehnt.
         self.assertEqual(("busy", ""), (status, detail))
         self.assertEqual([], records)
 
     def test_a_parallel_rotation_blocks_the_check(self):
         records = []
-        with vault_module.TOKEN_VAULT._lock:
-            status, detail = vault_module.check_stored_login(
-                config.CredentialStore({"partner_id": 4,
-                                        "hardware_id": "hw-1",
-                                        "refresh_token": "tok-1"}, "konto"),
-                lock_timeout=0)
+        with self._patch_client(records):
+            with vault_module.TOKEN_VAULT._lock:
+                status, detail = vault_module.check_stored_login(
+                    "konto", 4, lock_timeout=0)
         self.assertEqual(("busy", ""), (status, detail))
         self.assertEqual([], records)
 
     def test_a_late_401_uses_the_latest_stored_refresh_token(self):
-        store = config.CredentialStore(
-            {"account_name": "konto", "partner_id": 4,
-             "hardware_id": "hw-1", "refresh_token": "saved-old"}, "konto")
+        stored = {"refresh_token": "saved-old", "hardware_id": "hw-1"}
         requested = []
 
         class RefreshClient:
@@ -689,22 +671,21 @@ class LoginPreflightTests(unittest.TestCase):
                 return self.refresh
 
         from ..token_vault import TOKEN_VAULT
-        with patch("calibre_plugin.token_vault.TolinoClient", RefreshClient), \
-             patch("calibre_plugin.config.account_by_name",
-                   side_effect=lambda _name: {
-                       "refresh_token": store.refresh_token,
-                       "hardware_id": store.hardware_id}):
-            client = TOKEN_VAULT.login(store)
-            store.save_refresh("rotated-by-keepalive")
+        with patch.multiple(
+                "calibre_plugin.token_vault",
+                TolinoClient=RefreshClient,
+                account_by_name=lambda _name: dict(stored),
+                save_refresh_token=lambda _name, value: stored.update(
+                    refresh_token=value)):
+            client = TOKEN_VAULT.login("konto", 4)
+            stored["refresh_token"] = "rotated-by-keepalive"
             client.access = None
             TOKEN_VAULT.relogin(client)
         self.assertEqual(["saved-old", "rotated-by-keepalive"], requested)
 
     def test_the_rotation_lock_is_released_afterwards(self):
         with self._patch_client([]):
-            vault_module.check_stored_login(config.CredentialStore(
-                {"partner_id": 4, "hardware_id": "hw-1",
-                 "refresh_token": "tok-1"}, "konto"))
+            vault_module.check_stored_login("konto", 4)
         self.assertTrue(vault_module.TOKEN_VAULT._lock.acquire(blocking=False))
         vault_module.TOKEN_VAULT._lock.release()
 
@@ -861,7 +842,8 @@ class LoginPreflightTests(unittest.TestCase):
         opened = []
         dashboard._start_login_window = lambda values: opened.append(values)
         dashboard.browser_login()
-        self.assertEqual([""], [context.refresh_token for context in opened])
+        self.assertEqual(["konto"],
+                         [context.account_name for context in opened])
         self.assertIsNone(dashboard.login_thread)
 
     def test_with_a_token_the_stored_access_is_checked_first(self):
@@ -877,8 +859,7 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertEqual("konto",
                          dashboard.login_worker.context.account_name)
-        self.assertEqual("tok-1",
-                         dashboard.login_worker.context.refresh_token)
+        self.assertEqual(4, dashboard.login_worker.context.partner_id)
         self.assertIs(dashboard.login_thread,
                       dashboard.login_worker.moved_to)
         self.assertIn("geprüft", dashboard.status.text())
@@ -1010,7 +991,9 @@ class LoginPreflightTests(unittest.TestCase):
                                                      signal("invalid"),
                                                      signal("busy"))
         ui_module.auth_workers.check_stored_login = check
-        worker.run()
+        with patch("calibre_plugin.run_context.account_secrets",
+                   lambda _name: ("tok-1",)):
+            worker.run()
         return worker, emitted, calls
 
     def test_the_worker_hands_the_stored_account_to_the_check(self):
@@ -1018,9 +1001,7 @@ class LoginPreflightTests(unittest.TestCase):
         _worker, emitted, calls = self._run_check_worker(
             ui_module, ("valid", ""))
         args, kwargs = calls[0]
-        self.assertEqual(1, len(args))
-        self.assertEqual("konto", args[0].account_name)
-        self.assertEqual("tok-1", args[0].refresh_token)
+        self.assertEqual(("konto", 4), args)
         self.assertEqual({}, kwargs)
         self.assertEqual([("valid",)], emitted)
 
@@ -1042,16 +1023,16 @@ class LoginPreflightTests(unittest.TestCase):
         # Auch der unerwartete Fehler verraet den Zugang nicht.
         self.assertNotIn("tok-1", emitted[0][1])
 
-    def test_the_vault_persists_rotations_into_the_worker_snapshot(self):
-        settings = {"account_name": "konto", "partner_id": 4,
-                    "hardware_id": "hw-1", "refresh_token": "tok-1"}
-        store = config.CredentialStore(settings, "konto")
-        # Genau diese Methode haengt der Vault als Token-Callback ein.
-        callback = store.save_refresh
-        with patch("calibre_plugin.config.save_credentials") as save:
-            callback("tok-2")
-        self.assertEqual("tok-2", settings["refresh_token"])
-        save.assert_called_once_with("konto", "tok-2", "hw-1")
+    def test_the_vault_persists_rotations_into_the_account(self):
+        original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.save_account("konto", {"refresh_token": "tok-1",
+                                      "hardware_id": "hw-1"}, active="konto")
+        config.save_refresh_token("konto", "tok-2")
+        account = config.account_by_name("konto")
+        self.assertEqual("tok-2", account["refresh_token"])
+        self.assertEqual("hw-1", account["hardware_id"])
 
 class LoginMessageTests(unittest.TestCase):
     """P2: Erfolg in der Statuszeile, Ursachen klar getrennt."""
@@ -1153,25 +1134,24 @@ class LoginMessageTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
 
-    def test_each_cause_gets_its_own_next_step(self):
+    def test_the_error_text_is_the_single_source_for_the_title(self):
         ui_module = self._ui()
         try:
             guide = ui_module.common._login_failure_guidance
-            titles = {}
-            for code in ("A01", "B01", "B02", "N01", "N02", "N03",
-                         "S91", "E99"):
-                exc = tolino_module.TolinoAuthError("egal", code=code)
+            cases = (("B01", "Browser-Anmeldung nicht möglich"),
+                     ("N01", "Verbindung fehlgeschlagen"),
+                     ("A01", "Anmeldung erforderlich"))
+            for code, short in cases:
+                exc = tolino_module.TolinoAuthError("egal", code=code,
+                                                    short=short)
                 title, step = guide(exc)
-                titles[code] = title
+                self.assertEqual(short, title)
                 self.assertNotIn("\n", step)
                 self.assertLessEqual(len(step), 100, step)
-                self.assertLessEqual(len(title), 100, title)
-            self.assertEqual(len(titles), len(set(titles.values())),
-                             "jede Ursache braucht einen eigenen Titel")
-            self.assertEqual("Browser-Anmeldung nicht möglich", titles["B01"])
-            self.assertEqual("Verbindung fehlgeschlagen", titles["N01"])
-            self.assertEqual("Anmeldung erforderlich", titles["A01"])
-            self.assertEqual("Anmeldung nicht abgeschlossen", titles["B02"])
+            # Ohne Kurztext bleibt ein neutraler, umsetzbarer Titel.
+            self.assertEqual(
+                "Anmeldung nicht abgeschlossen",
+                guide(tolino_module.TolinoAuthError("egal"))[0])
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1203,12 +1183,13 @@ class LoginMessageTests(unittest.TestCase):
             with patch("calibre_plugin.ui_dashboard.log_warning",
                        lambda text: logged.append(text)):
                 dashboard.login_failed(tolino_module.TolinoAuthError(
-                    "Kein Chromium-Browser gefunden (tok-geheim)", code="B01"))
+                    "Kein Chromium-Browser gefunden (tok-geheim)", code="B01",
+                    short="Browser-Anmeldung nicht möglich"))
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(boxes))
         self.assertEqual("Browser-Anmeldung nicht möglich (Code B01)", boxes[0][1])
-        self.assertIn("Browser installieren", boxes[0][2])
+        self.assertIn("Anmeldung erneut starten", boxes[0][2])
         self.assertNotIn("tok-geheim", boxes[0][2])
         self.assertNotIn("tok-geheim", " ".join(logged))
         self.assertIn("Anmeldung fehlgeschlagen.", dashboard.status.value)

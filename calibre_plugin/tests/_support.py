@@ -72,6 +72,14 @@ class FakeTableItem:
         self._flags = 0
         self.tooltip = ""
         self.text_alignment = None
+        self._row = 0
+        self._column = 0
+
+    def row(self):
+        return self._row
+
+    def column(self):
+        return self._column
 
     def setTextAlignment(self, alignment):
         self.text_alignment = alignment
@@ -94,6 +102,9 @@ class FakeTableItem:
 
     def setToolTip(self, text):
         self.tooltip = text
+
+    def toolTip(self):
+        return self.tooltip
 
 
 def load_ui_module(get_icons_result, qt_stub=None):

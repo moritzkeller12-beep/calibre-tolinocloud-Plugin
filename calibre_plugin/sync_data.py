@@ -2,11 +2,12 @@
 
 import time
 
+from .errors import TolinoApiError
+
 READ_TAG = "collection_finished_readings_name"
 
 
-def tag_patch(op, book_id, name, category, error_type, revision=None,
-              tag_id=None):
+def tag_patch(op, book_id, name, category, revision=None, tag_id=None):
     """Build a sync-data tag patch; removal requires the server tag ID."""
     value = {"modified": int(time.time() * 1000),
              "name": name, "category": category}
@@ -15,7 +16,7 @@ def tag_patch(op, book_id, name, category, error_type, revision=None,
     path = "/publications/%s/tags" % book_id
     if op == "remove":
         if not str(tag_id or "").strip():
-            raise error_type(
+            raise TolinoApiError(
                 "Marken-ID fehlt (%s / %s)." % (book_id, name),
                 code="N02", short="Die Sammlung ist in der Cloud nicht auffindbar.")
         path = "%s/%s" % (path, tag_id)

@@ -151,6 +151,7 @@ def launch_reader_window():
     if not binary:
         message, code = browser_finder.missing_browser_error(status)
         raise TolinoAuthError(message, code=code,
+                              short="Browser-Anmeldung nicht möglich",
                               detail="Host-Sonde: %s" % status)
     if _LAUNCHED["process"] is not None:
         close_grabber_window()
@@ -158,7 +159,8 @@ def launch_reader_window():
             raise TolinoAuthError(
                 "Das vorherige Anmeldefenster konnte nicht sicher "
                 "geschlossen werden. Bitte schliessen Sie es und versuchen "
-                "Sie es erneut.", code="B01")
+                "Sie es erneut.", code="B01",
+                short="Browser-Anmeldung nicht möglich")
 
     port = _start_port()
     profile = tempfile.mkdtemp(prefix="tolino-grab-")
@@ -185,6 +187,7 @@ def launch_reader_window():
         shutil.rmtree(profile, ignore_errors=True)
         raise TolinoAuthError(
             "Chromium konnte nicht gestartet werden.", code="B01",
+            short="Browser-Anmeldung nicht möglich",
             detail="%s: %s" % last_error)
 
     _LAUNCHED.update({"process": process, "port": port, "profile": profile})
@@ -197,7 +200,8 @@ def launch_reader_window():
     _shutdown({"process": process, "port": port, "profile": profile})
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
-        "und es erneut versuchen.", code="B01", detail="Port %d" % port)
+        "und es erneut versuchen.", code="B01",
+        short="Browser-Anmeldung nicht möglich", detail="Port %d" % port)
 
 
 def _stop_launched_process(process, timeout=2):

@@ -80,7 +80,7 @@ class InventoryDialogQtTests(unittest.TestCase):
             "tolino_id": "cloud-1", "read_column": True,
             "read": ReadState(cloud=False, local=True),
         }])
-        check = dialog.cells["read"][0]
+        check = dialog._check(0, 2)
         self.assertFalse(check.isChecked())
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
@@ -121,7 +121,7 @@ class InventoryDialogQtTests(unittest.TestCase):
             "tolino_id": "cloud-2", "read_column": True,
             "read": ReadState(cloud=True, local=False),
         }])
-        dialog.cells["read"][0].setChecked(False)
+        dialog._check(0, 2).setChecked(False)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual(["cloud-2"], _read_ids(dialog, False))
         self.assertFalse(dialog.rows[0]["read"].local)

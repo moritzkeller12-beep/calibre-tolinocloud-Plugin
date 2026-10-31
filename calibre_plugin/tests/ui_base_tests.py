@@ -42,7 +42,6 @@ class ToolbarIconTests(unittest.TestCase):
             plugin.qaction = Action()
             plugin.show_dashboard = lambda: None
             plugin.load_resources = lambda _names: icon_module._test_resources
-            plugin._keepalive_credentials = lambda: {}
             icon = icon_module.TolinoSyncAction._toolbar_icon(plugin)
             self.assertIsNotNone(icon)
             self.assertFalse(icon.isNull())
@@ -155,6 +154,8 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.raw_items[(row, column)] = item
                 # Wie QTableWidget: Zustandsaenderungen melden itemChanged.
                 item._table = self
+                item._row = row
+                item._column = column
 
             def item(self, row, column):
                 return getattr(self, "raw_items", {}).get((row, column))
@@ -419,12 +420,6 @@ class InventoryDialogBuildTests(unittest.TestCase):
             for index, row in enumerate(dialog.rows):
                 in_cloud = bool(row["tolino_id"])
                 # Drei Auswahlfelder je Buch ...
-                self.assertIs(dialog.table.item(index, 0),
-                              dialog.cells["upload"][index].item)
-                self.assertIs(dialog.table.item(index, 1),
-                              dialog.cells["metadata"][index].item)
-                self.assertIs(dialog.table.item(index, 2),
-                              dialog.cells["read"][index].item)
                 # ... die zwei Orts-Spalten mit je einem Häkchen ...
                 self.assertEqual("✓" if row["book_id"] is not None else "",
                                  dialog.table.items[(index, 3)])
@@ -442,9 +437,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
                                  dialog.table.items[(index, 10)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
-                upload = dialog.cells["upload"][index]
-                metadata = dialog.cells["metadata"][index]
-                mark_read = dialog.cells["read"][index]
+                upload = dialog._check(index, 0)
+                metadata = dialog._check(index, 1)
+                mark_read = dialog._check(index, 2)
                 self.assertTrue(upload.enabled)
                 self.assertEqual(in_cloud, metadata.enabled)
                 self.assertEqual(in_cloud, mark_read.enabled)

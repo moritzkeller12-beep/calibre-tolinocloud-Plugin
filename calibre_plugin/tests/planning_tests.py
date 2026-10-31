@@ -15,7 +15,7 @@ from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        bool_column_available, column_state, cover_bytes,
                        create_custom_columns, metadata_ignored, metadata_tolino_id,
                        normalize_formats, safe_format_path,
-                       selected_table_rows, update_tolino_ids)
+                       update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
 from ..plan import (metadata_update_fields, plan_collection_updates,
@@ -45,8 +45,24 @@ from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
-setUpModule = start_cdp_stubs
-tearDownModule = stop_cdp_stubs
+_ACCOUNT_PATCH = None
+
+
+def setUpModule():
+    global _ACCOUNT_PATCH
+    start_cdp_stubs()
+    _ACCOUNT_PATCH = patch(
+        "calibre_plugin.token_vault.account_by_name",
+        lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
+    _ACCOUNT_PATCH.start()
+
+
+def tearDownModule():
+    global _ACCOUNT_PATCH
+    if _ACCOUNT_PATCH is not None:
+        _ACCOUNT_PATCH.stop()
+        _ACCOUNT_PATCH = None
+    stop_cdp_stubs()
 
 class QtFreePlanningTests(unittest.TestCase):
     """Die Planung ist ohne Qt-Stubs importierbar (eigener Prozess)."""
@@ -176,24 +192,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(1, len(preparation["skipped_uploads"]))
         self.assertIn("Nur PDF", preparation["skipped_uploads"][0])
         self.assertIn("EPUB", preparation["skipped_uploads"][0])
-
-    def test_selected_rows_reads_the_selected_indexes(self):
-        class Index:
-            def __init__(self, value):
-                self.value = value
-
-            def row(self):
-                return self.value
-
-        class Selection:
-            def selectedRows(self):
-                return (Index(2), Index(0))
-
-        class Table:
-            def selectionModel(self):
-                return Selection()
-
-        self.assertEqual([2, 0], selected_table_rows(Table()))
 
     def test_complete_preparation_path_handles_empty_single_and_short_data(self):
         cases = (
@@ -1363,7 +1361,9 @@ class SyncPlanTests(unittest.TestCase):
         self.assertFalse(_jwt_shaped("short.not.jwt"))
 
 
-    def test_keepalive_reuses_the_locked_login_factory(self):
+    def test_keepalive_rotates_each_saved_account_once(self):
+        saved = []
+
         class FakeClient:
             def __init__(self, partner, hw, token, token_callback=None,
                          hardware_callback=None):
@@ -1373,42 +1373,52 @@ class SyncPlanTests(unittest.TestCase):
             def login(self):
                 self.token_callback(self.refresh)
 
-        creds = {"name": "konto", "partner_id": 4, "hardware_id": "hw",
-                 "refresh_token": "tok"}
+        accounts = [{"name": "konto", "partner_id": 4, "hardware_id": "hw",
+                     "refresh_token": "tok"}]
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-             patch("calibre_plugin.config.account_by_name",
-                   return_value={}):
-            with patch.object(vault_module.TOKEN_VAULT, "login",
-                              wraps=vault_module.TOKEN_VAULT.login) as login:
-                result = vault_module.TOKEN_VAULT.keepalive_refresh(
-                    lambda: {"accounts": [creds]})
+             patch("calibre_plugin.token_vault.account_by_name",
+                   lambda _name: accounts[0]), \
+             patch("calibre_plugin.token_vault.settings",
+                   lambda: {"accounts": accounts}), \
+             patch("calibre_plugin.token_vault.save_refresh_token",
+                   lambda name, token: saved.append((name, token))):
+            result = vault_module.TOKEN_VAULT.keepalive_refresh()
         self.assertEqual(1, result)
-        login.assert_called_once()
-        self.assertEqual("tok-rotated", creds["refresh_token"])
+        self.assertEqual([("konto", "tok-rotated")], saved)
 
     def test_a_rotation_without_a_token_keeps_the_stored_login(self):
         """Eine Antwort ohne refresh_token darf den Zugang nicht ausleeren."""
-        saved = []
-        store = vault_module.CredentialStore(
-            {"refresh_token": "alt", "hardware_id": "hw"}, "konto")
-        with patch("calibre_plugin.config.save_credentials",
-                   lambda *args: saved.append(args)):
-            store.save_refresh(None)
-            store.save_refresh("")
-            self.assertEqual("alt", store.refresh_token)
-            store.save_refresh("neu")
-        self.assertEqual("neu", store.refresh_token)
-        self.assertEqual([("konto", "neu", "hw")], saved)
+        original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.save_account("konto", {"refresh_token": "alt",
+                                      "hardware_id": "hw"}, active="konto")
+        config.save_refresh_token("konto", None)
+        config.save_refresh_token("konto", "")
+        self.assertEqual("alt",
+                         config.account_by_name("konto")["refresh_token"])
+        config.save_refresh_token("konto", "neu")
+        account = config.account_by_name("konto")
+        self.assertEqual("neu", account["refresh_token"])
+        self.assertEqual("hw", account["hardware_id"])
 
     def test_keepalive_refresh_skips_when_there_is_nothing_to_do(self):
         """Ohne Token und bei laufender Rotation passiert nichts."""
-        with patch("calibre_plugin.token_vault.TolinoClient") as client_mock:
-            self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh(
-                lambda: {}))
+        accounts = [{"name": "A", "partner_id": 4, "hardware_id": "hw",
+                     "refresh_token": "tok"}]
+        with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
+             patch("calibre_plugin.token_vault.settings",
+                   lambda: {"accounts": []}):
+            self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh())
             client_mock.assert_not_called()
+        with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
+             patch("calibre_plugin.token_vault.settings",
+                   lambda: {"accounts": accounts}), \
+             patch("calibre_plugin.token_vault.account_by_name",
+                   lambda _name: accounts[0]):
             with vault_module.TOKEN_VAULT._lock:
-                self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh(
-                    lambda: {"refresh_token": "tok"}))
+                self.assertEqual(
+                    0, vault_module.TOKEN_VAULT.keepalive_refresh())
             client_mock.assert_not_called()
 
 class MetadataUpdatePlanTests(unittest.TestCase):

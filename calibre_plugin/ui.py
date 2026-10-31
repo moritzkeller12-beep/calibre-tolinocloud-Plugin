@@ -18,7 +18,7 @@ class TolinoSyncAction(InterfaceAction):
         # runs, so an adopted token survives between syncs.
         try:
             from .token_vault import start_token_keepalive
-            start_token_keepalive(self._keepalive_credentials)
+            start_token_keepalive()
         except Exception:
             pass  # keep-alive must never break plugin loading
 
@@ -53,15 +53,6 @@ class TolinoSyncAction(InterfaceAction):
                 app.aboutToQuit.connect(lambda: self._finish_session())
         except Exception:
             pass  # darf das Laden nie verhindern
-
-    def _keepalive_credentials(self):
-        try:
-            from .config import settings
-            cfg = settings()
-        except Exception:
-            return {}
-        return {"accounts": [item for item in cfg.get("accounts", ())
-                             if item.get("refresh_token")]}
 
     def show_dashboard(self):
         from .ui_dashboard import SyncDashboard

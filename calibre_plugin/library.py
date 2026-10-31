@@ -54,25 +54,14 @@ def metadata_tolino_id(metadata, account_name=None):
     return str(value or "").strip()
 
 
-def _field_info(database, column):
-    """(vorhanden, Feldinfo) aus Calibres oeffentlichen Feldmetadaten."""
-    fields = database.field_metadata
-    if column not in fields:
-        return False, None
-    return True, fields[column]
-
-
 def bool_column_available(database, column):
     """True, wenn Calibre ``column`` als Ja/Nein-Feld kennt.
 
     Ein Text- oder Zahlenfeld gilt nicht: dort stuenden fremde Werte, die
     wie ein versehentliches «ignoriert» aussehen koennten.
     """
-    present, info = _field_info(database, column)
-    if not present:
-        return False
-    datatype = info.get("datatype") if isinstance(info, dict) else None
-    return datatype in (None, "bool")
+    fields = database.field_metadata
+    return column in fields and fields[column].get("datatype") == "bool"
 
 
 def bool_column_value(metadata, column):
@@ -117,7 +106,7 @@ CREATED_COLUMNS = set()
 
 def _column_present(database, label):
     """True, wenn die Spalte in der Bibliothek (oder in dieser Sitzung) da ist."""
-    return label in CREATED_COLUMNS or _field_info(database, "#" + label)[0]
+    return label in CREATED_COLUMNS or ("#" + label) in database.field_metadata
 
 
 def create_custom_columns(database, labels=None):
@@ -171,7 +160,7 @@ def column_state(database):
     Lauf reicht es an den Worker weiter und schreibt nur in vorhandene
     Spalten.
     """
-    return {"id": _field_info(database, TOLINO_COLUMN)[0],
+    return {"id": TOLINO_COLUMN in database.field_metadata,
             "read": bool_column_available(database, TOLINO_READ_COLUMN)}
 
 
@@ -198,7 +187,7 @@ def update_read_status(database, updates):
 
 def update_tolino_ids(database, updates, account_name=None):
     """Merge this account's IDs into the shared Calibre custom column."""
-    if not updates or not _field_info(database, TOLINO_COLUMN)[0]:
+    if not updates or TOLINO_COLUMN not in database.field_metadata:
         return 0
     api = database.new_api
     account_name = str(account_name or "").strip()
@@ -255,14 +244,6 @@ def normalize_formats(value):
 
 
 
-def _api_for(database, book_id):
-    """Return the database API for an existing Calibre book."""
-    api = database.new_api
-    if not api.has_id(book_id):
-        raise ValueError("Calibre database has no book with id %r." % (book_id,))
-    return api
-
-
 def safe_format_path(database, book_id, format_name):
     """Resolve a real Calibre id without falling back to view-index semantics."""
     if not isinstance(format_name, str):
@@ -270,7 +251,9 @@ def safe_format_path(database, book_id, format_name):
     format_name = format_name.strip().lstrip(".").upper()
     if not format_name or not re.match(r"^[A-Z0-9][A-Z0-9._-]*$", format_name):
         raise ValueError("Invalid format name: %r" % (format_name,))
-    api = _api_for(database, book_id)
+    api = database.new_api
+    if not api.has_id(book_id):
+        raise ValueError("Calibre database has no book with id %r." % (book_id,))
     try:
         path = api.format_abspath(book_id, format_name)
     except ValueError as exc:
@@ -287,7 +270,10 @@ def safe_format_path(database, book_id, format_name):
 
 def cover_bytes(database, book_id):
     """Return the cover image bytes from Calibre, or None when unavailable."""
-    return _api_for(database, book_id).cover(book_id, as_file=False)
+    api = database.new_api
+    if not api.has_id(book_id):
+        raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    return api.cover(book_id, as_file=False)
 
 
 def image_suffix(data):
@@ -304,9 +290,3 @@ def image_suffix(data):
         return ".webp"
     return ""
 
-
-def selected_table_rows(table):
-    """Row numbers of the table's selected rows."""
-    selection_model = table.selectionModel()
-    selected = selection_model.selectedRows() if selection_model else ()
-    return [index.row() for index in selected]

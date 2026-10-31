@@ -14,6 +14,7 @@ from qt.core import (QCheckBox, QComboBox, QDialog,
                      QTableWidgetItem, QObject, QInputDialog,
                      QFileDialog, QStyledItemDelegate, QStyle,
                      QStyleOptionViewItem, QEvent, Qt, pyqtSignal)
+from .tolino import TolinoError
 
 # Namen, die andere UI-Module ueber dieses Modul beziehen.
 __all__ = [
@@ -220,41 +221,15 @@ def _apply_busy(dialog, busy):
                  not busy)
 
 
-# Titel + naechster Schritt je Fehlercode. Details stehen nur im Log.
-_LOGIN_GUIDANCE = {
-    "A01": ("Anmeldung erforderlich",
-            "Bitte neu bei tolino anmelden."),
-    "B01": ("Browser-Anmeldung nicht möglich",
-            "Browser installieren oder Token und Geräte-ID in den Einstellungen "
-            "eintragen."),
-    "B02": ("Anmeldung nicht abgeschlossen",
-            "Anmeldefenster offen lassen, bis die Bücherliste lädt, und "
-            "erneut versuchen."),
-    "N01": ("Verbindung fehlgeschlagen",
-            "Netzwerk prüfen. Nach einer Zeitüberschreitung ggf. neu anmelden."),
-    "N02": ("tolino-Antwort unbrauchbar",
-            "Erneut versuchen; Details stehen im Calibre-Log."),
-    "N03": ("tolino meldet einen Fehler",
-            "Erneut versuchen; bei Bot-Schutz kurz warten."),
-    "S91": ("Anmeldung wird erneuert",
-            "Kurz warten und erneut versuchen."),
-    "E99": ("Unerwarteter Fehler",
-            "Details stehen im Calibre-Log; erneut versuchen."),
-}
-
-_LOGIN_DEFAULT_GUIDANCE = (
-    "Anmeldung nicht abgeschlossen",
-    "Verbindung prüfen und die Anmeldung erneut starten.")
-
-
 def _login_failure_guidance(error):
     """(Titel, nächster Schritt) für einen fehlgeschlagenen Browser-Login.
 
-    Der Browser-Login meldet ausschliesslich TolinoError; unbekannte Codes
-    bekommen einen neutralen, aber umsetzbaren Hinweis.
+    Der Titel ist der Kurztext der Exception -- die einzige Quelle für
+    Fehlertexte; der nächste Schritt ist für alle Ursachen derselbe.
     """
-    return _LOGIN_GUIDANCE.get(str(error.code or ""),
-                               _LOGIN_DEFAULT_GUIDANCE)
+    title = error.short if isinstance(error, TolinoError) else ""
+    return (str(title or "").strip() or "Anmeldung nicht abgeschlossen",
+            "Anmeldung erneut starten; Details stehen im Calibre-Log.")
 
 
 def _failed_operations(outcome):

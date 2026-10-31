@@ -10,7 +10,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         sync_result_text, Qt)
 from calibre.gui2 import error_dialog, info_dialog
 from .token_vault import TOKEN_VAULT
-from .config import (CredentialStore, PREFERRED_FORMATS, account_by_name,
+from .config import (PREFERRED_FORMATS, account_by_name,
                      load_state, remove_account as remove_saved_account,
                      save_account, save_credentials,
                      set_active_account, settings)
@@ -546,11 +546,11 @@ class SyncDashboard(QDialog):
         return RunContext.from_values(values, self.columns)
 
     def values(self):
-        """Sichtbare Werte des Kontos; der Token nur, wenn eingetippt wurde.
+        """Sichtbare Werte des Kontos -- nie Zugangsdaten.
 
-        Ohne Eingabe fehlt der Schluessel ganz: ``save_account()`` mischt
-        nur vorhandene Schluessel und laesst den gespeicherten Token damit
-        unberuehrt -- auch wenn der Keep-alive ihn gerade rotiert hat.
+        Der Token steht ausschliesslich im Konto (config). Ein eingetippter
+        Wert wird von `store_refresh()` gespeichert; `save_account()` mischt
+        nur die hier vorhandenen Schluessel und laesst ihn unberuehrt.
         """
         # Nur ohne Kontonamen auf das aktive Konto zurückfallen. Ist der
         # angezeigte Name gesetzt, aber nicht mehr vorhanden, bleibt der
@@ -572,9 +572,6 @@ class SyncDashboard(QDialog):
             "state": (account.get("state")
                       if isinstance(account.get("state"), dict) else {}),
         }
-        typed = self._typed_refresh()
-        if typed:
-            values["refresh_token"] = typed
         return values
 
     def _login_running(self):
@@ -648,7 +645,8 @@ class SyncDashboard(QDialog):
         self.primary.setEnabled(False)
         self.status.setText(
             "Bitte im Browserfenster anmelden, bis die Bücherliste erscheint.")
-        worker = BrowserLoginWorker(context.partner_id, context.hardware_id)
+        worker = BrowserLoginWorker(
+            context.partner_id, self.hardware.text().strip())
         worker.progress.connect(self._login_progress)
         worker.completed.connect(self.login_completed)
         worker.failed.connect(self.login_failed)
@@ -701,9 +699,8 @@ class SyncDashboard(QDialog):
 
     @staticmethod
     def _worker_client(context):
-        """Client aus dem Lauf-Kontext bauen."""
-        store = CredentialStore(context.credentials, context.account_name)
-        return TOKEN_VAULT.login(store)
+        """Client aus dem Lauf-Kontext bauen; der Vault liest den Token."""
+        return TOKEN_VAULT.login(context.account_name, context.partner_id)
 
     def _show_prepare_error(self, exc, context):
         """Nur den kurzen Fehlertext zeigen; technische Details protokollieren."""
@@ -794,8 +791,6 @@ class SyncDashboard(QDialog):
         # Nur die Hardware-ID gehört nach dem Vergleich in die Einstellungen.
         # Der Token wird durch den Client-Callback beim Rotieren gespeichert.
         hardware = getattr(self, "hardware", None)
-        if payload.get("hardware"):
-            context.hardware_id = str(payload["hardware"])
         if (payload.get("hardware") and hardware is not None
                 and self.account_name == account_name):
             hardware.setText(str(payload["hardware"]))

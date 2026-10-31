@@ -144,7 +144,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
         self.assertEqual(["metadata", "prepare"], [item[0] for item in seen])
         context = seen[1][1]
-        self.assertEqual("token-1", context.refresh_token)
         self.assertIs(metadata, seen[1][2])
         self.assertTrue(context.columns["id"])
 
@@ -329,8 +328,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
         passed = dashboard.worker.arguments[0]
-        self.assertEqual("token-1", passed.refresh_token)
-        self.assertEqual("hw-1", passed.hardware_id)
+        self.assertFalse(hasattr(passed, "refresh_token"))
         self.assertEqual(jobs, dashboard.worker.arguments[1])
         self.assertEqual(["remove-1"], dashboard.worker.arguments[2])
         self.assertEqual([("uuid-1", 7)], dashboard.worker.arguments[3])
@@ -374,7 +372,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 lambda given, prep, state=None: started.append(given))
 
             def plan(_dashboard, given, _metadata, _state, _selection):
-                self.assertNotEqual("tok-rotated", given.refresh_token)
+                self.assertFalse(hasattr(given, "refresh_token"))
                 return _preparation()
 
             with patch.object(ui_module.dashboard._dashboard_plan,
@@ -387,8 +385,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
-        self.assertEqual("token-1", started[0].refresh_token)
-        self.assertEqual("hw-rotated", started[0].hardware_id)
+        self.assertEqual("konto", started[0].account_name)
 
     def test_skipped_uploads_are_reported_before_the_run(self):
         ui_module = self._ui_module()
@@ -554,37 +551,39 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual("Nichts zu tun", infos[0][1])
         self.assertIn("nichts zu übertragen", infos[0][2].casefold())
 
-    def test_the_sync_worker_adopts_the_stored_token_at_login(self):
+    def test_the_sync_worker_lets_the_vault_read_the_stored_token(self):
         """Zwischen Vergleichsfenster und Start kann der Keep-alive den
-        Token rotiert haben. Der Worker muss den GESPEICHERTEN nehmen --
-        sonst loest er einen verbrauchten Token ein (A01).
-
-        Das passiert an EINER Stelle: der Vault ruft `freshest`, nicht
-        schon der Aufrufer des Workers.
+        Token rotiert haben. Der Worker haelt deshalb keine Kopie: der Vault
+        liest den GESPEICHERTEN Zugang unmittelbar vor dem Login.
         """
         ui_module = self._ui_module()
         settings = dict(StartSyncOrchestrationTests._settings(),
-                        account_name="konto", refresh_token="alt-token",
-                        hardware_id="hw-alt")
+                        account_name="konto")
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
             RunContext.from_values(settings),
             _preparation(jobs=["job-1"]), {})
         self.assertEqual(1, dashboard.thread.starts)
         passed = dashboard.worker.arguments[0]
-        # Der GUI-Snapshot wird unveraendert weitergereicht ...
-        self.assertEqual("alt-token", passed.refresh_token)
-        self.assertEqual("hw-alt", passed.hardware_id)
-        # ... und der Login des Workers uebernimmt den gespeicherten Zugang.
-        with patch("calibre_plugin.config.account_by_name",
-                   lambda name: {"name": "konto", "refresh_token": "neu-token",
-                                 "hardware_id": "hw-neu"}):
-            worker = ui_module.workers.SyncWorker(passed, [], [])
-            self.assertEqual("neu-token",
-                             worker.store.freshest()["refresh_token"])
-        self.assertEqual("neu-token",
-                         worker.context.credentials["refresh_token"])
-        self.assertEqual("hw-neu", worker.context.credentials["hardware_id"])
+        self.assertFalse(hasattr(passed, "credentials"))
+        self.assertFalse(hasattr(passed, "refresh_token"))
+
+        seen = []
+
+        class FakeClient:
+            def __init__(self, partner, hardware, refresh, **callbacks):
+                seen.append((partner, hardware, refresh))
+
+            def login(self):
+                return None
+
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
+                patch("calibre_plugin.token_vault.account_by_name",
+                      lambda _name: {"refresh_token": "neu-token",
+                                     "hardware_id": "hw-neu"}):
+            ui_module.workers.TOKEN_VAULT.login(
+                passed.account_name, passed.partner_id)
+        self.assertEqual([("thalia", "hw-neu", "neu-token")], seen)
 
     def test_the_plan_is_named_before_the_run_starts(self):
         ui_module = self._ui_module()

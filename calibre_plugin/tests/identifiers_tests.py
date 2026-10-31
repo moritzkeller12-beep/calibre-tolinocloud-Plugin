@@ -237,8 +237,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         self.assertEqual("t1", meta_updates[0][2])
 
     def test_a_stored_entry_keeps_its_old_key(self):
-        state = {"frueher": {"calibre_id": 7, "tolino_id": "t1",
-                             "fingerprint": "1:1"}}
+        state = {"frueher": {"calibre_id": 7, "tolino_id": "t1"}}
         dashboard = self._dashboard(self._books(), {
             "state": state, "preferred_formats": ["EPUB"]})
         metadata = self.dashboard_plan.local_metadata(

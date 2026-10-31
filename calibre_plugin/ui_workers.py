@@ -6,7 +6,7 @@ from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
 from .planning_values import plural
 from .token_vault import TOKEN_VAULT
-from .config import CredentialStore, save_account
+from .config import account_secrets, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
@@ -30,9 +30,6 @@ class SyncWorker(QObject):
         # gehoert zu dem beim Start erfassten Konto dieses Laufs.
         self.context = context.clone()
         self.account_name = self.context.account_name
-        # Der Store aktualisiert denselben Snapshot, den der Lauf verwendet.
-        self.store = CredentialStore(self.context.credentials,
-                                     self.account_name)
         self.jobs = list(jobs or ())
         self.removals = list(removals or ())
         self.meta_updates = list(meta_updates or ())
@@ -122,30 +119,23 @@ class SyncWorker(QObject):
             failed=states[OP_FAILED],
             cancelled=bool(self.cancelled))
 
-    def _record_failure(self, operation, exc, client=None):
-        """Einen einzelnen Schritt als gescheitert zaehlen.
+    def _fail(self, operation, exc, client=None, fatal=False):
+        """Einen Schritt als gescheitert zaehlen; `fatal` beendet den Lauf.
 
-        Der Lauf macht weiter: ein fehlendes Cover oder eine einzelne Datei
-        darf die uebrigen Buecher nicht verhindern. Der Grund steht am
-        Schritt (fuer den Abschlussbericht) und im Log -- ohne Zugangsdaten.
+        Ein fehlendes Cover oder eine einzelne Datei darf die uebrigen
+        Buecher nicht verhindern. Nur eine beschädigte Anmeldung/Sitzung ist
+        fatal: danach liefert jeder weitere Aufruf denselben Fehler. Der
+        Grund steht am Schritt (fuer den Abschlussbericht) und im Log -- ohne
+        Zugangsdaten.
         """
-        detail = sanitize_error(exc, (self.store.refresh_token,
-                                      getattr(client, "access", None)))
+        detail = sanitize_error(exc, account_secrets(self.account_name)
+                                + (getattr(client, "access", None),))
         if operation is not None:
             operation["exception"] = exc
         self._finish_operation(operation, OP_FAILED, error=detail)
         log_warning("Schritt gescheitert (%s): %s"
                     % ((operation or {}).get("label") or "?", detail))
-
-    def _count_failure(self, operation, exc, client=None):
-        """Schritt als gescheitert zählen -- fatal beendet den Lauf.
-
-        Nur eine beschädigte Anmeldung/Sitzung ist fatal: danach liefert
-        jeder weitere Aufruf denselben Fehler. Alles andere wird pro Schritt
-        gezählt, der Lauf macht weiter.
-        """
-        self._record_failure(operation, exc, client)
-        if isinstance(exc, TolinoAuthError):
+        if fatal and isinstance(exc, TolinoAuthError):
             raise exc
 
     def _step(self, client, checkpoint, operation, text, action, done, total,
@@ -163,7 +153,7 @@ class SyncWorker(QObject):
         try:
             result = action()
         except Exception as exc:
-            self._count_failure(operation, exc, client)
+            self._fail(operation, exc, client, fatal=True)
             return False, None
         if finish is None:
             self._finish_operation(operation, OP_SUCCEEDED)
@@ -244,7 +234,7 @@ class SyncWorker(QObject):
         try:
             deleted = self._delete_or_skip(client, job.old_id)
         except Exception as exc:
-            self._count_failure(operation, exc, client)
+            self._fail(operation, exc, client, fatal=True)
         else:
             self._finish_operation(
                 operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
@@ -321,15 +311,13 @@ class SyncWorker(QObject):
             # Ohne Bestand liesse sich nicht erkennen, was schon zugeordnet
             # ist -- jede Zuordnung gilt als gescheitert.
             for _book, _tolino, _series, operation in collection_ops:
-                self._record_failure(operation, exc, client)
+                self._fail(operation, exc, client, fatal=True)
                 # Auch ein gescheiterter Schritt ist abgeschlossen; sonst
                 # bliebe der Fortschrittsbalken am Beginn der Phase stehen.
                 done += 1
                 self.progress.emit(
                     done, total, "Fehlgeschlagen: %s"
                     % (operation.get("label") or "Sammlung"))
-            if isinstance(exc, TolinoAuthError):
-                raise
             return None, done
 
     def _plan_collection_operations(self):
@@ -449,7 +437,7 @@ class SyncWorker(QObject):
                     cover_op = self._add_operation(
                         "cover", "Buchcover: %s" % job.label(),
                         book_uuid=job.book_uuid)
-                    self._count_failure(cover_op, exc, client)
+                    self._fail(cover_op, exc, client, fatal=True)
             self._remove_replaced_copy(client, job)
             done += 1
             self.progress.emit(done, total, "Hochgeladen: %s" % job.label())
@@ -459,7 +447,8 @@ class SyncWorker(QObject):
         state = self.state
         client = None
         try:
-            client = TOKEN_VAULT.login(self.store)
+            client = TOKEN_VAULT.login(self.account_name,
+                                       self.context.partner_id)
             (meta_ops, upload_ops, delete_ops, read_op, unread_op,
              total) = self._plan_operations()
             done = 0
@@ -498,8 +487,8 @@ class SyncWorker(QObject):
             self._refresh_counts()
             message = (CANCEL_MESSAGE if str(exc) == CANCEL_MESSAGE
                        else report_error(exc, "Sync", (
-                           self.store.refresh_token,
-                           getattr(client, "access", None))))
+                           account_secrets(self.account_name)
+                           + (getattr(client, "access", None),))))
             self.failed.emit(message)
 
 
@@ -529,14 +518,6 @@ class PrepareWorker(QObject):
         # mit «Anmeldung wird gerade erneuert» abbricht.
         self.lock_timeout = lock_timeout
         self.account_name = self.context.account_name
-        # Der Store aktualisiert denselben Snapshot, den Vergleich und Sync
-        # weiterverwenden.
-        self.store = CredentialStore(self.context.credentials,
-                                     self.account_name)
-        # Der ausgetauschte Token verschwindet nach der Rotation aus dem
-        # Kontext; fuer die Redaktion alter Fehlertexte bleibt er
-        # trotzdem ein Geheimnis.
-        self.initial_refresh_token = self.context.refresh_token
         self.cancelled = False
 
     def cancel(self):
@@ -575,10 +556,8 @@ class PrepareWorker(QObject):
             # «nichts gelesen» ausgeben.
             read_ids = None
             read_known = False
-            secrets = (self.initial_refresh_token,
-                       self.context.refresh_token)
             log_warning("Lesestatus konnte nicht geladen werden: "
-                        + sanitize_error(exc, secrets))
+                        + sanitize_error(exc, self.context.secrets()))
         return inventory, read_ids, read_known
 
     def _build_comparison(self, state, inventory, read_ids):
@@ -605,7 +584,9 @@ class PrepareWorker(QObject):
         try:
             state = self._load_comparison_state()
             self.progress.emit("Verbinde mit tolino …")
-            client = TOKEN_VAULT.login(self.store, self.lock_timeout)
+            client = TOKEN_VAULT.login(self.account_name,
+                                       self.context.partner_id,
+                                       self.lock_timeout)
             if self._stop_requested():
                 return
             self.progress.emit("Lade Cloud-Bestand …")
@@ -630,5 +611,5 @@ class PrepareWorker(QObject):
                 return
             self.failed.emit(report_error(
                 exc, "Vorbereitung",
-                (self.initial_refresh_token, self.context.refresh_token,
-                 getattr(client, "access", None))))
+                self.context.secrets()
+                + (getattr(client, "access", None),)))

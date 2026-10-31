@@ -20,9 +20,9 @@ tearDownModule = stop_cdp_stubs
 
 
 def _marked_rows(indexes):
-    """`selected_table_rows` für die Dauer des with-Blocks ersetzen."""
+    """`_selected_rows` für die Dauer des with-Blocks ersetzen."""
 
-    return patch("calibre_plugin.ui_dialogs.selected_table_rows",
+    return patch("calibre_plugin.ui_dialogs._selected_rows",
                  lambda _table: list(indexes))
 
 
@@ -34,8 +34,7 @@ def _read_ids(dialog, finished):
 
 def _action_cell(dialog, index, column):
     """Check-Controller einer Aktionsspalte (0 Upload, 1 Metadaten, 2 Read)."""
-    return (dialog.cells["upload"], dialog.cells["metadata"],
-            dialog.cells["read"])[column][index]
+    return dialog._check(index, column)
 
 
 class _CheckStateItem:
@@ -288,7 +287,7 @@ class InventoryDialogSortTests(unittest.TestCase):
                        if index not in dialog_cls.TECHNICAL_COLUMNS]
             self.assertEqual(8, len(visible))
             self.assertEqual(8, len(headers) - len(dialog_cls.TECHNICAL_COLUMNS))
-            self.assertEqual(len(headers), len(dialog_cls._SORT_KEYS))
+            self.assertEqual(len(headers), len(dialog_cls.COLUMNS))
             self.assertEqual((8, 9, 10), dialog_cls.TECHNICAL_COLUMNS)
             for gone in ("Wo", "Status"):
                 self.assertNotIn(gone, headers)
@@ -340,15 +339,54 @@ class InventoryDialogSortTests(unittest.TestCase):
                 {"status": "only_tolino", "book_id": None, "tolino_id": "c9",
                  "read": ReadState()},
             ]
+            class Header:
+                def setSectionResizeMode(self, *args):
+                    pass
+
+                def resizeSection(self, *args):
+                    pass
+
+            class Table:
+                """Tabellen-Ersatz für Auswahl, Neuaufbau und Zellen."""
+
+                def __init__(self):
+                    self.items = {}
+
+                def item(self, row, column):
+                    return self.items.setdefault(
+                        (row, column),
+                        ui_module.dialogs.QTableWidgetItem(""))
+
+                def setItem(self, row, column, item):
+                    self.items[(row, column)] = item
+
+                def setUpdatesEnabled(self, value):
+                    pass
+
+                def setRowCount(self, count):
+                    pass
+
+                def setRowHidden(self, index, hidden):
+                    pass
+
+                def setColumnHidden(self, column, hidden):
+                    pass
+
+                def resizeColumnsToContents(self):
+                    pass
+
+                def horizontalHeader(self):
+                    return Header()
+
             dialog.rows = rows
-            dialog.cells = {"upload": [], "metadata": [], "read": []}
+            dialog.table = Table()
+            dialog.group_filter = type(
+                "Combo", (), {"currentData": lambda self: None})()
+            dialog._syncing_checks = False
+            dialog._technical_visible = False
             dialog.summary = None
             dialog.confirm = None
             dialog.action_feedback = None
-            for index in range(len(rows)):
-                for controls in dialog.cells.values():
-                    controls.append(ui_module.dialogs._ActionCheck(
-                        ui_module.dialogs.QTableWidgetItem("")))
             dialog.apply_recommended()
             # Neu -> hochladen, geänderte Datei -> hochladen, sonst
             # Metadaten; nichts für unveränderte oder reine Cloud-Bücher.
@@ -394,12 +432,6 @@ class ComparisonLayoutTests(unittest.TestCase):
     @staticmethod
     def _source():
         return _ui_source_text()
-
-    @staticmethod
-    def _body():
-        source = ComparisonLayoutTests._source()
-        return source.split("class InventoryDialog(QDialog):", 1)[1].split(
-            "\nclass ", 1)[0]
 
     def test_the_menu_offers_every_row_action(self):
         """Die Spalten-Aktionen gelten auch für markierte Zeilen."""
@@ -461,7 +493,9 @@ class InventoryDialogReadStateTests(_QtDialogTest):
         ]
 
     @staticmethod
-    def _marked_table(marked):
+    def _mark(dialog, marked):
+        """Markierung am echten Tabellenstub setzen -- Zellen bleiben da."""
+
         class Index:
             def __init__(self, row):
                 self._row = row
@@ -473,16 +507,12 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             def selectedRows(self):
                 return [Index(row) for row in marked]
 
-        class Table:
-            def selectionModel(self):
-                return Model()
-
-        return Table()
+        dialog.table.selectionModel = lambda: Model()
 
     @staticmethod
     def _cells_by_title(dialog):
         """Lese-Checkzellen nach Titel – das Fenster sortiert beim Bau."""
-        return {row["title"]: dialog.cells["read"][index]
+        return {row["title"]: dialog._check(index, 2)
                 for index, row in enumerate(dialog.rows)}
 
     def test_cloud_read_book_is_prechecked_and_unlockable(self):
@@ -582,7 +612,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
         try:
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            dialog.table = self._marked_table(range(len(dialog.rows)))
+            self._mark(dialog, range(len(dialog.rows)))
             dialog.set_column_for_marked_rows("read", True, "schon gelesen")
             # Das gelesene Buch hat schon seine Marke, „Nur lokal“ keine
             # Cloud-Kopie -- nur die zwei ungelesenen Cloud-Bücher bleiben.
@@ -599,7 +629,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             local_index = [index for index, row in enumerate(dialog.rows)
                            if not row["tolino_id"]]
-            dialog.table = self._marked_table(local_index)
+            self._mark(dialog, local_index)
             dialog.set_column_for_marked_rows("read", True, "schon gelesen")
             self.assertEqual([], _read_ids(dialog, True))
             self.assertTrue(any("nichts geändert" in text.casefold()
@@ -612,7 +642,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
         try:
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            dialog.table = self._marked_table([])
+            self._mark(dialog, [])
             dialog.set_column_for_marked_rows("read", True, "schon gelesen")
             self.assertTrue(any("Strg" in text for text in calls), calls)
             self.assertEqual([], _read_ids(dialog, True))
@@ -625,7 +655,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
         try:
             self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            dialog.table = self._marked_table(range(len(dialog.rows)))
+            self._mark(dialog, range(len(dialog.rows)))
             dialog.set_column_for_marked_rows("upload", True, "keine Datei")
             self.assertEqual({1, 2, 3, 4}, dialog._selected_book_ids("upload"))
             dialog.set_column_for_marked_rows("metadata", True, "keine Cloud")
@@ -644,7 +674,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
         try:
             self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            dialog.table = self._marked_table(range(len(dialog.rows)))
+            self._mark(dialog, range(len(dialog.rows)))
             dialog.set_column_for_marked_rows("read", False, "schon ungelesen")
             # Nur das in der Cloud gelesene Buch lässt sich zurücksetzen.
             self.assertEqual({"t-1"}, set(_read_ids(dialog, False)))
@@ -731,7 +761,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             self.assertFalse(self._row(dialog, "Gelesen")["upload"])
             # Zeile UND Auswahlfeld in der Tabelle sind gesetzt.
             self.assertTrue(_action_cell(dialog, index, 0).isChecked())
-            self.assertTrue(dialog.cells["upload"][index].isChecked())
+            self.assertTrue(dialog._check(index, 0).isChecked())
             self.assertEqual(
                 "Upload aktiviert für 1 von 1 markierten Büchern.",
                 dialog.action_feedback.text())
@@ -755,7 +785,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             for index, row in enumerate(dialog.rows):
                 wanted = bool(row["tolino_id"])
                 self.assertEqual(wanted,
-                                 dialog.cells["metadata"][index].isChecked())
+                                 dialog._check(index, 1).isChecked())
                 self.assertEqual(wanted,
                                  _action_cell(dialog, index, 1).isChecked())
             self.assertEqual([], calls)
@@ -919,7 +949,7 @@ class RowActionPromptTests(_QtDialogTest):
             ui_module.dialogs.QMessageBox = type("MsgBox", (), {
                 "information": staticmethod(lambda *args, **kwargs: None)})
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            with patch("calibre_plugin.ui_dialogs.selected_table_rows",
+            with patch("calibre_plugin.ui_dialogs._selected_rows",
                        lambda _table: [0, 1, 2]):
                 dialog.choose_row_action()
             self.assertEqual(6, len(chosen))
@@ -939,7 +969,7 @@ class RowActionPromptTests(_QtDialogTest):
                                if row["title"] == "Nur lokal")
             dialog.rows[local_index]["has_preferred_format"] = True
             dialog.rows[local_index]["upload"] = False
-            with patch("calibre_plugin.ui_dialogs.selected_table_rows",
+            with patch("calibre_plugin.ui_dialogs._selected_rows",
                        lambda _table: [local_index]):
                 dialog.choose_row_action()
             self.assertEqual(["Upload aktivieren"], chosen)
@@ -968,7 +998,7 @@ class RowActionPromptTests(_QtDialogTest):
             ui_module.dialogs.QMenu = Menu
             ui_module.dialogs.QMessageBox = MsgBox
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            with patch("calibre_plugin.ui_dialogs.selected_table_rows",
+            with patch("calibre_plugin.ui_dialogs._selected_rows",
                        lambda _table: []):
                 dialog.choose_row_action()
             self.assertEqual(["info"], prompts)
@@ -1020,7 +1050,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
 
     @staticmethod
     def _marked(index):
-        return patch("calibre_plugin.ui_dialogs.selected_table_rows",
+        return patch("calibre_plugin.ui_dialogs._selected_rows",
                      lambda _table: [index])
 
     def test_marked_cloud_copy_is_queued_and_conflicting_actions_clear(self):
@@ -1359,9 +1389,9 @@ class IgnoredRowDialogTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
             self.assertEqual(1, len(dialog.rows))
             self.assertEqual("ignored", dialog.rows[0]["group"])
-            self.assertFalse(dialog.cells["upload"][0].enabled)
-            self.assertFalse(dialog.cells["upload"][0].isChecked())
-            self.assertIn("ignoriert", dialog.cells["upload"][0].tooltip)
+            self.assertFalse(dialog._check(0, 0).enabled)
+            self.assertFalse(dialog._check(0, 0).isChecked())
+            self.assertIn("ignoriert", dialog._check(0, 0).tooltip)
             self.assertEqual(
                 (False, False),
                 ui_module.dialogs.InventoryDialog.default_actions(
@@ -1377,7 +1407,7 @@ class IgnoredRowDialogTests(_QtDialogTest):
         ui_module = self._ui()
         try:
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-            dialog.cells["upload"][0].setChecked(True)
+            dialog._check(0, 0).setChecked(True)
             dialog.rows[0]["delete_cloud"] = True
             self.assertEqual(set(), dialog._selected_book_ids("upload"))
             self.assertEqual([], dialog.selected_cloud_deletions())

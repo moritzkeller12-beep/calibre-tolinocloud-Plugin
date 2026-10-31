@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode, quote as _url_quote, urlsplit
 from urllib.request import Request, urlopen
 
+from .errors import TolinoApiError, TolinoAuthError, TolinoError
 from .inventory import parse_inventory
 from .partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
                        WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS)
@@ -39,31 +40,6 @@ def _browser_sec_headers():
         "Sec-Fetch-Site": "cross-site",
         "Sec-GPC": "1",
     }
-
-
-class TolinoError(Exception):
-    """Fehler mit Code (z. B. A01), kurzem Nutzertext und Detail fürs Log.
-
-    str(exc) bleibt der vollständige Text (auch Serverantwort) und dient
-    der internen Auswertung; der Dialog zeigt nur `short` (falls gesetzt)
-    plus Code. Alles Technische landet über report_error() im Calibre-Log.
-    """
-    code = "E99"
-
-    def __init__(self, message="", *args, code=None, short=None, detail=""):
-        super().__init__(message, *args)
-        if code:
-            self.code = code
-        self.short = short
-        self.detail = detail
-
-
-class TolinoAuthError(TolinoError):
-    pass
-
-
-class TolinoApiError(TolinoError):
-    pass
 
 
 # Immer derselbe Satz, wenn nur eine neue Anmeldung hilft.
@@ -299,7 +275,6 @@ class TolinoClient:
         # Beide setzt der Token-Vault, sobald er diesen Client erzeugt;
         # ohne Vault meldet sich der Client direkt an.
         self.token_vault = None
-        self.credential_store = None
         self._in_device_recovery = False
         self._hw_registered_now = False
         self._login_lock = threading.Lock()
@@ -774,7 +749,7 @@ class TolinoClient:
         mehrere Zuordnungen nur eine Cloud-Anfrage zum Lesen brauchen.
         """
         patch = _sync_data.tag_patch(
-            "add", book_id, collection_name, "collection", TolinoApiError)
+            "add", book_id, collection_name, "collection")
         data = self._sync_patch({
             "revision": self._current_revision(revision), "patches": [patch]})
         return data.get("revision")
@@ -801,12 +776,10 @@ class TolinoClient:
             if finished:
                 if existing is None:
                     updates.append(_sync_data.tag_patch(
-                        "add", book_id, _sync_data.READ_TAG, "system",
-                        TolinoApiError))
+                        "add", book_id, _sync_data.READ_TAG, "system"))
             elif existing is not None:
                 updates.append(_sync_data.tag_patch(
                     "remove", book_id, _sync_data.READ_TAG, "system",
-                    TolinoApiError,
                     revision=existing["value"].get("revision"),
                     tag_id=_sync_data.tag_id_from_patch(existing)))
         if not updates:

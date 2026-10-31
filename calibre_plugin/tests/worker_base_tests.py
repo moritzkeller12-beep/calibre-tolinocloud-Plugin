@@ -8,8 +8,24 @@ from ._support import start_cdp_stubs, stop_cdp_stubs
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
-setUpModule = start_cdp_stubs
-tearDownModule = stop_cdp_stubs
+_ACCOUNT_PATCH = None
+
+
+def setUpModule():
+    global _ACCOUNT_PATCH
+    start_cdp_stubs()
+    _ACCOUNT_PATCH = patch(
+        "calibre_plugin.token_vault.account_by_name",
+        lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
+    _ACCOUNT_PATCH.start()
+
+
+def tearDownModule():
+    global _ACCOUNT_PATCH
+    if _ACCOUNT_PATCH is not None:
+        _ACCOUNT_PATCH.stop()
+        _ACCOUNT_PATCH = None
+    stop_cdp_stubs()
 
 class CollectionReconcileWorkerTests(unittest.TestCase):
     """Serien → Sammlungen im SyncWorker.

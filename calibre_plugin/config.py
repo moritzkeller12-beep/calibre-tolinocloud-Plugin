@@ -157,62 +157,28 @@ def save_credentials(account_name, refresh_token, hardware):
     })
 
 
-class CredentialStore:
-    """Snapshot and persistence adapter for one account's rotating credentials."""
+def save_refresh_token(account_name, token):
+    """Einen rotierten Token im Konto sichern; leer loescht nichts.
 
-    def __init__(self, values, account_name=None):
-        self.values = values if isinstance(values, dict) else {}
-        self.account_name = str(
-            account_name or self.values.get("account_name") or "")
+    Der Client meldet jede Token-Antwort hier; eine Antwort ohne
+    `refresh_token` darf den gespeicherten Zugang nicht ausleeren.
+    """
+    token = str(token or "").strip()
+    if account_name and token:
+        save_account(account_name, {"refresh_token": token})
 
-    @property
-    def refresh_token(self):
-        return str(self.values.get("refresh_token") or "")
 
-    @property
-    def hardware_id(self):
-        return str(self.values.get("hardware_id") or "")
+def save_hardware_id(account_name, hardware):
+    """Die Geraete-ID im Konto sichern -- die Config ist ihre einzige Quelle."""
+    if account_name:
+        save_account(account_name, {"hardware_id": str(hardware or "")})
 
-    def snapshot(self):
-        return {"refresh_token": self.refresh_token,
-                "hardware_id": self.hardware_id}
 
-    def _save(self):
-        if self.account_name:
-            save_credentials(self.account_name, self.refresh_token,
-                             self.hardware_id)
-
-    def save_refresh(self, refresh):
-        """Rotierten Token speichern; ein leerer Wert löscht nichts.
-
-        Der Callback des Clients läuft bei jeder Token-Antwort. Eine Antwort
-        ohne `refresh_token` darf den gespeicherten Zugang nicht ausleeren.
-        """
-        token = str(refresh or "").strip()
-        if not token:
-            return
-        self.values["refresh_token"] = token
-        self._save()
-
-    def save_hardware(self, hardware):
-        self.values["hardware_id"] = str(hardware or "")
-        self._save()
-
-    def freshest(self):
-        """Adopt the freshest persisted credentials before using a token."""
-        if not self.account_name:
-            return self.snapshot()
-        try:
-            stored = account_by_name(self.account_name) or {}
-        except Exception:
-            return self.snapshot()
-        token = str(stored.get("refresh_token") or "").strip()
-        if token and token != self.refresh_token:
-            self.values["refresh_token"] = token
-        hardware = str(stored.get("hardware_id") or "").strip()
-        if hardware and hardware != self.hardware_id:
-            self.values["hardware_id"] = hardware
-        return self.snapshot()
+def account_secrets(account_name):
+    """Bekannte Geheimnisse eines Kontos fuer die Log-Redaktion."""
+    account = account_by_name(account_name) or {}
+    token = str(account.get("refresh_token") or "").strip()
+    return (token,) if token else ()
 
 
 def remove_account(name):

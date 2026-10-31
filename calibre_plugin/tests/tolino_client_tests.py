@@ -1315,36 +1315,6 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
-    def test_the_store_writes_the_snapshot_and_persists_at_once(self):
-        original = config.PREFERENCES
-        try:
-            config.PREFERENCES = config.JSONConfig("test")
-            values = {"refresh_token": "alt", "hardware_id": "hw-alt"}
-            store = config.CredentialStore(values, "konto")
-            store.save_refresh("neu")
-            self.assertEqual("neu", values["refresh_token"])
-            account = config.account_by_name("konto")
-            self.assertEqual("neu", account["refresh_token"])
-            # Die Hardware-ID bleibt erhalten, wenn nur der Token rotiert.
-            self.assertEqual("hw-alt", account["hardware_id"])
-        finally:
-            config.PREFERENCES = original
-
-    def test_the_store_takes_only_non_empty_stored_values(self):
-        original = config.PREFERENCES
-        try:
-            config.PREFERENCES = config.JSONConfig("test")
-            values = {"refresh_token": "alt", "hardware_id": "hw-alt"}
-            store = config.CredentialStore(values, "konto")
-            # Nichts gespeichert: der Snapshot bleibt unangetastet.
-            store.freshest()
-            self.assertEqual("alt", values["refresh_token"])
-            config.save_credentials("konto", "gespeichert", "hw-neu")
-            self.assertEqual("gespeichert", store.freshest()["refresh_token"])
-            self.assertEqual("hw-neu", values["hardware_id"])
-        finally:
-            config.PREFERENCES = original
-
     def test_save_credentials_without_a_name_does_nothing(self):
         original = config.PREFERENCES
         try:
@@ -1355,23 +1325,19 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
-    def test_sync_worker_persists_through_the_shared_helper(self):
-        ui_module = self._ui_module()
-        saved = []
-        settings = {"account_name": "konto", "hardware_id": "hw-alt",
-                    "refresh_token": "tok-alt"}
+    def test_save_refresh_token_keeps_the_hardware_id(self):
+        original = config.PREFERENCES
         try:
-            with patch("calibre_plugin.config.save_credentials",
-                       lambda *args: saved.append(args)):
-                worker = ui_module.workers.SyncWorker(
-                    RunContext.from_values(settings), [], [],
-                    state=settings.get("state"))
-                worker.store.save_refresh("tok-neu")
-                worker.store.save_hardware("hw-neu")
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("konto", {"refresh_token": "alt",
+                                          "hardware_id": "hw"},
+                                active="konto")
+            config.save_refresh_token("konto", "neu")
+            account = config.account_by_name("konto")
+            self.assertEqual("neu", account["refresh_token"])
+            self.assertEqual("hw", account["hardware_id"])
         finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual([("konto", "tok-neu", "hw-alt"),
-                          ("konto", "tok-neu", "hw-neu")], saved)
+            config.PREFERENCES = original
 
     def test_dashboard_stores_a_manually_entered_token(self):
         ui_module = self._ui_module()
