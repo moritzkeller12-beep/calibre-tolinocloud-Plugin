@@ -162,14 +162,14 @@ def launch_reader_window():
     creationflags = 0x00000008 if os.name == "nt" else 0
     last_error = None
     process = None
-    for argv, candidate_label in options:
+    for argv in options:
         try:
             process = subprocess.Popen(
                 list(argv) + flags, creationflags=creationflags,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             break
         except OSError as exc:
-            last_error = (candidate_label, exc)
+            last_error = (argv, exc)
     if process is None:
         shutil.rmtree(profile, ignore_errors=True)
         raise TolinoAuthError(

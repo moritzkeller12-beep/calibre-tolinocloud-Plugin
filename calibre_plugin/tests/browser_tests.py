@@ -70,7 +70,7 @@ class LiveGrabTests(unittest.TestCase):
         from unittest.mock import patch as _patch
 
         with tempfile.TemporaryDirectory() as home:
-            for app_id, _command, _label, _host_label in browser_finder._FLATPAK_BROWSER_APPS:
+            for app_id, _command in browser_finder._FLATPAK_BROWSER_APPS:
                 os.makedirs(os.path.join(home, ".var", "app", app_id))
             fake_flatpak = os.path.join(home, "bin", "flatpak")
             os.makedirs(os.path.dirname(fake_flatpak))
@@ -81,13 +81,11 @@ class LiveGrabTests(unittest.TestCase):
                         side_effect=lambda name: fake_flatpak
                         if name == "flatpak" else None):
                 candidates = browser_finder._collect_candidates(home=home)[0]
-        labels = [label for _argv, label in candidates]
-        candidates_by_label = dict((label, argv) for argv, label in candidates)
-        for app_id, command, label, _host_label in browser_finder._FLATPAK_BROWSER_APPS:
-            self.assertIn(label, labels)
+        for app_id, command in browser_finder._FLATPAK_BROWSER_APPS:
+            launcher = next(argv for argv in candidates if argv[-1] == app_id)
             self.assertEqual(["run", "--command=" + command, app_id],
-                             candidates_by_label[label][1:])
-            self.assertTrue(candidates_by_label[label][0].endswith("flatpak"))
+                             launcher[1:])
+            self.assertTrue(launcher[0].endswith("flatpak"))
 
     def test_collect_candidates_skips_flatpak_without_launcher(self):
         """Ohne `flatpak`-Binary im PATH gibt es keinen Flatpak-Kandidaten."""
@@ -118,7 +116,7 @@ class LiveGrabTests(unittest.TestCase):
             prefix = ["/usr/bin/flatpak", "run", "--command=brave",
                       "com.brave.Browser"]
             with _patch.object(browser_finder, "find_browsers",
-                               return_value=([(prefix, "Brave (Flatpak)")], "")), \
+                               return_value=([prefix], "")), \
                  _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
                  _patch.object(cdp_module, "_http_get_json",
                                return_value={"webSocketDebuggerUrl":
@@ -990,8 +988,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                        side_effect=lambda name: "/usr/bin/%s" % name
                        if name == "chrome" else None):
                 found = browser_finder._collect_candidates(home=home)[0]
-        argvs = [argv for argv, _label in found]
-        self.assertIn(["/usr/bin/chrome"], argvs)
+        self.assertIn(["/usr/bin/chrome"], found)
 
     def test_collect_candidates_falls_back_to_known_paths(self):
         """Fest verdrahtete Installationsorte finden auch dann eine
@@ -1005,8 +1002,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
             with patch.object(browser_finder, "_EXTRA_BROWSER_PATHS", (path,)), \
                  patch("shutil.which", return_value=None):
                 found = browser_finder._collect_candidates(home=home)[0]
-        self.assertIn([path], [argv for argv, _label in found])
-        self.assertIn("Chromium", [label for _argv, label in found])
+        self.assertIn([path], found)
 
 
     def test_host_probe_status_empty_when_host_has_no_browser(self):
@@ -1053,8 +1049,8 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
         from unittest.mock import patch as _patch
         from .. import cdp as cdp_module
 
-        broken = (["/usr/bin/broken"], "Broken")
-        working = (["/usr/bin/working"], "Working")
+        broken = ["/usr/bin/broken"]
+        working = ["/usr/bin/working"]
         spawned = {}
 
         class FakePopen(object):
@@ -1098,7 +1094,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                 return 0
 
         with _patch.object(browser_finder, "find_browsers",
-                           return_value=([(["/usr/bin/chromium"], "Chromium")], "")), \
+                           return_value=([["/usr/bin/chromium"]], "")), \
              _patch.object(cdp_module, "_start_port", return_value=9333), \
              _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
              _patch.object(cdp_module, "_http_get_json", return_value=(None, 'empty')), \
@@ -1124,7 +1120,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                 raise OSError("cannot start")
 
         with _patch.object(browser_finder, "find_browsers",
-                           return_value=([(["/usr/bin/chromium"], "Chromium")], "")), \
+                           return_value=([["/usr/bin/chromium"]], "")), \
              _patch.object(cdp_module.subprocess, "Popen", FakePopen):
             with self.assertRaises(TolinoAuthError):
                 cdp_module.launch_reader_window()
@@ -1158,8 +1154,7 @@ class PlatformBrowserPathTests(unittest.TestCase):
                 patch.object(os.path, "isfile",
                              side_effect=lambda path: path in existing_paths):
             found = browser_finder._platform_browser_paths("win32")
-        self.assertEqual([([chrome], "Google Chrome"),
-                          ([chromium], "Chromium")], found)
+        self.assertEqual([[chrome], [chromium]], found)
 
     def test_macos_checks_system_and_user_application_directories(self):
         with tempfile.TemporaryDirectory() as home:
@@ -1179,7 +1174,7 @@ class PlatformBrowserPathTests(unittest.TestCase):
             with patch("os.path.expanduser", return_value=home), \
                     patch.object(os.path, "isfile", side_effect=isfile):
                 found = browser_finder._platform_browser_paths("darwin")
-        self.assertEqual([([chrome], "Google Chrome"), ([edge], "Edge")], found)
+        self.assertEqual([[chrome], [edge]], found)
 
 
 class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
@@ -1214,9 +1209,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         class FakeProc(object):
             returncode = 0
             stdout = ("NATIVE /usr/bin/chromium\n" + "".join(
-                "FLATPAK %s\n" % app_id
-                for app_id, _command, _label, _host_label
-                in browser_finder._FLATPAK_BROWSER_APPS))
+                "FLATPAK %s\n" % app_id                 for app_id, _command in browser_finder._FLATPAK_BROWSER_APPS))
 
         with _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=True), \
@@ -1226,15 +1219,12 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
              _patch.object(cdp_module.subprocess, "run",
                            return_value=FakeProc()):
             found = browser_finder._collect_candidates(home="/nonexistent-home")[0]
-        argvs = [argv for argv, _label in found]
         self.assertIn(["/usr/bin/flatpak-spawn", "--host",
-                       "/usr/bin/chromium"], argvs)
+                       "/usr/bin/chromium"], found)
         self.assertIn(["/usr/bin/flatpak-spawn", "--host", "flatpak", "run",
-                       "--command=chrome", "org.chromium.Chromium"], argvs)
-        labels = [label for _argv, label in found]
-        self.assertIn("chromium (Host)", labels)
-        for _app_id, _command, _label, host_label in browser_finder._FLATPAK_BROWSER_APPS:
-            self.assertIn(host_label, labels)
+                       "--command=chrome", "org.chromium.Chromium"], found)
+        for app_id, _command in browser_finder._FLATPAK_BROWSER_APPS:
+            self.assertTrue(any(argv[-1] == app_id for argv in found))
 
 
     def test_collect_candidates_never_probe_outside_sandbox(self):
@@ -1281,9 +1271,8 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
             found, status = browser_finder._collect_candidates(
                 home="/nonexistent-home")
             self.assertEqual("ok", status)
-        argvs = [argv for argv, _label in found]
         self.assertIn(["/usr/bin/flatpak-spawn", "--host",
-                       "/usr/bin/chromium"], argvs)
+                       "/usr/bin/chromium"], found)
 
     def test_host_probe_script_forces_exit_zero(self):
         """Das Sonden-Skript endet mit `exit 0` – sonst meldet die
@@ -1311,7 +1300,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
             browser_finder._collect_candidates(home="/nonexistent-home")[0]
         script = captured["argv"][-1]
         self.assertTrue(script.rstrip().endswith("exit 0"), script)
-        for app_id, _command, _label, _host_label in browser_finder._FLATPAK_BROWSER_APPS:
+        for app_id, _command in browser_finder._FLATPAK_BROWSER_APPS:
             self.assertIn(app_id, script)
 
     def test_denied_still_reported_without_any_output(self):
@@ -1467,7 +1456,7 @@ class CdpOwnershipTests(unittest.TestCase):
                 return None
 
         with patch.object(browser_finder, "find_browsers",
-                          return_value=([(["/usr/bin/chromium"], "Chromium")], "")), \
+                          return_value=([["/usr/bin/chromium"]], "")), \
              patch.object(self.cdp, "_start_port", return_value=9441), \
              patch.object(self.cdp.subprocess, "Popen", FakePopen), \
              patch.object(self.cdp, "_http_get_json", return_value={"ok": True}):
