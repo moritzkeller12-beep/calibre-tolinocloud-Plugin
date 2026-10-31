@@ -1,5 +1,6 @@
 """Hintergrundarbeit: Sync, Bestand und Keep-alive."""
 
+from ..comparison import ReadState
 import calibre_plugin.tolino as tolino_module
 import calibre_plugin.token_vault as vault_module
 import unittest
@@ -15,11 +16,12 @@ from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
 from unittest.mock import patch
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 def _changes(read_marks=(), read_unmarks=()):
     """Lesestatus-Änderungen als (tolino-ID, Calibre-Nummer, gelesen?)."""
+
     return ([(tolino_id, None, True) for tolino_id in read_marks or ()]
             + [(tolino_id, None, False) for tolino_id in read_unmarks or ()])
 
@@ -664,7 +666,10 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             def setText(self, value):
                 self.value = value
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.account_name = "B"
         dashboard.refresh = FakeField("tok-B")
         dashboard.gui = type("Gui", (), {"current_db": object()})()
@@ -672,8 +677,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
-        worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0}
+        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         dashboard.worker = worker
@@ -699,7 +703,10 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
     def test_cancel_is_shown_as_cancelled_not_as_a_failure(self):
         ui_module = self._ui()
         infos, errors = [], []
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
                                            "setText": lambda self, v: None})()
@@ -711,8 +718,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker.cancelled = True
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
-        worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0, "cancelled": True}
+        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0, "cancelled": True}
         dashboard.worker = worker
         with patch("calibre_plugin.ui_dashboard.save_account", lambda *a, **k: None), \
              patch("calibre_plugin.ui_dashboard.save_credentials", lambda *a, **k: None), \
@@ -907,7 +913,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return self.refresh
 
             def inventory(self):
-                return parsed_inventory([{"has_deliverable_id": False}])
+                return parsed_inventory([{}])
 
             def read_ids(self):
                 return set()
@@ -1633,8 +1639,8 @@ class ReadStatusUnknownTests(unittest.TestCase):
         try:
             dialog = ui_module.dialogs.InventoryDialog([
                 {"title": "Buch", "authors": "A", "status": "identical",
-                 "book_id": 1, "tolino_id": "t1", "read_known": False,
-                 "read_in_cloud": False,
+                 "book_id": 1, "tolino_id": "t1",
+                 "read": ReadState(known=False),
                  "explanation": "In beiden vorhanden."}], options={})
             self.assertEqual(1, len(dialog.cells["read"]))
             self.assertFalse(dialog.cells["read"][0].enabled)

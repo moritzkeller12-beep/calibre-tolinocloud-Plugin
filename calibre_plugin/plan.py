@@ -159,11 +159,12 @@ def metadata_update_fields(metadata):
 def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     """In-place Metadaten-Updates (/meta) für die ausgewählten Bücher.
 
-    Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat und sich
-    Titel/Autor(en)/ISBN/Serie geändert haben oder der gespeicherte Zustand
-    keinen passenden Metadaten-Fingerabdruck kennt. `only_book_ids` enthält
-    die vom Nutzer ausgewählten Bücher. Bücher, die ohnehin hochgeladen werden, werden NIE
-    zusätzlich gepatcht – der Upload trägt die Metadaten mit.
+    Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat und
+    `metadata_update_fields` etwas zu schreiben hat. Ob die Cloud schon
+    denselben Stand kennt, entscheidet der Vergleich (`meta_verified_fp`),
+    nicht diese Planung. `only_book_ids` enthält die vom Nutzer ausgewählten
+    Bücher. Bücher, die ohnehin hochgeladen werden, werden NIE zusätzlich
+    gepatcht – der Upload trägt die Metadaten mit.
 
     Returns the planned metadata updates.
     """

@@ -3,7 +3,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
                         QLabel, QLineEdit, QMessageBox, QProgressBar,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
-                        _dialog_busy, gui_guard, qt_enum,
+                        _dialog_busy, gui_guard,
                         start_worker,
                         _login_failure_guidance,
                         _stop_thread, sync_result_detail,
@@ -92,8 +92,7 @@ def _persist_sync_result(dialog, state, updates):
     if dialog.columns.get("id"):
         try:
             update_tolino_ids(
-                dialog.gui.current_db, updates, enabled=True,
-                account_name=account_name)
+                dialog.gui.current_db, updates, account_name=account_name)
         except Exception as exc:
             log_warning("Tolino-IDs konnten nicht in Calibre geschrieben "
                         "werden: %s" % sanitize_error(exc))
@@ -132,19 +131,11 @@ def _sync_failure_heading(outcome):
 
 
 class SyncDashboard(QDialog):
-    thread = None
-    worker = None
-    login_thread = None
-    login_worker = None
-    prepare_thread = None
-    prepare_worker = None
-
     def __init__(self, gui):
         QDialog.__init__(self, gui)
         self.gui = gui
         # Ein Plugin-Fenster darf beim Schliessen nicht die Anwendung beenden.
-        self.setAttribute(
-            qt_enum(Qt, "WA_QuitOnClose", "WidgetAttribute"), False)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.thread = None
         self.worker = None
         self.login_thread = None
@@ -262,8 +253,7 @@ class SyncDashboard(QDialog):
         self.account_remove.clicked.connect(self.remove_account)
         self.hardware = QLineEdit()
         self.refresh = QLineEdit()
-        self.refresh.setEchoMode(
-            qt_enum(QLineEdit, "Password", "EchoMode"))
+        self.refresh.setEchoMode(QLineEdit.EchoMode.Password)
         # Das Feld zeigt den Token nicht an: das Konto ist die Quelle, ein
         # leeres Feld heisst «gespeicherten Zugang behalten».
         self.refresh.setPlaceholderText(
@@ -406,8 +396,8 @@ class SyncDashboard(QDialog):
         if len(self.account_names) <= 1:
             return
         name = self.account_name
-        yes = qt_enum(QMessageBox, "Yes", "StandardButton")
-        no = qt_enum(QMessageBox, "No", "StandardButton")
+        yes = QMessageBox.StandardButton.Yes
+        no = QMessageBox.StandardButton.No
         answer = QMessageBox.question(
             self, "Konto entfernen",
             "Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
@@ -567,8 +557,6 @@ class SyncDashboard(QDialog):
         # Zustand leer -- sonst landeten die Werte eines anderen Kontos
         # unter diesem Namen in den Einstellungen.
         account = self._selected_account()
-        if not account and not getattr(self, "account_name", None):
-            account = settings()
         if not isinstance(account, dict):
             account = {}
         hardware = self.hardware.text().strip() or hardware_id()
@@ -692,15 +680,10 @@ class SyncDashboard(QDialog):
         # weder im Dialog noch im Log auftauchen.
         secrets = tuple(token for token in
                         (self._stored_refresh(), self._typed_refresh()) if token)
-        if isinstance(error, BaseException):
-            detail = report_error(error, "Anmeldefenster", secrets)
-        else:
-            detail = sanitize_error(error, secrets)
+        detail = report_error(error, "Anmeldefenster", secrets)
         log_warning("Anmeldung nicht abgeschlossen: " + detail)
         title, step = _login_failure_guidance(error)
-        code = str(getattr(error, "code", "") or "")
-        if code:
-            title = "%s (Code %s)" % (title, code)
+        title = "%s (Code %s)" % (title, error.code)
         self.status.setText("Anmeldung fehlgeschlagen.")
         QMessageBox.warning(self, title, step)
 
@@ -740,9 +723,7 @@ class SyncDashboard(QDialog):
             return
         values = self.values()
         if not self._effective_refresh():
-            status = getattr(self, "status", None)
-            if status is not None:
-                status.setText("Nicht angemeldet.")
+            self.status.setText("Nicht angemeldet.")
             return
         self._save_visible_account(values)
         self.columns = column_state(self.gui.current_db)
@@ -857,8 +838,8 @@ class SyncDashboard(QDialog):
                      or (entry.get("title") if isinstance(entry, dict) else "")
                      or key)
             lines.append("- %s" % title)
-        yes = qt_enum(QMessageBox, "Yes", "StandardButton")
-        no = qt_enum(QMessageBox, "No", "StandardButton")
+        yes = QMessageBox.StandardButton.Yes
+        no = QMessageBox.StandardButton.No
         answer = QMessageBox.question(
             self, "Bücher aus tolino löschen?",
             ("1 Buch wird aus tolino gelöscht (in Calibre bleibt es):\n\n%s"
@@ -877,7 +858,6 @@ class SyncDashboard(QDialog):
             client_factory=(client_factory or
                             (lambda: self._worker_client(context))),
             options={
-                "collections": True,
                 "automatic": int(automatic or 0),
                 # Für den Hinweis im Fenster: ohne diese Spalte bleiben
                 # gekaufte Bücher Upload-Kandidaten.
@@ -885,7 +865,7 @@ class SyncDashboard(QDialog):
                     getattr(getattr(self, "gui", None), "current_db", None),
                     TOLINO_IGNORE_COLUMN),
             })
-        if dialog.exec() != qt_enum(QDialog, "Accepted", "DialogCode"):
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         # Die Auswahl des bestätigten Fensters entscheidet, was
         # passiert -- jede Aktion für sich; eine leere Auswahl ändert
@@ -921,8 +901,8 @@ class SyncDashboard(QDialog):
                     % (count, "\n".join(titles)))
         if len(jobs) > 20:
             text += "\n- … und %d weitere" % (len(jobs) - 20)
-        yes = qt_enum(QMessageBox, "Yes", "StandardButton")
-        no = qt_enum(QMessageBox, "No", "StandardButton")
+        yes = QMessageBox.StandardButton.Yes
+        no = QMessageBox.StandardButton.No
         answer = QMessageBox.question(
             self, "Cloud-Kopie ersetzen?", text, yes | no, no)
         return answer == yes
@@ -967,9 +947,8 @@ class SyncDashboard(QDialog):
         replacements = [job for job in jobs
                         if getattr(job, "old_id", None)]
         if replacements and not self._confirm_replacements(replacements):
-            status = getattr(self, "status", None)
-            if status is not None:
-                status.setText("Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
+            self.status.setText(
+                "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
             return
         plan = _dashboard_plan.plan_text(preparation, len(jobs))
         # Der Plan steht im Log, auch wenn der Lauf danach scheitert;

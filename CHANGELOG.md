@@ -7,7 +7,7 @@ Die aktuelle Version steht in [`__init__.py`](__init__.py).
 - Qt6-Enums werden durchgängig in der skopierten Schreibweise gesetzt (`Qt.AscendingOrder`, `QTableWidget.SelectRows`, `QLineEdit.Password`); die Test-Stubs kennen keine unscharfen Aliase mehr, die solche Fehler verdeckt hätten.
 - Konto und Optionen eines Laufs stehen in einem expliziten `RunContext`; Metadaten und Sync-Zustand sind eigene Parameter. Die Planungsschicht ist Qt-frei und wird durch einen eigenen Test davor bewahrt, `qt.core` zu laden.
 - Nach jedem Upload wird der vollständige Konto-Zustand sofort gespeichert; ein separates Zustandsjournal entfällt. Das verhindert doppelte Uploads nach einem Abbruch mit einer einzigen Persistenzschicht.
-- Der `SyncWorker` bündelt Abbruchprüfung, Fortschritt, Fehlerzählung und Erfolg in `_step()` und pflegt seine Zähler inkrementell, statt nach jedem Schritt über alle Operationen zu laufen.
+- Der `SyncWorker` bündelt Abbruchprüfung, Fortschritt, Fehlerzählung und Erfolg in `_step()` und berechnet seine Zähler am Ende einmal aus allen Operationen (`_refresh_counts`), statt sie an jeder Stelle mitzuführen.
 - Bulk-«Upload aktivieren» respektiert das bevorzugte Format; die Web-Reader-Erkennung verlangt mindestens 80 Zeichen, die Autoren-Normalisierung trennt «Joe» und «Jo», und die Inventar-Erkennung nutzt kein generisches `id` als Löschkennung.
 - Fehlercodes sind auf acht zusammengeführt; UUID-Ersatzformen und die manuelle Zugangseingabe wurden gestrafft, während `calibre-<Nr>` als Zustandsschlüssel erhalten bleibt.
 - Buchdownloads laden die Cloud-Kopie über eine base64-kodierte Kennung; die rohe Kennung beantwortete der Server mit 404.

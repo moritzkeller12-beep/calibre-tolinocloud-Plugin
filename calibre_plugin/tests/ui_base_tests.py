@@ -1,18 +1,20 @@
 """Gemeinsame UI-Basis: Qt-Stubs, Toolbar und Vergleichsfenster."""
 
+from ..comparison import ReadState
 import os
 import unittest
 from ._support import (FakeTableItem, load_ui_module, start_cdp_stubs,
                        stop_cdp_stubs)
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
 
 class ToolbarIconTests(unittest.TestCase):
     """Shared UI module loader for tests without a live Calibre install."""
+
 
     @staticmethod
     def _load_ui_module(get_icons_result, qt_stub=None):
@@ -237,6 +239,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 Widget.__init__(self)
                 self.parent = parent
 
+            def resize(self, *_args):
+                pass
+
             def exec(self):
                 return 0
 
@@ -392,17 +397,19 @@ class InventoryDialogBuildTests(unittest.TestCase):
         rows = [
             {"title": "Zulu", "authors": "Z", "status": "identical",
              "book_id": 1, "tolino_id": "c1", "isbn": "111",
+             "read": ReadState(), "group": "unchanged",
              "explanation": "Titel stimmt mit der Cloud überein."},
             {"title": "Alpha", "authors": "A", "status": "new_in_calibre",
              "book_id": 2, "tolino_id": "", "isbn": "222",
-             "has_preferred_format": True,
+             "has_preferred_format": True, "read": ReadState(),
+             "group": "action",
              "explanation": "Noch nicht in der Cloud – kann hochgeladen "
              "werden."},
         ]
         return ui_module, ui_module.dialogs.InventoryDialog(rows, options=options)
 
     def test_constructor_writes_every_column_in_the_right_order(self):
-        ui_module, dialog = self._build({"collections": True, "automatic": 1})
+        ui_module, dialog = self._build({"automatic": 1})
         try:
             self.assertEqual(list(ui_module.dialogs.InventoryDialog.HEADERS),
                              dialog.table.headers)
@@ -487,7 +494,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
     def test_toggle_switches_the_technical_columns(self):
-        ui_module, dialog = self._build({"collections": True, "automatic": 1})
+        ui_module, dialog = self._build({"automatic": 1})
         try:
             dialog._toggle_technical_columns(True)
             self.assertEqual({8: False, 9: False, 10: False}, dialog.table.hidden)
@@ -551,7 +558,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             lambda *args, **kwargs: None, qt_stub=self._qt_stub())
         row = {"title": "Zulu", "authors": "Z", "status": "identical",
                "book_id": 1, "tolino_id": "c1", "isbn": "111",
-               "explanation": "Gleich."}
+               "read": ReadState(), "explanation": "Gleich."}
         try:
             dialog = ui_module.dialogs.InventoryDialog([dict(row)], options={})
             self.assertFalse(dialog.confirm.enabled)

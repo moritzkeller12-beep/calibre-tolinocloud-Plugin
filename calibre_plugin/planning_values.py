@@ -55,13 +55,12 @@ class SyncJob:
     """Ein geplanter Upload: Calibre-Buch, Datei, Cover und alte Cloud-Kopie."""
 
     # `title` gehoert dazu: Fortschritt und Bericht nennen den
-    # Titel, nicht die Kennung. Der Standardwert haelt aeltere Aufrufer
-    # (und Tests) unveraendert am Laufen.
+    # Titel, nicht die Kennung.
     __slots__ = ("book_id", "book_uuid", "format_name", "old_id", "path",
                  "cover", "title")
 
     def __init__(self, book_id, book_uuid, format_name, old_id, path,
-                 cover, title=""):
+                 cover, title):
         self.book_id = book_id
         self.book_uuid = book_uuid
         self.format_name = format_name

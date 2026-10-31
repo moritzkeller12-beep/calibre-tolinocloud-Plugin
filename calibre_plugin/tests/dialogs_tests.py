@@ -1,5 +1,6 @@
 """Dialoge: Vergleich, Aktionen und Loeschbestaetigung."""
 
+from ..comparison import ReadState
 import os
 import tempfile
 import threading
@@ -13,13 +14,14 @@ from ._support import (FakeMenu, FakeMessageBox, FakeTableItem,
 from unittest.mock import patch
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
 
 def _marked_rows(indexes):
     """`selected_table_rows` für die Dauer des with-Blocks ersetzen."""
+
     return patch("calibre_plugin.ui_dialogs.selected_table_rows",
                  lambda _table: list(indexes))
 
@@ -97,11 +99,13 @@ class _QtDialogTest(unittest.TestCase):
         """Drei Zeilen: gelesen, ungelesen, nur lokal."""
         return [
             {"title": "Gelesen", "authors": "A", "status": "identical",
-             "book_id": 1, "tolino_id": "t-1", "read_in_cloud": True},
+             "book_id": 1, "tolino_id": "t-1",
+             "read": ReadState(cloud=True)},
             {"title": "Ungelesen", "authors": "B", "status": "identical",
-             "book_id": 2, "tolino_id": "t-2"},
+             "book_id": 2, "tolino_id": "t-2", "read": ReadState()},
             {"title": "Nur lokal", "authors": "D",
-             "status": "new_in_calibre", "book_id": 3, "tolino_id": ""},
+             "status": "new_in_calibre", "book_id": 3, "tolino_id": "",
+             "read": ReadState()},
         ]
 
     @staticmethod
@@ -183,19 +187,20 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog = ui_module.dialogs.InventoryDialog.__new__(
                 ui_module.dialogs.InventoryDialog)
             rows = [
-                {"upload": False, "metadata": False, "read": False,
+                {"upload": False, "metadata": False, "read": ReadState(),
                  "title": "Alpha", "authors": "A", "status": "identical",
                  "book_id": 1, "tolino_id": "c1",
                  "explanation": "Titel stimmt mit der Cloud überein."},
-                {"upload": True, "metadata": False, "read": False,
+                {"upload": True, "metadata": False, "read": ReadState(),
                  "title": "Zulu", "authors": "Z", "status": "new_in_calibre",
                  "book_id": 2, "tolino_id": "",
                  "explanation": "Noch nicht in der Cloud – kann hochgeladen werden."},
-                {"upload": False, "metadata": True, "read": True,
+                {"upload": False, "metadata": True,
+                 "read": ReadState(cloud=True),
                  "title": "beta", "authors": "B", "status": "changed",
                  "book_id": 3, "tolino_id": "c3",
                  "explanation": "Nur Metadaten unterscheiden sich."},
-                {"upload": True, "metadata": False, "read": False,
+                {"upload": True, "metadata": False, "read": ReadState(),
                  "title": "alpha", "authors": "M", "status": "new_in_calibre",
                  "book_id": 4, "tolino_id": "",
                  "explanation": "Noch nicht in der Cloud – kann hochgeladen werden."},
@@ -204,6 +209,11 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog._sort_column = 0
             dialog._sort_descending = False
             dialog._technical_visible = False
+            dialog.summary = None
+            dialog.confirm = None
+            dialog.action_feedback = None
+            dialog.group_filter = type(
+                "Combo", (), {"currentData": lambda self: None})()
             dialog.table = FakeTable()
 
             # Klick auf den Titel (Spalte 5): aufsteigend, die Auswahl
@@ -295,13 +305,13 @@ class InventoryDialogSortTests(unittest.TestCase):
         try:
             dialog = ui_module.dialogs.InventoryDialog.__new__(
                 ui_module.dialogs.InventoryDialog)
-            dialog.options = {"collections": True, "deletions": True,
+            dialog.options = {"deletions": True,
                               "automatic": 3}
             note = dialog._automatic_note()
             self.assertIn("Sammlungen in tolino übernommen", note)
             self.assertIn("3 offen", note)
             self.assertNotIn("gelöscht", note)
-            dialog.options = {"collections": True, "automatic": 1}
+            dialog.options = {"automatic": 1}
             note = dialog._automatic_note()
             self.assertIn("Sammlungen in tolino übernommen", note)
             self.assertIn("1 offen", note)
@@ -319,15 +329,22 @@ class InventoryDialogSortTests(unittest.TestCase):
             dialog = ui_module.dialogs.InventoryDialog.__new__(
                 ui_module.dialogs.InventoryDialog)
             rows = [
-                {"status": "identical", "book_id": 1, "tolino_id": "c1"},
-                {"status": "new_in_calibre", "book_id": 2, "tolino_id": ""},
+                {"status": "identical", "book_id": 1, "tolino_id": "c1",
+                 "read": ReadState()},
+                {"status": "new_in_calibre", "book_id": 2, "tolino_id": "",
+                 "read": ReadState()},
                 {"status": "changed", "book_id": 3, "tolino_id": "c3",
-                 "file_changed": True},
-                {"status": "changed", "book_id": 4, "tolino_id": "c4"},
-                {"status": "only_tolino", "book_id": None, "tolino_id": "c9"},
+                 "file_changed": True, "read": ReadState()},
+                {"status": "changed", "book_id": 4, "tolino_id": "c4",
+                 "read": ReadState()},
+                {"status": "only_tolino", "book_id": None, "tolino_id": "c9",
+                 "read": ReadState()},
             ]
             dialog.rows = rows
             dialog.cells = {"upload": [], "metadata": [], "read": []}
+            dialog.summary = None
+            dialog.confirm = None
+            dialog.action_feedback = None
             for index in range(len(rows)):
                 for controls in dialog.cells.values():
                     controls.append(ui_module.dialogs._ActionCheck(
@@ -361,17 +378,12 @@ class InventoryDialogSortTests(unittest.TestCase):
             lambda *args, **kwargs: None)
         try:
             choose = ui_module.dialogs.InventoryDialog.default_actions
-            self.assertEqual((True, False), choose(
-                {"book_id": 1, "status": "new_in_calibre"}))
-            self.assertEqual((True, False), choose(
-                {"book_id": 1, "tolino_id": "t1", "status": "changed",
+            self.assertEqual((True, False), choose({"read": ReadState(), "book_id": 1, "status": "new_in_calibre"}))
+            self.assertEqual((True, False), choose({"read": ReadState(), "book_id": 1, "tolino_id": "t1", "status": "changed",
                  "file_changed": True}))
-            self.assertEqual((False, True), choose(
-                {"book_id": 1, "tolino_id": "t1", "status": "changed"}))
-            self.assertEqual((False, False), choose(
-                {"book_id": 1, "tolino_id": "t1", "status": "identical"}))
-            self.assertEqual((False, False), choose(
-                {"book_id": None, "tolino_id": "t1", "status": "only_tolino"}))
+            self.assertEqual((False, True), choose({"read": ReadState(), "book_id": 1, "tolino_id": "t1", "status": "changed"}))
+            self.assertEqual((False, False), choose({"read": ReadState(), "book_id": 1, "tolino_id": "t1", "status": "identical"}))
+            self.assertEqual((False, False), choose({"read": ReadState(), "book_id": None, "tolino_id": "t1", "status": "only_tolino"}))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -421,8 +433,7 @@ class ComparisonLayoutTests(unittest.TestCase):
                     in dialog.ROW_ACTIONS}
         finally:
             ui_module._restore_stubs_for_tests()
-        handlers = {"mark_read_for_marked_rows", "clear_read_for_marked_rows",
-                    "set_column_for_marked_rows", "download_selected",
+        handlers = {"set_column_for_marked_rows", "download_selected",
                     "delete_marked_from_cloud",
                     "clear_cloud_delete_for_marked_rows"}
         self.assertEqual(handlers, used)
@@ -438,13 +449,15 @@ class InventoryDialogReadStateTests(_QtDialogTest):
     def _rows(self):
         return [
             {"title": "Gelesen", "authors": "A", "status": "identical",
-             "book_id": 1, "tolino_id": "t-1", "read_in_cloud": True},
+             "book_id": 1, "tolino_id": "t-1",
+             "read": ReadState(cloud=True)},
             {"title": "Ungelesen", "authors": "B", "status": "identical",
-             "book_id": 2, "tolino_id": "t-2"},
+             "book_id": 2, "tolino_id": "t-2", "read": ReadState()},
             {"title": "Auch ungelesen", "authors": "C", "status": "changed",
-             "book_id": 3, "tolino_id": "t-3"},
+             "book_id": 3, "tolino_id": "t-3", "read": ReadState()},
             {"title": "Nur lokal", "authors": "D",
-             "status": "new_in_calibre", "book_id": 4, "tolino_id": ""},
+             "status": "new_in_calibre", "book_id": 4, "tolino_id": "",
+             "read": ReadState()},
         ]
 
     @staticmethod
@@ -570,7 +583,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             dialog.table = self._marked_table(range(len(dialog.rows)))
-            dialog.mark_read_for_marked_rows()
+            dialog.set_column_for_marked_rows("read", True, "schon gelesen")
             # Das gelesene Buch hat schon seine Marke, „Nur lokal“ keine
             # Cloud-Kopie -- nur die zwei ungelesenen Cloud-Bücher bleiben.
             self.assertEqual({"t-2", "t-3"},
@@ -587,7 +600,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             local_index = [index for index, row in enumerate(dialog.rows)
                            if not row["tolino_id"]]
             dialog.table = self._marked_table(local_index)
-            dialog.mark_read_for_marked_rows()
+            dialog.set_column_for_marked_rows("read", True, "schon gelesen")
             self.assertEqual([], _read_ids(dialog, True))
             self.assertTrue(any("nichts geändert" in text.casefold()
                                 for text in calls))
@@ -600,7 +613,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             dialog.table = self._marked_table([])
-            dialog.mark_read_for_marked_rows()
+            dialog.set_column_for_marked_rows("read", True, "schon gelesen")
             self.assertTrue(any("Strg" in text for text in calls), calls)
             self.assertEqual([], _read_ids(dialog, True))
         finally:
@@ -632,7 +645,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             dialog.table = self._marked_table(range(len(dialog.rows)))
-            dialog.clear_read_for_marked_rows()
+            dialog.set_column_for_marked_rows("read", False, "schon ungelesen")
             # Nur das in der Cloud gelesene Buch lässt sich zurücksetzen.
             self.assertEqual({"t-1"}, set(_read_ids(dialog, False)))
             self.assertEqual([], _read_ids(dialog, True))
@@ -674,13 +687,15 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
     def _rows():
         return [
             {"title": "Gelesen", "authors": "A", "status": "identical",
-             "book_id": 1, "tolino_id": "t-1", "read_in_cloud": True},
+             "book_id": 1, "tolino_id": "t-1",
+             "read": ReadState(cloud=True)},
             {"title": "Ungelesen", "authors": "B", "status": "identical",
-             "book_id": 2, "tolino_id": "t-2"},
+             "book_id": 2, "tolino_id": "t-2", "read": ReadState()},
             {"title": "Cloud zwei", "authors": "C", "status": "identical",
-             "book_id": 3, "tolino_id": "t-3"},
+             "book_id": 3, "tolino_id": "t-3", "read": ReadState()},
             {"title": "Nur lokal", "authors": "D",
-             "status": "new_in_calibre", "book_id": 4, "tolino_id": ""},
+             "status": "new_in_calibre", "book_id": 4, "tolino_id": "",
+             "read": ReadState()},
         ]
 
     @staticmethod
@@ -772,7 +787,8 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             with self._marked(range(len(dialog.rows))):
-                dialog.mark_read_for_marked_rows()
+                dialog.set_column_for_marked_rows(
+                    "read", True, "sind schon gelesen")
             self.assertEqual(
                 "Als gelesen markiert für 2 von 4 markierten Büchern; "
                 "2 übersprungen.",
@@ -886,11 +902,12 @@ class RowActionPromptTests(_QtDialogTest):
     def _rows():
         return [
             {"title": "Gelesen", "authors": "A", "status": "identical",
-             "book_id": 1, "tolino_id": "t-1"},
+             "book_id": 1, "tolino_id": "t-1", "read": ReadState()},
             {"title": "Ungelesen", "authors": "B", "status": "identical",
-             "book_id": 2, "tolino_id": "t-2"},
+             "book_id": 2, "tolino_id": "t-2", "read": ReadState()},
             {"title": "Nur lokal", "authors": "C",
-             "status": "new_in_calibre", "book_id": 3, "tolino_id": ""},
+             "status": "new_in_calibre", "book_id": 3, "tolino_id": "",
+             "read": ReadState()},
         ]
 
     def test_the_menu_selects_the_action_for_marked_books(self):
@@ -966,13 +983,14 @@ class CloudDeletionDialogTests(_QtDialogTest):
         return [
             {"title": "Löschen", "authors": "A", "status": "identical",
              "book_id": 1, "tolino_id": "t-1", "uuid": "u-1",
-             "explanation": "In beiden vorhanden."},
+             "read": ReadState(), "explanation": "In beiden vorhanden."},
             {"title": "Behalten", "authors": "B", "status": "identical",
              "book_id": 2, "tolino_id": "t-2", "uuid": "u-2",
-             "explanation": "In beiden vorhanden."},
+             "read": ReadState(), "explanation": "In beiden vorhanden."},
             {"title": "Nur lokal", "authors": "C",
              "status": "new_in_calibre", "book_id": 3, "tolino_id": "",
-             "uuid": "u-3", "explanation": "Nur in Calibre."},
+             "uuid": "u-3", "read": ReadState(),
+             "explanation": "Nur in Calibre."},
         ]
 
     @staticmethod
@@ -1099,8 +1117,11 @@ class CloudDeletionPlanTests(unittest.TestCase):
 
     @staticmethod
     def _dashboard(ui_module):
-        return ui_module.dashboard.SyncDashboard.__new__(
+        dashboard = ui_module.dashboard.SyncDashboard.__new__(
             ui_module.dashboard.SyncDashboard)
+        dashboard.gui = type("Gui", (), {
+            "current_db": type("Db", (), {"field_metadata": {}})()})()
+        return dashboard
 
     @staticmethod
     def _settings():
@@ -1174,6 +1195,9 @@ class CloudDeletionPlanTests(unittest.TestCase):
             ui_module.dashboard.InventoryDialog = FakeInventory
             dashboard = ui_module.dashboard.SyncDashboard.__new__(
                 ui_module.dashboard.SyncDashboard)
+            dashboard.gui = type("Gui", (), {
+                "current_db": type(
+                    "Db", (), {"field_metadata": {}})()})()
             selection = dashboard._confirm_comparison(
                 [], self._settings(), client_factory=lambda: object())
         finally:
@@ -1223,64 +1247,14 @@ class ReviewHintTests(unittest.TestCase):
         return {"title": "Der Schwarm", "authors": "Frank Schatzing",
                 "status": "review", "group": "review", "book_id": 1,
                 "tolino_id": "t1", "isbn": "9783161484100",
+                "read": ReadState(),
                 "explanation": "Autor oder ISBN widersprechen sich."}
-
-    def test_the_guard_names_the_undecided_rows(self):
-        messages = []
-        ui_module = self._ui(messages)
-        dialog = ui_module.dialogs.InventoryDialog([self._row()], options={})
-        dialog.accept()
-        self.assertEqual(1, len(messages))
-        text = " ".join(str(part) for part in messages[0])
-        self.assertIn("Zu prüfen", text)
 
     def test_the_note_explains_undecided_rows(self):
         messages = []
         ui_module = self._ui(messages)
         dialog = ui_module.dialogs.InventoryDialog([self._row()], options={})
         self.assertIn("Zu prüfen", dialog.summary.text())
-
-class AutomaticCloseGuardTests(unittest.TestCase):
-    """Automatiken dürfen den Wächter nur umgehen, wenn sie etwas tun."""
-
-    def _ui(self, messages):
-        class BaseDialog(ui_base_tests.InventoryDialogBuildTests._qt_stub()["QDialog"]):
-            closed = []
-
-            def accept(self):
-                BaseDialog.closed.append(True)
-
-        stub = ui_base_tests.InventoryDialogBuildTests._qt_stub()
-        stub["QDialog"] = BaseDialog
-        stub["QMessageBox"] = FakeMessageBox(messages, question_result=0)
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None, qt_stub=stub)
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        return ui_module
-
-    @staticmethod
-    def _rows():
-        return [{"title": "Neu", "authors": "A", "status": "new_in_calibre",
-                 "book_id": 1, "tolino_id": "", "isbn": "111"}]
-
-    def test_switched_on_collections_without_open_work_do_not_close(self):
-        messages = []
-        ui_module = self._ui(messages)
-        dialog = ui_module.dialogs.InventoryDialog(
-            self._rows(), options={"collections": True, "automatic": 0})
-        dialog.clear_all_selection()
-        dialog.accept()
-        self.assertEqual([], ui_module.common.QDialog.closed)
-        self.assertEqual(1, len(messages))
-
-    def test_open_collections_may_close(self):
-        messages = []
-        ui_module = self._ui(messages)
-        dialog = ui_module.dialogs.InventoryDialog(
-            self._rows(), options={"collections": True, "automatic": 2})
-        dialog.clear_all_selection()
-        dialog.accept()
-        self.assertEqual([True], ui_module.common.QDialog.closed)
 
 class AuthorFormattingRegressionTests(unittest.TestCase):
     """0.15 -> 0.16: anders geschriebene Autoren galten als Widerspruch.
@@ -1368,7 +1342,7 @@ class IgnoredRowDialogTests(_QtDialogTest):
     def _rows():
         return [{"title": "Gekauft", "authors": "Autorin",
                  "status": "new_in_calibre", "book_id": 1, "tolino_id": "",
-                 "ignored": True, "group": "ignored",
+                 "ignored": True, "group": "ignored", "read": ReadState(),
                  "explanation": "In Calibre ignoriert – kein Upload."}]
 
     def test_the_filter_offers_the_ignored_group(self):
@@ -1420,7 +1394,7 @@ class DialogClientReuseTests(_QtDialogTest):
     @staticmethod
     def _rows():
         return [{"title": "A", "authors": "B", "status": "identical",
-                 "book_id": 1, "tolino_id": "t-1"}]
+                 "book_id": 1, "tolino_id": "t-1", "read": ReadState()}]
 
     def test_client_is_cached_between_actions(self):
         ui_module = self._ui()
@@ -1550,7 +1524,7 @@ class BackgroundCallTests(unittest.TestCase):
     def _dialog(self, ui_module):
         rows = [{"title": "Der Schwarm", "authors": "A", "book_id": 1,
                  "tolino_id": "t-1", "status": "identical", "isbn": "111",
-                 "explanation": "Gleich."}]
+                 "read": ReadState(), "explanation": "Gleich."}]
         dialog = ui_module.dialogs.InventoryDialog(rows, options={})
         dialog.table.selectionModel = lambda: type("Sel", (), {
             "selectedRows": staticmethod(lambda: [

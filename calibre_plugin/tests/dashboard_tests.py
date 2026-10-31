@@ -14,7 +14,7 @@ from ._support import (
 from unittest.mock import patch
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
@@ -87,7 +87,10 @@ class DashboardAccountSwitchTests(unittest.TestCase):
             pass
 
     def _dashboard(self):
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         for name in ("account_select", "account_quick", "partner", "hardware",
                      "refresh", "formats", "account_quick_label", "status",
                      "progress", "progress_label", "primary", "covers",
@@ -197,7 +200,10 @@ class ColumnSetupButtonTests(unittest.TestCase):
     def _dashboard(ui_module, calls):
         """Stub ohne Qt-Aufbau, aber mit den echten Methoden gebunden."""
         cls = ui_module.dashboard.SyncDashboard
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.columns = {"id": False}
         dashboard.columns = {"id": False, "read": False}
@@ -296,7 +302,10 @@ class DashboardPrimaryActionTests(unittest.TestCase):
             def setToolTip(self, text):
                 self.tooltip = text
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.thread = object() if running else None
         dashboard.refresh = LineEdit(token)
         # Der Zugang kommt aus dem Konto: der Stub sagt, was drin steht.
@@ -458,7 +467,10 @@ class TokenRotationWriteBackTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
         self.addCleanup(restore)
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         for name in ("account_select", "account_quick", "partner", "hardware",
                      "refresh", "formats", "account_quick_label", "status",
                      "progress", "progress_label", "primary", "covers",
@@ -808,7 +820,10 @@ class LoginPreflightTests(unittest.TestCase):
         })
 
     def _dashboard(self, ui_module, token="tok-1"):
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.account_name = "konto"
         dashboard.login_thread = None
         dashboard.login_worker = None
@@ -1048,7 +1063,10 @@ class LoginMessageTests(unittest.TestCase):
         ui_module = self._ui()
         boxes = []
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
         dashboard.store_refresh = lambda refresh, hardware="": None
@@ -1072,7 +1090,10 @@ class LoginMessageTests(unittest.TestCase):
         ui_module = self._ui()
         self.addCleanup(ui_module._restore_stubs_for_tests)
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
         dashboard.store_refresh = lambda refresh, hardware="": None
@@ -1106,7 +1127,10 @@ class LoginMessageTests(unittest.TestCase):
             def setFocus(self):
                 self.calls.append(("focus",))
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
         dashboard.primary = Primary()
@@ -1148,12 +1172,6 @@ class LoginMessageTests(unittest.TestCase):
             self.assertEqual("Verbindung fehlgeschlagen", titles["N01"])
             self.assertEqual("Anmeldung erforderlich", titles["A01"])
             self.assertEqual("Anmeldung nicht abgeschlossen", titles["B02"])
-            # Bereits formatierte Meldungen (ältere Worker) tragen den Code
-            # im Text.
-            self.assertEqual(titles["B02"],
-                             guide("Zeitüberschreitung (Code B02)")[0])
-            self.assertEqual("Anmeldung nicht abgeschlossen",
-                             guide(RuntimeError("kaputt"))[0])
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1166,7 +1184,10 @@ class LoginMessageTests(unittest.TestCase):
             def text():
                 return "tok-geheim"
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.refresh = Refresh()
         dashboard._stored_refresh = lambda: ""
@@ -1222,7 +1243,8 @@ class AccountStateBindingTests(unittest.TestCase):
             config.set_active_account("alpha")
             values = config.settings()
             self.assertEqual("alpha", values["active_account"])
-            self.assertEqual({"u1": {"tolino_id": "id-a"}}, values["state"])
+            self.assertEqual({"u1": {"tolino_id": "id-a"}},
+                             config.account_by_name("alpha")["state"])
             # Das andere Konto bleibt unberuehrt.
             self.assertEqual({"u2": {"tolino_id": "id-b"}},
                              config.account_by_name("beta")["state"])

@@ -135,17 +135,6 @@ class ReadState:
         self.chosen = self.cloud if chosen is None else bool(chosen)
         self.local = local
 
-    @classmethod
-    def from_row(cls, row):
-        """Aus einer Zeile lesen -- typisiert auch rohe Dicts einmalig."""
-        state = row.get("read")
-        if isinstance(state, cls):
-            return state
-        return cls(known=row.get("read_known", True) is not False,
-                   cloud=row.get("read_in_cloud"),
-                   chosen=row.get("read"),
-                   local=row.get("read_local"))
-
     @property
     def changed(self):
         """Übertragen wird nur eine Änderung -- und nur bei bekanntem Stand."""
@@ -277,8 +266,7 @@ def _matched_status(metadata, remote, old, selected_format,
     same_fields = _same_comparison_fields(metadata, remote)
     current_meta_fp = metadata_fingerprint(metadata)
     # Nur ein nach PUT per GET bestaetigter Patch darf explizite Inventarwerte
-    # ueberstimmen. Aeltere meta_fp-Werte wurden allein nach HTTP-2xx gesetzt
-    # und beweisen nicht, dass Tolino den Titel tatsaechlich gespeichert hat.
+    # ueberstimmen.
     verified_metadata_matches = (
         bool(old.get("meta_verified_fp"))
         and old.get("meta_verified_fp") == current_meta_fp)

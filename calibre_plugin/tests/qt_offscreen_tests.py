@@ -1,4 +1,6 @@
 """Real-PyQt6 offscreen smoke test for InventoryDialog (Calibre APIs stubbed)."""
+
+from ..comparison import ReadState
 import importlib.util
 import os
 import sys
@@ -22,6 +24,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
 
 def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+
     return [tolino_id for tolino_id, _book, state
             in dialog.selected_read_changes() if state is finished]
 
@@ -74,8 +77,8 @@ class InventoryDialogQtTests(unittest.TestCase):
         dialog = InventoryDialog([{
             "title": "Calibre marks read", "authors": "Author",
             "status": "identical", "group": "unchanged", "book_id": 1,
-            "tolino_id": "cloud-1", "read_in_cloud": False,
-            "read_local": True, "read_column": True,
+            "tolino_id": "cloud-1", "read_column": True,
+            "read": ReadState(cloud=False, local=True),
         }])
         check = dialog.cells["read"][0]
         self.assertFalse(check.isChecked())
@@ -98,8 +101,8 @@ class InventoryDialogQtTests(unittest.TestCase):
             "authors": "Christoph Magnus Freiherr von und zu Hohenstein-Waldburg",
             "status": "identical", "group": "unchanged", "book_id": 1,
             "tolino_id": "cloud-1", "isbn": "9781234567890",
-            "read_in_cloud": False, "read_local": False,
             "read_column": True,
+            "read": ReadState(cloud=False, local=False),
         }])
         dialog.show()
         self.app.processEvents()
@@ -115,8 +118,8 @@ class InventoryDialogQtTests(unittest.TestCase):
         dialog = InventoryDialog([{
             "title": "Cloud marks read", "authors": "Author",
             "status": "identical", "group": "unchanged", "book_id": 1,
-            "tolino_id": "cloud-2", "read_in_cloud": True,
-            "read_local": False, "read_column": True,
+            "tolino_id": "cloud-2", "read_column": True,
+            "read": ReadState(cloud=True, local=False),
         }])
         dialog.cells["read"][0].setChecked(False)
         self.assertEqual([], _read_ids(dialog, True))

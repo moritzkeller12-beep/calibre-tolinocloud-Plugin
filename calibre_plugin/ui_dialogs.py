@@ -5,11 +5,10 @@ from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
                         QVBoxLayout, QStyledItemDelegate, QStyle,
                         QStyleOptionViewItem, QEvent, Qt, _set_enabled,
-                        qt_enum, start_call)
+                        start_call)
 from .planning_values import plural
 from calibre.gui2 import error_dialog, info_dialog
-from .comparison import (ReadState, comparison_group, comparison_sort_key,
-                         sort_comparison_rows)
+from .comparison import comparison_sort_key, sort_comparison_rows
 from .library import TOLINO_IGNORE_COLUMN, selected_table_rows
 from .tolino import report_error
 
@@ -31,8 +30,7 @@ def row_capabilities(row):
         "upload": bool(has_book and usable
                        and row.get("has_preferred_format", True)),
         "metadata": bool(has_book and in_cloud and usable),
-        "read": bool(in_cloud and usable
-                     and ReadState.from_row(row).known),
+        "read": bool(in_cloud and usable and row["read"].known),
         # Download ist auch für eine bereits markierte Kopie sinnvoll:
         # damit lässt sich die Datei vor dem Löschen noch retten.
         "download": in_cloud,
@@ -50,27 +48,25 @@ class _ActionCheck:
         self.tooltip = ""
 
     def isChecked(self):
-        return self.item.checkState() == qt_enum(Qt, "Checked", "CheckState")
+        return self.item.checkState() == Qt.CheckState.Checked
 
     def setChecked(self, value):
         # Auch «Unchecked» explizit setzen: Ein frisches QTableWidgetItem
         # meldet zwar Unchecked, hat aber noch keine CheckStateRole. Ohne
         # setCheckState zeichnet Qt kein leeres Kästchen.
         self.item.setCheckState(
-            qt_enum(Qt, "Checked" if value else "Unchecked", "CheckState"))
+            Qt.CheckState.Checked if value else Qt.CheckState.Unchecked)
 
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
         flags = self.item.flags()
-        enabled_flag = qt_enum(Qt, "ItemIsEnabled", "ItemFlag")
-        checkable_flag = qt_enum(Qt, "ItemIsUserCheckable", "ItemFlag")
         # Checkbar bleibt das Feld auch deaktiviert: Qt zeichnet das
         # Kästchen dann grau, statt es ganz zu verstecken.
-        flags |= checkable_flag
+        flags |= Qt.ItemFlag.ItemIsUserCheckable
         if self.enabled:
-            flags |= enabled_flag
+            flags |= Qt.ItemFlag.ItemIsEnabled
         else:
-            flags &= ~enabled_flag
+            flags &= ~Qt.ItemFlag.ItemIsEnabled
         self.item.setFlags(flags)
 
     def setToolTip(self, text):
@@ -89,46 +85,43 @@ class _CenteredCheckDelegate(QStyledItemDelegate):
             QStyledItemDelegate.paint(self, painter, option, index)
             return
         style.drawPrimitive(
-            qt_enum(QStyle, "PE_PanelItemViewItem", "PrimitiveElement"),
+            QStyle.PrimitiveElement.PE_PanelItemViewItem,
             opt, painter, opt.widget)
-        if opt.features & qt_enum(
-                QStyleOptionViewItem, "HasCheckIndicator", "ViewItemFeature"):
-            if opt.checkState == qt_enum(Qt, "PartiallyChecked", "CheckState"):
-                opt.state |= qt_enum(QStyle, "State_NoChange", "StateFlag")
-            elif opt.checkState == qt_enum(Qt, "Checked", "CheckState"):
-                opt.state |= qt_enum(QStyle, "State_On", "StateFlag")
+        if opt.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator:
+            if opt.checkState == Qt.CheckState.PartiallyChecked:
+                opt.state |= QStyle.StateFlag.State_NoChange
+            elif opt.checkState == Qt.CheckState.Checked:
+                opt.state |= QStyle.StateFlag.State_On
             else:
-                opt.state |= qt_enum(QStyle, "State_Off", "StateFlag")
+                opt.state |= QStyle.StateFlag.State_Off
             rect = style.subElementRect(
-                qt_enum(QStyle, "SE_ItemViewItemCheckIndicator", "SubElement"),
+                QStyle.SubElement.SE_ItemViewItemCheckIndicator,
                 opt, opt.widget)
             opt.rect = QStyle.alignedRect(
-                opt.direction, qt_enum(Qt, "AlignCenter", "AlignmentFlag"),
+                opt.direction, Qt.AlignmentFlag.AlignCenter,
                 rect.size(), opt.rect)
-            opt.state &= ~qt_enum(QStyle, "State_HasFocus", "StateFlag")
+            opt.state &= ~QStyle.StateFlag.State_HasFocus
             style.drawPrimitive(
-                qt_enum(QStyle, "PE_IndicatorItemViewItemCheck",
-                        "PrimitiveElement"), opt, painter, opt.widget)
+                QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
+                opt, painter, opt.widget)
         else:
             QStyledItemDelegate.paint(self, painter, option, index)
 
     def editorEvent(self, event, model, option, index):
-        if event.type() in (
-                qt_enum(QEvent, "MouseButtonRelease", "Type"),
-                qt_enum(QEvent, "MouseButtonDblClick", "Type")):
-            if event.button() != qt_enum(Qt, "LeftButton", "MouseButton"):
+        if event.type() in (QEvent.Type.MouseButtonRelease,
+                            QEvent.Type.MouseButtonDblClick):
+            if event.button() != Qt.MouseButton.LeftButton:
                 return False
             flags = model.flags(index)
-            if not (flags & qt_enum(Qt, "ItemIsUserCheckable", "ItemFlag")):
+            if not (flags & Qt.ItemFlag.ItemIsUserCheckable):
                 return False
-            if not (flags & qt_enum(Qt, "ItemIsEnabled", "ItemFlag")):
+            if not (flags & Qt.ItemFlag.ItemIsEnabled):
                 return False
-            state = index.data(qt_enum(Qt, "CheckStateRole", "ItemDataRole"))
-            state = (qt_enum(Qt, "Unchecked", "CheckState")
-                     if state == qt_enum(Qt, "Checked", "CheckState")
-                     else qt_enum(Qt, "Checked", "CheckState"))
-            return model.setData(
-                index, state, qt_enum(Qt, "CheckStateRole", "ItemDataRole"))
+            state = index.data(Qt.ItemDataRole.CheckStateRole)
+            state = (Qt.CheckState.Unchecked
+                     if state == Qt.CheckState.Checked
+                     else Qt.CheckState.Checked)
+            return model.setData(index, state, Qt.ItemDataRole.CheckStateRole)
         return QStyledItemDelegate.editorEvent(self, event, model, option, index)
 
 
@@ -184,10 +177,14 @@ class InventoryDialog(QDialog):
          ("metadata", False,
           "waren schon abgewählt oder liegen nicht in der Cloud"),
          lambda row: bool(row.get("metadata"))),
-        ("Als gelesen markieren", "mark_read_for_marked_rows", (),
+        ("Als gelesen markieren", "set_column_for_marked_rows",
+         ("read", True,
+          "sind schon gelesen oder liegen nicht in der Cloud"),
          lambda row: (row_capabilities(row)["read"]
                       and not row.get("read"))),
-        ("Als ungelesen markieren", "clear_read_for_marked_rows", (),
+        ("Als ungelesen markieren", "set_column_for_marked_rows",
+         ("read", False,
+          "sind bereits ungelesen oder liegen nicht in der Cloud"),
          lambda row: (row_capabilities(row)["read"]
                       and row.get("read"))),
         # Download arbeitet nur für eine markierte Cloud-Kopie.
@@ -268,16 +265,16 @@ class InventoryDialog(QDialog):
         self.options = dict(options or {})
         self._technical_visible = False
         self.rows = []
+        # Zusammenfassung und Startknopf entstehen erst mit dem Footer;
+        # der Tabellenaufbau aktualisiert die Zusammenfassung schon.
+        self.summary = None
+        self.confirm = None
+        self.action_feedback = None
         self._prepare_rows(rows)
         self.setAttribute(
-            qt_enum(Qt, "WA_QuitOnClose", "WidgetAttribute"), False)
-        self.setWindowTitle("Vergleich")
-        # Schmal genug fuer 1366x768 bei 100-125 % Skalierung; die breiten
-        # Textspalten wachsen mit (siehe _size_columns).
+            Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setMinimumSize(640, 460)
-        resize = getattr(self, "resize", None)
-        if resize is not None:
-            resize(960, 560)
+        self.resize(960, 560)
         layout = QVBoxLayout(self)
         self._build_header(layout)
         self._build_toolbar(layout)
@@ -285,17 +282,14 @@ class InventoryDialog(QDialog):
         self._build_footer(layout)
 
     def _prepare_rows(self, rows):
-        """Zeilen normalisieren, Standardaktionen setzen und sortieren."""
+        """Zeilen übernehmen, Standardaktionen setzen und sortieren.
+
+        `read` kommt aus `comparison.py` bereits als `ReadState`.
+        """
         for row in rows:
             row = dict(row)
-            # Auch von Hand gebaute Zeilen (Tests, künftige Aufrufer) haben
-            # eine Gruppe; sonst würde der Gruppenfilter sie verstecken.
-            row.setdefault("group", comparison_group(row.get("status")))
             if "upload" not in row or "metadata" not in row:
                 row["upload"], row["metadata"] = self.default_actions(row)
-            # Lesestatus aus der Cloud: eine Auswahl ändert ihn erst mit
-            # «Synchronisierung starten».
-            row["read"] = ReadState.from_row(row)
             # Die Calibre-Spalte wird nur angezeigt. Die Auswahl folgt dem
             # Lesestatus des aktuell ausgewählten Tolino-Kontos.
             self.rows.append(row)
@@ -315,7 +309,7 @@ class InventoryDialog(QDialog):
         self.note = QLabel(self._automatic_note())
         self.note.setWordWrap(True)
         if not self.note.text() and any(
-                not ReadState.from_row(row).known for row in self.rows):
+                not row["read"].known for row in self.rows):
             self.note.setText(
                 "Lesestatus unbekannt: konnte nicht geladen werden und "
                 "wird nicht verändert.")
@@ -360,11 +354,11 @@ class InventoryDialog(QDialog):
             self.table.setItemDelegateForColumn(column, self._check_delegate)
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setSelectionBehavior(
-            qt_enum(QTableWidget, "SelectRows", "SelectionBehavior"))
+            QTableWidget.SelectionBehavior.SelectRows)
         # Strg-/Shift-Klick und Strg+A werden in Tooltips und Menue
-        # versprochen -- Qt6 kennt den Modus nur als skopiertes Enum.
+        # versprochen.
         self.table.setSelectionMode(
-            qt_enum(QTableWidget, "ExtendedSelection", "SelectionMode"))
+            QTableWidget.SelectionMode.ExtendedSelection)
         header_tooltips = (
             "Buchdatei in die Cloud hochladen.",
             "Titel, Autor und ISBN ohne Upload aktualisieren.",
@@ -390,11 +384,9 @@ class InventoryDialog(QDialog):
         table_header = self.table.horizontalHeader()
         table_header.setSortIndicatorShown(True)
         table_header.setSortIndicator(
-            0, qt_enum(Qt, "AscendingOrder", "SortOrder"))
+            0, Qt.SortOrder.AscendingOrder)
         table_header.sectionClicked.connect(self._sort_by_column)
-        item_changed = getattr(self.table, "itemChanged", None)
-        if item_changed is not None:
-            item_changed.connect(self._item_changed)
+        self.table.itemChanged.connect(self._item_changed)
         self._rebuild_table(self.rows, resize_columns=True)
         layout.addWidget(self.table)
 
@@ -438,7 +430,7 @@ class InventoryDialog(QDialog):
     def _automatic_note(self):
         """Anzahl der automatisch geplanten Sammlungen anzeigen."""
         count = int(self.options.get("automatic") or 0)
-        if self.options.get("collections") and count:
+        if count:
             return "Serien werden als Sammlungen in tolino übernommen (%d offen)." % count
         return ""
 
@@ -451,10 +443,8 @@ class InventoryDialog(QDialog):
             self.table.setColumnHidden(column, not self._technical_visible)
 
     def _read_state(self, row):
-        """Lesestatus der Zeile; normalisiert auch von Hand gebaute Zeilen."""
-        state = ReadState.from_row(row)
-        row["read"] = state
-        return state
+        """Lesestatus der Zeile."""
+        return row["read"]
 
     def _choice_changed(self, index, key):
         """Die Zeile hält die Auswahl; die Zelle zeigt sie nur an."""
@@ -542,28 +532,8 @@ class InventoryDialog(QDialog):
             return False
 
     def accept(self):
-        """«Synchronisierung starten» -- nie stillschweigend ohne Aktion.
-
-        Feldbefund: Der Vergleich schloss sich, ohne dass etwas
-        übertragen wurde, und sagte nichts dazu. Ohne ausgewählte Aktion und
-        ohne Automatiken bleibt das Fenster jetzt offen und erklärt es.
-        """
-        counts = self._selection_counts()
-        if not counts["work"] and not self.automatic_actions_enabled():
-            text = ("Wähle mindestens eine Aktion oder nutze "
-                    "«Empfohlene Aktionen auswählen».")
-            undecided = counts["undecided"]
-            if undecided:
-                text += " %d %s «Zu prüfen»: nicht vorausgewählt." % (
-                    undecided, plural(undecided, "Buch", "Bücher"))
-            QMessageBox.information(
-                self, "Nichts ausgewählt", text)
-            return
+        """«Synchronisierung starten»: die Auswahl übernehmen."""
         QDialog.accept(self)
-
-    def reject(self):
-        """Abbrechen: Dialog ohne Übernahme schliessen."""
-        QDialog.reject(self)
 
     def selected_cloud_deletions(self):
         """(UUID, tolino-ID, Titel) der zum Löschen markierten Cloud-Kopien."""
@@ -622,29 +592,12 @@ class InventoryDialog(QDialog):
             actions[menu.addAction(label)] = (method, args)
         position = self.row_actions.mapToGlobal(
             self.row_actions.rect().bottomLeft())
-        execute = getattr(menu, "exec", None) or menu.exec_
-        chosen = execute(position)
+        chosen = menu.exec(position)
         handler = actions.get(chosen)
         if handler is None:
             return
         method, args = handler
         getattr(self, method)(*args)
-
-    def mark_read_for_marked_rows(self):
-        """Lesestatus für alle markierten Zeilen setzen.
-
-        Mehrfachauswahl und Sammelaktion erlauben, viele Bücher gemeinsam
-        auszuwählen.
-        """
-        self.set_column_for_marked_rows(
-            "read", True,
-            "sind schon gelesen oder liegen nicht in der Cloud")
-
-    def clear_read_for_marked_rows(self):
-        """Lesestatus markierter Cloud-Bücher auf ungelesen setzen."""
-        self.set_column_for_marked_rows(
-            "read", False,
-            "sind bereits ungelesen oder liegen nicht in der Cloud")
 
     def set_column_for_marked_rows(self, key, value, summary):
         """Eine Spalte für alle markierten Zeilen setzen.
@@ -700,10 +653,7 @@ class InventoryDialog(QDialog):
         Bewusst nicht modal: eine erfolgreiche Auswahlaktion soll den
         Ablauf nicht mit einem weiteren Dialog anhalten.
         """
-        label = getattr(self, "action_feedback", None)
-        if label is None:
-            return
-        label.setText(text)
+        self.action_feedback.setText(text)
 
     def _set_row_choice(self, index, key, value, caps=None):
         """Zeile und Check-Zelle setzen; False = war schon so.
@@ -741,8 +691,8 @@ class InventoryDialog(QDialog):
         ordered = sorted(self.rows, key=self._SORT_KEYS[column],
                          reverse=self._sort_descending)
         self.table.horizontalHeader().setSortIndicator(
-            column, qt_enum(Qt, "DescendingOrder" if self._sort_descending
-                             else "AscendingOrder", "SortOrder"))
+            column, Qt.SortOrder.DescendingOrder if self._sort_descending
+            else Qt.SortOrder.AscendingOrder)
         self._rebuild_table(ordered)
 
     def _build_action_items(self, row_index, row, has_book, in_cloud):
@@ -808,10 +758,8 @@ class InventoryDialog(QDialog):
         self.table.setUpdatesEnabled(False)
         self._syncing_checks = True
         try:
-            # Zeilen sind die einzige Quelle -- auch wenn ein Aufrufer oder
-            # Test sie als rohes Dict übergibt.
-            self.rows = [dict(row, read=ReadState.from_row(row))
-                         for row in rows]
+            # Zeilen sind die einzige Quelle der Auswahl.
+            self.rows = [dict(row) for row in rows]
             self.cells = {"upload": [], "metadata": [], "read": []}
             self.table.setRowCount(0)
             self.table.setRowCount(len(self.rows))
@@ -842,34 +790,28 @@ class InventoryDialog(QDialog):
         damit eine Mindestbreite weit über einem 1366x768-Fenster.
         """
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(
-            7, qt_enum(QHeaderView, "Stretch", "ResizeMode"))
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         # Der Titel ist manuell verstellbar; beim ersten Anzeigen und beim
         # Fenster-Resize bekommt er den groesseren Textanteil.
-        header.setSectionResizeMode(
-            5, qt_enum(QHeaderView, "Interactive", "ResizeMode"))
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
         header.resizeSection(5, 160)
         # Der Autor bleibt schmal, damit der Titel nicht von langen Namen
         # ueberholt wird.
-        header.setSectionResizeMode(
-            6, qt_enum(QHeaderView, "Interactive", "ResizeMode"))
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
         header.resizeSection(6, 90)
         # Aktions- und Ortsmarkierungen brauchen nur das Kästchen. Lange
         # Ueberschriften machten den Titel sonst auf wenige Zeichen breit.
         for column in (0, 1, 2, 3, 4):
             header.setSectionResizeMode(
-                column, qt_enum(QHeaderView, "Interactive", "ResizeMode"))
+                column, QHeaderView.ResizeMode.Interactive)
             header.resizeSection(column, 60)
 
     def _fit_title_column(self):
         """Titelbreite an das Fenster anpassen, ohne den Autor zu ueberholen."""
-        table = getattr(self, "table", None)
-        if table is None:
-            return
-        header = table.horizontalHeader()
+        header = self.table.horizontalHeader()
         fixed = sum(header.sectionSize(column)
                     for column in (0, 1, 2, 3, 4, 6))
-        available = table.viewport().width() - fixed
+        available = self.table.viewport().width() - fixed
         if available > 0:
             header.resizeSection(5, max(120, available * 2 // 3))
 
@@ -887,9 +829,9 @@ class InventoryDialog(QDialog):
         Es werden nur Tabellenzeilen versteckt; `self.rows` bleibt die
         vollstaendige Liste, damit Auswahl und Sortierung unberuehrt bleiben.
         """
-        combo = getattr(self, "group_filter", None)
-        selected = combo.currentData() if combo is not None else None
-        for index, row in enumerate(getattr(self, "rows", ())):
+        combo = self.group_filter
+        selected = combo.currentData()
+        for index, row in enumerate(self.rows):
             visible = selected is None or row.get("group") == selected
             self.table.setRowHidden(index, not visible)
 
@@ -937,7 +879,7 @@ class InventoryDialog(QDialog):
         marked_unread = counts["unread"]
         deletions = counts["deletions"]
         changes = marked_read + marked_unread
-        summary = getattr(self, "summary", None)
+        summary = self.summary
         if summary is not None:
             summary_text = (
                 "Ausgewählt: %d %s · %d Metadaten · %d Lesestatus"
@@ -956,7 +898,7 @@ class InventoryDialog(QDialog):
                     " · %d %s unklar («Zu prüfen», nicht vorausgewählt)"
                     % (undecided, plural(undecided, "Buch", "Bücher")))
             summary.setText(summary_text)
-        confirm = getattr(self, "confirm", None)
+        confirm = self.confirm
         if confirm is not None:
             total = counts["work"]
             confirm.setText("Synchronisierung starten (%d)" % total
@@ -1022,11 +964,8 @@ class InventoryDialog(QDialog):
 
     def _set_action_busy(self, busy, text=""):
         _set_enabled(self, ("table", "confirm"), not busy)
-        summary = getattr(self, "summary", None)
-        if summary is None:
-            return
         if busy:
-            summary.setText(text or "Verbindung zu tolino …")
+            self.summary.setText(text or "Verbindung zu tolino …")
         else:
             self._update_summary()
 

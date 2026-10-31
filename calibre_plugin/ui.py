@@ -28,7 +28,7 @@ class TolinoSyncAction(InterfaceAction):
         Calibre prüft beim Herunterfahren auf laufende Threads, deshalb muss
         der Keep-alive hier enden und nicht erst in einem atexit-Haken.
         """
-        self._finish_session("shutting_down")
+        self._finish_session()
         parent = getattr(super(), "shutting_down", None)
         if callable(parent):
             parent()

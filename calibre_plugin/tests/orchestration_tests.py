@@ -1,5 +1,6 @@
 """Ablauf vom Vergleichsfenster bis zum Sync-Start."""
 
+from ..comparison import ReadState
 import os
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from ._support import compare_inventory, start_cdp_stubs, stop_cdp_stubs
 from unittest.mock import patch
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
@@ -49,11 +50,20 @@ class StartSyncOrchestrationTests(unittest.TestCase):
     def _dashboard(self, ui_module, settings, thread=None):
         dashboard = ui_module.dashboard.SyncDashboard.__new__(ui_module.dashboard.SyncDashboard)
         dashboard.thread = thread
+        dashboard.prepare_thread = None
+        dashboard.prepare_worker = None
+        dashboard.login_thread = None
+        dashboard.login_worker = None
+        dashboard.worker = None
         dashboard.values = lambda: settings
         # Der Zugang liegt im Konto; der Stub sagt, welcher Token drin steht.
         dashboard._effective_refresh = lambda: str(
             (settings or {}).get("refresh_token") or "")
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {}
         return dashboard
 
@@ -153,6 +163,9 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             class FieldMetadata:
                 def __contains__(self, key):
                     return key == "#tolino_id"
+
+                def __getitem__(self, key):
+                    return {}
 
             settings = self._settings()
             dashboard = self._dashboard(ui_module, settings)
@@ -464,6 +477,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
     def _rows():
         return [{"title": "Neu", "authors": "A", "status": "new_in_calibre",
                  "book_id": 1, "tolino_id": "", "isbn": "111",
+                 "read": ReadState(),
                  "explanation": "Noch nicht in der Cloud."}]
 
     def test_a_selected_upload_still_closes_the_dialog(self):
@@ -474,20 +488,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dialog.accept()
         self.assertEqual([True], ui_module.common.QDialog.closed)
         self.assertEqual([], messages)
-
-    def test_without_a_selection_the_dialog_stays_open_and_explains(self):
-        messages = []
-        ui_module = self._ui_with_messages(messages)
-        dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-        dialog.clear_all_selection()
-        self.assertEqual(0, dialog._selection_counts()["work"])
-        dialog.accept()
-        # Kein stilles Schliessen: das Fenster bleibt offen und sagt warum.
-        self.assertEqual([], ui_module.common.QDialog.closed)
-        self.assertEqual(1, len(messages))
-        # QMessageBox.information(self, Titel, Text)
-        self.assertEqual("Nichts ausgewählt", messages[0][2])
-        self.assertIn("Wähle mindestens eine Aktion", messages[0][3])
 
     def test_activated_automatics_may_close_without_a_selection(self):
         messages = []
@@ -512,7 +512,11 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = ui_module.dashboard.SyncDashboard.__new__(ui_module.dashboard.SyncDashboard)
         dashboard.thread = None
         dashboard.values = lambda: settings
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {}
         dashboard.account_name = "konto"
         dashboard.prepare_thread = None
@@ -689,11 +693,18 @@ class NoSilentDeadEndTests(unittest.TestCase):
     def test_a_failed_bookkeeping_still_reports_the_result(self):
         ui_module = self._ui_module()
         boxes = []
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
                                            "setText": lambda self, v: None})()
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {"id": False, "read": False}
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
@@ -701,8 +712,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         worker.account = {"hardware_id": "hw"}
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
-        worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0}
+        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
         dashboard.worker = worker
 
         def boom(*_args, **_kwargs):
@@ -724,21 +734,27 @@ class NoSilentDeadEndTests(unittest.TestCase):
         """Ein Calibre-Fehler nach dem Lauf darf den Dialog nicht sperren."""
         ui_module = self._ui_module()
         boxes, finished = [], []
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {
             "text": lambda self: "tok",
             "setText": lambda self, value: None,
         })()
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {"id": True, "read": False}
         dashboard.finish_thread = lambda: finished.append(True)
         worker = type("Worker", (), {})()
         worker.account_name = "A"
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
-        worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0}
+        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
         dashboard.worker = worker
 
         def boom(*_args, **_kwargs):
@@ -789,7 +805,11 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
             ui_module.dashboard.SyncDashboard)
         dashboard.thread = None
         dashboard.values = lambda: settings
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {}
         dashboard.account_name = "konto"
         dashboard.prepare_thread = None
@@ -925,29 +945,6 @@ class VisibleResultTests(unittest.TestCase):
     Nutzer sieht weder Ergebnis noch Hinweis.
     """
 
-    @staticmethod
-    def _calls(text):
-        """Alle info_dialog-Aufrufe als Quelltext-Stück."""
-        calls = []
-        start = 0
-        while True:
-            index = text.find("info_dialog(", start)
-            if index < 0:
-                return calls
-            depth = 0
-            end = index
-            for offset in range(index, len(text)):
-                character = text[offset]
-                if character == "(":
-                    depth += 1
-                elif character == ")":
-                    depth -= 1
-                    if depth == 0:
-                        end = offset + 1
-                        break
-            calls.append(text[index:end])
-            start = end
-
     def test_the_result_dialog_is_shown_after_a_sync(self):
         ui_module = StartSyncOrchestrationTests._ui_module()
         self.addCleanup(ui_module._restore_stubs_for_tests)
@@ -957,8 +954,7 @@ class VisibleResultTests(unittest.TestCase):
         dashboard = NoSilentDeadEndTests._dashboard(
             ui_module, StartSyncOrchestrationTests._settings())
         dashboard.worker = type("Worker", (), {
-            "outcome": {"uploaded": 1, "updated": 0, "downloaded": 0,
-                        "skipped": 0, "failed": 0, "cancelled": False,
+            "outcome": {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0, "cancelled": False,
                         "operations": []},
             "account": {}, "account_name": "konto"})()
         dashboard.finish_thread = lambda: None
@@ -1036,7 +1032,11 @@ class EmptyRunAccountingTests(unittest.TestCase):
         ui_module = self._ui()
         dashboard = NoSilentDeadEndTests._dashboard(
             ui_module, StartSyncOrchestrationTests._settings())
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         # Ohne UUID kann plan_sync das Buch nicht einplanen.
         metadata = {1: {"uuid": "", "title": "Kaputt", "formats": ["EPUB"]}}
         selection = {"uploads": {1}, "metadata": {1}, "read_changes": [],

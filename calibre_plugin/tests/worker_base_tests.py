@@ -7,7 +7,7 @@ from ..run_context import RunContext
 from ._support import start_cdp_stubs, stop_cdp_stubs
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 

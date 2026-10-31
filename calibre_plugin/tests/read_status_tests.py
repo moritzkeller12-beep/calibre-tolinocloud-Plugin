@@ -1,4 +1,6 @@
 """Tolino-Lesestatus im Vergleichsdialog; #tolino_read bleibt informativ."""
+
+from ..comparison import ReadState
 import unittest
 from ._support import compare_inventory
 from .dialogs_tests import _QtDialogTest
@@ -8,6 +10,7 @@ from ..library import (TOLINO_READ_COLUMN, bool_column_value, column_state,
 
 def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+
     return [tolino_id for tolino_id, _book, state
             in dialog.selected_read_changes() if state is finished]
 
@@ -135,15 +138,14 @@ class ReadColumnComparisonTests(unittest.TestCase):
 class ReadColumnDialogTests(_QtDialogTest):
     @staticmethod
     def _rows():
-        base = {"status": "identical", "read_column": True,
-                "read_known": True}
+        base = {"status": "identical", "read_column": True}
         return [
             dict(base, title="Calibre only", authors="A", book_id=1,
-                 uuid="u1", tolino_id="t-1", read_in_cloud=False,
-                 read_local=True, read=False),
+                 uuid="u1", tolino_id="t-1",
+                 read=ReadState(cloud=False, local=True)),
             dict(base, title="Cloud read", authors="B", book_id=2,
-                 uuid="u2", tolino_id="t-2", read_in_cloud=True,
-                 read_local=None, read=True),
+                 uuid="u2", tolino_id="t-2",
+                 read=ReadState(cloud=True, local=None)),
         ]
 
     @staticmethod
@@ -185,8 +187,8 @@ class ReadColumnDialogTests(_QtDialogTest):
     def test_unknown_cloud_status_cannot_be_changed(self):
         ui_module = self._ui()
         self._messages(ui_module)
-        row = dict(self._rows()[0], read_known=False, read_local=True,
-                   read=True, read_in_cloud=True)
+        row = dict(self._rows()[0],
+                   read=ReadState(known=False, cloud=True, local=True))
         dialog = ui_module.dialogs.InventoryDialog([row])
         self.assertFalse(dialog.cells["read"][0].enabled)
         self.assertEqual([], _read_ids(dialog, True))

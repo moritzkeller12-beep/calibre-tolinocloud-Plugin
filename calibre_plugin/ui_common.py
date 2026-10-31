@@ -13,12 +13,7 @@ from qt.core import (QCheckBox, QComboBox, QDialog,
                      QVBoxLayout, QHBoxLayout, QTableWidget,
                      QTableWidgetItem, QObject, QInputDialog,
                      QFileDialog, QStyledItemDelegate, QStyle,
-                     QStyleOptionViewItem, QEvent, Qt)
-try:
-    from qt.core import pyqtSignal
-except ImportError:
-    # Some Calibre Qt builds expose the signal type as Signal.
-    from qt.core import Signal as pyqtSignal
+                     QStyleOptionViewItem, QEvent, Qt, pyqtSignal)
 
 # Namen, die andere UI-Module ueber dieses Modul beziehen.
 __all__ = [
@@ -31,7 +26,7 @@ __all__ = [
     "QStyleOptionViewItem", "QEvent", "Qt",
     "_THREADS", "_apply_busy", "_dialog_busy",
     "_login_failure_guidance",
-    "gui_guard", "qt_enum",
+    "gui_guard",
     "start_worker", "_stop_thread",
     "_set_enabled",
     "_keep_thread_alive",
@@ -39,11 +34,6 @@ __all__ = [
     "sync_result_detail",
     "sync_result_text",
 ]
-
-
-def qt_enum(owner, name, scope):
-    """Qt-Konstante aus ihrem skopierten Enum lesen (Calibre 6/Qt6)."""
-    return getattr(getattr(owner, scope), name)
 
 
 def _widget_deleted(widget):
@@ -260,15 +250,11 @@ _LOGIN_DEFAULT_GUIDANCE = (
 def _login_failure_guidance(error):
     """(Titel, nächster Schritt) für einen fehlgeschlagenen Browser-Login.
 
-    Akzeptiert die Exception (mit ``.code``) oder die bereits formatierte
-    Meldung («… (Code B02)»). Unbekannte Ursachen bekommen einen neutralen,
-    aber umsetzbaren Hinweis; sensible Daten werden nie angezeigt.
+    Der Browser-Login meldet ausschliesslich TolinoError; unbekannte Codes
+    bekommen einen neutralen, aber umsetzbaren Hinweis.
     """
-    code = str(getattr(error, "code", "") or "")
-    if not code:
-        match = re.search(r"\(Code ([A-Z][0-9]{2})\)", str(error or ""))
-        code = match.group(1) if match else ""
-    return _LOGIN_GUIDANCE.get(code, _LOGIN_DEFAULT_GUIDANCE)
+    return _LOGIN_GUIDANCE.get(str(error.code or ""),
+                               _LOGIN_DEFAULT_GUIDANCE)
 
 
 def _failed_operations(outcome):

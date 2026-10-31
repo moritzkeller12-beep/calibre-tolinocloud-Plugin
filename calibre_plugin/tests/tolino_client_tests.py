@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
@@ -1310,7 +1310,8 @@ class PersistCredentialsDedupTests(unittest.TestCase):
             account = config.account_by_name("konto")
             self.assertEqual("tok-1", account["refresh_token"])
             self.assertEqual("hw-1", account["hardware_id"])
-            self.assertEqual("konto", config.settings()["active_account"])
+            # Der Keep-alive rotiert alle Konten: das aktive bleibt stehen.
+            self.assertEqual("default", config.settings()["active_account"])
         finally:
             config.PREFERENCES = original
 

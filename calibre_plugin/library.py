@@ -56,22 +56,10 @@ def metadata_tolino_id(metadata, account_name=None):
 
 def _field_info(database, column):
     """(vorhanden, Feldinfo) aus Calibres oeffentlichen Feldmetadaten."""
-    fields = getattr(database, "field_metadata", None)
-    if callable(fields):
-        fields = fields()
-    if fields is None:
+    fields = database.field_metadata
+    if column not in fields:
         return False, None
-    try:
-        if column not in fields:
-            return False, None
-    except (TypeError, AttributeError):
-        return False, None
-    # Ein Test-Stub oder eine aeltere Calibre-Fassung liefert moeglicherweise
-    # keine Feldinfo: dann gilt die Spalte als vorhanden, aber unbekannt.
-    try:
-        return True, fields[column]
-    except (TypeError, AttributeError, KeyError, IndexError):
-        return True, None
+    return True, fields[column]
 
 
 def bool_column_available(database, column):
@@ -184,17 +172,16 @@ def column_state(database):
     Spalten.
     """
     return {"id": _field_info(database, TOLINO_COLUMN)[0],
-            "read": bool_column_available(database, TOLINO_READ_COLUMN),
-            "ignore": bool_column_available(database, TOLINO_IGNORE_COLUMN)}
+            "read": bool_column_available(database, TOLINO_READ_COLUMN)}
 
 
-def update_read_status(database, updates, enabled=True):
+def update_read_status(database, updates):
     """Bestätigten Cloud-Lesestatus in ``#tolino_read`` spiegeln.
 
     Die Spalte bleibt informativ: geschrieben wird nur, was tolino nach einem
     Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung.
     """
-    if not enabled or not updates or not bool_column_available(
+    if not updates or not bool_column_available(
             database, TOLINO_READ_COLUMN):
         return 0
     api = database.new_api
@@ -209,10 +196,9 @@ def update_read_status(database, updates, enabled=True):
     return len(values)
 
 
-def update_tolino_ids(database, updates, enabled=True, account_name=None):
+def update_tolino_ids(database, updates, account_name=None):
     """Merge this account's IDs into the shared Calibre custom column."""
-    if not enabled or not updates or not _field_info(
-            database, TOLINO_COLUMN)[0]:
+    if not updates or not _field_info(database, TOLINO_COLUMN)[0]:
         return 0
     api = database.new_api
     account_name = str(account_name or "").strip()
@@ -270,9 +256,7 @@ def normalize_formats(value):
 
 
 def _api_for(database, book_id):
-    """Validate a Calibre book id and return the database API."""
-    if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
-        raise ValueError("Invalid Calibre book id: %r" % (book_id,))
+    """Return the database API for an existing Calibre book."""
     api = database.new_api
     if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
@@ -322,18 +306,7 @@ def image_suffix(data):
 
 
 def selected_table_rows(table):
-    """Return valid selected Qt row numbers without assuming QModelIndex shape."""
-    if table is None:
-        return []
-    try:
-        selection_model = table.selectionModel()
-        selected = selection_model.selectedRows() if selection_model else ()
-    except RuntimeError:
-        return []
-    rows = []
-    for index in selected or ():
-        row_value = getattr(index, "row", None)
-        row = row_value() if callable(row_value) else row_value
-        if isinstance(row, int) and row >= 0:
-            rows.append(row)
-    return rows
+    """Row numbers of the table's selected rows."""
+    selection_model = table.selectionModel()
+    selected = selection_model.selectedRows() if selection_model else ()
+    return [index.row() for index in selected]

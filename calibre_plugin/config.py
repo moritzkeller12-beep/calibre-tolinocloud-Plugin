@@ -2,20 +2,7 @@
 import copy
 import threading
 
-try:
-    from calibre.utils.config import JSONConfig
-except ImportError:
-    class JSONConfig(dict):
-        """In-memory stand-in for settings tests outside Calibre."""
-
-        defaults = {}
-
-        def __init__(self, *_args, **_kwargs):
-            super().__init__()
-
-        def commit(self):
-            return None
-
+from calibre.utils.config import JSONConfig
 
 # Keep the historic Lite namespace: changing it would hide existing user
 # settings and credentials in Calibre's preferences store.
@@ -90,8 +77,8 @@ def settings():
         return {
             PREFERRED_FORMATS: copy.deepcopy(
                 PREFERENCES.get(PREFERRED_FORMATS, ["EPUB"])),
-            **{key: copy.deepcopy(current[key]) for key in ACCOUNT_KEYS},
-            "name": current["name"],
+            "partner_id": copy.deepcopy(current["partner_id"]),
+            "hardware_id": copy.deepcopy(current["hardware_id"]),
             "accounts": accounts,
             "active_account": active,
         }
@@ -157,13 +144,17 @@ def set_active_account(name):
 
 
 def save_credentials(account_name, refresh_token, hardware):
-    """Persist a rotated refresh token and hardware ID for one account."""
+    """Persist a rotated refresh token and hardware ID for one account.
+
+    Das aktive Konto bleibt unberührt: der Keep-alive rotiert alle Konten,
+    ein Token-Rotationsschritt darf die Auswahl nicht umschalten.
+    """
     if not account_name:
         return
     save_account(account_name, {
         "refresh_token": refresh_token,
         "hardware_id": hardware,
-    }, active=account_name)
+    })
 
 
 class CredentialStore:

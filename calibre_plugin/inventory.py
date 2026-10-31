@@ -6,7 +6,7 @@ _INVENTORY_CONTAINERS = ("edata", "ebook")
 # Felder, unter denen die Cloud die Kennung einer Kopie fuehrt. Bewusst NUR
 # die Kennung des Deliverables: ``identifier`` aus ``epubMetaData`` ist eine
 # ISBN/Verlagsnummer und taugt nicht fuer /deletecontent und /downloadinfo.
-_INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id", "tolino_id")
+_INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id")
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
                             "ebook", "edata")

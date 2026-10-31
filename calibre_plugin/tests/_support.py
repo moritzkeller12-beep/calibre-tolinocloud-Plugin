@@ -21,9 +21,14 @@ _REAL_CLOSE_WINDOW = cdp_module.close_grabber_window
 
 
 def parsed_inventory(value):
-    """Return canonical inventory records from a raw fixture or record list."""
+    """Return canonical inventory records from a raw fixture or record list.
+
+    Ein bereits normalisierter Datensatz wird unverändert übernommen:
+    Produktivcode normalisiert genau einmal.
+    """
     if isinstance(value, list):
-        return [normalize_inventory_record(item)
+        return [item if "has_deliverable_id" in item
+                else normalize_inventory_record(item)
                 for item in value if isinstance(item, dict)]
     records, problems, valid_envelope = parse_inventory(value)
     if not valid_envelope:
