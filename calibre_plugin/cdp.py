@@ -141,9 +141,8 @@ def launch_reader_window():
     previous = _verified_owner()
     if previous:
         return
-    candidate, status = browser_finder.pick_chromium()
-    binary, label = candidate or (None, None)
-    if not binary:
+    options, status = browser_finder.find_browsers()
+    if not options:
         message = browser_finder.missing_browser_error(status)
         raise TolinoAuthError(message, code="B01",
                               short="Browser-Anmeldung nicht möglich",
@@ -161,16 +160,9 @@ def launch_reader_window():
     profile = tempfile.mkdtemp(prefix="tolino-grab-")
     flags = _reader_flags(port, profile)
     creationflags = 0x00000008 if os.name == "nt" else 0
-    def candidates():
-        """Erster Kandidat, danach die Alternativen nur bei Bedarf."""
-        yield list(binary), label
-        for argv, option_label in browser_finder.chromium_options():
-            if list(argv) != list(binary):
-                yield list(argv), option_label
-
     last_error = None
     process = None
-    for argv, candidate_label in candidates():
+    for argv, candidate_label in options:
         try:
             process = subprocess.Popen(
                 list(argv) + flags, creationflags=creationflags,

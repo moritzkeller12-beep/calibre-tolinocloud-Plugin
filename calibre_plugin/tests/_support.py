@@ -262,10 +262,10 @@ def ui_module_for(test_case, qt_stub=None):
 
 # The login helpers must not open a REAL browser window during tests.
 # On machines that have Chrome/Chromium installed (CI runners do),
-# pick_chromium() would succeed and launch_reader_window() would spawn a
+# find_browsers() would succeed and launch_reader_window() would spawn a
 # browser the tests never asked for -- every login test that asserts the
 # no-Chromium fallback would then fail or hang. Tests that need a
-# browser patch calibre_plugin.browser_finder.pick_chromium themselves.
+# browser patch calibre_plugin.browser_finder.find_browsers themselves.
 # close_grabber_window() is stubbed as well: the real one
 # talks to a DevTools endpoint on 127.0.0.1:9223 and must never close
 # a developer's open grabber window while the suite runs. Tests that
@@ -279,8 +279,8 @@ def start_cdp_stubs():
     global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
     if _PICK_CHROMIUM_PATCH is None:
         _PICK_CHROMIUM_PATCH = patch(
-            "calibre_plugin.browser_finder.pick_chromium",
-            return_value=(None, ""))
+            "calibre_plugin.browser_finder.find_browsers",
+            return_value=([], ""))
         _PICK_CHROMIUM_PATCH.start()
     if _CLOSE_WINDOW_PATCH is None:
         _CLOSE_WINDOW_PATCH = patch("calibre_plugin.cdp.close_grabber_window",

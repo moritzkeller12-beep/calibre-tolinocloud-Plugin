@@ -28,7 +28,7 @@ def flatpak_permission_hint():
 def missing_browser_error(status=""):
     """Return user-facing details when no Chromium browser is available.
 
-    ``status`` ist das Ergebnis der Host-Sonde aus ``pick_chromium()``.
+    ``status`` ist das Ergebnis der Host-Sonde aus ``find_browsers()``.
     """
     message = (
         "Kein Chromium-Browser gefunden. Bitte Chrome, Chromium, Brave oder "
@@ -236,18 +236,7 @@ def _platform_browser_paths(platform=None):
     return []
 
 
-def _options_with_status(home=None):
-    """(alle Kandidaten inkl. Plattformpfade, Status der Host-Sonde)."""
+def find_browsers(home=None):
+    """Alle Kandidaten inkl. Plattformpfade und Status der Host-Sonde."""
     found, status = _collect_candidates(home)
     return found + _platform_browser_paths(), status
-
-
-def chromium_options():
-    """All candidates, including standard Windows/macOS install paths."""
-    return _options_with_status()[0]
-
-
-def pick_chromium():
-    """(bester Kandidat oder None, Status der Host-Sonde)."""
-    options, status = _options_with_status()
-    return (options[0] if options else None), status
