@@ -8,13 +8,13 @@ _UUID_TEXT = re.compile(
 _UUID_PLACEHOLDERS = frozenset(("none", "null", "undefined", "dummy"))
 def normalize_uuid_text(value):
     """Normalize a UUID-shaped value to trimmed text; no byte/repr parsing."""
-    return str(value or "").strip().strip("'\" \t\r\n").casefold()
+    return str(value or "").strip().casefold()
 
 
 def valid_book_uuid(value):
     """Return a usable Calibre book key, or empty for junk/incomplete data."""
     text = normalize_uuid_text(value)
-    if not text or text.casefold() in _UUID_PLACEHOLDERS:
+    if not text or text in _UUID_PLACEHOLDERS:
         return ""
     if len(text) > 128 or any(character.isspace() for character in text):
         return ""

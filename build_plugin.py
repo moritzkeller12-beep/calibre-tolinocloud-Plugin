@@ -20,9 +20,6 @@ def build_plugin(archive_path=ROOT / "tolino_cloud_sync.zip"):
             info = ZipInfo(name, date_time=DATE)
             info.compress_type, info.external_attr = ZIP_DEFLATED, MODE
             archive.writestr(info, data, compress_type=ZIP_DEFLATED, compresslevel=9)
-    with ZipFile(archive_path) as archive:
-        if set(archive.namelist()) != set(FILES):
-            raise RuntimeError("plugin archive layout mismatch")
     print(f"Wrote {archive_path.name} ({len(FILES)} entries, "
           f"{archive_path.stat().st_size} bytes)")
     return archive_path

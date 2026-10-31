@@ -205,11 +205,8 @@ class ColumnSetupButtonTests(unittest.TestCase):
             "prepare_worker": None, "login_thread": None,
             "login_worker": None})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.columns = {"id": False}
-        dashboard.columns = {"id": False, "read": False}
         dashboard.update_status = lambda: calls.append("status")
-        for name in ("create_columns", "_refresh_column_flags"):
-            setattr(dashboard, name, getattr(cls, name).__get__(dashboard))
+        dashboard.create_columns = cls.create_columns.__get__(dashboard)
         return dashboard
 
     def test_one_button_creates_only_its_own_column(self):
@@ -234,9 +231,9 @@ class ColumnSetupButtonTests(unittest.TestCase):
         self.assertEqual([["tolino_ignore"]], seen)
         self.assertIn("#tolino_ignore", boxes[0][2])
         self.assertIn("neu starten", boxes[0][2])
-        self.assertTrue(dashboard.columns.get("id"))
-        self.assertTrue(dashboard.columns.get("read"))
-        self.assertEqual(["status"], calls)
+        # Calibre kennt die neue Spalte erst nach einem Neustart; hier
+        # wird kein Spaltenstatus vorgetäuscht.
+        self.assertEqual([], calls)
 
     def test_an_existing_column_says_so_and_changes_nothing(self):
         from unittest.mock import patch
@@ -251,7 +248,6 @@ class ColumnSetupButtonTests(unittest.TestCase):
         self.assertIn("schon vorhanden", boxes[0][2])
         self.assertIn("#tolino_read", boxes[0][2])
         self.assertEqual([], calls)
-        self.assertFalse(dashboard.columns.get("read"))
 
     def test_a_refused_creation_is_reported_instead_of_crashing(self):
         from unittest.mock import patch
@@ -1066,8 +1062,8 @@ class LoginMessageTests(unittest.TestCase):
         self.assertEqual([], boxes)
         self.assertIn("Angemeldet.", dashboard.status.value)
 
-    def test_successful_login_without_open_window_has_no_close_warning(self):
-        """Die UI fragt den Fensterzustand ab, statt ein zweites Mal zu schliessen."""
+    def test_successful_login_leaves_the_close_warning_to_the_grabber(self):
+        """Das Schliessen samt Warnung liegt beim Grabber, nicht in der UI."""
         ui_module = self._ui()
         self.addCleanup(ui_module._restore_stubs_for_tests)
 
@@ -1084,13 +1080,10 @@ class LoginMessageTests(unittest.TestCase):
             dashboard)
 
         with patch.object(ui_module.dashboard, "grabber_window_state",
-                          return_value={"window": False}, create=True) as alive, \
-             patch.object(ui_module.dashboard, "close_grabber_window",
-                          create=True) as close:
+                          create=True) as alive:
             dashboard.login_completed("tok-neu", "hw-neu")
-        alive.assert_called_once_with()
-        close.assert_not_called()
-        self.assertNotIn("von Hand", dashboard.status.value)
+        alive.assert_not_called()
+        self.assertNotIn("offen", dashboard.status.value)
         self.assertIn("Angemeldet.", dashboard.status.value)
 
     def test_the_primary_button_becomes_the_next_step(self):
@@ -1144,14 +1137,14 @@ class LoginMessageTests(unittest.TestCase):
             for code, short in cases:
                 exc = tolino_module.TolinoAuthError("egal", code=code,
                                                     short=short)
-                title, step = guide(exc)
-                self.assertEqual(short, title)
-                self.assertNotIn("\n", step)
-                self.assertLessEqual(len(step), 100, step)
+                self.assertEqual(short, guide(exc))
+                self.assertNotIn("\n", ui_module.common.LOGIN_NEXT_STEP)
+                self.assertLessEqual(
+                    len(ui_module.common.LOGIN_NEXT_STEP), 100)
             # Ohne Kurztext bleibt ein neutraler, umsetzbarer Titel.
             self.assertEqual(
                 "Anmeldung nicht abgeschlossen",
-                guide(tolino_module.TolinoAuthError("egal"))[0])
+                guide(tolino_module.TolinoAuthError("egal")))
         finally:
             ui_module._restore_stubs_for_tests()
 

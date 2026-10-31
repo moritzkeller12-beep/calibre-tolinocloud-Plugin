@@ -5,7 +5,7 @@ from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
                         QPushButton, QThread, QVBoxLayout, _apply_busy,
                         _dialog_busy, gui_guard,
                         start_worker,
-                        _login_failure_guidance,
+                        LOGIN_NEXT_STEP, _login_failure_guidance,
                         _stop_thread, sync_result_detail,
                         sync_result_text, Qt)
 from calibre.gui2 import error_dialog, info_dialog
@@ -23,7 +23,6 @@ from . import dashboard_plan as _dashboard_plan
 from .partners import PARTNERS
 from .tolino import (RELOGIN, hardware_id, log_warning,
                      normalize_refresh_token, report_error, sanitize_error)
-from .cdp import grabber_window_state
 from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
@@ -80,24 +79,27 @@ def _persist_sync_result(dialog, state, updates):
     abgesichert: ein Fehler in einer Spalte darf weder den anderen
     Schreibvorgang noch den Abschluss des Laufs verhindern.
     """
+    worker = getattr(dialog, "worker", None)
     account_name = str(
-        getattr(getattr(dialog, "worker", None), "account_name", None)
+        getattr(worker, "account_name", None)
         or getattr(dialog, "account_name", "") or "")
+    # Die Spalten des Laufs stehen im Kontext des Workers -- nicht mehr am
+    # Dialog: dort waeren sie ein zweiter, veralteter Zustand.
+    columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
     try:
         if account_name:
             save_account(account_name, {"state": state}, active=account_name)
     except Exception as exc:
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s" % sanitize_error(exc))
-    if dialog.columns.get("id"):
+    if columns.get("id"):
         try:
             update_tolino_ids(
                 dialog.gui.current_db, updates, account_name=account_name)
         except Exception as exc:
             log_warning("Tolino-IDs konnten nicht in Calibre geschrieben "
                         "werden: %s" % sanitize_error(exc))
-    if dialog.columns.get("read"):
-        worker = getattr(dialog, "worker", None)
+    if columns.get("read"):
         try:
             update_read_status(
                 dialog.gui.current_db,
@@ -142,8 +144,6 @@ class SyncDashboard(QDialog):
         self.login_worker = None
         self.prepare_thread = None
         self.prepare_worker = None
-        # Welche tolino-Spalten die Bibliothek hat (id/read/ignore).
-        self.columns = {}
         self.account_name = ""
         self.setWindowTitle("tolino Cloud Sync")
         self.setMinimumWidth(560)
@@ -297,19 +297,6 @@ class SyncDashboard(QDialog):
             "Angelegt: #%s.\n\nCalibre neu starten, damit die Spalte in der "
             "Bibliothek nutzbar ist." % label,
             show=True, show_copy_button=False)
-        self._refresh_column_flags(database)
-
-    def _refresh_column_flags(self, database):
-        """Spaltenstatus neu lesen: der naechste Vergleich nutzt sie sofort."""
-        try:
-            # Die Spalte selbst entscheidet -- frueher konnte eine
-            # Einstellung sie zusaetzlich abschalten.
-            self.columns = column_state(database)
-        except Exception as exc:
-            log_warning("Spaltenstatus konnte nicht gelesen werden: %s"
-                        % sanitize_error(exc))
-        self.update_status()
-
     def _save_visible_account(self, values=None):
         """Das sichtbare Konto und die globalen Optionen EINMAL einlesen.
 
@@ -543,7 +530,7 @@ class SyncDashboard(QDialog):
     def run_context(self, values=None):
         """Konto und Optionen des Laufs als expliziter Kontext."""
         values = self.values() if values is None else values
-        return RunContext.from_values(values, self.columns)
+        return RunContext.from_values(values)
 
     def values(self):
         """Sichtbare Werte des Kontos -- nie Zugangsdaten.
@@ -593,7 +580,7 @@ class SyncDashboard(QDialog):
             # Von Hand eingetippt: erst ins Konto speichern, dann pruefen.
             self.store_refresh(self._typed_refresh())
             values = self.values()
-        context = RunContext.from_values(values, self.columns)
+        context = RunContext.from_values(values)
         if self._effective_refresh():
             self._check_stored_login(context)
             return
@@ -662,11 +649,6 @@ class SyncDashboard(QDialog):
         # Erfolg steht in der Statuszeile -- kein zusaetzlicher modaler
         # Dialog fuer den Normalfall.
         self.status.setText("Angemeldet.")
-        # Der Grabber schliesst sein Fenster bereits. Die UI fragt nur
-        # den Zustand ab; ein fehlender Besitzsatz heisst nicht «offen».
-        if grabber_window_state()["window"]:
-            self.status.setText(
-                "Angemeldet. Das Anmeldefenster ist noch offen.")
         _offer_next_step(self)
 
     @gui_guard
@@ -680,10 +662,9 @@ class SyncDashboard(QDialog):
                         (self._stored_refresh(), self._typed_refresh()) if token)
         detail = report_error(error, "Anmeldefenster", secrets)
         log_warning("Anmeldung nicht abgeschlossen: " + detail)
-        title, step = _login_failure_guidance(error)
-        title = "%s (Code %s)" % (title, error.code)
+        title = "%s (Code %s)" % (_login_failure_guidance(error), error.code)
         self.status.setText("Anmeldung fehlgeschlagen.")
-        QMessageBox.warning(self, title, step)
+        QMessageBox.warning(self, title, LOGIN_NEXT_STEP)
 
     @gui_guard
     def _login_progress(self, text):
@@ -723,8 +704,8 @@ class SyncDashboard(QDialog):
             self.status.setText("Nicht angemeldet.")
             return
         self._save_visible_account(values)
-        self.columns = column_state(self.gui.current_db)
-        context = RunContext.from_values(values, self.columns)
+        context = RunContext.from_values(
+            values, column_state(self.gui.current_db))
         state = load_state(values.get("state"))
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.

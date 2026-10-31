@@ -686,10 +686,11 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.account_name = "B"
         dashboard.refresh = FakeField("tok-B")
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.columns = {"id": True, "read": False}
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
+        worker.context = type("Context", (), {
+            "columns": {"id": True, "read": False}})()
         worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
@@ -978,8 +979,8 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertEqual(1, len(payloads))
         self.assertIsInstance(payloads[0], dict)
         self.assertEqual([[{"tolino_id": "d1", "has_deliverable_id": True,
-                            "identifier": "", "title": "", "authors": "",
-                            "isbn": ""}]], compared)
+                            "title": "", "authors": "", "isbn": ""}]],
+                         compared)
         self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_login_failure_is_reported_without_starting_a_sync(self):
@@ -1538,13 +1539,13 @@ class InventorySchemaTests(unittest.TestCase):
                               "title": "K"}}]}})
         records = client.inventory()
         self.assertEqual(
-            ["authors", "has_deliverable_id", "identifier", "isbn",
-             "title", "tolino_id"], sorted(records[0]))
+            ["authors", "has_deliverable_id", "isbn", "title",
+             "tolino_id"], sorted(records[0]))
         self.assertTrue(records[0]["has_deliverable_id"])
         self.assertEqual("d1", records[0]["tolino_id"])
         self.assertFalse(records[1]["has_deliverable_id"])
         self.assertEqual("", records[1]["tolino_id"])
-        self.assertEqual("978-3-16-148410-0", records[1]["identifier"])
+        self.assertEqual("978-3-16-148410-0", records[1]["isbn"])
 
     def test_an_identifier_only_record_makes_the_ids_incomplete(self):
         """Keine Deliverable-Kennung heisst: kein Beweis fuer Loeschungen.

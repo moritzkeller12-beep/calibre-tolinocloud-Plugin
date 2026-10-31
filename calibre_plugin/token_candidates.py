@@ -94,11 +94,10 @@ def _filter_live_candidates(candidates, max_age_seconds=1800):
 def _decrypt_reader_blob(value):
     """Plaintext of a CryptoJS "Salted__" reader blob ("" when none)."""
     text = str(value or "")
-    if not text or ("Salted__" not in text
-                    and not text.lstrip().startswith("U2FsdGVk")):
+    if not text or not text.lstrip().startswith("U2FsdGVk"):
         return ""
     try:
-        return (cryptojs_decrypt(text, "") or "").strip()
+        return (cryptojs_decrypt(text) or "").strip()
     except Exception:
         return ""
 
@@ -186,7 +185,7 @@ def _normalize_live_grab(grabbed):
     hardware = []
     for value in grabbed.get("hardware") or ():
         value = str(value or "").strip()
-        if value.startswith("U2FsdGVk") or "Salted__" in value:
+        if value.startswith("U2FsdGVk"):
             value = _hardware_from_reader_blob(value)
         if value and value not in hardware:
             hardware.append(value)

@@ -10,17 +10,14 @@ import time
 from urllib.parse import urlsplit
 
 from .partners import WEBREADER_URL
-from .tolino import TolinoAuthError
+from .tolino import TolinoAuthError, log_info
 from .cdp_transport import _Ws, _http_get_json
 from .cdp_scripts import _GRAB_SNIPPET, idb_expression
 
 
 # ---------------------------------------------------------------- Vorbedingungen
 
-# Keep the established cdp import path while locating browser discovery in
-# its dedicated module.
 from . import browser_finder
-from .browser_finder import pick_chromium
 
 
 def _start_port():
@@ -146,11 +143,11 @@ def launch_reader_window():
     previous = _verified_owner()
     if previous:
         return previous["port"]
-    candidate, status = pick_chromium()
+    candidate, status = browser_finder.pick_chromium()
     binary, label = candidate or (None, None)
     if not binary:
-        message, code = browser_finder.missing_browser_error(status)
-        raise TolinoAuthError(message, code=code,
+        message = browser_finder.missing_browser_error(status)
+        raise TolinoAuthError(message, code="B01",
                               short="Browser-Anmeldung nicht möglich",
                               detail="Host-Sonde: %s" % status)
     if _LAUNCHED["process"] is not None:
@@ -193,7 +190,6 @@ def launch_reader_window():
     _LAUNCHED.update({"process": process, "port": port, "profile": profile})
     # Der Port gehört ins Log: nur so lässt sich die CDP-Verbindung von
     # aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
-    from .tolino import log_info
     log_info("Tolino-Anmeldefenster: Chromium auf 127.0.0.1:%d." % port)
     if _wait_for_debug_port(port):
         return port

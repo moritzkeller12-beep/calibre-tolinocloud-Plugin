@@ -578,10 +578,6 @@ class InventoryDialog(QDialog):
         except (TypeError, ValueError):
             return False
 
-    def accept(self):
-        """«Synchronisierung starten»: die Auswahl übernehmen."""
-        QDialog.accept(self)
-
     def selected_cloud_deletions(self):
         """(UUID, tolino-ID, Titel) der zum Löschen markierten Cloud-Kopien."""
         return [(str(row.get("uuid") or ""), str(row["tolino_id"]),
@@ -1052,15 +1048,11 @@ class InventoryDialog(QDialog):
     def _download_content(self, tolino_id):
         """Buchdatei ohne Zusatzdateien im Hintergrund laden."""
         client = self._cached_or_new_client()
-        if client is None:
-            return None
         return client.download(tolino_id)
 
     def _download_finished(self, result):
         path = self._download_path
         self._end_action()
-        if result is None:
-            return
         if result[:4] == b"%PDF" and path.casefold().endswith(".epub"):
             path = path[:-5] + ".pdf"
         try:

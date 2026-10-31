@@ -171,11 +171,13 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.gui.current_db = type(
                 "Database", (), {"field_metadata": FieldMetadata()})()
             dashboard._save_visible_account = lambda _values: None
+            contexts = []
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "local_metadata", return_value={}):
-                dashboard._start_prepare_worker = lambda *_args: None
+                dashboard._start_prepare_worker = (
+                    lambda context, *_args: contexts.append(context))
                 dashboard.start_sync()
-            self.assertTrue(dashboard.columns.get("id"))
+            self.assertTrue(contexts[0].columns.get("id"))
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
@@ -208,11 +210,13 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                     dashboard.gui.current_db = type(
                         "Database", (), {"field_metadata": fields})()
                     dashboard._save_visible_account = lambda _values: None
+                    contexts = []
                     with patch.object(ui_module.dashboard._dashboard_plan,
                                       "local_metadata", return_value={}):
-                        dashboard._start_prepare_worker = lambda *_args: None
+                        dashboard._start_prepare_worker = (
+                            lambda context, *_args: contexts.append(context))
                         dashboard.start_sync()
-                    self.assertIs(expected, dashboard.columns.get("id"))
+                    self.assertIs(expected, contexts[0].columns.get("id"))
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
@@ -747,10 +751,11 @@ class NoSilentDeadEndTests(unittest.TestCase):
                 "Db", (), {"field_metadata": {}})()})()
         dashboard.status = type(
             "Status", (), {"setText": lambda self, _text: None})()
-        dashboard.columns = {"id": True, "read": False}
         dashboard.finish_thread = lambda: finished.append(True)
         worker = type("Worker", (), {})()
         worker.account_name = "A"
+        worker.context = type("Context", (), {
+            "columns": {"id": True, "read": False}})()
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}

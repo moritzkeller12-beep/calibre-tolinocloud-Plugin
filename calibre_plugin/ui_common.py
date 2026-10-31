@@ -26,7 +26,7 @@ __all__ = [
     "QThread", "QVBoxLayout", "QStyledItemDelegate", "QStyle",
     "QStyleOptionViewItem", "QEvent", "Qt",
     "_THREADS", "_apply_busy", "_dialog_busy",
-    "_login_failure_guidance",
+    "LOGIN_NEXT_STEP", "_login_failure_guidance",
     "gui_guard",
     "start_worker", "_stop_thread",
     "_set_enabled",
@@ -221,15 +221,17 @@ def _apply_busy(dialog, busy):
                  not busy)
 
 
+LOGIN_NEXT_STEP = "Anmeldung erneut starten; Details stehen im Calibre-Log."
+
+
 def _login_failure_guidance(error):
-    """(Titel, nächster Schritt) für einen fehlgeschlagenen Browser-Login.
+    """Titel für einen fehlgeschlagenen Browser-Login.
 
     Der Titel ist der Kurztext der Exception -- die einzige Quelle für
     Fehlertexte; der nächste Schritt ist für alle Ursachen derselbe.
     """
     title = error.short if isinstance(error, TolinoError) else ""
-    return (str(title or "").strip() or "Anmeldung nicht abgeschlossen",
-            "Anmeldung erneut starten; Details stehen im Calibre-Log.")
+    return str(title or "").strip() or "Anmeldung nicht abgeschlossen"
 
 
 def _failed_operations(outcome):

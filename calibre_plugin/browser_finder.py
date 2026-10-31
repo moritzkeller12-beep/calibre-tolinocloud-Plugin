@@ -39,11 +39,10 @@ def missing_browser_error(status=""):
             "Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt. "
             "Bitte «flatpak update» ausführen und Calibre danach "
             "vollständig neu starten.")
-        return message, "B01"
+        return message
     if in_flatpak_sandbox() and status not in ("empty", "unavailable"):
         message += "\n\n" + flatpak_permission_hint()
-        return message, "B01"
-    return message, "B01"
+    return message
 
 
 # PATH-independent locations for desktop-launched Calibre.
@@ -59,25 +58,24 @@ _EXTRA_BROWSER_PATHS = (
 )
 
 # Executable aliases and display names shared by PATH and Flatpak host probing.
-# The third field preserves the smaller command set previously probed on hosts.
 _BROWSER_COMMANDS = (
-    ("google-chrome", "Google Chrome", True),
-    ("google-chrome-stable", "Google Chrome", True),
-    ("google-chrome-beta", "Google Chrome", True),
-    ("chrome", "Google Chrome", True),
-    ("chromium", "Chromium", True),
-    ("chromium-browser", "Chromium", True),
-    ("brave-browser", "Brave", True),
-    ("brave-browser-stable", "Brave", True),
-    ("microsoft-edge", "Edge", True),
-    ("microsoft-edge-stable", "Edge", True),
-    ("microsoft-edge-beta", "Edge", False),
-    ("microsoft-edge-dev", "Edge", True),
-    ("vivaldi", "Vivaldi", True),
-    ("vivaldi-stable", "Vivaldi", True),
-    ("vivaldi-snapshot", "Vivaldi", False),
-    ("opera", "Opera", True),
-    ("opera-stable", "Opera", False),
+    ("google-chrome", "Google Chrome"),
+    ("google-chrome-stable", "Google Chrome"),
+    ("google-chrome-beta", "Google Chrome"),
+    ("chrome", "Google Chrome"),
+    ("chromium", "Chromium"),
+    ("chromium-browser", "Chromium"),
+    ("brave-browser", "Brave"),
+    ("brave-browser-stable", "Brave"),
+    ("microsoft-edge", "Edge"),
+    ("microsoft-edge-stable", "Edge"),
+    ("microsoft-edge-beta", "Edge"),
+    ("microsoft-edge-dev", "Edge"),
+    ("vivaldi", "Vivaldi"),
+    ("vivaldi-stable", "Vivaldi"),
+    ("vivaldi-snapshot", "Vivaldi"),
+    ("opera", "Opera"),
+    ("opera-stable", "Opera"),
 )
 
 # Keep the native Flatpak launcher and host probe mappings in one place.
@@ -96,7 +94,7 @@ _FLATPAK_BROWSER_APPS = (
 def _browser_label_for(path):
     """Display name for a browser executable path."""
     name = os.path.basename(str(path))
-    for command, label, _probe_on_host in _BROWSER_COMMANDS:
+    for command, label in _BROWSER_COMMANDS:
         if name.startswith(command):
             return label
     return name
@@ -118,8 +116,7 @@ def _sandbox_host_launchers():
         app_id for app_id, _command, _label, _host_label
         in _FLATPAK_BROWSER_APPS)).replace(
             "HOST_COMMAND_LIST", " ".join(
-                name for name, _label, probe_on_host in _BROWSER_COMMANDS
-                if probe_on_host))
+                name for name, _label in _BROWSER_COMMANDS))
     try:
         proc = subprocess.run([spawn, "--host", "sh", "-c", script],
                               stdout=subprocess.PIPE,
@@ -159,7 +156,7 @@ def _collect_candidates(home=None):
     flat = os.path.join(home, ".var", "app")
     snap = os.path.join(home, "snap")
     found = []
-    for exe, label, _probe_on_host in _BROWSER_COMMANDS:
+    for exe, label in _BROWSER_COMMANDS:
         path = shutil.which(exe)
         if path:
             found.append(([path], label))

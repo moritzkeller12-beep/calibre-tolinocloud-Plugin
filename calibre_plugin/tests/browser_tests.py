@@ -117,7 +117,7 @@ class LiveGrabTests(unittest.TestCase):
         with tempfile.TemporaryDirectory():
             prefix = ["/usr/bin/flatpak", "run", "--command=brave",
                       "com.brave.Browser"]
-            with _patch.object(cdp_module, "pick_chromium",
+            with _patch.object(browser_finder, "pick_chromium",
                                return_value=((prefix, "Brave (Flatpak)"), "")), \
                  _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
                  _patch.object(cdp_module, "_http_get_json",
@@ -1024,8 +1024,9 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                    if name == "flatpak-spawn" else None), \
              patch.object(cdp_module.subprocess, "run",
                           return_value=EmptyProc()):
-            browser_finder._collect_candidates(home="/nonexistent-home")[0]
-            self.assertEqual("empty", browser_finder.pick_chromium()[1])
+            _found, status = browser_finder._collect_candidates(
+                home="/nonexistent-home")
+            self.assertEqual("empty", status)
 
     def test_launch_names_installation_when_host_probe_empty(self):
         """Ist die Sonde durchgelaufen und hat nichts gefunden, nennt die
@@ -1034,7 +1035,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
         from unittest.mock import patch as _patch
         from .. import cdp as cdp_module
 
-        with _patch.object(cdp_module, "pick_chromium", return_value=(None, 'empty')), \
+        with _patch.object(browser_finder, "pick_chromium", return_value=(None, 'empty')), \
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=True):
             with self.assertRaises(TolinoAuthError) as ctx:
@@ -1062,7 +1063,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                 spawned["args"] = list(args)
 
         with tempfile.TemporaryDirectory():
-            with _patch.object(cdp_module, "pick_chromium",
+            with _patch.object(browser_finder, "pick_chromium",
                                return_value=(broken, "")), \
                  _patch.object(browser_finder, "chromium_options",
                                return_value=[broken, working]), \
@@ -1096,7 +1097,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                 state["waited"] = True
                 return 0
 
-        with _patch.object(cdp_module, "pick_chromium",
+        with _patch.object(browser_finder, "pick_chromium",
                            return_value=((["/usr/bin/chromium"], "Chromium"), "")), \
              _patch.object(cdp_module, "_start_port", return_value=9333), \
              _patch.object(cdp_module.subprocess, "Popen", FakePopen), \
@@ -1122,7 +1123,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                     if arg.startswith("--user-data-dir=")))
                 raise OSError("cannot start")
 
-        with _patch.object(cdp_module, "pick_chromium",
+        with _patch.object(browser_finder, "pick_chromium",
                            return_value=((["/usr/bin/chromium"], "Chromium"), "")), \
              _patch.object(browser_finder, "chromium_options", return_value=[]), \
              _patch.object(cdp_module.subprocess, "Popen", FakePopen):
@@ -1196,7 +1197,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
         from unittest.mock import patch as _patch
         from .. import cdp as cdp_module
 
-        with _patch.object(cdp_module, "pick_chromium", return_value=(None, 'empty')), \
+        with _patch.object(browser_finder, "pick_chromium", return_value=(None, 'empty')), \
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=False):
             with self.assertRaises(TolinoAuthError) as ctx:
@@ -1278,11 +1279,9 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
                    if name == "flatpak-spawn" else None), \
              patch.object(cdp_module.subprocess, "run",
                           return_value=Proc()):
-            found = browser_finder._collect_candidates(home="/nonexistent-home")[0]
-            # Status hier pruefen: der Patch stellt den alten Wert wieder
-            # her, sobald der Block endet (Verhalten wie die
-            # Bestandstests in ChromiumOpensRegardlessOfDefaultTests).
-            self.assertEqual("ok", browser_finder.pick_chromium()[1])
+            found, status = browser_finder._collect_candidates(
+                home="/nonexistent-home")
+            self.assertEqual("ok", status)
         argvs = [argv for argv, _label in found]
         self.assertIn(["/usr/bin/flatpak-spawn", "--host",
                        "/usr/bin/chromium"], argvs)
@@ -1334,8 +1333,9 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
                    if name == "flatpak-spawn" else None), \
              patch.object(cdp_module.subprocess, "run",
                           return_value=Proc()):
-            found = browser_finder._collect_candidates(home="/nonexistent-home")[0]
-            self.assertEqual("denied", browser_finder.pick_chromium()[1])
+            found, status = browser_finder._collect_candidates(
+                home="/nonexistent-home")
+            self.assertEqual("denied", status)
         self.assertEqual([], found)
 
     def test_launch_permission_names_both_installations(self):
@@ -1346,7 +1346,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
         from unittest.mock import patch as _patch
         from .. import cdp as cdp_module
 
-        with _patch.object(cdp_module, "pick_chromium", return_value=(None, 'denied')), \
+        with _patch.object(browser_finder, "pick_chromium", return_value=(None, 'denied')), \
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=True):
             with self.assertRaises(TolinoAuthError) as ctx:
@@ -1364,7 +1364,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
         from unittest.mock import patch as _patch
         from .. import cdp as cdp_module
 
-        with _patch.object(cdp_module, "pick_chromium", return_value=(None, 'unavailable')), \
+        with _patch.object(browser_finder, "pick_chromium", return_value=(None, 'unavailable')), \
              _patch.object(browser_finder, "in_flatpak_sandbox",
                            return_value=True):
             with self.assertRaises(TolinoAuthError) as ctx:
@@ -1469,7 +1469,7 @@ class CdpOwnershipTests(unittest.TestCase):
             def poll():
                 return None
 
-        with patch.object(self.cdp, "pick_chromium",
+        with patch.object(browser_finder, "pick_chromium",
                           return_value=((["/usr/bin/chromium"], "Chromium"), "")), \
              patch.object(self.cdp, "_start_port", return_value=9441), \
              patch.object(self.cdp.subprocess, "Popen", FakePopen), \

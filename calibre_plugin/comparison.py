@@ -143,10 +143,6 @@ class ReadState:
     def __bool__(self):
         return self.chosen
 
-    def __repr__(self):
-        return ("ReadState(known=%s, cloud=%s, chosen=%s, local=%s)"
-                % (self.known, self.cloud, self.chosen, self.local))
-
 
 def _read_flags(tolino_id, read_known, read_ids):
     """Lesestatus einer Zeile: Cloud-Stand und Auswahl in einem Objekt."""
@@ -389,9 +385,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     Matching is deliberately conservative and ordered:
 
     1. the stored tolino ID (state or ``#tolino_id`` column),
-    2. the Calibre UUID,
-    3. one unique *valid* ISBN,
-    4. one unique normalized title+author pair.
+    2. one unique *valid* ISBN,
+    3. one unique normalized title+author pair.
 
     A title on its own never matches: it produces a ``review`` row for a
     human decision and leaves the cloud record untouched, so no automatic

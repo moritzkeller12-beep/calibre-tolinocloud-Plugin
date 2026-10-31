@@ -65,7 +65,6 @@ def normalize_inventory_record(item):
 
         {"tolino_id": <Deliverable-Kennung oder "">,
          "has_deliverable_id": bool,
-         "identifier": <Ersatzkennung/ISBN oder "">,
          "title": str, "authors": str, "isbn": str}
 
     ``tolino_id`` bleibt leer, wenn nur ``identifier`` existiert: diese
@@ -74,7 +73,6 @@ def normalize_inventory_record(item):
     Loeschungen ueberhaupt ansprechbar ist.
     """
     deliverable = _inventory_id_in(item, _INVENTORY_ID_KEYS)
-    identifier = _inventory_id_in(item, ("identifier",))
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
     isbn = _nested_inventory_value(
@@ -82,7 +80,6 @@ def normalize_inventory_record(item):
     return {
         "tolino_id": deliverable,
         "has_deliverable_id": bool(deliverable),
-        "identifier": identifier,
         "title": str(title or "").strip(),
         "authors": _inventory_author(author),
         "isbn": str(isbn or "").strip(),

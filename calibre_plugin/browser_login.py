@@ -71,14 +71,6 @@ def _close_window_after_grab(progress=None):
     return False
 
 
-def _grabber_window_state(getter):
-    """Read the grabber window; a transient CDP error is no state."""
-    try:
-        return getter()
-    except Exception:
-        return None
-
-
 def _raise_grab_failure(last_error, grabbed, rejected):
     """Raise the final B02 error with age/error context."""
     details = []
@@ -152,25 +144,24 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         now = time.monotonic()
         if now - last_window_check >= _WINDOW_CHECK_INTERVAL:
             last_window_check = now
-            window = _grabber_window_state(cdp_module.grabber_window_state)
-            if window is not None:
-                if window.get("window"):
-                    endpoint_misses = 0
-                    saw_reader = saw_reader or bool(window.get("reader_tab"))
-                else:
-                    endpoint_misses += 1
-                    if endpoint_misses >= _CLOSED_WINDOW_MISSES:
-                        # Nach einem gelesenen Token bleibt die Ablehnung
-                        # die genauere Meldung; ohne Token ist das Fenster
-                        # wirklich vorzeitig verschwunden.
-                        if saw_reader:
-                            break
-                        if progress:
-                            progress("Anmeldefenster geschlossen – abgebrochen.")
-                        raise TolinoAuthError(
-                            "Das Anmeldefenster wurde geschlossen, bevor die "
-                            "Übernahme fertig war. Bitte erneut versuchen und "
-                            "es offen lassen.", code="B02")
+            window = cdp_module.grabber_window_state()
+            if window.get("window"):
+                endpoint_misses = 0
+                saw_reader = saw_reader or bool(window.get("reader_tab"))
+            else:
+                endpoint_misses += 1
+                if endpoint_misses >= _CLOSED_WINDOW_MISSES:
+                    # Nach einem gelesenen Token bleibt die Ablehnung
+                    # die genauere Meldung; ohne Token ist das Fenster
+                    # wirklich vorzeitig verschwunden.
+                    if saw_reader:
+                        break
+                    if progress:
+                        progress("Anmeldefenster geschlossen – abgebrochen.")
+                    raise TolinoAuthError(
+                        "Das Anmeldefenster wurde geschlossen, bevor die "
+                        "Übernahme fertig war. Bitte erneut versuchen und "
+                        "es offen lassen.", code="B02")
 
         if (progress and window and window.get("window")
                 and not window.get("reader_tab")):
@@ -185,7 +176,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         time.sleep(min(_NEW_TOKEN_INTERVAL, remaining))
 
     if not window:
-        window = _grabber_window_state(cdp_module.grabber_window_state)
+        window = cdp_module.grabber_window_state()
     if window and window.get("window") and not window.get("reader_tab"):
         # Leave the partner login page open so the user can finish signing in.
         if saw_reader:
