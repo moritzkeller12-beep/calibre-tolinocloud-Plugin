@@ -124,7 +124,8 @@ class LiveGrabTests(unittest.TestCase):
                                return_value={"webSocketDebuggerUrl":
                                              "ws://127.0.0.1:%d/devtools/browser/x" % 9441}), \
                  _patch.object(cdp_module.time, "sleep"):
-                port = cdp_module.launch_reader_window()
+                cdp_module.launch_reader_window()
+                port = cdp_module._LAUNCHED["port"]
         args = spawned["args"]
         self.assertEqual(prefix, args[:4])
         self.assertIn("--remote-debugging-port=%d" % port, args)
@@ -1072,7 +1073,8 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                                return_value={"webSocketDebuggerUrl":
                                              "ws://127.0.0.1:%d/devtools/browser/x" % 9441}), \
                  _patch.object(cdp_module.time, "sleep"):
-                port = cdp_module.launch_reader_window()
+                cdp_module.launch_reader_window()
+                port = cdp_module._LAUNCHED["port"]
         self.assertEqual("/usr/bin/working", spawned["args"][0])
         self.assertIn("--remote-debugging-port=%d" % port, spawned["args"])
         self.assertIn("mytolino.com", spawned["args"][-1])
@@ -1387,7 +1389,7 @@ class CdpOwnershipTests(unittest.TestCase):
         self.cdp._LAUNCHED.update({
             "process": process, "port": port,
             "profile": profile or tempfile.mkdtemp(prefix="cdp-test-")})
-        return self.cdp._verified_owner(port, require_endpoint=False)
+        return self.cdp._verified_owner(require_endpoint=False)
 
     def test_reader_target_builds_only_port_and_path(self):
         """Der Reader-Tab liefert (Port, Pfad); die gemeldete URL zaehlt nicht."""
@@ -1451,8 +1453,6 @@ class CdpOwnershipTests(unittest.TestCase):
         self._launch(Process())
         with patch.object(self.cdp, "_endpoint_answers", return_value=True):
             self.assertEqual(9223, self.cdp._verified_owner()["port"])
-            self.assertIsNotNone(self.cdp._verified_owner(9223))
-            self.assertIsNone(self.cdp._verified_owner(9224))
         with patch.object(self.cdp, "_endpoint_answers", return_value=False):
             self.assertIsNone(self.cdp._verified_owner())
 
@@ -1474,7 +1474,8 @@ class CdpOwnershipTests(unittest.TestCase):
              patch.object(self.cdp, "_start_port", return_value=9441), \
              patch.object(self.cdp.subprocess, "Popen", FakePopen), \
              patch.object(self.cdp, "_http_get_json", return_value={"ok": True}):
-            port = self.cdp.launch_reader_window()
+            self.cdp.launch_reader_window()
+        port = self.cdp._LAUNCHED["port"]
         self.assertEqual(9441, port)
         profile_arg = next(arg for arg in spawned["args"]
                            if arg.startswith("--user-data-dir="))

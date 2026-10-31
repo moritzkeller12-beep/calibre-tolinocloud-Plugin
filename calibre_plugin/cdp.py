@@ -32,14 +32,12 @@ def _start_port():
 _LAUNCHED = {"process": None, "port": None, "profile": ""}
 
 
-def _verified_owner(port=None, require_endpoint=True):
+def _verified_owner(require_endpoint=True):
     """This process's browser record, by default only while it answers."""
     process = _LAUNCHED["process"]
     actual_port = _LAUNCHED["port"]
     profile = _LAUNCHED["profile"]
     if process is None or not actual_port or not profile:
-        return None
-    if port is not None and int(port) != int(actual_port):
         return None
     record = {"process": process, "port": int(actual_port),
               "profile": profile}
@@ -142,7 +140,7 @@ def launch_reader_window():
     """Start Chromium with an isolated temporary profile and random port."""
     previous = _verified_owner()
     if previous:
-        return previous["port"]
+        return
     candidate, status = browser_finder.pick_chromium()
     binary, label = candidate or (None, None)
     if not binary:
@@ -192,7 +190,7 @@ def launch_reader_window():
     # aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
     log_info("Tolino-Anmeldefenster: Chromium auf 127.0.0.1:%d." % port)
     if _wait_for_debug_port(port):
-        return port
+        return
     _shutdown({"process": process, "port": port, "profile": profile})
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
@@ -301,9 +299,9 @@ def _reader_target(targets, port):
     return None, reader_found
 
 
-def _reader_targets(port=None, timeout=5):
+def _reader_targets(timeout=5):
     """Owned window's reader target, resolved in one place."""
-    record = _verified_owner(port)
+    record = _verified_owner()
     if record is None:
         return None
     port = int(record["port"])
@@ -315,7 +313,7 @@ def _reader_targets(port=None, timeout=5):
     return {"window": True, "reader_tab": reader_found, "target": target}
 
 
-def grab_once_from_grabber(port=None, timeout=12):
+def grab_once_from_grabber(timeout=12):
     """ONE grab attempt against OUR grabber window (no polling).
 
     Returns the grabbed dict (refresh/hardware/idb lists, possibly empty)
@@ -324,7 +322,7 @@ def grab_once_from_grabber(port=None, timeout=12):
     waiting for a sign-in that may not happen – the user just clicks the
     button again after signing in.
     """
-    target = _reader_targets(port, timeout=max(0.1, min(5, timeout)))
+    target = _reader_targets(timeout=max(0.1, min(5, timeout)))
     if target is None or target["target"] is None:
         return None
     return _grab_page_tokens(target["target"], timeout)
@@ -399,17 +397,17 @@ def _shutdown(record, timeout=2):
     return True
 
 
-def close_grabber_window(timeout=2, port=None):
+def close_grabber_window(timeout=2):
     """Close only the browser started by this module, then remove its profile."""
-    record = _verified_owner(port, require_endpoint=False)
+    record = _verified_owner(require_endpoint=False)
     if record is None:
         return False
     return _shutdown(record, timeout)
 
 
-def grabber_window_state(port=None, timeout=5):
+def grabber_window_state(timeout=5):
     """Return whether the grabber window and a reader tab are available."""
-    target = _reader_targets(port, timeout)
+    target = _reader_targets(timeout)
     if target is None:
         return {"window": False, "reader_tab": False}
     return {"window": True, "reader_tab": target["reader_tab"]}

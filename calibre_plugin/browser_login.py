@@ -95,7 +95,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
     reports that and offers the manual route instead.
     """
     deadline = time.monotonic() + max(0, timeout)
-    port = cdp_module.launch_reader_window()
+    cdp_module.launch_reader_window()
     if progress:
         progress("Anmeldefenster geöffnet – bitte anmelden und warten, "
                  "bis die Bücherliste lädt.")
@@ -113,7 +113,7 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         if remaining <= 0:
             break
         more = _normalize_live_grab(cdp_module.grab_once_from_grabber(
-            port, timeout=max(0.1, min(12, remaining))))
+            timeout=max(0.1, min(12, remaining))))
         if more and more.get("refresh"):
             grabbed = more
             saw_reader = True
