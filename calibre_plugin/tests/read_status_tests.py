@@ -223,6 +223,64 @@ class ProgressColumnTests(unittest.TestCase):
         self.assertEqual(0, update_progress_status(db, [(1, 42)]))
         self.assertEqual({}, db.new_api.values)
 
+    def test_unchanged_progress_is_not_written_again(self):
+        db = self._db({1})
+        db.new_api.field_for = lambda _column, _book_id: 33
+        self.assertEqual(0, update_progress_status(db, [(1, 33)]))
+        self.assertEqual({}, db.new_api.values)
+
+
+class ProgressMirrorTests(unittest.TestCase):
+    def test_changed_progress_and_missing_cloud_copy_are_mirrored(self):
+        from ..ui_dashboard import _mirror_progress
+
+        class Api:
+            def __init__(self):
+                self.values = {2: 20, 4: 44, 5: 55}
+                self.writes = []
+
+            def has_id(self, book_id):
+                return book_id in (1, 2, 3, 4, 5)
+
+            def field_for(self, _column, book_id):
+                return self.values.get(book_id)
+
+            def set_field(self, _column, values):
+                self.writes.append(dict(values))
+                self.values.update(values)
+
+        class Db:
+            field_metadata = {TOLINO_PROGRESS_COLUMN: {"datatype": "int"}}
+            new_api = Api()
+
+        refreshed = []
+        model = type("Model", (), {
+            "refresh_ids": lambda self, ids: refreshed.append(tuple(ids))})()
+        gui = type("Gui", (), {
+            "current_db": Db(),
+            "library_view": type("View", (), {
+                "model": lambda self: model})()})()
+        dashboard = type("Dashboard", (), {"gui": gui})()
+        rows = [
+            {"book_id": 1, "tolino_id": "t-1", "status": "identical",
+             "progress": ProgressState(percent=33)},
+            {"book_id": 2, "tolino_id": "", "status": "new_in_calibre",
+             "progress": ProgressState()},
+            {"book_id": 3, "tolino_id": "t-3", "status": "identical",
+             "progress": ProgressState(known=False)},
+            {"book_id": 4, "tolino_id": "", "status": "review",
+             "progress": ProgressState()},
+            {"book_id": 5, "tolino_id": "", "status": "new_in_calibre",
+             "stale_cloud_id": "old-5", "progress": ProgressState()},
+        ]
+        _mirror_progress(dashboard, rows, {"progress": True})
+        self.assertEqual({1: 33, 2: 20, 4: 44, 5: None},
+                         dashboard.gui.current_db.new_api.values)
+        self.assertEqual([{1: 33, 5: None}],
+                         dashboard.gui.current_db.new_api.writes)
+        self.assertEqual([(1, 5)], refreshed)
+
+
 
 class ProgressComparisonTests(unittest.TestCase):
     """Fortschritt kommt an die Zeile, bleibt aber reine Anzeige."""

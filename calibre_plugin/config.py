@@ -46,9 +46,10 @@ def _account_list(raw):
                 for index, item in enumerate(raw)]
     names = set()
     for index, item in enumerate(accounts):
-        name = item["name"]
-        if name in names:
-            item["name"] = "%s-%d" % (name, index + 1)
+        base, number = item["name"], index + 1
+        while item["name"] in names:
+            item["name"] = "%s-%d" % (base, number)
+            number += 1
         names.add(item["name"])
     return accounts
 

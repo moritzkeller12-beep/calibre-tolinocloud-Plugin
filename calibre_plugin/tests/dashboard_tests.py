@@ -547,6 +547,27 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         dashboard.hardware.setText("manuell")
         self.assertEqual("manuell", dashboard.values()["hardware_id"])
 
+    def test_adopted_hardware_survives_stale_fields_and_token_storage(self):
+        _ui_module, dashboard = self._ui()
+        config.save_account("konto", {"hardware_id": "adoptiert"},
+                            active="konto")
+        dashboard._save_visible_account()
+        self.assertEqual("adoptiert",
+                         config.account_by_name("konto")["hardware_id"])
+        dashboard.hardware.setText("manuell")
+        dashboard._hardware_edited = True
+        dashboard._save_visible_account()
+        self.assertEqual("manuell",
+                         config.account_by_name("konto")["hardware_id"])
+
+        _ui_module, dashboard = self._ui("alt-token")
+        config.save_account("konto", {"hardware_id": "adopted"},
+                            active="konto")
+        dashboard.hardware.setText("hw-1")
+        dashboard.store_refresh("neu")
+        self.assertEqual("adopted",
+                         config.account_by_name("konto")["hardware_id"])
+
     def test_a_missing_account_never_saves_another_accounts_state(self):
         """Ist der angezeigte Name weg, darf nicht das aktive Konto
         unter diesem Namen gespeichert werden."""
@@ -1216,6 +1237,20 @@ class AccountStateBindingTests(unittest.TestCase):
         self.assertEqual({"u2": {"tolino_id": "id-b"}},
                          config.account_by_name("beta")["state"])
         self.assertEqual({}, config.account_by_name("gone"))
+
+    def test_duplicate_names_keep_both_accounts_accessible(self):
+        original = config.PREFERENCES
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.PREFERENCES = config.JSONConfig("test")
+        config.PREFERENCES.update({
+            "accounts": [{"name": "konto", "hardware_id": "hw-1"},
+                         {"name": "konto", "hardware_id": "hw-2"}],
+            "active_account": "konto",
+        })
+        self.assertEqual("hw-1",
+                         config.account_by_name("konto")["hardware_id"])
+        self.assertEqual("hw-2",
+                         config.account_by_name("konto-2")["hardware_id"])
 
     def test_set_active_account_switches_without_touching_state(self):
         original = config.PREFERENCES

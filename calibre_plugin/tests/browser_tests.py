@@ -714,6 +714,9 @@ class LiveGrabTests(unittest.TestCase):
         expression = idb_expression("tolino-user")
         self.assertTrue(expression.rstrip().endswith('})("tolino-user")'))
         self.assertNotIn("'\"", expression)
+        # Große Offline-Buchdaten dürfen den Reader-Tab nicht blockieren.
+        self.assertIn("ArrayBuffer.isView(value)", expression)
+        self.assertIn("instanceof Blob", expression)
 
 class LoginWindowWaitTests(_SidJwtTest):
     """die Wartezeit nach einer Ablehnung unterscheidet, OB das

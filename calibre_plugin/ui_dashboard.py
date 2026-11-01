@@ -67,6 +67,17 @@ def _persist_sync_result(dialog, state, updates):
     return failures
 
 
+def _finish_sync(dialog, state, updates):
+    """Laufergebnis sichern und den Thread in jedem Fall beenden."""
+    outcome = dict(getattr(dialog.worker, "outcome", None) or {})
+    try:
+        return outcome, _persist_sync_result(dialog, state, updates)
+    finally:
+        # Auch ein unerwarteter Fehler beim Schreiben in Calibre darf
+        # den Dialog nicht im Zustand «läuft» zurücklassen.
+        dialog.finish_thread()
+
+
 def _mirror_progress(dashboard, comparison, columns):
     """Cloud-Fortschritt einmalig in die informative Calibre-Spalte spiegeln.
 
@@ -80,18 +91,41 @@ def _mirror_progress(dashboard, comparison, columns):
     updates = []
     for row in comparison:
         progress = row.get("progress")
-        if (row.get("book_id") is None or not row.get("tolino_id")
-                or progress is None
+        if (row.get("book_id") is None or progress is None
                 or not getattr(progress, "known", False)):
             continue
-        updates.append((row["book_id"], progress.percent))
+        # Nur eine veraltete gespeicherte Cloud-ID belegt, dass die Kopie
+        # verschwunden ist. Ohne ID und ohne alte ID bleibt der letzte Stand
+        # stehen -- die Zeile kann nur nicht zugeordnet sein.
+        tolino_id = row.get("tolino_id")
+        if not tolino_id and not row.get("stale_cloud_id"):
+            continue
+        updates.append((row["book_id"], progress.percent if tolino_id else None))
     if not updates:
         return
     try:
-        update_progress_status(dashboard.gui.current_db, updates)
+        written = update_progress_status(dashboard.gui.current_db, updates)
     except Exception as exc:
         log_warning("Lesefortschritt konnte nicht in Calibre geschrieben "
                     "werden: %s" % sanitize_error(exc))
+        return
+    if written:
+        _refresh_library_view(dashboard, [book_id for book_id, _ in updates])
+
+
+def _refresh_library_view(dashboard, book_ids):
+    """Geänderte Calibre-Zeilen sichtbar machen, ohne die Bibliothek neu zu laden."""
+    view = getattr(getattr(dashboard, "gui", None), "library_view", None)
+    model = getattr(view, "model", None)
+    if callable(model):
+        model = model()
+    refresh = getattr(model, "refresh_ids", None)
+    if callable(refresh):
+        try:
+            refresh(tuple(book_ids))
+        except Exception as exc:
+            log_warning("Calibre-Ansicht konnte nicht aktualisiert werden: %s"
+                        % sanitize_error(exc))
 
 
 def _sync_cancelled_text(outcome):
@@ -133,6 +167,8 @@ class SyncDashboard(DashboardParts, QDialog):
         self.setWindowTitle("tolino Cloud Sync")
         self.setMinimumWidth(560)
         self._build_ui()
+        self._hardware_edited = False
+        self.hardware.textEdited.connect(self._mark_hardware_edited)
         self.load_values()
 
     def _save_visible_account(self, values=None):
@@ -145,15 +181,24 @@ class SyncDashboard(DashboardParts, QDialog):
         """
         if not getattr(self, "account_name", None):
             return
-        values = values or self.values()
+        values = dict(values or self.values())
         name = str(values.get("account_name") or "")
         if not name:
             # Fehlende Konten dürfen keinen fremden Zustand überschreiben.
             log_warning("Das sichtbare Konto existiert nicht mehr; "
                         "Änderungen wurden nicht gespeichert.")
             return
+        # Ein unverändertes Feld darf eine vom Worker übernommene Geräte-ID
+        # nicht mit einem veralteten Anzeigewert überschreiben.
+        if not getattr(self, "_hardware_edited", False):
+            values.pop("hardware_id", None)
         save_account(name, values, active=name,
                      preferred_formats=values[PREFERRED_FORMATS])
+        self._hardware_edited = False
+
+    def _mark_hardware_edited(self, _text=""):
+        """Merken, dass die Geräte-ID von Hand geändert wurde."""
+        self._hardware_edited = True
 
     def account_changed(self, index):
         """Konto in den Einstellungen gewechselt."""
@@ -250,6 +295,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 save_account(self.account_name, {"partner_id": partner_id})
         self.partner.setCurrentIndex(max(0, self.partner.findData(partner_id)))
         self.hardware.setText(values["hardware_id"] or hardware_id())
+        self._hardware_edited = False
         # Das leere Feld darf einen rotierten Token nicht überschreiben.
         self.refresh.setText("")
         self.formats.setText(", ".join(values["preferred_formats"]))
@@ -333,10 +379,13 @@ class SyncDashboard(DashboardParts, QDialog):
         token = normalize_refresh_token(refresh)
         if not token or not self.account_name:
             return
+        hardware = str(hardware or "").strip()
+        if not hardware and not getattr(self, "_hardware_edited", False):
+            account = account_by_name(getattr(self, "account_name", "")) or {}
+            hardware = str(account.get("hardware_id") or "")
         save_credentials(
             self.account_name, token,
-            str(hardware or "").strip() or self.hardware.text().strip()
-            or hardware_id())
+            hardware or self.hardware.text().strip() or hardware_id())
         self.refresh.setText("")
         self.update_status()
 
@@ -600,7 +649,6 @@ class SyncDashboard(DashboardParts, QDialog):
         if payload.get("progress_status_known") is False:
             log_warning("Lesefortschritt unbekannt – die Spalte bleibt "
                         "unverändert.")
-        _mirror_progress(self, payload["comparison"], context.columns)
         try:
             selection = self._confirm_comparison(
                 payload["comparison"], context,
@@ -616,7 +664,10 @@ class SyncDashboard(DashboardParts, QDialog):
                     self, preparation["removals"], state,
                     preparation.get("removal_titles")):
                 return
-            self._start_sync_worker(context, preparation, state)
+            # Erst nach allen Bestätigungen schreiben: ein Abbruch im Dialog
+            # lässt die Calibre-Spalte unangetastet.
+            self._start_sync_worker(context, preparation, state,
+                                    payload["comparison"])
         except Exception as exc:
             # Ein Fehler NACH dem Vergleichsfenster darf nicht als
             # Traceback im Slot verschwinden: der Nutzer sähe sonst nur ein
@@ -647,12 +698,20 @@ class SyncDashboard(DashboardParts, QDialog):
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
 
-    def _start_sync_worker(self, context, preparation, state):
+    def _start_sync_worker(self, context, preparation, state, comparison=None):
         """Übersprungene Uploads melden und den Hintergrundlauf starten."""
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
         # Der Vault liest den möglicherweise rotierten Token erst beim Login.
         total = _dashboard_plan.plan_counts(preparation, len(jobs))["steps"]
+        replacements = [job for job in jobs
+                        if getattr(job, "old_id", None)]
+        if replacements and not confirm_replacements(self, replacements):
+            self.status.setText(
+                "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
+            return
+        if comparison is not None:
+            _mirror_progress(self, comparison, context.columns)
         if not total and not skipped_uploads:
             # Calibre zeigt info_dialog nur mit show=True an.
             info_dialog(self, "Nichts zu tun",
@@ -661,12 +720,6 @@ class SyncDashboard(DashboardParts, QDialog):
             return
         if skipped_uploads and report_skipped_uploads(
                 self, skipped_uploads, nothing_else=not total):
-            return
-        replacements = [job for job in jobs
-                        if getattr(job, "old_id", None)]
-        if replacements and not confirm_replacements(self, replacements):
-            self.status.setText(
-                "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
             return
         plan = _dashboard_plan.plan_text(preparation, len(jobs))
         log_warning("Sync geplant: %s" % plan)
@@ -717,13 +770,7 @@ class SyncDashboard(DashboardParts, QDialog):
         Persistiert wird unter dem KONTO DES LAUFS. UI-Felder werden nur
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
-        outcome = dict(getattr(self.worker, "outcome", None) or {})
-        try:
-            failures = _persist_sync_result(self, state, updates)
-        finally:
-            # Auch ein unerwarteter Fehler beim Schreiben in Calibre darf
-            # den Dialog nicht im Zustand «läuft» zurücklassen.
-            self.finish_thread()
+        outcome, failures = _finish_sync(self, state, updates)
         if failures:
             error_dialog(self, "Speichern fehlgeschlagen",
                          "Nicht gespeichert: %s. Cloud-Änderungen bleiben "
@@ -746,18 +793,14 @@ class SyncDashboard(DashboardParts, QDialog):
 
     @gui_guard
     def sync_failed(self, message):
-        outcome = dict(getattr(self.worker, "outcome", None) or {})
         worker = self.worker
         cancelled = bool(getattr(worker, "cancelled", False)) or \
             str(message) == CANCEL_MESSAGE
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
-        try:
-            failures = _persist_sync_result(
-                self, getattr(worker, "state", {}),
-                getattr(worker, "updates", ()))
-        finally:
-            self.finish_thread()
+        outcome, failures = _finish_sync(
+            self, getattr(worker, "state", {}),
+            getattr(worker, "updates", ()))
         if cancelled and not failures:
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)

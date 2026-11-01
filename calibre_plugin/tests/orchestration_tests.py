@@ -373,7 +373,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 })
             started = []
             dashboard._start_sync_worker = (
-                lambda given, prep, state=None: started.append(given))
+                lambda given, prep, state=None, comparison=None:
+                started.append(given))
 
             def plan(_dashboard, given, _metadata, _state, _selection):
                 self.assertFalse(hasattr(given, "refresh_token"))

@@ -15,6 +15,11 @@ _TOKEN_SCAN_HELPERS = r"""
   }
   function walk(value, depth, seen) {
     if (!value || depth > 6) return;
+    // ArrayBuffer-Views (z. B. offline gespeicherte Buchdaten) haben
+    // Millionen numerischer Indizes; sie enthalten keine Tokens.
+    if ((typeof ArrayBuffer !== 'undefined' &&
+         (ArrayBuffer.isView(value) || value instanceof ArrayBuffer)) ||
+        (typeof Blob !== 'undefined' && value instanceof Blob)) return;
     if (typeof value === 'string') {
       // Nur ein echter JWT ist ein Refresh-Kandidat: ein dreiteiliger
       // Hostname (webreader.mytolino.com) ist keiner. Dieselbe Schwelle

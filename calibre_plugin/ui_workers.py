@@ -432,7 +432,10 @@ class SyncWorker(QObject):
                         "cover", "Buchcover: %s" % job.label(),
                         book_uuid=job.book_uuid)
                     self._fail(cover_op, exc, client, fatal=True)
-            self._remove_replaced_copy(client, job)
+            # Liefert tolino beim Ersetzen dieselbe ID, ist das die neue
+            # Kopie -- sie darf nicht als «alte» gelöscht werden.
+            if job.old_id and str(job.old_id) != str(new_id):
+                self._remove_replaced_copy(client, job)
             done += 1
             self.progress.emit(done, total, "Hochgeladen: %s" % job.label())
         return done

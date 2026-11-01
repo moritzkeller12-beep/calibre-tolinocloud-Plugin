@@ -12,6 +12,9 @@ Aktuelle Version: **0.1.06** (Quelle: [`__init__.py`](__init__.py)).
 - Download-Callbacks sind GUI-geschützt, Cloud-Antworten werden vor dem Speichern als EPUB/PDF geprüft, und EPUB/PDF erhalten feste MIME-Typen.
 - Ein später Refresh-Token-Callback legt kein entferntes Konto neu an; Relogin wartet länger auf den Keep-alive-Lock. WebSocket-Nachrichten sind auf 16 MiB begrenzt, der IndexedDB-Scan liest per Cursor statt `getAll()`.
 - Der Release-Build entfernt jetzt zusätzlich Docstrings aus den Plugin-Modulen; Code, Kodierung und Zeilennummern bleiben erhalten. Das verkleinert das ZIP, ohne das Laufzeitverhalten zu ändern.
+- Ersatz-Uploads löschen die gerade bestätigte Kopie nicht, wenn tolino dieselbe `deliverableId` zurückgibt; ein 403 auf einer Einzelaktion beendet den Lauf nicht mehr als Anmeldefehler. Fortschritt wird nur bei Änderungen geschrieben und nur bei einer veralteten gespeicherten Cloud-ID geleert.
+- Der Reader-Scan überspringt Offline-Binärdaten, Multipart-Dateinamen werden header-sicher bereinigt, und eine unveränderte Geräte-ID überschreibt keine vom Worker übernommene ID.
+- Nach dem Fortschrittsschreiben werden die betroffenen Zeilen aktualisiert, und der Fortschritt wird erst nach der Ersetzungsbestätigung geschrieben. Browser-Kopfzeilen nennen die tatsächliche Plattform.
 
 ## 0.1.05
 

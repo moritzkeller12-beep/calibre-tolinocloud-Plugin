@@ -149,6 +149,34 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         return {"uuid": uuid, "title": title, "formats": ["EPUB"],
                 "last_modified": "1"}
 
+    def test_same_id_replacement_is_not_deleted(self):
+        ui_module = self._ui()
+        deletes = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.refresh = "rot-A"
+                self.access = "access"
+
+            def login(self):
+                return self.refresh
+
+            def upload(self, path):
+                return "same-id"
+
+            def delete(self, tolino_id):
+                deletes.append(tolino_id)
+
+        state = {"u1": {"tolino_id": "same-id", "calibre_id": 1}}
+        job = SyncJob(1, "u1", "EPUB", "same-id", "/book", None, "A")
+        worker, emitted, _saved, _credentials = self._run(
+            ui_module, self._settings(state), [job], FakeClient)
+        ui_module._restore_stubs_for_tests()
+        self.assertEqual([], deletes)
+        self.assertEqual("same-id", worker.state["u1"]["tolino_id"])
+        self.assertEqual(1, worker.outcome["uploaded"])
+        self.assertIsNone(emitted["failed"])
+
     def test_first_upload_survives_a_failing_second_upload(self):
         ui_module = self._ui()
 

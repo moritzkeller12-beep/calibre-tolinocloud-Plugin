@@ -229,7 +229,6 @@ class InventoryDialog(QDialog):
     TITLE_COLUMN = HEADERS.index("Buchtitel")
     AUTHORS_COLUMN = HEADERS.index("Autor(en)")
     HINT_COLUMN = HEADERS.index("Hinweis")
-    PROGRESS_COLUMN = HEADERS.index("Fortschritt")
     GROUP_FILTERS = (
         ("Alle", None),
         ("Aktion nötig", "action"),
@@ -787,7 +786,7 @@ class InventoryDialog(QDialog):
         self.table.setUpdatesEnabled(False)
         self._syncing_checks = True
         try:
-            self.rows = [dict(row) for row in rows]
+            self.rows = list(rows)
             self.table.setRowCount(0)
             self.table.setRowCount(len(self.rows))
             for row_index, row in enumerate(self.rows):

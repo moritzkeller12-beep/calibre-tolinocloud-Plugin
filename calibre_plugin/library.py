@@ -108,7 +108,8 @@ CUSTOM_COLUMNS = (
 )
 
 # Klartext des Calibre-Typs fuer die Oberflaeche (je Spalte ein Knopf).
-COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein"}
+COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein",
+                     "int": "Zahl", "float": "Zahl"}
 
 # In dieser Calibre-Sitzung angelegte Spalten. Calibre fuehrt eine neue
 # Spalte in `field_metadata` erst nach einem Neustart -- ohne diesen Merker
@@ -192,12 +193,19 @@ def _update_column(database, column, updates, convert, datatypes):
     if not updates or not _column_available(database, column, datatypes):
         return 0
     api = database.new_api
+    field_for = getattr(api, "field_for", None)
     values = {}
     for book_id, raw in updates:
-        if book_id is not None and api.has_id(book_id):
-            value = convert(raw)
-            if value is not _SKIP:
-                values[book_id] = value
+        if book_id is None or not api.has_id(book_id):
+            continue
+        value = convert(raw)
+        if value is _SKIP:
+            continue
+        # Kein Schreibvorgang, wenn der Wert schon stimmt: Calibre markiert
+        # sonst bei jedem Vergleich die metadata.opf als geändert.
+        if callable(field_for) and field_for(column, book_id) == value:
+            continue
+        values[book_id] = value
     if values:
         api.set_field(column, values)
     return len(values)

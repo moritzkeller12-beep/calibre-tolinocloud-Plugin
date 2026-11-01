@@ -871,6 +871,22 @@ class RequestRetryBudgetTests(unittest.TestCase):
                               b"</title>")
         return error
 
+    def test_non_token_403_is_not_an_auth_failure(self):
+        from urllib.error import HTTPError
+        from ..tolino import TolinoApiError, TolinoClient
+
+        error = HTTPError("https://bosh.pageplace.de/bosh/rest/upload", 403,
+                          "Forbidden", {}, None)
+        error.read = lambda: b"quota exceeded"
+        client = TolinoClient(4, "hardware", "refresh-token")
+        client.access = "access-token"
+        retry = {"auth": True, "hardware": True, "waf": 0}
+        with self.assertRaises(TolinoApiError) as caught:
+            client._handle_http_error(
+                error, b"quota exceeded", error.url, True, retry)
+        self.assertEqual("N03", caught.exception.code)
+        self.assertEqual("access-token", client.access)
+
     def test_waf_budget_counts_down_and_then_raises(self):
         from ..tolino import _WAF_RETRY_SECONDS, TolinoAuthError, TolinoClient
         sleeps = []
@@ -1124,13 +1140,17 @@ class MultipartMemoryTests(unittest.TestCase):
 class MultipartMimeTypeTests(unittest.TestCase):
     """Bekannte Buchformate brauchen keine System-MIME-Datenbank."""
 
-    def test_epub_keeps_its_mime_type_without_a_system_guess(self):
+    def test_multipart_headers_keep_mime_and_sanitize_filename(self):
         from ..tolino import TolinoClient
         with patch("calibre_plugin.tolino.mimetypes.guess_type",
                    return_value=(None, None)):
             body, _content_type = TolinoClient._multipart(
                 {}, b"data", "book.epub")
         self.assertIn(b"Content-Type: application/epub+zip", body)
+        body, _content_type = TolinoClient._multipart(
+            {}, b"data", 'bad"name\r\n.epub')
+        self.assertIn(b'filename="bad_name__.epub"', body)
+        self.assertNotIn(b'filename="bad"name', body)
 
 
 class SyncDataResponseShapeTests(unittest.TestCase):
