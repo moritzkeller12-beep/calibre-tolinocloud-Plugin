@@ -9,7 +9,7 @@ import time
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
-from ..partners import PARTNERS, WEBREADER_URL
+from ..partners import PARTNERS
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, active_tags, tag_id_from_patch
 from ..browser_login import grab_live_refresh
@@ -758,12 +758,6 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
     Einzelheiten.
     """
 
-    SHARED = (1, 2, 4, 5, 6, 7, 8)
-
-    def test_all_shops_use_the_shared_reader(self):
-        self.assertEqual("https://webreader.mytolino.com/library/", WEBREADER_URL)
-        self.assertEqual({1, 2, 4, 5, 6, 7, 8}, set(PARTNERS))
-
     def test_ebook_de_partner_matches_reference_config(self):
         partner = PARTNERS[8]
         self.assertEqual("eBook.de", partner["name"])
@@ -816,7 +810,7 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                              captured.get("referer"), pid)
 
     def test_authenticated_requests_send_webreader_client(self):
-        for pid in (1, 5):
+        for pid in (1, 4, 5):
             captured = {}
 
             class Response:
@@ -847,6 +841,8 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
             self.assertEqual("TOLINO_WEBREADER",
                              captured.get("client_type"), pid)
             self.assertEqual("5.2.0", captured.get("client_version"), pid)
+            self.assertEqual(PARTNERS[pid]["reseller_id"],
+                             captured.get("reseller_id"), pid)
 
     def test_grab_live_refresh_reports_a_missing_chromium(self):
         """Shops auf dem gemeinsamen Reader: fehlt Chromium, wird der
@@ -870,6 +866,22 @@ class RequestRetryBudgetTests(unittest.TestCase):
         error.read = lambda: (b"<!doctype html><title>Zugriff geblockt"
                               b"</title>")
         return error
+
+    def test_non_token_403_is_not_an_auth_failure(self):
+        from urllib.error import HTTPError
+        from ..tolino import TolinoApiError, TolinoClient
+
+        error = HTTPError("https://bosh.pageplace.de/bosh/rest/upload", 403,
+                          "Forbidden", {}, None)
+        error.read = lambda: b"quota exceeded"
+        client = TolinoClient(4, "hardware", "refresh-token")
+        client.access = "access-token"
+        retry = {"auth": True, "hardware": True, "waf": 0}
+        with self.assertRaises(TolinoApiError) as caught:
+            client._handle_http_error(
+                error, b"quota exceeded", error.url, True, retry)
+        self.assertEqual("N03", caught.exception.code)
+        self.assertEqual("access-token", client.access)
 
     def test_waf_budget_counts_down_and_then_raises(self):
         from ..tolino import _WAF_RETRY_SECONDS, TolinoAuthError, TolinoClient
@@ -928,14 +940,19 @@ class ErrorCodeTests(unittest.TestCase):
         self.assertIn("Tolino-Fehler (HTTP 500)", str(exc))
 
     def test_secrets_never_reach_the_dialog_the_log_or_the_history(self):
+        secrets = ("refresh-secret-123", "password-secret-123",
+                   "cookie-secret-123", "access-secret-123")
         exc = tolino_module.TolinoAuthError(
-            "Fehler mit geheimwert-123", code="A01",
-            detail="auch hier geheimwert-123")
+            "refresh_token=%s password=%s Cookie: session=%s"
+            % secrets[:3], code="A01",
+            detail="access_token=%s" % secrets[3])
         with patch.object(tolino_module, "log_warning") as log:
-            shown = tolino_module.report_error(
-                exc, "Test", ("geheimwert-123",))
-        blob = " ".join([shown, log.call_args[0][0]])
-        self.assertNotIn("geheimwert-123", blob)
+            shown = tolino_module.report_error(exc, "Test", secrets)
+        log_text = log.call_args[0][0]
+        blob = " ".join([shown, log_text])
+        for secret in secrets:
+            self.assertNotIn(secret, blob)
+        self.assertIn("[REDACTED]", log_text)
 
     def test_unexpected_errors_get_e99_and_a_traceback_in_the_log(self):
         with patch.object(tolino_module, "log_warning") as log:
@@ -1120,6 +1137,23 @@ class MultipartMemoryTests(unittest.TestCase):
         # ~2x the file (bytes + joined body), never a multiple of it.
         self.assertLess(peak, size * 3)
 
+
+class MultipartMimeTypeTests(unittest.TestCase):
+    """Bekannte Buchformate brauchen keine System-MIME-Datenbank."""
+
+    def test_multipart_headers_keep_mime_and_sanitize_filename(self):
+        from ..tolino import TolinoClient
+        with patch("calibre_plugin.tolino.mimetypes.guess_type",
+                   return_value=(None, None)):
+            body, _content_type = TolinoClient._multipart(
+                {}, b"data", "book.epub")
+        self.assertIn(b"Content-Type: application/epub+zip", body)
+        body, _content_type = TolinoClient._multipart(
+            {}, b"data", 'bad"name\r\n.epub')
+        self.assertIn(b'filename="bad_name__.epub"', body)
+        self.assertNotIn(b'filename="bad"name', body)
+
+
 class SyncDataResponseShapeTests(unittest.TestCase):
     """Die sync-data-Antwort des Servers trägt die Marken-ID im Pfad.
 
@@ -1173,6 +1207,23 @@ class SyncDataResponseShapeTests(unittest.TestCase):
         client, calls = self._client([self.READ, self.SERIES])
         self.assertEqual({self.PUB}, client.read_ids())
         self.assertEqual({(self.PUB, "Brunetti")}, client.collection_pairs())
+        self.assertEqual(1, len(calls))
+
+    def test_progress_by_id_reads_the_bookmark_patch(self):
+        progress = {"op": "replace",
+                    "path": "/publications/%s/bookmark/12" % self.PUB,
+                    "value": {"currentPosition": "192",
+                              "lastPosition": "590", "progress": 0.3288,
+                              "position": "Ops/017.html#point(/1/4/74:0)",
+                              "modified": 100}}
+        client, calls = self._client([progress])
+        result = client.progress_by_id()
+        self.assertEqual(33, result[self.PUB]["percent"])
+        self.assertEqual("192", result[self.PUB]["current"])
+        self.assertEqual("590", result[self.PUB]["last"])
+        self.assertEqual(1, len(calls))
+        # Lesestatus und Fortschritt teilen denselben Snapshot.
+        self.assertEqual(set(), client.read_ids())
         self.assertEqual(1, len(calls))
 
     def test_remove_with_tag_id_takes_the_book_out_again(self):
@@ -1306,12 +1357,14 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         return ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]})
+                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
 
     def test_save_credentials_writes_token_and_hardware(self):
         original = config.PREFERENCES
         try:
             config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("konto", {}, active="konto")
+            config.save_account("default", {}, active="default")
             config.save_credentials("konto", "tok-1", "hw-1")
             account = config.account_by_name("konto")
             self.assertEqual("tok-1", account["refresh_token"])

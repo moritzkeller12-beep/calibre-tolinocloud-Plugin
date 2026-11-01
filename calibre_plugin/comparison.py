@@ -3,40 +3,13 @@ import hashlib
 
 from .identifiers import state_entry, valid_book_uuid
 from .library import metadata_tolino_id, normalize_formats
-from .matching import (author_tokens, authors_match, normalize_isbn,
-                       normalize_match_text, normalize_title,
+from .matching import (author_tokens, authors_match, is_valid_isbn,
+                       normalize_isbn, normalize_match_text, normalize_title,
                        normalized_authors)
 
 IGNORED_EXPLANATION = (
     "In Calibre als «ignoriert» markiert (#tolino_ignore) – wird weder "
     "hochgeladen noch abgeglichen.")
-
-
-def is_valid_isbn(value):
-    """True for an ISBN-10/ISBN-13 with a correct check digit.
-
-    Only a valid ISBN may identify a book automatically; arbitrary digits
-    in the ISBN field are not a unique key.
-    """
-    digits = normalize_isbn(value).upper()
-    if len(digits) == 10:
-        total = 0
-        for index, character in enumerate(digits):
-            if character == "X":
-                if index != 9:
-                    return False
-                digit = 10
-            elif character.isdigit():
-                digit = int(character)
-            else:
-                return False
-            total += digit * (10 - index)
-        return total % 11 == 0
-    if len(digits) == 13 and digits.isdigit():
-        total = sum((1 if index % 2 == 0 else 3) * int(character)
-                    for index, character in enumerate(digits))
-        return total % 10 == 0
-    return False
 
 
 def _metadata_text(metadata, name):
@@ -149,6 +122,120 @@ def _read_flags(tolino_id, read_known, read_ids):
     return ReadState(known=read_known, cloud=is_read)
 
 
+class ProgressState:
+    """Lesefortschritt einer Vergleichszeile – nur Anzeige, nie Auswahl.
+
+    ``known=False`` bedeutet, dass sync-data nicht gelesen werden konnte.
+    Ein bekannter Stand ohne Bookmark hat ``percent=None`` und bleibt leer;
+    das ist nicht dasselbe wie 0 Prozent.
+    """
+
+    __slots__ = ("known", "percent", "current", "last", "position")
+
+    def __init__(self, known=True, percent=None, current="", last="",
+                 position=""):
+        self.known = bool(known)
+        self.current = str(current or "").strip()
+        self.last = str(last or "").strip()
+        self.position = str(position or "").strip()
+        try:
+            value = int(round(float(percent)))
+        except (TypeError, ValueError, OverflowError):
+            value = None
+        self.percent = value if value is not None and 0 <= value <= 100 else None
+
+    @property
+    def text(self):
+        if not self.known:
+            return "unbekannt"
+        if self.percent is None:
+            return ""
+        text = "%d %%" % self.percent
+        if self.current and self.last:
+            text += " · %s/%s" % (self.current, self.last)
+        return text
+
+    def __bool__(self):
+        return self.known and self.percent is not None
+
+
+def _progress_state(tolino_id, progress_known, progress_by_id):
+    """Fortschritt einer Zeile aus der sync-data-Antwort herauslösen."""
+    if not progress_known:
+        return ProgressState(known=False)
+    item = (progress_by_id.get(str(tolino_id))
+            if tolino_id and isinstance(progress_by_id, dict) else None)
+    if not isinstance(item, dict):
+        return ProgressState()
+    return ProgressState(
+        percent=item.get("percent"), current=item.get("current", ""),
+        last=item.get("last", ""), position=item.get("position", ""))
+
+
+_READING_STATUSES = frozenset(("identical", "changed"))
+
+
+def reading_state(entry):
+    """Den veränderbaren Lesebereich eines State-Eintrags sicher anlegen."""
+    reading = entry.get("reading")
+    if not isinstance(reading, dict):
+        reading = {}
+        entry["reading"] = reading
+    return reading
+
+
+def store_reading_state(state, comparison):
+    """Bekannte Cloud-Lesewerte in den State des abgefragten Kontos übernehmen.
+
+    Nur eindeutig zugeordnete Zeilen dürfen schreiben. Unbekannte Abrufe
+    lassen den gespeicherten Wert unverändert; ein erfolgreicher Abruf ohne
+    Bookmark speichert dagegen ausdrücklich ``percent=None``.
+    """
+    if not isinstance(state, dict):
+        return 0
+    changed = 0
+    for row in comparison or ():
+        if (not isinstance(row, dict)
+                or row.get("status") not in _READING_STATUSES):
+            continue
+        key = valid_book_uuid(row.get("uuid"))
+        tolino_id = str(row.get("tolino_id") or "").strip()
+        book_id = row.get("book_id")
+        if not key or not tolino_id or book_id is None:
+            continue
+        read = row.get("read")
+        progress = row.get("progress")
+        read_known = bool(read is not None and getattr(read, "known", False))
+        progress_known = bool(progress is not None
+                              and getattr(progress, "known", False))
+        if not (read_known or progress_known):
+            continue
+        entry = state.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+            state[key] = entry
+        recorded = str(entry.get("tolino_id") or "").strip()
+        if recorded and recorded != tolino_id:
+            continue
+        before_entry = dict(entry)
+        entry["tolino_id"] = tolino_id
+        entry["calibre_id"] = book_id
+        reading = reading_state(entry)
+        before_reading = dict(reading)
+        if read_known:
+            reading["read"] = bool(read.cloud)
+        if progress_known:
+            reading["progress"] = {
+                "percent": progress.percent,
+                "current": progress.current,
+                "last": progress.last,
+                "position": progress.position,
+            }
+        if entry != before_entry or reading != before_reading:
+            changed += 1
+    return changed
+
+
 class _RemoteIndex:
     """Cloud-Zeilen plus Lookup-Indizes -- in derselben Reihenfolge.
 
@@ -184,7 +271,8 @@ class _RemoteIndex:
                 self.by_title_author.setdefault((title, author_key), []).append(index)
 
 
-def _remote_rows(inventory, read_known, read_ids):
+def _remote_rows(inventory, read_known, read_ids, progress_known,
+                 progress_by_id):
     """Normalisierte Cloud-Datensätze in Vergleichszeilen umwandeln."""
     rows = []
     for record in inventory:
@@ -201,6 +289,8 @@ def _remote_rows(inventory, read_known, read_ids):
             "status": "only_tolino",
             "file_changed": False,
             "read": _read_flags(tolino_id, read_known, read_ids),
+            "progress": _progress_state(
+                tolino_id, progress_known, progress_by_id),
             "explanation": "Nur in tolino – kann heruntergeladen werden.",
             "normalized_title": normalize_title(record["title"]),
         })
@@ -208,13 +298,15 @@ def _remote_rows(inventory, read_known, read_ids):
 
 
 def _find_remote_match(index, stored_id, local_isbn, title_key,
-                       author_key, matched):
+                       author_key, authors, matched):
     """Ersten eindeutigen Treffer in der dokumentierten Reihenfolge finden.
 
     Rueckgabe ``(row_index, reason, ambiguous, candidates)``. Ein Treffer
     verbraucht die Zeile erst beim Aufrufer; mehrere freie Treffer auf
     denselben Schluessel sind ein Prueffall und werden nicht nach
-    Listenposition ausgewaehlt.
+    Listenposition ausgewaehlt. Der Titel+Autor-Schluessel transliteriert
+    ae/oe/ue; deshalb muss bei diesem Grund zusaetzlich `authors_match`
+    zustimmen («Michael» und «Michal» sind nicht derselbe Name).
     """
     attempts = []
     if stored_id:
@@ -222,8 +314,10 @@ def _find_remote_match(index, stored_id, local_isbn, title_key,
     if is_valid_isbn(local_isbn):
         attempts.append((index.by_isbn.get(local_isbn, ()), "isbn"))
     if title_key and author_key:
-        attempts.append((index.by_title_author.get((title_key, author_key), ()),
-                         "title_author"))
+        title_author = [
+            item for item in index.by_title_author.get((title_key, author_key), ())
+            if authors_match(authors, index.rows[item]["authors"])]
+        attempts.append((title_author, "title_author"))
     for indexes, reason in attempts:
         free = [item for item in indexes if item not in matched]
         if len(free) == 1:
@@ -258,7 +352,9 @@ def _matched_status(metadata, remote, old, selected_format,
     same_fields = _same_comparison_fields(metadata, remote)
     current_meta_fp = metadata_fingerprint(metadata)
     # Nur ein nach PUT per GET bestaetigter Patch darf explizite Inventarwerte
-    # ueberstimmen.
+    # ueberstimmen. Bewusster Kompromiss: aendert die Cloud den Titel spaeter,
+    # gilt die Zeile weiter als gleich -- sonst wuerde jede externe Aenderung
+    # beim naechsten Sync sofort wieder ueberschrieben.
     verified_metadata_matches = (
         bool(old.get("meta_verified_fp"))
         and old.get("meta_verified_fp") == current_meta_fp)
@@ -277,8 +373,9 @@ def _title_only_match(remote, title_key, matched, disputed):
 
 
 def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
-                          use_metadata_ids, matched,
-                          disputed, read_known, read_ids, read_column=False):
+                          use_metadata_ids, matched, disputed, read_known,
+                          read_ids, progress_known, progress_by_id,
+                          read_column=False):
     """Eine lokale Vergleichszeile -- inklusive einer bestaetigten Zuordnung."""
     # Ignorierte Bücher bleiben zugeordnet, erhalten aber keine Aktion.
     ignored = bool(metadata.get("ignored"))
@@ -297,7 +394,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                             if fmt in local_formats), None)
     local_isbn = normalize_isbn(isbn)
     remote_index, match_reason, ambiguous, candidates = _find_remote_match(
-        remote, stored_id, local_isbn, title_key, author_key, matched)
+        remote, stored_id, local_isbn, title_key, author_key, authors, matched)
     file_changed = False
     tolino_id = ""
     status = "new_in_calibre"
@@ -310,7 +407,10 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
             authors, author_key, local_isbn)
         if override:
             match_reason = override
-        if book_uuid and tolino_id:
+        if book_uuid and tolino_id and status != "review":
+            # Nur bestaetigte Zuordnungen bleiben kleben: ein Prueffall
+            # (etwa widersprechende ISBN) darf die Serie nicht automatisch
+            # dem falschen Cloud-Buch zuordnen.
             # Calibre-ID erhält die Zuordnung, falls die UUID später fehlt.
             entry = state.get(book_uuid)
             if not isinstance(entry, dict):
@@ -341,6 +441,8 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         "file_changed": file_changed,
         "has_preferred_format": bool(selected_format),
         "read": _read_flags(tolino_id, read_known, read_ids),
+        "progress": _progress_state(
+            tolino_id, progress_known, progress_by_id),
         "explanation": (IGNORED_EXPLANATION if ignored
                         else _row_explanation(status, match_reason,
                                               file_changed)),
@@ -352,28 +454,31 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     return row
 
 
+def _review_row(row, status, explanation):
+    return dict(row, status=status, group="review", explanation=explanation)
+
+
 def _leftover_remote_row(row, disputed, title_counts, row_index):
     """Cloud-Zeile, die keine lokale Zeile eindeutig beansprucht hat."""
     if row_index in disputed:
-        return dict(row, status="review", group="review",
-                    explanation="Möglicher Treffer, nicht eindeutig.")
+        return _review_row(row, "review",
+                           "Möglicher Treffer, nicht eindeutig.")
     if row.get("cloud_id_missing"):
-        return dict(row, status="review", group="review",
-                    explanation=("In tolino vorhanden, aber nicht ansprechbar "
-                                 "(kein Download, kein Löschen)."))
+        return _review_row(row, "review",
+                           "In tolino vorhanden, aber nicht ansprechbar "
+                           "(kein Download, kein Löschen).")
     if not row["title"]:
-        return dict(row, status="not_matchable", group="review",
-                    explanation=(
-                        "tolino-Datensatz ohne Titel – nicht zuordenbar."
-                    ))
+        return _review_row(row, "not_matchable",
+                           "tolino-Datensatz ohne Titel – nicht zuordenbar.")
     if title_counts.get(row["normalized_title"], 0) > 1:
-        return dict(row, status="duplicate_tolino", group="review",
-                    explanation="Titel mehrfach in tolino – nicht automatisch hochladen.")
+        return _review_row(row, "duplicate_tolino",
+                           "Titel mehrfach in tolino – nicht automatisch hochladen.")
     return row
 
 
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
-                      use_metadata_ids=True, read_ids=(), read_column=False):
+                      use_metadata_ids=True, read_ids=(), read_column=False,
+                      progress_by_id=None):
     """Return deterministic local/remote rows for the pre-sync confirmation view.
 
     Matching is deliberately conservative and ordered:
@@ -401,12 +506,21 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
 
     ``read_column`` adds the informational Calibre ``#tolino_read`` value;
     it never changes the selected account's Cloud read status.
+
+    ``progress_by_id`` maps tolino IDs to the reading progress from
+    sync-data. ``None`` means «not loaded»; an empty mapping means «loaded,
+    but no bookmarks». Progress is display-only and is never written back.
     """
     preferred_formats = normalize_formats(preferred_formats)
     read_known = read_ids is not None
     read_ids = ({str(item) for item in read_ids if str(item or "").strip()}
                 if read_known else set())
-    rows = _remote_rows(inventory, read_known, read_ids)
+    progress_known = progress_by_id is not None
+    progress_by_id = ({str(key): value for key, value in progress_by_id.items()}
+                      if progress_known and isinstance(progress_by_id, dict)
+                      else {})
+    rows = _remote_rows(
+        inventory, read_known, read_ids, progress_known, progress_by_id)
     remote = _RemoteIndex(rows)
     matched = set()
     disputed = set()
@@ -414,8 +528,8 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     for book_id, metadata in metadata_by_id.items():
         local_rows.append(_local_comparison_row(
             book_id, metadata, remote, state, preferred_formats,
-            use_metadata_ids, matched, disputed,
-            read_known, read_ids, read_column))
+            use_metadata_ids, matched, disputed, read_known, read_ids,
+            progress_known, progress_by_id, read_column))
     for index, row in enumerate(remote.rows):
         if index not in matched:
             local_rows.append(_leftover_remote_row(

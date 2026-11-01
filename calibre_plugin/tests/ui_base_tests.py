@@ -430,20 +430,23 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertEqual(row["authors"], dialog.table.items[(index, 6)])
                 self.assertEqual(row["explanation"],
                                  dialog.table.items[(index, 7)])
-                self.assertEqual(row["isbn"], dialog.table.items[(index, 8)])
+                self.assertEqual("", dialog.table.items[(index, 8)])
+                self.assertEqual(row["isbn"], dialog.table.items[(index, 9)])
                 self.assertEqual(row["tolino_id"],
-                                 dialog.table.items[(index, 9)])
-                self.assertEqual(row.get("uuid", ""),
                                  dialog.table.items[(index, 10)])
+                self.assertEqual(row.get("uuid", ""),
+                                 dialog.table.items[(index, 11)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
-                upload = dialog._check(index, 0)
-                metadata = dialog._check(index, 1)
-                mark_read = dialog._check(index, 2)
-                self.assertTrue(upload.item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-                self.assertEqual(in_cloud, bool(metadata.item.flags() &
+                upload = dialog.table.item(index, 0)
+                metadata = dialog.table.item(index, 1)
+                mark_read = dialog.table.item(index, 2)
+                self.assertTrue(upload.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+                self.assertEqual(ui_module.dialogs.Qt.AlignmentFlag.AlignCenter,
+                                 upload.text_alignment)
+                self.assertEqual(in_cloud, bool(metadata.flags() &
                                                 ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
-                self.assertEqual(in_cloud, bool(mark_read.item.flags() &
+                self.assertEqual(in_cloud, bool(mark_read.flags() &
                                                 ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
                 # Vorbelegt ist, was der Vergleich vorschlägt; die Lese-Marke
                 # bleibt unangetastet.
@@ -475,7 +478,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             self.assertEqual(90, dialog.table.header.widths[6])
             self.assertFalse(dialog.attributes[55])
             # Nur die technischen Spalten sind zunächst verborgen.
-            self.assertEqual({8: True, 9: True, 10: True}, dialog.table.hidden)
+            self.assertEqual({9: True, 10: True, 11: True}, dialog.table.hidden)
             self.assertIn("Sammlungen in tolino übernommen",
                           dialog.note.text())
             self.assertIn("1 offen", dialog.note.text())
@@ -494,9 +497,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
         ui_module, dialog = self._build({"automatic": 1})
         try:
             dialog._toggle_technical_columns(True)
-            self.assertEqual({8: False, 9: False, 10: False}, dialog.table.hidden)
+            self.assertEqual({9: False, 10: False, 11: False}, dialog.table.hidden)
             dialog._toggle_technical_columns(False)
-            self.assertEqual({8: True, 9: True, 10: True}, dialog.table.hidden)
+            self.assertEqual({9: True, 10: True, 11: True}, dialog.table.hidden)
             self.assertIn("Sammlungen in tolino übernommen",
                           dialog.note.text())
             self.assertIn("1 offen", dialog.note.text())
@@ -527,7 +530,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             @staticmethod
             def download(tolino_id, **kwargs):
                 events.append(("download", kwargs))
-                return b"data"
+                return b"PK\x03\x04data"
 
         class FileDialog:
             @staticmethod

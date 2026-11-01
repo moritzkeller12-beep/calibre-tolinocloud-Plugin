@@ -7,12 +7,14 @@ import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
 from ..identifiers import display_title
+from ..library import TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
 from ..plan import MetaUpdateRecord, plan_sync
 from ..planning_values import SyncJob
 from ..run_context import RunContext
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
-from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
-                       stop_cdp_stubs, ui_module_for)
+from ._support import (_ReadingDb, _read_ids, compare_inventory,
+                       parsed_inventory, start_cdp_stubs, stop_cdp_stubs,
+                       ui_module_for)
 from unittest.mock import patch
 
 
@@ -26,7 +28,7 @@ def setUpModule():
     global _ACCOUNT_PATCH
     start_cdp_stubs()
     _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_by_name",
+        "calibre_plugin.token_vault.account_summary",
         lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
     _ACCOUNT_PATCH.start()
 
@@ -44,16 +46,10 @@ def _changes(read_marks=(), read_unmarks=()):
             + [(tolino_id, None, False) for tolino_id in read_unmarks or ()])
 
 
-def _read_ids(dialog, finished):
-    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
-    return [tolino_id for tolino_id, _book, state
-            in dialog.selected_read_changes() if state is finished]
-
-
 class CloudDeletionWorkerTests(unittest.TestCase):
     """Der Worker führt ausdrücklich markierte Cloud-Löschungen direkt aus."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def test_explicitly_marked_deletion_is_executed(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -103,7 +99,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
 class SyncWorkerPartialResultTests(unittest.TestCase):
     """Teilresultate, Abbruch und Kontobindung im SyncWorker (P1/C/E/H)."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -127,7 +123,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         saved, credentials = [], []
         with patch("calibre_plugin.token_vault.TolinoClient", fake_client), \
              patch("calibre_plugin.ui_workers.save_account",
-                   lambda name, values, active=None: saved.append(
+                   lambda name, values, **_kwargs: saved.append(
                        (name, values))), \
              patch("calibre_plugin.config.save_credentials",
                    lambda *args: credentials.append(args)):
@@ -148,6 +144,34 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
     def _metadata(self, uuid="u1", title="A"):
         return {"uuid": uuid, "title": title, "formats": ["EPUB"],
                 "last_modified": "1"}
+
+    def test_same_id_replacement_is_not_deleted(self):
+        ui_module = self._ui()
+        deletes = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.refresh = "rot-A"
+                self.access = "access"
+
+            def login(self):
+                return self.refresh
+
+            def upload(self, path):
+                return "same-id"
+
+            def delete(self, tolino_id):
+                deletes.append(tolino_id)
+
+        state = {"u1": {"tolino_id": "same-id", "calibre_id": 1}}
+        job = SyncJob(1, "u1", "EPUB", "same-id", "/book", None, "A")
+        worker, emitted, _saved, _credentials = self._run(
+            ui_module, self._settings(state), [job], FakeClient)
+        ui_module._restore_stubs_for_tests()
+        self.assertEqual([], deletes)
+        self.assertEqual("same-id", worker.state["u1"]["tolino_id"])
+        self.assertEqual(1, worker.outcome["uploaded"])
+        self.assertIsNone(emitted["failed"])
 
     def test_first_upload_survives_a_failing_second_upload(self):
         ui_module = self._ui()
@@ -665,7 +689,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         fake = FakeClient()
         with patch("calibre_plugin.token_vault.TolinoClient", lambda *a, **k: fake), \
              patch("calibre_plugin.ui_workers.save_account",
-                   lambda name, values, active=None: saved.append(
+                   lambda name, values, **_kwargs: saved.append(
                        (name, values))):
             worker = ui_module.workers.SyncWorker(
                 RunContext.from_values(self._settings(state)),
@@ -785,7 +809,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker.updates = [(1, "new-1")]
         dashboard.worker = worker
         with patch("calibre_plugin.ui_dashboard.save_account",
-                   lambda name, values, active=None: saved.append((name, values))), \
+                   lambda name, values, **_kwargs: saved.append((name, values))), \
              patch("calibre_plugin.ui_dashboard.save_credentials",
                    lambda *args: credentials.append(args)), \
              patch("calibre_plugin.ui_dashboard.update_tolino_ids",
@@ -841,7 +865,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 class PrepareWorkerTests(unittest.TestCase):
     """Netz-Vorbereitung im Hintergrund, gebunden an das Konto (P2/G)."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -866,6 +890,10 @@ class PrepareWorkerTests(unittest.TestCase):
 
             def read_ids(self):
                 return {"t-1"}
+
+            def progress_by_id(self):
+                return {"t-1": {"percent": 33, "current": "192",
+                                 "last": "590"}}
 
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw-A", "refresh_token": "tok-A", "state": {},
@@ -897,8 +925,11 @@ class PrepareWorkerTests(unittest.TestCase):
         _args, kwargs = captured[0]
         # Der Vergleich bekommt den Metadaten-Snapshot unverändert mit ...
         self.assertEqual({1: {"title": "A"}}, _args[0])
-        # ... und den Lesestatus als eigenen Eingang.
+        # ... und den Lesestatus sowie den Fortschritt als eigene Eingänge.
         self.assertIn("read_ids", kwargs)
+        self.assertEqual({"percent": 33, "current": "192", "last": "590"},
+                         kwargs["progress_by_id"]["t-1"])
+        self.assertTrue(payload["progress_status_known"])
 
     def test_cancel_between_login_and_inventory_fails_softly(self):
         ui_module = self._ui()
@@ -1001,6 +1032,70 @@ class PrepareWorkerTests(unittest.TestCase):
                     self.assertNotIn("tolino_id", payloads[0]["state"]["u-stale"])
                 finally:
                     ui_module._restore_stubs_for_tests()
+
+    def _run_state(self, state, uuid):
+        """PrepareWorker mit nicht lesbarem Lesestatus laufen lassen."""
+        ui_module = self._ui()
+        saved, payloads = [], []
+
+        class FakeClient:
+            refresh = "rot"
+            hardware = "hw"
+            access = ""
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def login(self):
+                return self.refresh
+
+            def inventory(self):
+                return []
+
+            def read_ids(self):
+                raise RuntimeError("Lesestatus nicht lesbar")
+
+        settings = {"account_name": "A", "partner_id": 4,
+                    "hardware_id": "hw", "refresh_token": "tok",
+                    "state": state, "preferred_formats": ["EPUB"]}
+        metadata = {1: {"uuid": uuid, "title": "Buch", "authors": "Autor",
+                        "formats": ["EPUB"]}}
+        try:
+            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
+                 patch("calibre_plugin.ui_workers.save_account",
+                       lambda name, values, **kwargs: saved.append(
+                           (name, values))):
+                worker = ui_module.workers.PrepareWorker(
+                    RunContext.from_values(settings), metadata, state=state)
+                worker.ready.connect(payloads.append)
+                worker.failed.connect(self.fail)
+                worker.run()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        return saved, payloads
+
+    def test_all_state_changes_without_reading_are_saved_once(self):
+        """Migration und veraltete Kopien dürfen nicht am Lese-Update hängen."""
+        uuid = "55555555-5555-5555-5555-555555555555"
+        saved, payloads = self._run_state({"calibre-1": {
+            "tolino_id": "gone", "calibre_id": 1,
+            "reading": {"read": True, "progress": {"percent": 100}}}},
+            uuid)
+        self.assertEqual(1, len(saved))
+        self.assertEqual("A", saved[0][0])
+        self.assertEqual(1, len(payloads))
+        state = payloads[0]["state"]
+        self.assertEqual({uuid}, set(state))
+        self.assertNotIn("tolino_id", state[uuid])
+        self.assertNotIn("reading", state[uuid])
+
+    def test_key_migration_alone_is_saved_once(self):
+        """Auch ein reiner Key-Umzug muss im Konto ankommen."""
+        uuid = "66666666-6666-6666-6666-666666666666"
+        saved, payloads = self._run_state(
+            {"calibre-1": {"calibre_id": 1}}, uuid)
+        self.assertEqual(1, len(saved))
+        self.assertEqual({uuid}, set(payloads[0]["state"]))
 
     def test_a_partly_readable_inventory_still_compares(self):
         """Einzelne nicht zuordenbare Cloud-Datensätze verhindern den Vergleich nicht."""
@@ -1117,7 +1212,7 @@ class PrepareWorkerTests(unittest.TestCase):
                     "hardware_id": "hw-alt", "refresh_token": "alt-token", "state": {},
                     "preferred_formats": ["EPUB"]}
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-                patch("calibre_plugin.token_vault.account_by_name",
+                patch("calibre_plugin.token_vault.account_summary",
                       lambda name: {"name": "A", "refresh_token": "neu-token",
                                     "hardware_id": "hw-neu"}):
             worker = ui_module.workers.PrepareWorker(
@@ -1151,7 +1246,7 @@ class PrepareWorkerTests(unittest.TestCase):
             dashboard.account_name = "A"
             context = RunContext.from_values(settings)
             with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-                 patch("calibre_plugin.token_vault.account_by_name",
+                 patch("calibre_plugin.token_vault.account_summary",
                        lambda _name: {"refresh_token": "tok-A",
                                       "hardware_id": "hw-A"}), \
                  patch("calibre_plugin.token_vault.save_refresh_token",
@@ -1169,7 +1264,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]})
+                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
         seen = []
 
         class FakeClient(object):
@@ -1202,7 +1297,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]})
+                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
         completed = []
 
         class FakeClient(object):
@@ -1240,8 +1335,8 @@ class KeepaliveSafetyTests(unittest.TestCase):
                      "refresh_token": "tok"}]
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
                 patch("calibre_plugin.token_vault.settings",
-                      lambda: {"accounts": accounts}), \
-                patch("calibre_plugin.token_vault.account_by_name",
+                      lambda **_kwargs: {"accounts": accounts}), \
+                patch("calibre_plugin.token_vault.account_summary",
                       lambda _name: accounts[0]):
             with vault_module.TOKEN_VAULT._lock:
                 result = vault_module.TOKEN_VAULT.keepalive_refresh()
@@ -1265,7 +1360,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
                 raise RuntimeError("kaputt")
 
         with patch("calibre_plugin.token_vault.TolinoClient", FailingClient), \
-                patch("calibre_plugin.token_vault.account_by_name",
+                patch("calibre_plugin.token_vault.account_summary",
                       lambda _name: {"refresh_token": "tok",
                                      "hardware_id": "hw"}):
             with self.assertRaises(RuntimeError):
@@ -1288,8 +1383,8 @@ class KeepaliveSafetyTests(unittest.TestCase):
         with patch("calibre_plugin.token_vault.log_info", logged.append), \
                 patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                 patch("calibre_plugin.token_vault.settings",
-                      lambda: {"accounts": accounts}), \
-                patch("calibre_plugin.token_vault.account_by_name",
+                      lambda **_kwargs: {"accounts": accounts}), \
+                patch("calibre_plugin.token_vault.account_summary",
                       lambda _name: accounts[0]):
             result = vault_module.TOKEN_VAULT.keepalive_refresh()
         self.assertEqual(1, result)
@@ -1310,8 +1405,8 @@ class KeepaliveSafetyTests(unittest.TestCase):
         with patch("calibre_plugin.token_vault.log_warning", logged.append), \
                 patch("calibre_plugin.token_vault.TolinoClient", BoomClient), \
                 patch("calibre_plugin.token_vault.settings",
-                      lambda: {"accounts": accounts}), \
-                patch("calibre_plugin.token_vault.account_by_name",
+                      lambda **_kwargs: {"accounts": accounts}), \
+                patch("calibre_plugin.token_vault.account_summary",
                       lambda _name: accounts[0]):
             result = vault_module.TOKEN_VAULT.keepalive_refresh()
         self.assertEqual(0, result)
@@ -1326,7 +1421,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
 class BackgroundCallTokenTests(unittest.TestCase):
     """Einzelaufrufe laufen ohne globalen Refresh-Token-Zähler."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1335,7 +1430,7 @@ class BackgroundCallTokenTests(unittest.TestCase):
         """A01 vor jedem Netzaufruf -- wie die Dialogpruefung."""
         from ..token_vault import TOKEN_VAULT
         self._ui()
-        with patch("calibre_plugin.token_vault.account_by_name",
+        with patch("calibre_plugin.token_vault.account_summary",
                    lambda *_args, **_kwargs: {}):
             with self.assertRaises(tolino_module.TolinoAuthError) as caught:
                 TOKEN_VAULT.login("konto", 4)
@@ -1348,7 +1443,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
     Zustandsbereinigung unterbleibt und steht als Fehler im Bericht.
     """
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1383,7 +1478,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         with patch("calibre_plugin.token_vault.TolinoClient",
                    lambda *args, **kwargs: client), \
              patch("calibre_plugin.ui_workers.save_account",
-                   lambda name, values, active=None: saved.append(values)), \
+                   lambda name, values, **_kwargs: saved.append(values)), \
              patch("calibre_plugin.config.save_credentials",
                    lambda *args, **kwargs: None):
             worker = ui_module.workers.SyncWorker(
@@ -1564,6 +1659,13 @@ class InventorySchemaTests(unittest.TestCase):
         with self.assertRaises(TolinoApiError):
             client.inventory()
 
+    def test_invalid_entries_without_a_record_do_not_look_empty(self):
+        for data in ({"PublicationInventory": {"edata": [None, "x"]}},
+                     {"PublicationInventory": {"ebook": [17]}}):
+            with self.subTest(data=data):
+                with self.assertRaises(TolinoApiError):
+                    self._client(data).inventory()
+
     def test_a_record_without_any_id_blocks_only_the_deletion(self):
         client = self._client({"PublicationInventory": {"edata": [
             {"deliverableId": "d1"},
@@ -1597,7 +1699,16 @@ class InventorySchemaTests(unittest.TestCase):
             ["authors", "isbn", "title", "tolino_id"], sorted(records[0]))
         self.assertEqual("d1", records[0]["tolino_id"])
         self.assertEqual("", records[1]["tolino_id"])
-        self.assertEqual("978-3-16-148410-0", records[1]["isbn"])
+        self.assertEqual("9783161484100", records[1]["isbn"])
+
+    def test_identifier_embedded_isbn_is_normalized_for_matching(self):
+        client = self._client({"PublicationInventory": {"ebook": [
+            {"epubMetaData": {
+                "identifier": "DT0400.9783832170141_A38978050",
+                "title": "Gekauft"}}]}})
+        records = client.inventory()
+        self.assertEqual("", records[0]["tolino_id"])
+        self.assertEqual("9783832170141", records[0]["isbn"])
 
     def test_an_identifier_only_record_makes_the_ids_incomplete(self):
         """Keine Deliverable-Kennung heisst: kein Beweis fuer Loeschungen.
@@ -1651,7 +1762,7 @@ class ReadStatusUnknownTests(unittest.TestCase):
     def test_prepare_worker_reports_an_unknown_read_state(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
-            qt_stub={"pyqtSignal": worker_base_tests.CollectionReconcileWorkerTests
+            qt_stub={"pyqtSignal": worker_base_tests.SyncWorkerCollectionTests
                      ._signal_descriptor()[0]})
         captured, payloads, logged = [], [], []
 
@@ -1706,10 +1817,10 @@ class ReadStatusUnknownTests(unittest.TestCase):
                  "book_id": 1, "tolino_id": "t1",
                  "read": ReadState(known=False),
                  "explanation": "In beiden vorhanden."}], options={})
-            self.assertFalse(dialog._check(0, 2).item.flags() &
+            self.assertFalse(dialog.table.item(0, 2).flags() &
                              ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-            self.assertFalse(dialog._check(0, 2).isChecked())
-            self.assertIn("unbekannt", dialog._check(0, 2).item.toolTip())
+            self.assertFalse(dialog.table.item(0, 2).isChecked())
+            self.assertIn("unbekannt", dialog.table.item(0, 2).toolTip())
             self.assertIn("Lesestatus unbekannt",
                           dialog.table.items[(0, 7)])
             self.assertIn("Lesestatus unbekannt", dialog.note.text())
@@ -1730,6 +1841,325 @@ class KeepaliveStopTests(unittest.TestCase):
         thread = token_vault.start_token_keepalive(interval=3600)
         try:
             self.assertTrue(thread.is_alive())
+            self.assertIsNone(token_vault.start_token_keepalive(interval=3600))
         finally:
             token_vault.stop_token_keepalive()
         self.assertFalse(thread.is_alive())
+
+    def test_a_stuck_thread_keeps_its_slot_and_reference(self):
+        """Nach dem Join-Timeout darf kein zweiter Keep-alive starten."""
+        import threading
+        from .. import token_vault
+        token_vault.stop_token_keepalive()
+
+        class StuckThread:
+            def __init__(self):
+                self.joins = []
+
+            @staticmethod
+            def is_alive():
+                return True
+
+            def join(self, timeout=None):
+                self.joins.append(timeout)
+
+        stuck = StuckThread()
+        token_vault._KEEPALIVE_THREAD = stuck
+        token_vault._KEEPALIVE_STOP = threading.Event()
+        try:
+            self.assertFalse(token_vault.stop_token_keepalive(timeout=0))
+            self.assertIs(stuck, token_vault._KEEPALIVE_THREAD)
+            self.assertIsNone(token_vault.start_token_keepalive(interval=3600))
+        finally:
+            token_vault._KEEPALIVE_THREAD = None
+            token_vault._KEEPALIVE_STOP = None
+
+
+class MultiAccountReadingStateTests(unittest.TestCase):
+    """Lesewerte folgen dem Konto, nicht der gemeinsam genutzten Spalte."""
+
+    UUID = "11111111-1111-1111-1111-111111111111"
+    OTHER_UUID = "22222222-2222-2222-2222-222222222222"
+
+    @staticmethod
+    def _ui():
+        return ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub={"pyqtSignal": worker_base_tests
+                     .SyncWorkerCollectionTests
+                     ._signal_descriptor()[0]})
+
+    @classmethod
+    def _metadata(cls):
+        return {1: {"uuid": cls.UUID, "title": "Buch", "authors": "Autor",
+                    "formats": ["EPUB"], "last_modified": "1"}}
+
+    @staticmethod
+    def _inventory():
+        return parsed_inventory([{"deliverableId": "t1", "title": "Buch",
+                                  "authors": "Autor"}])
+
+    @staticmethod
+    def _reading(read, percent, current="192", last="590"):
+        return {"read": read, "progress": {
+            "percent": percent, "current": current, "last": last,
+            "position": "Ops/017.html#point(/1/4/74:0)"}}
+
+    def _accounts(self, states):
+        original = config.PREFERENCES
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.PREFERENCES = config.JSONConfig("test")
+        for name, state in states.items():
+            config.save_account(name, {"state": state}, active=name)
+
+    def _prepare(self, account, state, read_ids, progress,
+                 fail_read=False):
+        ui_module = self._ui()
+        payloads, failures = [], []
+        inventory = self._inventory()
+        metadata = self._metadata()
+
+        class FakeClient:
+            hardware = "hw"
+            refresh = "rot"
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def login(self):
+                return "rot"
+
+            def inventory(self):
+                return inventory
+
+            def read_ids(self):
+                if fail_read:
+                    raise RuntimeError("Netz weg")
+                return set(read_ids or ())
+
+            def progress_by_id(self):
+                return dict(progress or {})
+
+        settings = {"account_name": account, "partner_id": 4,
+                    "hardware_id": "hw", "refresh_token": "tok",
+                    "state": state, "preferred_formats": ["EPUB"]}
+        try:
+            with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
+                       lambda *args, **kwargs: FakeClient()), \
+                 patch("calibre_plugin.config.save_credentials",
+                       lambda *args, **kwargs: None):
+                worker = ui_module.workers.PrepareWorker(
+                    RunContext.from_values(
+                        settings, {"read": True, "progress": True}),
+                    metadata, state=state)
+                worker.ready.connect(payloads.append)
+                worker.failed.connect(failures.append)
+                worker.run()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], failures)
+        self.assertEqual(1, len(payloads))
+        return payloads[0]
+
+    def test_two_accounts_keep_read_and_progress_independent(self):
+        a_state = {self.UUID: {"tolino_id": "t1", "calibre_id": 1}}
+        b_state = {self.UUID: {"tolino_id": "t1", "calibre_id": 1}}
+        self._accounts({"A": a_state, "B": b_state})
+        self._prepare("A", a_state, {"t1"}, {
+            "t1": {"percent": 100, "current": "350", "last": "350",
+                   "position": "Ops/A.html"}})
+        self._prepare("B", b_state, set(), {
+            "t1": {"percent": 37, "current": "130", "last": "350",
+                   "position": "Ops/B.html"}})
+        a_saved = config.account_by_name("A")["state"][self.UUID]
+        b_saved = config.account_by_name("B")["state"][self.UUID]
+        self.assertIs(True, a_saved["reading"]["read"])
+        self.assertEqual(100, a_saved["reading"]["progress"]["percent"])
+        self.assertIs(False, b_saved["reading"]["read"])
+        self.assertEqual(37, b_saved["reading"]["progress"]["percent"])
+        self.assertEqual("t1", a_saved["tolino_id"])
+        self.assertEqual("t1", b_saved["tolino_id"])
+        # Das Speichern des Vergleichs schaltet das Konto nicht um.
+        self.assertEqual("B", config.settings()["active_account"])
+
+    def test_comparison_result_stays_with_its_account_after_a_switch(self):
+        a_state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": self._reading(False, 37)}}
+        b_state = {self.UUID: {
+            "tolino_id": "t1-b", "calibre_id": 1,
+            "reading": self._reading(False, 37)}}
+        self._accounts({"A": a_state, "B": b_state})
+        # B ist aktiv, während der Vergleich für A fertig wird.
+        self._prepare("A", a_state, {"t1"}, {
+            "t1": {"percent": 100, "current": "350", "last": "350",
+                   "position": "Ops/A.html"}})
+        self.assertIs(True, config.account_by_name("A")["state"]
+                      [self.UUID]["reading"]["read"])
+        self.assertIs(False, config.account_by_name("B")["state"]
+                      [self.UUID]["reading"]["read"])
+        self.assertEqual("B", config.settings()["active_account"])
+
+    def test_old_state_keeps_ids_fingerprints_and_collections(self):
+        old = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "content_fp": "content-fingerprint",
+            "meta_fp": "metadata-fingerprint",
+            "collections": ["Serie"],
+        }}
+        self._accounts({"A": old})
+        self._prepare("A", old, {"t1"}, {
+            "t1": {"percent": 100, "current": "350", "last": "350",
+                   "position": "Ops/A.html"}})
+        entry = config.account_by_name("A")["state"][self.UUID]
+        self.assertEqual("content-fingerprint", entry["content_fp"])
+        self.assertEqual("metadata-fingerprint", entry["meta_fp"])
+        self.assertEqual(["Serie"], entry["collections"])
+        self.assertEqual("t1", entry["tolino_id"])
+        self.assertEqual(1, entry["calibre_id"])
+        self.assertIs(True, entry["reading"]["read"])
+        self.assertEqual(100, entry["reading"]["progress"]["percent"])
+
+    def test_failed_cloud_fetch_keeps_saved_reading(self):
+        import copy
+        state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": self._reading(True, 100)}}
+        self._accounts({"A": state})
+        before = copy.deepcopy(config.account_by_name("A")["state"])
+        payload = self._prepare("A", state, None, None, fail_read=True)
+        self.assertFalse(payload["read_status_known"])
+        self.assertFalse(payload["progress_status_known"])
+        self.assertEqual(before, config.account_by_name("A")["state"])
+
+    def test_successful_fetch_without_bookmark_stores_none_and_clears_column(
+            self):
+        state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": self._reading(True, 100)}}
+        self._accounts({"A": state})
+        self._prepare("A", state, set(), {})
+        entry = config.account_by_name("A")["state"][self.UUID]
+        self.assertIs(False, entry["reading"]["read"])
+        self.assertIsNone(entry["reading"]["progress"]["percent"])
+
+        from ..ui_dashboard import _mirror_account_reading
+        db = _ReadingDb({1: self.UUID}, read={1: True}, progress={1: 100})
+        dashboard = type("Dashboard", (), {
+            "gui": type("Gui", (), {"current_db": db})()})()
+        _mirror_account_reading(dashboard, "A")
+        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
+        self.assertIs(False, db.values[TOLINO_READ_COLUMN][1])
+
+    def test_unknown_values_clear_columns_without_becoming_false_or_zero(self):
+        from ..ui_dashboard import _mirror_account_reading
+        state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": None, "progress": {"current": "192"}}}}
+        self._accounts({"A": state})
+        db = _ReadingDb({1: self.UUID}, read={1: True}, progress={1: 100})
+        dashboard = type("Dashboard", (), {
+            "gui": type("Gui", (), {"current_db": db})()})()
+        _mirror_account_reading(dashboard, "A")
+        self.assertEqual([(TOLINO_READ_COLUMN, {1: None}),
+                          (TOLINO_PROGRESS_COLUMN, {1: None})], db.writes)
+        self.assertIsNone(db.values[TOLINO_READ_COLUMN][1])
+        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
+
+    def test_all_field_for_fetches_uuids_without_full_metadata(self):
+        from ..ui_dashboard import _mirror_account_reading
+        state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 7,
+            "reading": self._reading(True, 100)}}
+        self._accounts({"A": state})
+        calls = []
+        db = _ReadingDb({42: self.UUID})
+        db.get_metadata = lambda _book_id: self.fail(
+            "get_metadata darf bei all_field_for nicht laufen")
+
+        def all_field_for(field, book_ids):
+            calls.append((field, tuple(book_ids)))
+            return {book_id: self.UUID for book_id in book_ids}
+
+        db.all_field_for = all_field_for
+        dashboard = type("Dashboard", (), {
+            "gui": type("Gui", (), {"current_db": db})()})()
+        _mirror_account_reading(dashboard, "A")
+        self.assertEqual([("uuid", (42,))], calls)
+        self.assertIs(True, db.values[TOLINO_READ_COLUMN][42])
+        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][42])
+
+    def test_changed_calibre_id_uses_uuid_not_the_stored_number(self):
+        from ..ui_dashboard import _mirror_account_reading
+        state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 7,
+            "reading": self._reading(True, 100)}}
+        self._accounts({"A": state})
+        db = _ReadingDb({42: self.UUID, 7: self.OTHER_UUID})
+        dashboard = type("Dashboard", (), {
+            "gui": type("Gui", (), {"current_db": db})()})()
+        _mirror_account_reading(dashboard, "A")
+        self.assertIs(True, db.values[TOLINO_READ_COLUMN][42])
+        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][42])
+        self.assertNotIn(7, db.values[TOLINO_READ_COLUMN])
+        self.assertNotIn(7, db.values[TOLINO_PROGRESS_COLUMN])
+
+    def _manual(self, state, fail=False):
+        ui_module = self._ui()
+        emitted, calls = {}, []
+
+        class FakeClient:
+            def mark_read_many(self, book_ids, finished=True):
+                calls.append((list(book_ids), finished))
+                if fail:
+                    raise RuntimeError("Netz weg")
+                return len(book_ids)
+
+        try:
+            with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
+                       lambda *args, **kwargs: FakeClient()):
+                worker = ui_module.workers.SyncWorker(
+                    RunContext.from_values({"account_name": "A",
+                                            "partner_id": 4}),
+                    [], [], [], {},
+                    [("t1", 1, True, self.UUID)], state=state)
+                worker.completed.connect(
+                    lambda *args: emitted.update(completed=args))
+                worker.failed.connect(
+                    lambda *args: emitted.update(failed=args))
+                worker.run()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertIsNone(emitted.get("failed"))
+        self.assertIsNotNone(emitted.get("completed"))
+        return worker, calls
+
+    def test_confirmed_manual_read_change_updates_only_its_account(self):
+        a_state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": self._reading(False, 37)}}
+        b_state = {self.UUID: {
+            "tolino_id": "t1-b", "calibre_id": 1,
+            "reading": self._reading(False, 37)}}
+        self._accounts({"A": a_state, "B": b_state})
+        worker, calls = self._manual(config.account_by_name("A")["state"])
+        self.assertEqual([(["t1"], True)], calls)
+        self.assertEqual([(1, True)], worker.read_updates)
+        self.assertIs(True, config.account_by_name("A")["state"]
+                      [self.UUID]["reading"]["read"])
+        self.assertIs(False, config.account_by_name("B")["state"]
+                      [self.UUID]["reading"]["read"])
+        self.assertEqual("B", config.settings()["active_account"])
+
+    def test_failed_manual_read_change_is_not_stored(self):
+        a_state = {self.UUID: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": self._reading(False, 37)}}
+        self._accounts({"A": a_state})
+        worker, calls = self._manual(a_state, fail=True)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, worker.outcome["failed"])
+        self.assertIs(False, config.account_by_name("A")["state"]
+                      [self.UUID]["reading"]["read"])
+        self.assertEqual(37, config.account_by_name("A")["state"]
+                         [self.UUID]["reading"]["progress"]["percent"])

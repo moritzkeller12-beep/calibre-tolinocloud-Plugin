@@ -14,6 +14,7 @@ from unittest.mock import patch
 import calibre_plugin.cdp as cdp_module
 from calibre_plugin.comparison import compare_inventory as _compare_inventory
 from calibre_plugin.inventory import normalize_inventory_record, parse_inventory
+from calibre_plugin.library import TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
 
 # setUpModule() stubs close_grabber_window; real close tests keep this.
 _REAL_CLOSE_WINDOW = cdp_module.close_grabber_window
@@ -37,16 +38,60 @@ def parsed_inventory(value):
 
 
 def compare_inventory(metadata, state, inventory, preferred_formats=(),
-                      use_metadata_ids=True, read_ids=(), read_column=False):
+                      use_metadata_ids=True, read_ids=(), read_column=False,
+                      progress_by_id=None):
     """Comparison test helper: normalize raw Tolino fixtures at the boundary."""
     return _compare_inventory(
         metadata, state, parsed_inventory(inventory), preferred_formats,
-        use_metadata_ids, read_ids, read_column)
+        use_metadata_ids, read_ids, read_column,
+        progress_by_id=progress_by_id)
 
 
 def _full(exc):
     """Nutzertext plus Log-Detail eines TolinoError."""
     return "%s %s" % (exc, getattr(exc, "detail", ""))
+
+
+def _read_ids(dialog, finished):
+    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+    return [tolino_id for tolino_id, _book, state, _uuid
+            in dialog.selected_read_changes() if state is finished]
+
+
+class _ReadingDb:
+    """Minimale Calibre-DB: UUID -> aktuelle Buchnummer plus Lesespalten."""
+
+    def __init__(self, books, read=None, progress=None):
+        self.books = dict(books)
+        self.field_metadata = {
+            TOLINO_READ_COLUMN: {"datatype": "bool"},
+            TOLINO_PROGRESS_COLUMN: {"datatype": "int"},
+        }
+        self.values = {
+            TOLINO_READ_COLUMN: dict(read or {}),
+            TOLINO_PROGRESS_COLUMN: dict(progress or {}),
+        }
+        self.writes = []
+        self.new_api = self
+
+    def all_book_ids(self):
+        return list(self.books)
+
+    def all_field_for(self, _field, book_ids):
+        return {book_id: self.books[book_id] for book_id in book_ids}
+
+    def get_metadata(self, book_id):
+        return {"uuid": self.books[book_id]}
+
+    def has_id(self, book_id):
+        return book_id in self.books
+
+    def field_for(self, column, book_id):
+        return self.values.get(column, {}).get(book_id)
+
+    def set_field(self, column, values):
+        self.values.setdefault(column, {}).update(values)
+        self.writes.append((column, dict(values)))
 
 
 class FakeTableItem:
@@ -85,6 +130,12 @@ class FakeTableItem:
 
     def checkState(self):
         return self._check_state
+
+    def isChecked(self):
+        return bool(self._check_state)
+
+    def setChecked(self, value):
+        self.setCheckState(2 if value else 0)
 
     def setToolTip(self, text):
         self.tooltip = text

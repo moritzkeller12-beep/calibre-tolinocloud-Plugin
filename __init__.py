@@ -4,7 +4,7 @@ except ImportError:
     InterfaceActionBase = object
 
 
-PLUGIN_VERSION = (0, 1, 5)
+PLUGIN_VERSION = (0, 1, 6)
 
 # GPL-3.0-or-later: siehe LICENSE (kompatibel zu Calibre, das unter GPL-3 steht).
 __license__ = "GPL-3.0-or-later"
@@ -18,5 +18,4 @@ class TolinoSyncPlugin(InterfaceActionBase):
     type = "InterfaceAction"
     supported_platforms = ["linux", "windows", "osx"]
     minimum_calibre_version = (6, 0, 0)
-    load_on_demand = True
     actual_plugin = "calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"

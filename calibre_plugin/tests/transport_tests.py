@@ -124,6 +124,16 @@ class WebSocketTransportTests(unittest.TestCase):
         self.assertTrue(seen[0][2])
         self.assertEqual(b"ping-data", seen[0][3])
 
+    def test_an_oversized_frame_is_rejected_before_reading_the_payload(self):
+        """Die Laengenangabe darf keinen beliebig grossen Puffer anfordern."""
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        right.sendall(bytes([0x81, 127])
+                      + struct.pack(">Q", 16 * 1024 * 1024 + 1))
+        with self.assertRaisesRegex(OSError, "too large"):
+            _Ws(left).recv_json(timeout=3)
+
 
 if __name__ == "__main__":
     unittest.main()

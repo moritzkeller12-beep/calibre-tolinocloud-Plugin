@@ -4,6 +4,7 @@ Dieses Modul importiert bewusst kein Qt: `dashboard_plan` und die
 Planungstests kommen damit ohne UI-Stubs aus.
 """
 import os
+from typing import NamedTuple
 
 from .identifiers import display_title
 from .library import safe_format_path
@@ -51,24 +52,16 @@ def format_signatures(database, book_id, formats):
     return signatures
 
 
-class SyncJob:
+class SyncJob(NamedTuple):
     """Ein geplanter Upload: Calibre-Buch, Datei, Cover und alte Cloud-Kopie."""
 
-    # `title` gehoert dazu: Fortschritt und Bericht nennen den
-    # Titel, nicht die Kennung.
-    __slots__ = ("book_id", "book_uuid", "format_name", "old_id", "path",
-                 "cover", "title")
-
-    def __init__(self, book_id, book_uuid, format_name, old_id, path,
-                 cover, title):
-        self.book_id = book_id
-        self.book_uuid = book_uuid
-        self.format_name = format_name
-        self.old_id = old_id
-        self.path = path
-        # Cover-Bytes statt einer Temp-Datei: kein Aufraeumen noetig.
-        self.cover = cover
-        self.title = title
+    book_id: object
+    book_uuid: object
+    format_name: object
+    old_id: object
+    path: object
+    cover: object
+    title: object
 
     def label(self):
         """Sichtbarer Name des Buchs: Titel, sonst «Buch <Nummer>»."""

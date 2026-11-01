@@ -6,11 +6,12 @@ import unittest
 from . import ui_base_tests
 from .. import config
 from ..partners import PARTNERS
-from ..library import TOLINO_COLUMN
+from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
+                       TOLINO_READ_COLUMN)
 from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
-    FakeText,start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+    FakeText, _ReadingDb, start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -186,6 +187,74 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         self.assertFalse(dashboard.switch_account("gibt-es-nicht"))
         self.assertFalse(dashboard.switch_account(""))
         self.assertEqual([], calls)
+
+    def test_reading_columns_follow_the_selected_account(self):
+        uuid = "33333333-3333-3333-3333-333333333333"
+        ui_module, dashboard, _calls = self._run(2)
+        config.save_account("erstes", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": True, "progress": {
+                "percent": 100, "current": "350", "last": "350",
+                "position": "Ops/A.html"}}}}}, active="erstes")
+        config.save_account("zweites", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": False, "progress": {
+                "percent": 37, "current": "130", "last": "350",
+                "position": "Ops/B.html"}}}}}, active="zweites")
+
+        db = _ReadingDb({1: uuid})
+        dashboard.gui = type("Gui", (), {"current_db": db})()
+        self.assertTrue(dashboard.switch_account("zweites"))
+        self.assertIs(False, db.values[TOLINO_READ_COLUMN][1])
+        self.assertEqual(37, db.values[TOLINO_PROGRESS_COLUMN][1])
+        self.assertTrue(dashboard.switch_account("erstes"))
+        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
+        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
+
+    def test_switching_to_an_account_without_values_clears_the_old_ones(self):
+        uuid = "44444444-4444-4444-4444-444444444444"
+        ui_module, dashboard, _calls = self._run(2)
+        config.save_account("erstes", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": True, "progress": {"percent": 100}}}}},
+            active="erstes")
+        config.save_account("zweites", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1}}}, active="zweites")
+
+        db = _ReadingDb({1: uuid}, read={1: True}, progress={1: 100})
+        dashboard.gui = type("Gui", (), {"current_db": db})()
+        self.assertTrue(dashboard.switch_account("zweites"))
+        self.assertIsNone(db.values[TOLINO_READ_COLUMN][1])
+        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
+        self.assertTrue(dashboard.switch_account("erstes"))
+        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
+        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
+
+    def test_account_switch_stays_available_while_a_comparison_runs(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+
+        class Widget:
+            def setEnabled(self, value):
+                self.enabled = value
+
+        dialog = type("Dashboard", (), {})()
+        dialog.account_quick = Widget()
+        dialog.account_select = Widget()
+        dialog.thread = None
+        dialog.prepare_thread = None
+        ui_module.common._apply_busy(dialog, True)
+        self.assertFalse(dialog.account_quick.enabled)
+        # `_apply_busy` läuft vor dem Setzen des Threads. Sobald der Lauf
+        # sichtbar ist, muss die Kontoauswahl wieder bedienbar sein.
+        dialog.thread = object()
+        ui_module.common._apply_busy(dialog, True)
+        self.assertTrue(dialog.account_quick.enabled)
+        self.assertTrue(dialog.account_select.enabled)
+        dialog.thread = None
+        ui_module.common._apply_busy(dialog, True)
+        self.assertFalse(dialog.account_quick.enabled)
 
 class ColumnSetupButtonTests(unittest.TestCase):
     """Je Calibre-Spalte ein Knopf in den Einstellungen."""
@@ -378,6 +447,24 @@ class SettingsLockTests(unittest.TestCase):
         self.assertEqual({}, second["state"])
         self.assertEqual({}, config.DEFAULT_ACCOUNT["state"])
 
+    def test_ui_and_token_metadata_do_not_copy_book_state(self):
+        import copy
+        real_deepcopy = copy.deepcopy
+
+        def guarded(value):
+            if isinstance(value, dict):
+                raise AssertionError("Buchzustand wurde unnötig kopiert")
+            return real_deepcopy(value)
+
+        with patch("calibre_plugin.config.copy.deepcopy", guarded):
+            values = config.settings()
+            self.assertNotIn("state", values["accounts"][0])
+            self.assertTrue(config.set_active_account("konto"))
+            self.assertEqual(("tok",), config.account_secrets("konto"))
+            self.assertTrue(config.save_refresh_token("konto", "neu"))
+            self.assertEqual("neu", config.account_summary(
+                "konto")["refresh_token"])
+
     def test_save_account_waits_for_the_settings_lock(self):
         import threading
         started = threading.Event()
@@ -547,6 +634,27 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         dashboard.hardware.setText("manuell")
         self.assertEqual("manuell", dashboard.values()["hardware_id"])
 
+    def test_adopted_hardware_survives_stale_fields_and_token_storage(self):
+        _ui_module, dashboard = self._ui()
+        config.save_account("konto", {"hardware_id": "adoptiert"},
+                            active="konto")
+        dashboard._save_visible_account()
+        self.assertEqual("adoptiert",
+                         config.account_by_name("konto")["hardware_id"])
+        dashboard.hardware.setText("manuell")
+        dashboard._hardware_edited = True
+        dashboard._save_visible_account()
+        self.assertEqual("manuell",
+                         config.account_by_name("konto")["hardware_id"])
+
+        _ui_module, dashboard = self._ui("alt-token")
+        config.save_account("konto", {"hardware_id": "adopted"},
+                            active="konto")
+        dashboard.hardware.setText("hw-1")
+        dashboard.store_refresh("neu")
+        self.assertEqual("adopted",
+                         config.account_by_name("konto")["hardware_id"])
+
     def test_a_missing_account_never_saves_another_accounts_state(self):
         """Ist der angezeigte Name weg, darf nicht das aktive Konto
         unter diesem Namen gespeichert werden."""
@@ -602,7 +710,7 @@ class LoginPreflightTests(unittest.TestCase):
         return patch.multiple(
             "calibre_plugin.token_vault",
             TolinoClient=FakeClient,
-            account_by_name=lambda _name: ({} if token is None else {
+            account_summary=lambda _name: ({} if token is None else {
                 "refresh_token": token, "hardware_id": hardware}),
             account_secrets=lambda _name: () if token is None else (token,),
         )
@@ -675,7 +783,7 @@ class LoginPreflightTests(unittest.TestCase):
         with patch.multiple(
                 "calibre_plugin.token_vault",
                 TolinoClient=RefreshClient,
-                account_by_name=lambda _name: dict(stored),
+                account_summary=lambda _name: dict(stored),
                 save_refresh_token=lambda _name, value: stored.update(
                     refresh_token=value)):
             client = TOKEN_VAULT.login("konto", 4)
@@ -768,8 +876,8 @@ class LoginPreflightTests(unittest.TestCase):
                 pass
 
         class LoginWorker:
-            def __init__(self, partner_id, hardware):
-                self.arguments = (partner_id, hardware)
+            def __init__(self, account_name, partner_id, hardware):
+                self.arguments = (account_name, partner_id, hardware)
                 self.progress = Signal()
                 self.completed = Signal()
                 self.failed = Signal()
@@ -827,7 +935,7 @@ class LoginPreflightTests(unittest.TestCase):
         # Die beiden Ergebnis-Slots des Anmeldefensters: hier nur Empfaenger.
         dashboard.login_completed = lambda *args: None
         dashboard.login_failed = lambda *args: None
-        names = ("browser_login", "_check_stored_login", "run_context",
+        names = ("browser_login", "_check_stored_login",
                  "_start_login_window", "_login_running",
                  "login_still_valid", "login_rejected", "login_check_busy",
                  "_login_cleanup", "store_refresh", "_login_progress")
@@ -912,7 +1020,8 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsNot(check_thread, dashboard.login_thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
+        self.assertEqual(("konto", 4, "hw-1"),
+                         dashboard.login_worker.arguments)
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
 
@@ -959,7 +1068,8 @@ class LoginPreflightTests(unittest.TestCase):
             RunContext.from_values(dashboard.values()))
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
+        self.assertEqual(("konto", 4, "hw-1"),
+                         dashboard.login_worker.arguments)
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertFalse(dashboard.primary.enabled)
         self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
@@ -1051,7 +1161,7 @@ class LoginMessageTests(unittest.TestCase):
             "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
-        dashboard.store_refresh = lambda refresh, hardware="": None
+        dashboard.refresh = FakeText()
         dashboard.update_status = lambda: None
         dashboard._login_cleanup = lambda: None
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
@@ -1078,7 +1188,7 @@ class LoginMessageTests(unittest.TestCase):
             "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
-        dashboard.store_refresh = lambda refresh, hardware="": None
+        dashboard.refresh = FakeText()
         dashboard.update_status = lambda: None
         dashboard._login_cleanup = lambda: None
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
@@ -1112,8 +1222,8 @@ class LoginMessageTests(unittest.TestCase):
             "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
+        dashboard.refresh = FakeText()
         dashboard.primary = Primary()
-        dashboard.store_refresh = lambda refresh, hardware="": None
         dashboard.update_status = lambda: None
         dashboard._login_cleanup = lambda: None
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
@@ -1217,6 +1327,20 @@ class AccountStateBindingTests(unittest.TestCase):
                          config.account_by_name("beta")["state"])
         self.assertEqual({}, config.account_by_name("gone"))
 
+    def test_duplicate_names_keep_both_accounts_accessible(self):
+        original = config.PREFERENCES
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.PREFERENCES = config.JSONConfig("test")
+        config.PREFERENCES.update({
+            "accounts": [{"name": "konto", "hardware_id": "hw-1"},
+                         {"name": "konto", "hardware_id": "hw-2"}],
+            "active_account": "konto",
+        })
+        self.assertEqual("hw-1",
+                         config.account_by_name("konto")["hardware_id"])
+        self.assertEqual("hw-2",
+                         config.account_by_name("konto-2")["hardware_id"])
+
     def test_set_active_account_switches_without_touching_state(self):
         original = config.PREFERENCES
         try:
@@ -1249,12 +1373,38 @@ class AccountStateBindingTests(unittest.TestCase):
 
         class Db:
             field_metadata = {TOLINO_COLUMN: {},
-                              "#tolino_read": {"datatype": "bool"}}
+                              "#tolino_read": {"datatype": "bool"},
+                              "#tolino_progress": {"datatype": "int"}}
 
         class NoColumn:
             field_metadata = {}
 
         self.assertTrue(column_state(Db())["id"])
         self.assertTrue(column_state(Db())["read"])
+        self.assertTrue(column_state(Db())["progress"])
         self.assertFalse(column_state(NoColumn())["id"])
         self.assertFalse(column_state(NoColumn())["read"])
+        self.assertFalse(column_state(NoColumn())["progress"])
+
+
+class BrowserLoginPersistenceTests(unittest.TestCase):
+    """Der Browser-Token überlebt ein sofort geschlossenes Dashboard."""
+
+    def test_worker_saves_credentials_before_reporting_completion(self):
+        ui_module = ui_module_for(self)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        events = []
+        worker = ui_module.auth_workers.BrowserLoginWorker("konto", 4, "hw")
+        for name in ("progress", "completed", "failed"):
+            setattr(worker, name, type("Signal", (), {
+                "emit": lambda self, *args, _name=name:
+                    events.append((_name,) + args)})())
+        with patch.object(ui_module.auth_workers, "grab_live_refresh",
+                          lambda *args, **kwargs: ("tok", "hw")), \
+             patch.object(ui_module.auth_workers, "save_credentials",
+                          lambda *args: events.append(("save",) + args) or True):
+            worker.run()
+        self.assertEqual([
+            ("save", "konto", "tok", "hw"),
+            ("completed", "tok", "hw"),
+        ], events)

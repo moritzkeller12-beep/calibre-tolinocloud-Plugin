@@ -19,7 +19,7 @@ from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
 from ..plan import (metadata_update_fields, plan_collection_updates,
-                    plan_metadata_updates, plan_sync, recorded_collections,
+                    plan_metadata_updates, plan_sync,
                     remember_collection, series_map_from_metadata)
 from ..plan import UploadRecord
 from ..inventory import normalize_inventory_record
@@ -48,7 +48,7 @@ def setUpModule():
     global _ACCOUNT_PATCH
     start_cdp_stubs()
     _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_by_name",
+        "calibre_plugin.token_vault.account_summary",
         lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
     _ACCOUNT_PATCH.start()
 
@@ -383,10 +383,11 @@ class SyncPlanTests(unittest.TestCase):
                 return 1
 
         database = Database()
-        self.assertEqual(["tolino_read", "tolino_ignore"],
+        self.assertEqual(["tolino_read", "tolino_progress", "tolino_ignore"],
                          create_custom_columns(database))
         self.assertEqual(
             [("tolino_read", "Gelesen (tolino)", "bool", False, True, {}),
+             ("tolino_progress", "tolino gelesen %", "int", False, True, {}),
              ("tolino_ignore", "Ignoriert (tolino)", "bool", False, True, {})],
             database.calls)
         # Zweiter Klick: nichts doppelt anlegen, auch wenn Calibre die neue
@@ -435,6 +436,7 @@ class SyncPlanTests(unittest.TestCase):
         """Text fuer die ID, Ja/Nein fuer Lesestatus und Ignorieren."""
         self.assertEqual([("tolino_id", "tolino-ID", "text"),
                           ("tolino_read", "Gelesen (tolino)", "bool"),
+                          ("tolino_progress", "tolino gelesen %", "int"),
                           ("tolino_ignore", "Ignoriert (tolino)", "bool")],
                          list(CUSTOM_COLUMNS))
 
@@ -445,7 +447,8 @@ class SyncPlanTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError) as caught:
             create_custom_columns(WithoutColumns())
-        for label in ("#tolino_id", "#tolino_read", "#tolino_ignore"):
+        for label in ("#tolino_id", "#tolino_read", "#tolino_progress",
+                      "#tolino_ignore"):
             self.assertIn(label, str(caught.exception))
 
     def test_custom_column_availability_accepts_calibre_field_metadata(self):
@@ -948,36 +951,6 @@ class SyncPlanTests(unittest.TestCase):
         token = normalize_refresh_token('  "refresh-secret-value"  ')
         self.assertEqual("refresh-secret-value", token)
 
-    def test_partner_8_authenticated_headers_match_web_reader(self):
-        captured = {}
-
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b"{}"
-
-        def request(request, timeout):
-            captured["headers"] = request.headers
-            return Response()
-
-        with patch("calibre_plugin.tolino.urlopen", request):
-            client = TolinoClient(4, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
-                                  "refresh-token")
-            client.access = "access-token"
-            client.expires_at = time.time() + 60
-            client._request("https://bosh.pageplace.de/bosh/rest/inventory/delta")
-        headers = {key.casefold(): value for key, value in captured["headers"].items()}
-        self.assertEqual("8", headers["reseller_id"])
-        self.assertEqual("TOLINO_WEBREADER", headers["client_type"])
-        self.assertEqual("5.2.0", headers["client_version"])
-
     def test_partner_8_refresh_payload_is_url_encoded_and_not_access_token(self):
         captured = {}
 
@@ -1206,6 +1179,29 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
+    def test_first_install_uses_the_virtual_default_account(self):
+        """Frischer Store: „default“ muss lesbar und beschreibbar sein."""
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            values = config.settings()
+            self.assertEqual("default", values["active_account"])
+            self.assertEqual(["default"],
+                             [item["name"] for item in values["accounts"]])
+            account = config.account_by_name("default")
+            self.assertEqual("default", account["name"])
+            self.assertEqual({}, account["state"])
+            # Der erste Vergleich schreibt in das virtuelle Default-Konto,
+            # ohne ein zweites Konto anzulegen.
+            self.assertTrue(config.save_account(
+                "default", {"state": {"u": {"tolino_id": "t"}}},
+                create=False))
+            saved = config.account_by_name("default")
+            self.assertEqual("t", saved["state"]["u"]["tolino_id"])
+            self.assertEqual("default", config.settings()["active_account"])
+        finally:
+            config.PREFERENCES = original
+
     def test_settings_do_not_return_obsolete_options(self):
         original = config.PREFERENCES
         try:
@@ -1273,29 +1269,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual((6, 0, 0), tuple(plugin.minimum_calibre_version))
         self.assertEqual("InterfaceAction", plugin.type)
 
-    def test_report_error_logs_no_tokens_passwords_or_cookies(self):
-        """Auch die Logzeile und der Traceback enthalten keine Geheimnisse."""
-        from ..tolino import report_error
-
-        refresh = "refresh-secret-log"
-        password = "password-secret-log"
-        cookie = "cookie-secret-log"
-        access = "access-secret-log"
-        logged = []
-        with patch("calibre_plugin.tolino.log_warning",
-                   side_effect=logged.append):
-
-            error = TolinoAuthError(
-                "refresh_token=%s password=%s Cookie: session=%s"
-                % (refresh, password, cookie),
-                code="A01", detail="access_token=%s" % access)
-            message = report_error(error, secrets=(refresh, password, cookie,
-                                                   access))
-        rendered = "\n".join(logged) + "\n" + message
-        for secret in (refresh, password, cookie, access):
-            self.assertNotIn(secret, rendered)
-        self.assertIn("[REDACTED]", "\n".join(logged))
-
     def test_partial_settings_ignore_unscoped_legacy_account_fields(self):
         original = config.PREFERENCES
         try:
@@ -1306,7 +1279,8 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual("", values["accounts"][0]["refresh_token"])
             self.assertEqual("", values["hardware_id"])
             self.assertNotIn("enable_deletions", values)
-            self.assertIsInstance(values["accounts"][0]["state"], dict)
+            self.assertIsInstance(
+                config.account_by_name("default")["state"], dict)
             self.assertEqual("configured-token", config.PREFERENCES["refresh_token"])
         finally:
             config.PREFERENCES = original
@@ -1325,8 +1299,10 @@ class SyncPlanTests(unittest.TestCase):
             values = config.settings()
             accounts = {item["name"]: item for item in values["accounts"]}
             self.assertEqual("bob", values["active_account"])
-            self.assertEqual("a", accounts["alice"]["state"]["u"]["tolino_id"])
-            self.assertEqual("b", accounts["bob"]["state"]["u"]["tolino_id"])
+            self.assertEqual("a", config.account_by_name("alice")["state"]
+                             ["u"]["tolino_id"])
+            self.assertEqual("b", config.account_by_name("bob")["state"]
+                             ["u"]["tolino_id"])
             self.assertEqual("a", accounts["alice"]["refresh_token"])
             self.assertEqual("b", accounts["bob"]["refresh_token"])
         finally:
@@ -1366,10 +1342,10 @@ class SyncPlanTests(unittest.TestCase):
         accounts = [{"name": "konto", "partner_id": 4, "hardware_id": "hw",
                      "refresh_token": "tok"}]
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-             patch("calibre_plugin.token_vault.account_by_name",
+             patch("calibre_plugin.token_vault.account_summary",
                    lambda _name: accounts[0]), \
              patch("calibre_plugin.token_vault.settings",
-                   lambda: {"accounts": accounts}), \
+                   lambda **_kwargs: {"accounts": accounts}), \
              patch("calibre_plugin.token_vault.save_refresh_token",
                    lambda name, token: saved.append((name, token))):
             result = vault_module.TOKEN_VAULT.keepalive_refresh()
@@ -1392,19 +1368,41 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("neu", account["refresh_token"])
         self.assertEqual("hw", account["hardware_id"])
 
+    def test_a_late_token_callback_does_not_recreate_a_removed_account(self):
+        """Ein verspaeteter Refresh darf kein geloeschtes Konto anlegen."""
+        original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.save_account("konto", {"refresh_token": "alt",
+                                      "hardware_id": "hw"}, active="konto")
+        config.save_account("behalten", {}, active="behalten")
+        config.remove_account("konto")
+        config.save_refresh_token("konto", "spaet")
+        self.assertFalse(config.save_hardware_id("konto", "hw-spaet"))
+        self.assertFalse(config.save_credentials("konto", "tok", "hw"))
+        self.assertEqual({}, config.account_by_name("konto"))
+
+    def test_a_fresh_default_account_can_store_its_first_token(self):
+        original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        self.assertTrue(config.save_refresh_token("default", "erster"))
+        self.assertEqual("erster",
+                         config.account_by_name("default")["refresh_token"])
+
     def test_keepalive_refresh_skips_when_there_is_nothing_to_do(self):
         """Ohne Token und bei laufender Rotation passiert nichts."""
         accounts = [{"name": "A", "partner_id": 4, "hardware_id": "hw",
                      "refresh_token": "tok"}]
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
              patch("calibre_plugin.token_vault.settings",
-                   lambda: {"accounts": []}):
+                   lambda **_kwargs: {"accounts": []}):
             self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh())
             client_mock.assert_not_called()
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
              patch("calibre_plugin.token_vault.settings",
-                   lambda: {"accounts": accounts}), \
-             patch("calibre_plugin.token_vault.account_by_name",
+                   lambda **_kwargs: {"accounts": accounts}), \
+             patch("calibre_plugin.token_vault.account_summary",
                    lambda _name: accounts[0]):
             with vault_module.TOKEN_VAULT._lock:
                 self.assertEqual(
@@ -1608,17 +1606,18 @@ class CollectionPlanTests(unittest.TestCase):
         self.assertEqual([("u2", "t2", "Neu")],
                          plan_collection_updates(series_map, state))
 
-    def test_recorded_collections_ignore_broken_state(self):
+    def test_plan_collection_updates_ignores_broken_state(self):
         state = {"u1": {"tolino_id": "t1", "collections": "kaputt"}}
         self.assertEqual([("u1", "t1", "Adamsberg")],
                          plan_collection_updates({"u1": "Adamsberg"}, state))
-        self.assertEqual(set(), recorded_collections(None))
-        self.assertEqual(set(), recorded_collections({"collections": ["  "] }))
+        state = {"u1": {"tolino_id": "t1", "collections": ["  "]}}
+        self.assertEqual([("u1", "t1", "Adamsberg")],
+                         plan_collection_updates({"u1": "Adamsberg"}, state))
         self.assertFalse(remember_collection(None, "u1", "Adamsberg"))
         self.assertFalse(remember_collection({}, "", "Adamsberg"))
         self.assertFalse(remember_collection({}, "u1", "   "))
 
-    def test_recorded_collections_survive_plan_sync(self):
+    def test_plan_collection_updates_preserve_collections_during_plan_sync(self):
         """Der Zustand wird bei jedem Sync neu aufgebaut – die gemerkten
         Zuordnungen dürfen dabei nicht verloren gehen."""
         book = {"uuid": "u1", "title": "A", "authors": "A", "isbn": "1",
@@ -1697,10 +1696,9 @@ class ConservativeMatchingTests(unittest.TestCase):
             self.assertFalse(rows[0]["ignored"], value)
             self.assertEqual("action", rows[0]["group"], value)
 
-    def test_ignored_books_are_filtered_out_of_the_selection_helpers(self):
-        from ..dashboard_plan import syncable_book_ids, syncable_metadata
+    def test_ignored_books_are_filtered_out_of_syncable_metadata(self):
+        from ..dashboard_plan import syncable_metadata
         metadata = {1: {"ignored": True}, 2: {}, 3: {"ignored": False}}
-        self.assertEqual({2, 3}, syncable_book_ids(metadata, [1, 2, 3]))
         self.assertEqual({2, 3}, set(syncable_metadata(metadata)))
 
     def test_plan_actions_drops_ignored_books_but_keeps_the_others(self):
@@ -1768,16 +1766,31 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
     def test_same_title_different_valid_isbn_is_review(self):
+        state = {}
         rows = compare_inventory(
-            self._metadata(authors="Autor", isbn="9783161484100"), {},
+            self._metadata(authors="Autor", isbn="9783161484100"), state,
             [{"deliverableId": "t1", "title": "Titel", "authors": "Autor",
               "isbn": "9780306406157"}], ["EPUB"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("conflict", rows[0]["match_reason"])
         self.assertNotEqual("new_in_calibre", rows[0]["status"])
         # Die gefundene Cloud-Kopie bleibt technisch sichtbar, wird aber
-        # nicht als automatischer Treffer verbucht.
+        # nicht als automatischer Treffer verbucht -- und darf deshalb auch
+        # nicht als klebrige Zuordnung im Zustand landen.
         self.assertEqual("t1", rows[0]["tolino_id"])
+        self.assertNotIn("u1", state)
+
+    def test_a_transliterated_author_collision_is_not_automatically_matched(self):
+        """«Michael» und «Michal» teilen den Index-Schluessel, sind aber verschieden."""
+        state = {}
+        rows = compare_inventory(
+            self._metadata(authors="Michael Ende"), state,
+            [{"deliverableId": "t1", "title": "Titel",
+              "authors": "Michal Ende"}], ["EPUB"])
+        self.assertEqual("review", rows[0]["status"])
+        self.assertEqual("title_only", rows[0]["match_reason"])
+        self.assertEqual("", rows[0]["tolino_id"])
+        self.assertNotIn("u1", state)
 
     def test_unique_title_and_author_match_identically(self):
         rows = compare_inventory(
@@ -1812,6 +1825,23 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertEqual("conflict", rows[0]["match_reason"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("t-known", state["u1"]["tolino_id"])
+
+    def test_identifier_embedded_isbn_matches_despite_a_different_title(self):
+        """Die ISBN aus ``DT0400.<ISBN>_…`` ist ein echter Abgleichsschlüssel."""
+        metadata = {1: {"uuid": "u1", "title": "Lokaler Titel",
+                        "authors": "Autorin", "isbn": "9783832170141",
+                        "formats": ["EPUB"]}}
+        inventory = {"PublicationInventory": {"ebook": [{
+            "deliverableId": "d1",
+            "epubMetaData": {
+                "identifier": "DT0400.9783832170141_A38978050",
+                "title": "Cloud-Titel",
+                "author": [{"name": "Autorin"}],
+            }}]}}
+        rows = compare_inventory(metadata, {}, inventory, ["EPUB"])
+        self.assertEqual("d1", rows[0]["tolino_id"])
+        self.assertEqual("isbn", rows[0]["match_reason"])
+        self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
     def test_matching_always_uses_isbn_or_title_and_author_pair(self):
         metadata = self._metadata(title="Gleich", authors="Autor")
@@ -2103,7 +2133,7 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
 class PrepareStateCopyTests(unittest.TestCase):
     """Die Vorbereitung veraendert den gespeicherten Zustand nicht."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
     UUID = "8f3c5f0e-1a2b-4c3d-9e8f-001122334455"
 
     def test_load_state_accepts_mappings_and_rejects_invalid_values(self):
@@ -2209,7 +2239,7 @@ class FingerprintCommitTests(unittest.TestCase):
     «aktuell» aussehen -- der Schritt wurde nie wieder angeboten.
     """
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})

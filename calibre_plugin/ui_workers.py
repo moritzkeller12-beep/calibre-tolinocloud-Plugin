@@ -6,13 +6,14 @@ from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
 from .planning_values import plural
 from .token_vault import TOKEN_VAULT
-from .config import account_secrets, save_account
+from .config import account_secrets, load_state, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
-                         metadata_fingerprint)
-from .identifiers import display_title, migrate_state_keys, state_entry
+                         metadata_fingerprint, reading_state,
+                         store_reading_state)
+from .identifiers import (display_title, migrate_state_keys, state_entry,
+                          valid_book_uuid)
 from .library import image_suffix
-from .config import load_state
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
 
@@ -36,13 +37,20 @@ class SyncWorker(QObject):
         # (tolino-ID, Calibre-Nummer, gelesen?) je ausdrücklich gewählter
         # Änderung aus dem Vergleichsfenster. Leer heisst: Lesestatus bleibt
         # unangetastet und die Spalte unverändert.
-        self.read_changes = [
-            (str(tolino_id), book_id, bool(finished))
-            for tolino_id, book_id, finished in (read_changes or ())
-            if str(tolino_id or "").strip()]
-        self.read_marks = [tolino_id for tolino_id, _id, finished
+        self.read_changes = []
+        for change in (read_changes or ()):
+            values = tuple(change) if isinstance(change, (tuple, list)) else ()
+            if len(values) < 3:
+                continue
+            tolino_id = str(values[0] or "").strip()
+            if not tolino_id:
+                continue
+            book_uuid = valid_book_uuid(values[3]) if len(values) > 3 else ""
+            self.read_changes.append(
+                (tolino_id, values[1], bool(values[2]), book_uuid))
+        self.read_marks = [tolino_id for tolino_id, _id, finished, _uuid
                            in self.read_changes if finished]
-        self.read_unmarks = [tolino_id for tolino_id, _id, finished
+        self.read_unmarks = [tolino_id for tolino_id, _id, finished, _uuid
                              in self.read_changes if not finished]
         self.titles = {str(key): str(value)
                        for key, value in (titles or {}).items()
@@ -124,8 +132,6 @@ class SyncWorker(QObject):
         """
         detail = sanitize_error(exc, account_secrets(self.account_name)
                                 + (getattr(client, "access", None),))
-        if operation is not None:
-            operation["exception"] = exc
         self._finish_operation(operation, OP_FAILED, error=detail)
         log_warning("Schritt gescheitert (%s): %s"
                     % ((operation or {}).get("label") or "?", detail))
@@ -166,7 +172,7 @@ class SyncWorker(QObject):
             return
         try:
             save_account(self.account_name, {"state": self.state},
-                         active=self.account_name)
+                         create=False)
         except Exception as exc:
             raise TolinoError(
                 "Der Sync-Zwischenstand konnte nicht gespeichert werden. "
@@ -188,6 +194,12 @@ class SyncWorker(QObject):
             if exc.code == "N03" and "http 404" in text:
                 return False
             raise
+
+    def _finish_delete(self, operation, deleted):
+        """Eine Löschoperation als erfolgreich oder übersprungen verbuchen."""
+        self._finish_operation(
+            operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
+            **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
 
     def _plan_operations(self):
         """Plan selected actions; collections are added after uploads."""
@@ -221,7 +233,6 @@ class SyncWorker(QObject):
         total = (len(meta_ops) + len(upload_ops) + len(delete_ops)
                  + (1 if read_op else 0)
                  + (1 if unread_op else 0))
-        self._refresh_counts()
         return meta_ops, upload_ops, delete_ops, read_op, unread_op, total
 
     def _remove_replaced_copy(self, client, job):
@@ -236,18 +247,13 @@ class SyncWorker(QObject):
         except Exception as exc:
             self._fail(operation, exc, client, fatal=True)
         else:
-            self._finish_operation(
-                operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
-                **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
+            self._finish_delete(operation, deleted)
 
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
         for book_uuid, tolino_id, operation in delete_ops:
             def finish(deleted):
-                self._finish_operation(
-                    operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
-                    **({} if deleted else {
-                        "reason": "nicht mehr in der Cloud"}))
+                self._finish_delete(operation, deleted)
 
             ok, deleted = self._step(
                 client, checkpoint, operation,
@@ -290,13 +296,33 @@ class SyncWorker(QObject):
                 lambda: client.mark_read_many(book_ids, finished=finished),
                 done, total)
             if ok:
-                self.read_updates.extend(
-                    (book_id, finished) for _tolino, book_id, state
-                    in self.read_changes
-                    if state is finished and book_id is not None)
+                stored = False
+                for _tolino, book_id, state, book_uuid in self.read_changes:
+                    if state is not finished:
+                        continue
+                    if book_id is not None:
+                        self.read_updates.append((book_id, finished))
+                    stored = self._store_read_state(book_uuid, finished) or stored
+                if stored:
+                    self._persist_state()
                 self.progress.emit(done, total, done_text)
             done += 1
         return done
+
+    def _store_read_state(self, book_uuid, finished):
+        """Bestätigten Lesestatus im Account-State dieses Laufs sichern."""
+        key = valid_book_uuid(book_uuid)
+        if not key:
+            return False
+        entry = self.state.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+            self.state[key] = entry
+        reading = reading_state(entry)
+        if reading.get("read") is bool(finished):
+            return False
+        reading["read"] = bool(finished)
+        return True
 
     def _load_collection_pairs(self, client, collection_ops, done, total):
         """Cloud-Zuordnungen lesen; ein Fehler zaehlt jede Aktion als beendet."""
@@ -432,7 +458,10 @@ class SyncWorker(QObject):
                         "cover", "Buchcover: %s" % job.label(),
                         book_uuid=job.book_uuid)
                     self._fail(cover_op, exc, client, fatal=True)
-            self._remove_replaced_copy(client, job)
+            # Liefert tolino beim Ersetzen dieselbe ID, ist das die neue
+            # Kopie -- sie darf nicht als «alte» gelöscht werden.
+            if job.old_id and str(job.old_id) != str(new_id):
+                self._remove_replaced_copy(client, job)
             done += 1
             self.progress.emit(done, total, "Hochgeladen: %s" % job.label())
         return done
@@ -520,43 +549,52 @@ class PrepareWorker(QObject):
         return True
 
     def _load_comparison_state(self):
-        """Load and migrate the state for this comparison.
+        """Load the state and snapshot it before migration/comparison.
 
-        `load_state` may return the preferences mapping unchanged; the
-        comparison writes tolino IDs, so it must get an independent copy.
+        `load_state` may return the preferences mapping unchanged. Only the
+        working state is copied; the original snapshot stays untouched.
         """
-        state = copy.deepcopy(load_state(self.state))
+        original = load_state(self.state)
+        state = copy.deepcopy(original)
         # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
         # wenn Calibre spaeter eine echte UUID liefert.
         migrated = migrate_state_keys(self.metadata, state)
         if migrated:
             log_warning("Zustand auf die echte Kennung umgestellt: %d %s."
                         % (migrated, plural(migrated, "Buch", "Bücher")))
-        return state
+        return state, original
+
+    def _load_optional(self, label, loader):
+        """Optionale Cloud-Daten laden; ein Fehler bleibt «unbekannt»."""
+        try:
+            return loader(), True
+        except Exception as exc:
+            log_warning("%s konnte nicht geladen werden: %s"
+                        % (label, sanitize_error(
+                            exc, self.context.secrets())))
+            return None, False
 
     def _load_inventory(self, client):
-        """Load cloud inventory and read status without hiding failures."""
+        """Load inventory, read status and progress without hiding failures."""
         inventory = client.inventory()
-        read_known = True
-        try:
-            read_ids = client.read_ids()
-        except Exception as exc:
-            # «Unbekannt» ist ein eigener Zustand: niemals als
-            # «nichts gelesen» ausgeben.
-            read_ids = None
-            read_known = False
-            log_warning("Lesestatus konnte nicht geladen werden: "
-                        + sanitize_error(exc, self.context.secrets()))
-        return inventory, read_ids, read_known
+        read_ids, read_known = self._load_optional(
+            "Lesestatus", client.read_ids)
+        progress_by_id, progress_known = None, False
+        loader = getattr(client, "progress_by_id", None)
+        if read_known and callable(loader):
+            progress_by_id, progress_known = self._load_optional(
+                "Lesefortschritt", loader)
+        return inventory, read_ids, read_known, progress_by_id, progress_known
 
-    def _build_comparison(self, state, inventory, read_ids):
+    def _build_comparison(self, state, inventory, read_ids, progress_by_id):
         """Build comparison rows and drop stale cloud IDs from state."""
         columns = self.context.columns
         comparison = compare_inventory(
             self.metadata, state, inventory, self.context.preferred_formats,
             use_metadata_ids=columns.get("id", True),
             read_ids=read_ids,
-            read_column=bool(columns.get("read")))
+            read_column=bool(columns.get("read")),
+            progress_by_id=progress_by_id)
         for row in comparison:
             stale_id = str(row.get("stale_cloud_id") or "").strip()
             book_uuid = str(row.get("uuid") or "").strip()
@@ -564,14 +602,17 @@ class PrepareWorker(QObject):
                 entry = state.get(book_uuid)
                 if isinstance(entry, dict) and str(
                         entry.get("tolino_id") or "").strip() == stale_id:
+                    # Cloud-Kopie weg: Zuordnung und alter Lesestand dieses
+                    # Kontos dürfen nicht weiter angezeigt werden.
                     entry.pop("tolino_id", None)
+                    entry.pop("reading", None)
         return comparison
 
     def run(self):
         """Vergleich vorbereiten, ohne Keep-alive oder UI zu blockieren."""
         client = None
         try:
-            state = self._load_comparison_state()
+            state, original_state = self._load_comparison_state()
             self.progress.emit("Verbinde mit tolino …")
             client = TOKEN_VAULT.login(self.account_name,
                                        self.context.partner_id,
@@ -579,19 +620,29 @@ class PrepareWorker(QObject):
             if self._stop_requested():
                 return
             self.progress.emit("Lade Cloud-Bestand …")
-            inventory, read_ids, read_known = self._load_inventory(client)
+            (inventory, read_ids, read_known,
+             progress_by_id, progress_known) = self._load_inventory(client)
             if self._stop_requested():
                 return
             self.progress.emit("Vergleiche Bibliothek …")
-            comparison = self._build_comparison(state, inventory, read_ids)
+            comparison = self._build_comparison(
+                state, inventory, read_ids, progress_by_id)
             if self._stop_requested():
                 return
+            store_reading_state(state, comparison)
+            if state != original_state:
+                # Alle Änderungen des Vergleichs (Migration, bestätigte IDs,
+                # veraltete Kopien, Lesewerte) in EINEM Schreibvorgang sichern.
+                # Nur bestehende Konten aktualisieren: ein während des
+                # Vergleichs entferntes Konto darf nicht wieder erscheinen.
+                save_account(self.account_name, {"state": state}, create=False)
             self.ready.emit({
                 "context": self.context,
                 "metadata": self.metadata,
                 "state": state,
                 "comparison": comparison,
                 "read_status_known": read_known,
+                "progress_status_known": progress_known,
                 "hardware": client.hardware,
             })
         except Exception as exc:

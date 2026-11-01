@@ -16,23 +16,18 @@ from qt.core import (QCheckBox, QComboBox, QDialog,
                      QStyleOptionViewItem, QEvent, Qt, pyqtSignal)
 from .tolino import TolinoError
 
-# Namen, die andere UI-Module ueber dieses Modul beziehen.
+# Re-export the Qt names other UI modules and the test loader import from here.
 __all__ = [
     "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
-    "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog",
-    "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView",
-    "QMenu", "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
+    "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog", "QFileDialog",
+    "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView", "QMenu",
+    "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
     "QThread", "QVBoxLayout", "QStyledItemDelegate", "QStyle",
-    "QStyleOptionViewItem", "QEvent", "Qt",
-    "_THREADS", "_apply_busy", "_dialog_busy",
-    "LOGIN_NEXT_STEP", "_login_failure_guidance",
-    "gui_guard",
-    "start_worker", "_stop_thread",
-    "_set_enabled",
-    "_keep_thread_alive",
-    "pyqtSignal",
-    "sync_result_detail",
+    "QStyleOptionViewItem", "QEvent", "Qt", "_THREADS", "_apply_busy",
+    "_dialog_busy", "LOGIN_NEXT_STEP", "_login_failure_guidance",
+    "gui_guard", "start_worker", "_stop_thread", "_set_enabled",
+    "_keep_thread_alive", "pyqtSignal", "sync_result_detail",
     "sync_result_text",
 ]
 
@@ -209,16 +204,21 @@ def _set_enabled(owner, names, enabled):
 
 
 def _apply_busy(dialog, busy):
-    """Disable account/partner/sync controls while an operation runs.
+    """Disable sync controls while keeping the account switch available.
 
-    Der Statustext kommt von den Startern -- sie wissen, was läuft; hier
-    würde nur geraten.
+    Während Vergleich oder Sync darf das angezeigte Konto gewechselt werden;
+    die laufende Aktion bleibt über RunContext an ihr Startkonto gebunden.
+    Eine laufende Anmeldeprüfung blockiert den Wechsel dagegen weiterhin.
     """
-    _set_enabled(dialog, ("account_quick", "account_select", "account_new",
-                          "account_remove", "partner", "login_button",
-                          "settings_button", "hardware", "refresh",
-                          "formats"),
-                 not busy)
+    switchable = bool(getattr(dialog, "thread", None)
+                      or getattr(dialog, "prepare_thread", None))
+    _set_enabled(dialog, ("account_new", "account_remove", "partner",
+                          "login_button", "settings_button", "hardware",
+                          "refresh", "formats"), not busy)
+    # Während Vergleich/Sync bleibt die Kontoauswahl bedienbar. Das gilt
+    # auch dann, wenn `_apply_busy` vor dem Setzen des Threads läuft.
+    _set_enabled(dialog, ("account_quick", "account_select"),
+                 not busy or switchable)
 
 
 LOGIN_NEXT_STEP = "Anmeldung erneut starten; Details stehen im Calibre-Log."

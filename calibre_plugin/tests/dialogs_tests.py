@@ -8,7 +8,7 @@ import unittest
 from . import ui_base_tests
 from ..plan import normalize_removals
 from ..run_context import RunContext
-from ._support import (FakeMenu, FakeMessageBox, FakeTableItem,
+from ._support import (FakeMenu, FakeMessageBox, FakeTableItem, _read_ids,
                       compare_inventory, start_cdp_stubs,
                       stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
@@ -26,60 +26,9 @@ def _marked_rows(indexes):
                  lambda _table: list(indexes))
 
 
-def _read_ids(dialog, finished):
-    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
-    return [tolino_id for tolino_id, _book, state
-            in dialog.selected_read_changes() if state is finished]
-
-
 def _action_cell(dialog, index, column):
     """Check-Controller einer Aktionsspalte (0 Upload, 1 Metadaten, 2 Read)."""
-    return dialog._check(index, column)
-
-
-class _CheckStateItem:
-    """QTableWidgetItem, der den ersten CheckState-Aufruf festhält."""
-
-    def __init__(self):
-        self.states = []
-        self.flags_value = 0
-
-    def setCheckState(self, state):
-        self.states.append(state)
-
-    def checkState(self):
-        return 0
-
-    def flags(self):
-        return self.flags_value
-
-    def setFlags(self, flags):
-        self.flags_value = flags
-
-
-class ActionCheckTests(unittest.TestCase):
-    def test_unchecked_state_is_set_explicitly(self):
-        """Auch ein leeres Kästchen braucht eine explizite CheckStateRole."""
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        try:
-            item = _CheckStateItem()
-            ui_module.dialogs._ActionCheck(item).setChecked(False)
-            self.assertEqual([0], item.states)
-        finally:
-            ui_module._restore_stubs_for_tests()
-
-    def test_disabled_check_stays_checkable_for_drawing(self):
-        """Deaktiviert heisst grau, nicht unsichtbar."""
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        try:
-            item = _CheckStateItem()
-            ui_module.dialogs._ActionCheck(item).setEnabled(False)
-            self.assertFalse(item.flags_value & 1)  # ItemIsEnabled
-            self.assertTrue(item.flags_value & 2)   # ItemIsUserCheckable
-        finally:
-            ui_module._restore_stubs_for_tests()
+    return dialog.table.item(index, column)
 
 
 class _QtDialogTest(unittest.TestCase):
@@ -280,15 +229,16 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertEqual(
                 ("Upload", "Metadaten", "Gelesen",
                  "Calibre", "tolino", "Buchtitel", "Autor(en)",
-                 "Hinweis", "ISBN", "tolino-ID", "UUID"), headers)
-            # 8 sichtbare Spalten + 3 technische.
-            self.assertEqual(11, len(headers))
+                 "Hinweis", "Fortschritt", "ISBN", "tolino-ID", "UUID"),
+                headers)
+            # 9 sichtbare Spalten + 3 technische.
+            self.assertEqual(12, len(headers))
             visible = [name for index, name in enumerate(headers)
                        if index not in dialog_cls.TECHNICAL_COLUMNS]
-            self.assertEqual(8, len(visible))
-            self.assertEqual(8, len(headers) - len(dialog_cls.TECHNICAL_COLUMNS))
+            self.assertEqual(9, len(visible))
+            self.assertEqual(9, len(headers) - len(dialog_cls.TECHNICAL_COLUMNS))
             self.assertEqual(len(headers), len(dialog_cls.COLUMNS))
-            self.assertEqual((8, 9, 10), dialog_cls.TECHNICAL_COLUMNS)
+            self.assertEqual((9, 10, 11), dialog_cls.TECHNICAL_COLUMNS)
             for gone in ("Wo", "Status"):
                 self.assertNotIn(gone, headers)
             for column in dialog_cls.TECHNICAL_COLUMNS:
@@ -508,7 +458,7 @@ class InventoryDialogReadStateTests(_QtDialogTest):
     @staticmethod
     def _cells_by_title(dialog):
         """Lese-Checkzellen nach Titel – das Fenster sortiert beim Bau."""
-        return {row["title"]: dialog._check(index, 2)
+        return {row["title"]: dialog.table.item(index, 2)
                 for index, row in enumerate(dialog.rows)}
 
     def test_cloud_read_book_is_prechecked_and_unlockable(self):
@@ -520,15 +470,15 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             # Schon gelesen: angehakt -- aber anklickbar, damit man es auch
             # wieder auf ungelesen setzen kann.
             self.assertTrue(read_cell["Gelesen"].isChecked())
-            self.assertTrue(read_cell["Gelesen"].item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertTrue(read_cell["Gelesen"].flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             self.assertIn("Ausgewählt = gelesen",
-                          read_cell["Gelesen"].item.toolTip())
+                          read_cell["Gelesen"].toolTip())
             # Ungelesen: leer, aber anklickbar.
             self.assertFalse(read_cell["Ungelesen"].isChecked())
-            self.assertTrue(read_cell["Ungelesen"].item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertTrue(read_cell["Ungelesen"].flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             # Ohne Cloud-Kopie gibt es keine Lese-Marke.
-            self.assertFalse(read_cell["Nur lokal"].item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-            self.assertIn("in tolino", read_cell["Nur lokal"].item.toolTip())
+            self.assertFalse(read_cell["Nur lokal"].flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertIn("in tolino", read_cell["Nur lokal"].toolTip())
             # Nur echte Änderungen gehen an die Cloud -- und ohne Klick
             # wird nichts ungelesen.
             self.assertEqual([], _read_ids(dialog, True))
@@ -757,7 +707,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             self.assertFalse(self._row(dialog, "Gelesen")["upload"])
             # Zeile UND Auswahlfeld in der Tabelle sind gesetzt.
             self.assertTrue(_action_cell(dialog, index, 0).isChecked())
-            self.assertTrue(dialog._check(index, 0).isChecked())
+            self.assertTrue(dialog.table.item(index, 0).isChecked())
             self.assertEqual(
                 "Upload aktiviert für 1 von 1 markierten Büchern.",
                 dialog.action_feedback.text())
@@ -781,7 +731,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             for index, row in enumerate(dialog.rows):
                 wanted = bool(row["tolino_id"])
                 self.assertEqual(wanted,
-                                 dialog._check(index, 1).isChecked())
+                                 dialog.table.item(index, 1).isChecked())
                 self.assertEqual(wanted,
                                  _action_cell(dialog, index, 1).isChecked())
             self.assertEqual([], calls)
@@ -842,7 +792,7 @@ class SingleBookActionTests(_QtDialogTest):
             @staticmethod
             def download(tolino_id, **kwargs):
                 events.append(("download", tolino_id))
-                return b"data"
+                return b"PK\x03\x04data"
 
         class FileDialog:
             @staticmethod
@@ -1060,10 +1010,10 @@ class CloudDeletionDialogTests(_QtDialogTest):
                           dialog.table.items[(index, 7)])
             for column in (0, 1, 2):
                 cell = _action_cell(dialog, index, column)
-                self.assertFalse(cell.item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+                self.assertFalse(cell.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
                 self.assertFalse(cell.isChecked())
             self.assertIn("Zum Löschen",
-                          _action_cell(dialog, index, 0).item.toolTip())
+                          _action_cell(dialog, index, 0).toolTip())
             self.assertIn("1 Löschung", dialog.summary.text())
             self.assertIn("(1)", dialog.confirm.text())
             self.assertFalse(any(kind == "question"
@@ -1071,7 +1021,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             # Die nicht markierte Cloud-Kopie bleibt unangetastet.
             other = self._index(dialog, "Behalten")
             self.assertFalse(dialog.rows[other].get("delete_cloud"))
-            self.assertTrue(_action_cell(dialog, other, 1).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertTrue(_action_cell(dialog, other, 1).flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1086,7 +1036,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self.assertEqual([("u-1", "t-1", "Löschen")],
                              dialog.selected_cloud_deletions())
             self.assertTrue(dialog.rows[index].get("delete_cloud"))
-            self.assertFalse(_action_cell(dialog, index, 0).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertFalse(_action_cell(dialog, index, 0).flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1105,8 +1055,8 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self.assertFalse(dialog.rows[index].get("delete_cloud"))
             self.assertNotIn("Wird beim Start aus tolino gelöscht.",
                              dialog.table.items[(index, 7)])
-            self.assertTrue(_action_cell(dialog, index, 0).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-            self.assertTrue(_action_cell(dialog, index, 1).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertTrue(_action_cell(dialog, index, 0).flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertTrue(_action_cell(dialog, index, 1).flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             self.assertFalse(any("nichts geändert" in text.casefold()
                                  for kind, text in calls
                                  if kind == "information"))
@@ -1368,9 +1318,9 @@ class IgnoredRowDialogTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
             self.assertEqual(1, len(dialog.rows))
             self.assertEqual("ignored", dialog.rows[0]["group"])
-            self.assertFalse(dialog._check(0, 0).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-            self.assertFalse(dialog._check(0, 0).isChecked())
-            self.assertIn("ignoriert", dialog._check(0, 0).item.toolTip())
+            self.assertFalse(dialog.table.item(0, 0).flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertFalse(dialog.table.item(0, 0).isChecked())
+            self.assertIn("ignoriert", dialog.table.item(0, 0).toolTip())
             self.assertEqual(
                 (False, False),
                 ui_module.dialogs.InventoryDialog.default_actions(
@@ -1386,7 +1336,7 @@ class IgnoredRowDialogTests(_QtDialogTest):
         ui_module = self._ui()
         try:
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-            dialog._check(0, 0).setChecked(True)
+            dialog.table.item(0, 0).setChecked(True)
             dialog.rows[0]["delete_cloud"] = True
             self.assertEqual(set(), dialog._selected_book_ids("upload"))
             self.assertEqual([], dialog.selected_cloud_deletions())
@@ -1408,12 +1358,13 @@ class DialogClientReuseTests(_QtDialogTest):
     def test_client_is_cached_between_actions(self):
         ui_module = self._ui()
         calls = []
-        client = type("Client", (), {})()
+        client = type("Client", (), {
+            "download": lambda self, _tolino_id: b"PK\x03\x04"})()
         try:
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
             dialog.client_factory = lambda: calls.append(1) or client
-            self.assertIs(client, dialog._cached_or_new_client())
-            self.assertIs(client, dialog._cached_or_new_client())
+            self.assertEqual(b"PK\x03\x04", dialog._download_content("t-1"))
+            self.assertEqual(b"PK\x03\x04", dialog._download_content("t-1"))
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(calls))
@@ -1457,7 +1408,8 @@ class DialogClientReuseTests(_QtDialogTest):
             dialog.download_selected()
             self.assertEqual(1, len(factory_calls))
             # Nach dem Fehler darf der nächste Versuch wieder anmelden.
-            self.assertIsNotNone(dialog._cached_or_new_client())
+            with self.assertRaises(RuntimeError):
+                dialog._download_content("t-1")
             self.assertEqual(2, len(factory_calls))
         finally:
             ui_module._restore_stubs_for_tests()
@@ -1570,6 +1522,24 @@ class BackgroundCallTests(unittest.TestCase):
         self.assertEqual("/tmp/chosen.pdf", written["path"])
         self.assertEqual(b"%PDF-1.7 test", written["data"])
 
+    def test_an_html_error_page_is_not_saved_as_epub(self):
+        """Nur EPUB (ZIP) und PDF gelten als heruntergeladenes Buch."""
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        dialog = self._dialog(ui_module)
+        dialog._download_path = "/tmp/chosen.epub"
+        dialog._end_action = lambda: None
+        opened = []
+        errors = []
+        ui_module.dialogs.open = lambda *args, **kwargs: opened.append(args)
+        ui_module.dialogs.error_dialog = (
+            lambda *args, **kwargs: errors.append(args))
+        dialog._download_finished(b"<html>error</html>")
+        self.assertEqual([], opened)
+        self.assertEqual(1, len(errors))
+
     def test_the_download_leaves_the_gui_thread(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
@@ -1584,7 +1554,7 @@ class BackgroundCallTests(unittest.TestCase):
             @staticmethod
             def download(tolino_id, **kwargs):
                 seen.append(threading.current_thread())
-                return b"data"
+                return b"PK\x03\x04data"
 
         dialog = self._dialog(ui_module)
         dialog.client_factory = lambda: Client()

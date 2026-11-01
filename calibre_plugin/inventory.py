@@ -1,5 +1,7 @@
 """Normalize Tolino inventory responses for the client and sync planner."""
 
+from .matching import isbn_from_identifier
+
 # Container, in denen die Cloud ihre Bestandslisten liefert.
 _INVENTORY_CONTAINERS = ("edata", "ebook")
 
@@ -68,13 +70,19 @@ def normalize_inventory_record(item):
 
     ``tolino_id`` bleibt leer, wenn nur ``identifier`` existiert: diese
     Kennung taugt weder fuer ``/downloadinfo`` noch fuer
-    ``/deletecontent``.
+    ``/deletecontent``. Eine in ``identifier`` eingebettete ISBN wird
+    dagegen für den Abgleich extrahiert.
     """
     deliverable = _inventory_id_in(item, _INVENTORY_ID_KEYS)
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
     isbn = _nested_inventory_value(
-        item, ("isbn", "ISBN", "isbn13", "isbn10", "identifier"))
+        item, ("isbn", "ISBN", "isbn13", "isbn10"))
+    if not str(isbn or "").strip():
+        # Gekaufte E-Books tragen oft nur eine Produktkennung wie
+        # ``DT0400.978..._A...``; darin steckt die eigentliche ISBN.
+        identifier = _nested_inventory_value(item, ("identifier",))
+        isbn = isbn_from_identifier(identifier)
     return {
         "tolino_id": deliverable,
         "title": str(title or "").strip(),
@@ -141,5 +149,9 @@ def parse_inventory(data):
     raw, problems = [], []
     _collect_inventory(container, raw, problems)
     records = [normalize_inventory_record(item) for item in raw]
-    return records, problems, True
+    # Eine leere, aber gültige Bibliothek hat keine Probleme. Sobald nur
+    # unlesbare Einträge gefunden wurden, ist die Antwort keine leere
+    # Bibliothek, sondern unbrauchbar. Einzelne gute Datensätze bleiben
+    # trotz beschädigter Nachbarn sichtbar.
+    return records, problems, bool(records) or not problems
 

@@ -3,6 +3,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import threading
 import time
 import traceback
@@ -18,9 +19,17 @@ from .partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
 from . import sync_data as _sync_data
 
 CHROME_MAJOR = "153"
+# Feste MIME-Typen fuer Formate, die mimetypes je nach System nicht kennt.
+_FIXED_MIME_TYPES = {".epub": "application/epub+zip",
+                     ".pdf": "application/pdf"}
+_BROWSER_PLATFORM = {
+    "win32": ("Windows NT 10.0; Win64; x64", '"Windows"'),
+    "darwin": ("Macintosh; Intel Mac OS X 10_15_7", '"macOS"'),
+}.get(sys.platform, ("X11; Linux x86_64", '"Linux"'))
 BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36" % CHROME_MAJOR
+    "Mozilla/5.0 (%s) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36"
+    % (_BROWSER_PLATFORM[0], CHROME_MAJOR)
 )
 
 
@@ -34,7 +43,7 @@ def _browser_sec_headers():
         "Priority": "u=1, i",
         "Sec-CH-UA": '"Chromium";v="%s", "Not_A Brand";v="8"' % CHROME_MAJOR,
         "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Platform": '"Linux"',
+        "Sec-CH-UA-Platform": _BROWSER_PLATFORM[1],
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "cross-site",
@@ -205,10 +214,7 @@ def normalize_hardware_id(value):
         return ""
     compact = text.replace("-", "")
     if re.fullmatch(r"[0-9a-fA-F]{32}", compact):
-        formatted = "%s-%s-%s-%s-%s" % (
-            compact[0:8], compact[8:12], compact[12:16],
-            compact[16:20], compact[20:32])
-        return formatted.lower()
+        return str(uuid.UUID(hex=compact))
     return text
 
 
@@ -445,6 +451,15 @@ class TolinoClient:
                 time.sleep(_REGISTER_SETTLE_SECONDS)
                 return
 
+        # Ein 403 ausserhalb des Token-Endpunkts ist meist eine Rechte- oder
+        # Quotabeschränkung. Nur der Token-Endpunkt spricht von Anmeldung;
+        # ein einzelner Upload darf deshalb nicht den ganzen Lauf beenden.
+        if exc.code == 403 and url != self.partner.get("token_url"):
+            raise TolinoApiError(
+                "tolino-Fehler (HTTP 403): %s" % self.last_error_text,
+                code="N03",
+                short="tolino meldet einen Fehler (HTTP 403).")
+
         if exc.code in (401, 403):
             if (exc.code == 403
                     and url == self.partner.get("token_url")
@@ -502,9 +517,13 @@ class TolinoClient:
             chunks.extend([b"--" + boundary + b"\r\n",
                            ("Content-Disposition: form-data; name=\"%s\"\r\n\r\n" % key).encode(),
                            str(value).encode(), b"\r\n"])
-        name = os.path.basename(str(filename))
+        name = os.path.basename(str(filename)).replace("\\", "_")
+        name = re.sub(r'["\r\n]', "_", name)
+        suffix = os.path.splitext(name)[1].casefold()
         guessed_type = mimetypes.guess_type(name)
-        mime = next(iter(guessed_type), None) or "application/octet-stream"
+        mime = (_FIXED_MIME_TYPES.get(suffix)
+                or next(iter(guessed_type), None)
+                or "application/octet-stream")
         chunks.extend([b"--" + boundary + b"\r\n",
                        ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field, name)).encode(),
                        ("Content-Type: %s\r\n\r\n" % mime).encode(),
@@ -727,6 +746,15 @@ class TolinoClient:
         """
         _revision, patches = self.sync_snapshot()
         return _sync_data.read_ids(patches)
+
+    def progress_by_id(self):
+        """Lesefortschritt je tolino-ID aus denselben sync-data-Daten.
+
+        Die Werte sind reine Anzeige: Das Plugin schreibt keine Leseposition
+        in die Cloud zurück. Der Snapshot wird mit `read_ids` geteilt.
+        """
+        _revision, patches = self.sync_snapshot()
+        return _sync_data.reading_progress(patches)
 
     def _current_revision(self, revision):
         """Revision fuer einen Schreibvorgang: die aktuelle, nie None.

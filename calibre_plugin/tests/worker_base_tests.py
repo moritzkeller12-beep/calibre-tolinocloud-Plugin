@@ -15,7 +15,7 @@ def setUpModule():
     global _ACCOUNT_PATCH
     start_cdp_stubs()
     _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_by_name",
+        "calibre_plugin.token_vault.account_summary",
         lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
     _ACCOUNT_PATCH.start()
 
@@ -27,7 +27,7 @@ def tearDownModule():
         _ACCOUNT_PATCH = None
     stop_cdp_stubs()
 
-class CollectionReconcileWorkerTests(unittest.TestCase):
+class SyncWorkerCollectionTests(unittest.TestCase):
     """Serien → Sammlungen im SyncWorker.
 
     Feldbefund des Nutzers: «ich habe das Gefühl, es synchronisiert die
@@ -211,7 +211,7 @@ class SyncWorkerStateTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     CollectionReconcileWorkerTests._signal_descriptor()[0]})
+                     SyncWorkerCollectionTests._signal_descriptor()[0]})
         settings = {"partner_id": 4, "state": {"alt": {"tolino_id": "t-alt"}}}
         try:
             worker = ui_module.workers.SyncWorker(

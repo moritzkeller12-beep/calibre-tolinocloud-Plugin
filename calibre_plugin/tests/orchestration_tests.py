@@ -265,6 +265,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         ui_module = self._ui_module()
         try:
             settings = self._settings()
+            settings["account_name"] = "konto"
             dashboard = ui_module.dashboard.SyncDashboard.__new__(
                 ui_module.dashboard.SyncDashboard)
             dashboard.account_name = "konto"
@@ -373,9 +374,11 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 })
             started = []
             dashboard._start_sync_worker = (
-                lambda given, prep, state=None: started.append(given))
+                lambda given, prep, state=None, comparison=None:
+                started.append(given))
 
-            def plan(_dashboard, given, _metadata, _state, _selection):
+            def plan(_dashboard, given, _metadata, _state, _selection,
+                     series_map=None):
                 self.assertFalse(hasattr(given, "refresh_token"))
                 return _preparation()
 
@@ -582,7 +585,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
                 return None
 
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-                patch("calibre_plugin.token_vault.account_by_name",
+                patch("calibre_plugin.token_vault.account_summary",
                       lambda _name: {"refresh_token": "neu-token",
                                      "hardware_id": "hw-neu"}):
             ui_module.workers.TOKEN_VAULT.login(
@@ -675,6 +678,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
         errors = []
         dashboard = self._dashboard(ui_module,
                                     StartSyncOrchestrationTests._settings())
+        dashboard.account_name = ""
+        dashboard._finish_prepare = lambda: None
         dashboard._show_prepare_error = lambda exc, given: errors.append(exc)
 
         def boom(*_args, **_kwargs):
@@ -692,6 +697,34 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual(1, len(errors))
         self.assertIn("Fenster kaputt", str(errors[0]))
         self.assertEqual([], started)
+
+    def test_a_comparison_of_a_switched_away_account_stays_out_of_the_ui(
+            self):
+        """A läuft, B ist sichtbar: kein A-Dialog und keine A-Spiegelung."""
+        ui_module = self._ui_module()
+        dashboard = self._dashboard(
+            ui_module, StartSyncOrchestrationTests._settings())
+        dashboard.account_name = "B"
+        dashboard._finish_prepare = lambda: None
+        statuses = []
+        dashboard.status = type("Status", (), {
+            "setText": lambda self, text: statuses.append(text)})()
+        mirrored, confirmed = [], []
+        with patch.object(ui_module.dashboard, "_mirror_account_reading",
+                          lambda *args: mirrored.append(args)):
+            dashboard._confirm_comparison = (
+                lambda *args, **kwargs: confirmed.append(args))
+            dashboard._prepare_ready({
+                "context": RunContext.from_values(
+                    dict(StartSyncOrchestrationTests._settings(),
+                         account_name="A")),
+                "metadata": {}, "state": {}, "comparison": [],
+                "refresh": "tok", "hardware": "hw",
+            })
+        self.assertEqual([], mirrored)
+        self.assertEqual([], confirmed)
+        self.assertIn("A", statuses[-1])
+        self.assertIn("B", statuses[-1])
 
     def test_a_failed_bookkeeping_still_reports_the_result(self):
         ui_module = self._ui_module()
