@@ -91,16 +91,6 @@ def series_map_from_metadata(metadata_by_id):
     return series_map
 
 
-def recorded_collections(entry):
-    """Serien, die für diese Cloud-Kopie schon zugeordnet wurden."""
-    if not isinstance(entry, dict):
-        return set()
-    recorded = entry.get("collections")
-    if not isinstance(recorded, list):
-        return set()
-    return {str(name).strip() for name in recorded if str(name or "").strip()}
-
-
 def remember_collection(state, book_uuid, series):
     """Nach erfolgreichem Schreiben: Zuordnung im Zustand merken."""
     if not isinstance(state, dict) or not str(book_uuid or "").strip():
@@ -135,7 +125,11 @@ def plan_collection_updates(series_map, state):
         if not isinstance(entry, dict):
             continue
         tolino_id = str(entry.get("tolino_id") or "").strip()
-        if not tolino_id or series in recorded_collections(entry):
+        recorded = entry.get("collections")
+        recorded = (recorded if isinstance(recorded, list) else ())
+        if not tolino_id or series in {
+                str(name).strip() for name in recorded
+                if str(name or "").strip()}:
             continue
         pending.add((str(book_uuid), tolino_id, series))
     return sorted(pending, key=lambda item: (item[1], item[2], item[0]))

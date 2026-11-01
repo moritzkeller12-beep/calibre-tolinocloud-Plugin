@@ -16,23 +16,18 @@ from qt.core import (QCheckBox, QComboBox, QDialog,
                      QStyleOptionViewItem, QEvent, Qt, pyqtSignal)
 from .tolino import TolinoError
 
-# Namen, die andere UI-Module ueber dieses Modul beziehen.
+# Re-export the Qt names other UI modules and the test loader import from here.
 __all__ = [
     "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
-    "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog",
-    "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView",
-    "QMenu", "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
+    "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog", "QFileDialog",
+    "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView", "QMenu",
+    "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
     "QThread", "QVBoxLayout", "QStyledItemDelegate", "QStyle",
-    "QStyleOptionViewItem", "QEvent", "Qt",
-    "_THREADS", "_apply_busy", "_dialog_busy",
-    "LOGIN_NEXT_STEP", "_login_failure_guidance",
-    "gui_guard",
-    "start_worker", "_stop_thread",
-    "_set_enabled",
-    "_keep_thread_alive",
-    "pyqtSignal",
-    "sync_result_detail",
+    "QStyleOptionViewItem", "QEvent", "Qt", "_THREADS", "_apply_busy",
+    "_dialog_busy", "LOGIN_NEXT_STEP", "_login_failure_guidance",
+    "gui_guard", "start_worker", "_stop_thread", "_set_enabled",
+    "_keep_thread_alive", "pyqtSignal", "sync_result_detail",
     "sync_result_text",
 ]
 

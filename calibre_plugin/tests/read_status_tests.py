@@ -2,19 +2,12 @@
 
 from ..comparison import ProgressState, ReadState
 import unittest
-from ._support import compare_inventory
+from ._support import _read_ids, compare_inventory
 from .dialogs_tests import _QtDialogTest
 from ..library import (TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN,
                        bool_column_value, column_state,
                        update_progress_status, update_read_status)
 from ..sync_data import reading_progress
-
-
-def _read_ids(dialog, finished):
-    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
-
-    return [tolino_id for tolino_id, _book, state, _uuid
-            in dialog.selected_read_changes() if state is finished]
 
 
 class ReadColumnLibraryTests(unittest.TestCase):
@@ -79,6 +72,11 @@ class ReadColumnWriteBackTests(unittest.TestCase):
         db = self._db({1: None}, fields={})
         self.assertEqual(0, update_read_status(db, [(1, False)]))
         self.assertEqual({}, db.new_api.values)
+
+    def test_none_clears_the_column_instead_of_becoming_false(self):
+        db = self._db({1: None})
+        self.assertEqual(1, update_read_status(db, [(1, None)]))
+        self.assertEqual({1: None}, db.new_api.values)
 
 
 class ReadColumnComparisonTests(unittest.TestCase):
@@ -244,58 +242,6 @@ class ProgressColumnTests(unittest.TestCase):
         self.assertEqual({}, db.new_api.values)
 
 
-class ProgressMirrorTests(unittest.TestCase):
-    def test_changed_progress_and_missing_cloud_copy_are_mirrored(self):
-        from ..ui_dashboard import _mirror_progress
-
-        class Api:
-            def __init__(self):
-                self.values = {2: 20, 4: 44, 5: 55}
-                self.writes = []
-
-            def has_id(self, book_id):
-                return book_id in (1, 2, 3, 4, 5)
-
-            def field_for(self, _column, book_id):
-                return self.values.get(book_id)
-
-            def set_field(self, _column, values):
-                self.writes.append(dict(values))
-                self.values.update(values)
-
-        class Db:
-            field_metadata = {TOLINO_PROGRESS_COLUMN: {"datatype": "int"}}
-            new_api = Api()
-
-        refreshed = []
-        model = type("Model", (), {
-            "refresh_ids": lambda self, ids: refreshed.append(tuple(ids))})()
-        gui = type("Gui", (), {
-            "current_db": Db(),
-            "library_view": type("View", (), {
-                "model": lambda self: model})()})()
-        dashboard = type("Dashboard", (), {"gui": gui})()
-        rows = [
-            {"book_id": 1, "tolino_id": "t-1", "status": "identical",
-             "progress": ProgressState(percent=33)},
-            {"book_id": 2, "tolino_id": "", "status": "new_in_calibre",
-             "progress": ProgressState()},
-            {"book_id": 3, "tolino_id": "t-3", "status": "identical",
-             "progress": ProgressState(known=False)},
-            {"book_id": 4, "tolino_id": "", "status": "review",
-             "progress": ProgressState()},
-            {"book_id": 5, "tolino_id": "", "status": "new_in_calibre",
-             "stale_cloud_id": "old-5", "progress": ProgressState()},
-        ]
-        _mirror_progress(dashboard, rows, {"progress": True})
-        self.assertEqual({1: 33, 2: 20, 4: 44, 5: None},
-                         dashboard.gui.current_db.new_api.values)
-        self.assertEqual([{1: 33, 5: None}],
-                         dashboard.gui.current_db.new_api.writes)
-        self.assertEqual([(1, 5)], refreshed)
-
-
-
 class ProgressComparisonTests(unittest.TestCase):
     """Fortschritt kommt an die Zeile, bleibt aber reine Anzeige."""
 
@@ -345,18 +291,6 @@ class ReadColumnDialogTests(_QtDialogTest):
         index = next(i for i, row in enumerate(dialog.rows)
                      if row["title"] == title)
         return index, dialog.table.item(index, 2)
-
-    def test_calibre_value_is_a_note_not_a_default_or_action(self):
-        ui_module = self._ui()
-        self._messages(ui_module)
-        dialog = ui_module.dialogs.InventoryDialog(self._rows())
-        self.assertEqual([], _read_ids(dialog, True))
-        self.assertEqual([], _read_ids(dialog, False))
-        index = next(index for index, row in enumerate(dialog.rows)
-                     if row["title"] == "Calibre only")
-        self.assertIn("Calibre-Lesestatus: gelesen.",
-                      dialog.table.items[(index, 7)])
-        self.assertEqual(0, dialog._selection_counts()["work"])
 
     def test_progress_is_visible_but_not_an_action(self):
         ui_module = self._ui()

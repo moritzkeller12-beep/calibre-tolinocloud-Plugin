@@ -43,6 +43,17 @@ def _jwt_token(iat, sid=None):
                           body.decode().rstrip("="))
 
 
+def _missing_browser_message(test_case, status, sandbox):
+    """Startfehlermeldung ohne Browser mit definierter Flatpak-Sonde."""
+    with patch.object(browser_finder, "find_browsers",
+                      return_value=([], status)), \
+         patch.object(browser_finder, "in_flatpak_sandbox",
+                      return_value=sandbox):
+        with test_case.assertRaises(TolinoAuthError) as caught:
+            cdp_module.launch_reader_window()
+    return str(caught.exception)
+
+
 class _SidJwtTest(unittest.TestCase):
     """Refresh-JWT mit fester Session-ID je Testklasse."""
 
@@ -1029,15 +1040,7 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
         """Ist die Sonde durchgelaufen und hat nichts gefunden, nennt die
         Meldung die Installation statt des override-Befehls (der wäre
         überflüssig)."""
-        from unittest.mock import patch as _patch
-        from .. import cdp as cdp_module
-
-        with _patch.object(browser_finder, "find_browsers", return_value=([], 'empty')), \
-             _patch.object(browser_finder, "in_flatpak_sandbox",
-                           return_value=True):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window()
-        message = str(ctx.exception)
+        message = _missing_browser_message(self, 'empty', True)
         self.assertIn("installieren", message)
         self.assertNotIn("flatpak override", message)
 
@@ -1221,15 +1224,7 @@ class FlatpakSandboxBrowserOpenTests(unittest.TestCase):
     def test_launch_reader_window_without_sandbox_has_no_permission_hint(self):
         """Ausserhalb einer Sandbox nennt dieselbe Meldung KEINEN
         Flatpak-Befehl (sonst führt sie in die Irre)."""
-        from unittest.mock import patch as _patch
-        from .. import cdp as cdp_module
-
-        with _patch.object(browser_finder, "find_browsers", return_value=([], 'empty')), \
-             _patch.object(browser_finder, "in_flatpak_sandbox",
-                           return_value=False):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window()
-        message = str(ctx.exception)
+        message = _missing_browser_message(self, 'empty', False)
         self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertNotIn("flatpak override", message)
 
@@ -1364,15 +1359,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
         ausgeführt, System-Befehl mit sudo), den Nachweis über
         `flatpak info --show-permissions` und den vollständigen
         Neustart."""
-        from unittest.mock import patch as _patch
-        from .. import cdp as cdp_module
-
-        with _patch.object(browser_finder, "find_browsers", return_value=([], 'denied')), \
-             _patch.object(browser_finder, "in_flatpak_sandbox",
-                           return_value=True):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window()
-        message = str(ctx.exception)
+        message = _missing_browser_message(self, 'denied', True)
         self.assertIn("Kein Chromium-Browser gefunden", message)
         self.assertIn("flatpak override --user", message)
         self.assertIn("sudo flatpak override", message)
@@ -1382,15 +1369,7 @@ class FlatpakHostProbeReportTests(unittest.TestCase):
     def test_launch_names_runtime_update_when_spawn_missing(self):
         """Ohne flatpak-spawn hilft keine Freigabe – die Meldung
         nennt dann `flatpak update` statt des override-Befehls."""
-        from unittest.mock import patch as _patch
-        from .. import cdp as cdp_module
-
-        with _patch.object(browser_finder, "find_browsers", return_value=([], 'unavailable')), \
-             _patch.object(browser_finder, "in_flatpak_sandbox",
-                           return_value=True):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                cdp_module.launch_reader_window()
-        message = str(ctx.exception)
+        message = _missing_browser_message(self, 'unavailable', True)
         self.assertIn("flatpak update", message)
         self.assertNotIn("flatpak override", message)
 

@@ -198,7 +198,7 @@ def _update_column(database, column, updates, convert, datatypes):
     for book_id, raw in updates:
         if book_id is None or not api.has_id(book_id):
             continue
-        value = convert(raw)
+        value = None if raw is None else convert(raw)
         if value is _SKIP:
             continue
         # Kein Schreibvorgang, wenn der Wert schon stimmt: Calibre markiert
@@ -215,7 +215,8 @@ def update_read_status(database, updates):
     """Bestätigten Cloud-Lesestatus in ``#tolino_read`` spiegeln.
 
     Die Spalte bleibt informativ: geschrieben wird nur, was tolino nach einem
-    Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung.
+    Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung. ``None``
+    leert sie beim Konto-Wechsel, statt «unbekannt» als ``False`` zu zeigen.
     """
     return _update_column(database, TOLINO_READ_COLUMN, updates, bool,
                           ("bool",))

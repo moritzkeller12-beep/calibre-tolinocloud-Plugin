@@ -558,15 +558,17 @@ class InventoryDialog(QDialog):
                             state.chosen, str(row.get("uuid") or "")))
         return changes
 
-    def _marked_row_indexes(self):
-        """Markierte Zeilen -- oder ein Hinweis, wenn keine markiert ist."""
+    def _marked_rows(self):
+        """Markierte (Index, Zeile)-Paare -- oder Hinweis, wenn keine markiert ist."""
         marked = _selected_rows(self.table)
         if not marked:
             QMessageBox.information(
                 self, "Aktionen für markierte Bücher",
                 "Markiere zuerst mindestens ein Buch in der Tabelle. "
                 "Mehrere Bücher wählst du mit Strg-/Shift-Klick aus.")
-        return marked
+            return []
+        return [(index, self.rows[index]) for index in marked
+                if 0 <= index < len(self.rows)]
 
     def choose_row_action(self):
         """Eine Stelle für alle Aktionen auf markierte Zeilen.
@@ -574,15 +576,13 @@ class InventoryDialog(QDialog):
         Aktionen für markierte Bücher sind hier zusammengefasst; auch Upload,
         Metadaten und Lesestatus sind verfügbar.
         """
-        marked = self._marked_row_indexes()
+        marked = self._marked_rows()
         if not marked:
             return
         menu = QMenu(self)
         actions = {}
-        row_indexes = [index for index in marked
-                       if 0 <= index < len(self.rows)]
         for label, method, args, predicate in self.ROW_ACTIONS:
-            if not any(predicate(self.rows[index]) for index in row_indexes):
+            if not any(predicate(row) for _index, row in marked):
                 continue
             actions[menu.addAction(label)] = (method, args)
         position = self.row_actions.mapToGlobal(
@@ -601,15 +601,13 @@ class InventoryDialog(QDialog):
         passt die Spalte nicht zur Zeile, wird sie gezählt und ausgelassen.
         Geschrieben wird weiterhin erst mit «Synchronisierung starten».
         """
-        marked = self._marked_row_indexes()
+        marked = self._marked_rows()
         if not marked:
             return
         changed = 0
         skipped = 0
-        for index in marked:
-            if not 0 <= index < len(self.rows):
-                continue
-            caps = row_capabilities(self.rows[index])
+        for index, row in marked:
+            caps = row_capabilities(row)
             if not caps.get(key):
                 skipped += 1
                 continue
@@ -1043,14 +1041,11 @@ class InventoryDialog(QDialog):
         konkreten Titel noch einmal bestätigt. Die Calibre-Bücher und ihre
         Dateien bleiben unangetastet.
         """
-        marked = self._marked_row_indexes()
+        marked = self._marked_rows()
         if not marked:
             return
         candidates = []
-        for index in marked:
-            if not 0 <= index < len(self.rows):
-                continue
-            row = self.rows[index]
+        for _index, row in marked:
             if row.get("delete_cloud") or not row_capabilities(row)["delete"]:
                 continue
             candidates.append(row)
@@ -1068,13 +1063,12 @@ class InventoryDialog(QDialog):
 
     def clear_cloud_delete_for_marked_rows(self):
         """Löschmarkierung der markierten Zeilen wieder aufheben."""
-        marked = self._marked_row_indexes()
+        marked = self._marked_rows()
         if not marked:
             return
         changed = 0
-        for index in marked:
-            if (0 <= index < len(self.rows)
-                    and self.rows[index].pop("delete_cloud", None) is not None):
+        for _index, row in marked:
+            if row.pop("delete_cloud", None) is not None:
                 changed += 1
         if not changed:
             QMessageBox.information(

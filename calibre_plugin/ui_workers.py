@@ -9,7 +9,8 @@ from .token_vault import TOKEN_VAULT
 from .config import account_secrets, load_state, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
-                         metadata_fingerprint, store_reading_state)
+                         metadata_fingerprint, reading_state,
+                         store_reading_state)
 from .identifiers import (display_title, migrate_state_keys, state_entry,
                           valid_book_uuid)
 from .library import image_suffix
@@ -196,6 +197,12 @@ class SyncWorker(QObject):
                 return False
             raise
 
+    def _finish_delete(self, operation, deleted):
+        """Eine Löschoperation als erfolgreich oder übersprungen verbuchen."""
+        self._finish_operation(
+            operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
+            **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
+
     def _plan_operations(self):
         """Plan selected actions; collections are added after uploads."""
         meta_ops = []
@@ -243,18 +250,13 @@ class SyncWorker(QObject):
         except Exception as exc:
             self._fail(operation, exc, client, fatal=True)
         else:
-            self._finish_operation(
-                operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
-                **({} if deleted else {"reason": "nicht mehr in der Cloud"}))
+            self._finish_delete(operation, deleted)
 
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
         for book_uuid, tolino_id, operation in delete_ops:
             def finish(deleted):
-                self._finish_operation(
-                    operation, OP_SUCCEEDED if deleted else OP_SKIPPED,
-                    **({} if deleted else {
-                        "reason": "nicht mehr in der Cloud"}))
+                self._finish_delete(operation, deleted)
 
             ok, deleted = self._step(
                 client, checkpoint, operation,
@@ -319,10 +321,7 @@ class SyncWorker(QObject):
         if not isinstance(entry, dict):
             entry = {}
             self.state[key] = entry
-        reading = entry.get("reading")
-        if not isinstance(reading, dict):
-            reading = {}
-            entry["reading"] = reading
+        reading = reading_state(entry)
         if reading.get("read") is bool(finished):
             return False
         reading["read"] = bool(finished)
@@ -553,19 +552,20 @@ class PrepareWorker(QObject):
         return True
 
     def _load_comparison_state(self):
-        """Load and migrate the state for this comparison.
+        """Load the state and snapshot it before migration/comparison.
 
-        `load_state` may return the preferences mapping unchanged; the
-        comparison writes tolino IDs, so it must get an independent copy.
+        `load_state` may return the preferences mapping unchanged; both the
+        working state and the original snapshot must be independent copies.
         """
-        state = copy.deepcopy(load_state(self.state))
+        original = copy.deepcopy(load_state(self.state))
+        state = copy.deepcopy(original)
         # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
         # wenn Calibre spaeter eine echte UUID liefert.
         migrated = migrate_state_keys(self.metadata, state)
         if migrated:
             log_warning("Zustand auf die echte Kennung umgestellt: %d %s."
                         % (migrated, plural(migrated, "Buch", "Bücher")))
-        return state
+        return state, original
 
     def _load_optional(self, label, loader):
         """Optionale Cloud-Daten laden; ein Fehler bleibt «unbekannt»."""
@@ -605,14 +605,17 @@ class PrepareWorker(QObject):
                 entry = state.get(book_uuid)
                 if isinstance(entry, dict) and str(
                         entry.get("tolino_id") or "").strip() == stale_id:
+                    # Cloud-Kopie weg: Zuordnung und alter Lesestand dieses
+                    # Kontos dürfen nicht weiter angezeigt werden.
                     entry.pop("tolino_id", None)
+                    entry.pop("reading", None)
         return comparison
 
     def run(self):
         """Vergleich vorbereiten, ohne Keep-alive oder UI zu blockieren."""
         client = None
         try:
-            state = self._load_comparison_state()
+            state, original_state = self._load_comparison_state()
             self.progress.emit("Verbinde mit tolino …")
             client = TOKEN_VAULT.login(self.account_name,
                                        self.context.partner_id,
@@ -629,7 +632,10 @@ class PrepareWorker(QObject):
                 state, inventory, read_ids, progress_by_id)
             if self._stop_requested():
                 return
-            if store_reading_state(state, comparison):
+            store_reading_state(state, comparison)
+            if state != original_state:
+                # Alle Änderungen des Vergleichs (Migration, bestätigte IDs,
+                # veraltete Kopien, Lesewerte) in EINEM Schreibvorgang sichern.
                 # Nur bestehende Konten aktualisieren: ein während des
                 # Vergleichs entferntes Konto darf nicht wieder erscheinen.
                 save_account(self.account_name, {"state": state}, create=False)

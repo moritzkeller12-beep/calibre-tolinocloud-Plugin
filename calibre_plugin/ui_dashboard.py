@@ -7,12 +7,12 @@ from .ui_common import (CANCEL_MESSAGE, QDialog, QInputDialog,
                         sync_result_text, Qt)
 from calibre.gui2 import error_dialog, info_dialog
 from .token_vault import TOKEN_VAULT
-from .config import (PREFERRED_FORMATS, account_by_name,
+from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
                      load_state, remove_account as remove_saved_account,
                      save_account, save_credentials,
                      set_active_account, settings)
 from .run_context import RunContext
-from .identifiers import book_uuid
+from .identifiers import valid_book_uuid
 from .library import (TOLINO_IGNORE_COLUMN, column_state,
                       bool_column_available, update_progress_status,
                       update_read_status, update_tolino_ids)
@@ -35,30 +35,14 @@ def _book_ids_by_uuid(dashboard):
         "new_api", None)
     if api is None:
         return {}
+    book_ids = list(api.all_book_ids())
+    uuids = api.all_field_for("uuid", book_ids) or {}
     mapping = {}
-    for book_id in api.all_book_ids():
-        key = book_uuid(api.get_metadata(book_id))
+    for book_id in book_ids:
+        key = valid_book_uuid(uuids.get(book_id))
         if key:
             mapping[key] = book_id
     return mapping
-
-
-def _reading_column_updates(state, book_ids_by_uuid):
-    """Gespeicherte Lese-Spaltenwerte eines Kontos als Schreibaufträge."""
-    read_updates, progress_updates = [], []
-    for key, entry in (state or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        book_id = book_ids_by_uuid.get(str(key))
-        reading = entry.get("reading")
-        if book_id is None or not isinstance(reading, dict):
-            continue
-        if isinstance(reading.get("read"), bool):
-            read_updates.append((book_id, reading["read"]))
-        progress = reading.get("progress")
-        if isinstance(progress, dict) and "percent" in progress:
-            progress_updates.append((book_id, progress.get("percent")))
-    return read_updates, progress_updates
 
 
 def _mirror_account_reading(dashboard, account_name=None):
@@ -67,15 +51,31 @@ def _mirror_account_reading(dashboard, account_name=None):
         account = account_by_name(
             account_name or getattr(dashboard, "account_name", "")) or {}
         state = load_state(account.get("state"))
-        read_updates, progress_updates = _reading_column_updates(
-            state, _book_ids_by_uuid(dashboard))
-        if not (read_updates or progress_updates):
+        book_ids_by_uuid = _book_ids_by_uuid(dashboard)
+        if not book_ids_by_uuid:
             return 0
+        # Erst alle Bücher auf unbekannt setzen, dann die Werte des Kontos
+        # darüberlegen: kein Wert eines anderen Kontos bleibt stehen.
+        read_updates = {book_id: None
+                        for book_id in book_ids_by_uuid.values()}
+        progress_updates = dict(read_updates)
+        for key, entry in state.items():
+            if not isinstance(entry, dict):
+                continue
+            book_id = book_ids_by_uuid.get(str(key))
+            reading = entry.get("reading")
+            if book_id is None or not isinstance(reading, dict):
+                continue
+            if isinstance(reading.get("read"), bool):
+                read_updates[book_id] = reading["read"]
+            progress = reading.get("progress")
+            if isinstance(progress, dict) and "percent" in progress:
+                progress_updates[book_id] = progress.get("percent")
+        read_updates = list(read_updates.items())
+        progress_updates = list(progress_updates.items())
         database = dashboard.gui.current_db
         written = (update_read_status(database, read_updates)
-                   if read_updates else 0)
-        if progress_updates:
-            written += update_progress_status(database, progress_updates)
+                   + update_progress_status(database, progress_updates))
         if written:
             _refresh_library_view(
                 dashboard,
@@ -140,41 +140,6 @@ def _finish_sync(dialog, state, updates):
         # Auch ein unerwarteter Fehler beim Schreiben in Calibre darf
         # den Dialog nicht im Zustand «läuft» zurücklassen.
         dialog.finish_thread()
-
-
-def _mirror_progress(dashboard, comparison, columns):
-    """Cloud-Fortschritt einmalig in die informative Calibre-Spalte spiegeln.
-
-    Der Fortschritt wird nie zurückgeschrieben. Nur ein bekannter Cloud-Stand
-    wird übernommen; bei einem fehlgeschlagenen Abruf bleibt die Spalte
-    unangetastet. Ein Fehler beim lokalen Schreiben darf den Vergleich nicht
-    verhindern.
-    """
-    if not (columns or {}).get("progress"):
-        return
-    updates = []
-    for row in comparison:
-        progress = row.get("progress")
-        if (row.get("book_id") is None or progress is None
-                or not getattr(progress, "known", False)):
-            continue
-        # Nur eine veraltete gespeicherte Cloud-ID belegt, dass die Kopie
-        # verschwunden ist. Ohne ID und ohne alte ID bleibt der letzte Stand
-        # stehen -- die Zeile kann nur nicht zugeordnet sein.
-        tolino_id = row.get("tolino_id")
-        if not tolino_id and not row.get("stale_cloud_id"):
-            continue
-        updates.append((row["book_id"], progress.percent if tolino_id else None))
-    if not updates:
-        return
-    try:
-        written = update_progress_status(dashboard.gui.current_db, updates)
-    except Exception as exc:
-        log_warning("Lesefortschritt konnte nicht in Calibre geschrieben "
-                    "werden: %s" % sanitize_error(exc))
-        return
-    if written:
-        _refresh_library_view(dashboard, [book_id for book_id, _ in updates])
 
 
 def _refresh_library_view(dashboard, book_ids):
@@ -439,7 +404,7 @@ class SyncDashboard(DashboardParts, QDialog):
             return
         hardware = str(hardware or "").strip()
         if not hardware and not getattr(self, "_hardware_edited", False):
-            account = account_by_name(getattr(self, "account_name", "")) or {}
+            account = account_summary(getattr(self, "account_name", "")) or {}
             hardware = str(account.get("hardware_id") or "")
         save_credentials(
             self.account_name, token,
@@ -458,7 +423,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _selected_account(self):
         """The account this dialog shows – never a different 'active' one."""
-        return account_by_name(getattr(self, "account_name", None))
+        return account_summary(getattr(self, "account_name", None))
 
     def values(self):
         """Sichtbare Werte des Kontos -- nie Zugangsdaten.
@@ -731,8 +696,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 return
             # Erst nach allen Bestätigungen schreiben: ein Abbruch im Dialog
             # lässt die Calibre-Spalte unangetastet.
-            self._start_sync_worker(context, preparation, state,
-                                    payload["comparison"])
+            self._start_sync_worker(context, preparation, state)
         except Exception as exc:
             # Ein Fehler NACH dem Vergleichsfenster darf nicht als
             # Traceback im Slot verschwinden: der Nutzer sähe sonst nur ein
@@ -763,7 +727,7 @@ class SyncDashboard(DashboardParts, QDialog):
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
 
-    def _start_sync_worker(self, context, preparation, state, comparison=None):
+    def _start_sync_worker(self, context, preparation, state):
         """Übersprungene Uploads melden und den Hintergrundlauf starten."""
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
@@ -775,10 +739,6 @@ class SyncDashboard(DashboardParts, QDialog):
             self.status.setText(
                 "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
             return
-        if (comparison is not None
-                and str(getattr(self, "account_name", "") or "")
-                == context.account_name):
-            _mirror_progress(self, comparison, context.columns)
         if not total and not skipped_uploads:
             # Calibre zeigt info_dialog nur mit show=True an.
             info_dialog(self, "Nichts zu tun",

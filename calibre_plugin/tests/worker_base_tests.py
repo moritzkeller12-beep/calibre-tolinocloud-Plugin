@@ -15,7 +15,7 @@ def setUpModule():
     global _ACCOUNT_PATCH
     start_cdp_stubs()
     _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_by_name",
+        "calibre_plugin.token_vault.account_summary",
         lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
     _ACCOUNT_PATCH.start()
 

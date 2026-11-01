@@ -1,6 +1,7 @@
 """Real-PyQt6 offscreen smoke test for InventoryDialog (Calibre APIs stubbed)."""
 
 from ..comparison import ReadState
+from ._support import _read_ids
 import importlib.util
 import os
 import sys
@@ -12,7 +13,8 @@ if importlib.util.find_spec("PyQt6") is None:  # die CI installiert PyQt6
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QEvent, QObject, QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPoint, QThread, Qt, pyqtSignal
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                              QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                              QHeaderView, QInputDialog, QLabel, QLineEdit,
@@ -20,13 +22,6 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                              QStyle, QStyledItemDelegate,
                              QStyleOptionViewItem, QTableWidget,
                              QTableWidgetItem, QVBoxLayout)
-
-
-def _read_ids(dialog, finished):
-    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
-
-    return [tolino_id for tolino_id, _book, state, _uuid
-            in dialog.selected_read_changes() if state is finished]
 
 
 def _install_calibre_qt_shim():
@@ -84,6 +79,7 @@ class InventoryDialogQtTests(unittest.TestCase):
         self.assertEqual(Qt.CheckState.Unchecked, check.checkState())
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
+        self.assertEqual(0, dialog._selection_counts()["work"])
         self.assertIn("Calibre-Lesestatus: gelesen", dialog.table.item(0, 7).text())
 
         check.setCheckState(Qt.CheckState.Checked)
@@ -118,6 +114,24 @@ class InventoryDialogQtTests(unittest.TestCase):
         self.assertEqual(Qt.CheckState.Checked,
                          dialog.table.item(0, 2).checkState())
         self.assertEqual(["cloud-3"], _read_ids(dialog, True))
+        dialog.close()
+
+    def test_a_real_click_anywhere_in_the_check_cell_toggles_it(self):
+        dialog = InventoryDialog([{
+            "title": "Read me", "authors": "Author",
+            "status": "identical", "group": "unchanged", "book_id": 1,
+            "tolino_id": "cloud-4", "read": ReadState(cloud=False),
+        }])
+        dialog.show()
+        self.app.processEvents()
+        rect = dialog.table.visualRect(dialog.table.model().index(0, 2))
+        QTest.mouseClick(dialog.table.viewport(),
+                         Qt.MouseButton.LeftButton,
+                         pos=QPoint(rect.center().x(), rect.center().y()))
+        self.app.processEvents()
+        self.assertEqual(Qt.CheckState.Checked,
+                         dialog.table.item(0, 2).checkState())
+        self.assertEqual(["cloud-4"], _read_ids(dialog, True))
         dialog.close()
 
     def test_title_column_stays_wider_than_author_column(self):

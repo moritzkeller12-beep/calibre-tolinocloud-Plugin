@@ -7,7 +7,7 @@ sofort zurueck; niemand sonst haelt eine zweite Kopie.
 import contextlib
 import threading
 
-from .config import (account_by_name, account_secrets, clear_refresh_token,
+from .config import (account_secrets, account_summary, clear_refresh_token,
                      save_hardware_id, save_refresh_token, settings)
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
                      log_info, log_warning, normalize_refresh_token,
@@ -55,7 +55,7 @@ class TokenVault:
     @staticmethod
     def _stored_credentials(account_name):
         """Token und Geraete-ID des Kontos; leer heisst «nicht angemeldet»."""
-        account = account_by_name(account_name) or {}
+        account = account_summary(account_name) or {}
         refresh = normalize_refresh_token(account.get("refresh_token"))
         if not refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,

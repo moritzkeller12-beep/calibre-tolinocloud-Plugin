@@ -19,7 +19,7 @@ from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
 from ..plan import (metadata_update_fields, plan_collection_updates,
-                    plan_metadata_updates, plan_sync, recorded_collections,
+                    plan_metadata_updates, plan_sync,
                     remember_collection, series_map_from_metadata)
 from ..plan import UploadRecord
 from ..inventory import normalize_inventory_record
@@ -48,7 +48,7 @@ def setUpModule():
     global _ACCOUNT_PATCH
     start_cdp_stubs()
     _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_by_name",
+        "calibre_plugin.token_vault.account_summary",
         lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
     _ACCOUNT_PATCH.start()
 
@@ -1332,7 +1332,8 @@ class SyncPlanTests(unittest.TestCase):
             self.assertEqual("", values["accounts"][0]["refresh_token"])
             self.assertEqual("", values["hardware_id"])
             self.assertNotIn("enable_deletions", values)
-            self.assertIsInstance(values["accounts"][0]["state"], dict)
+            self.assertIsInstance(
+                config.account_by_name("default")["state"], dict)
             self.assertEqual("configured-token", config.PREFERENCES["refresh_token"])
         finally:
             config.PREFERENCES = original
@@ -1351,8 +1352,10 @@ class SyncPlanTests(unittest.TestCase):
             values = config.settings()
             accounts = {item["name"]: item for item in values["accounts"]}
             self.assertEqual("bob", values["active_account"])
-            self.assertEqual("a", accounts["alice"]["state"]["u"]["tolino_id"])
-            self.assertEqual("b", accounts["bob"]["state"]["u"]["tolino_id"])
+            self.assertEqual("a", config.account_by_name("alice")["state"]
+                             ["u"]["tolino_id"])
+            self.assertEqual("b", config.account_by_name("bob")["state"]
+                             ["u"]["tolino_id"])
             self.assertEqual("a", accounts["alice"]["refresh_token"])
             self.assertEqual("b", accounts["bob"]["refresh_token"])
         finally:
@@ -1392,10 +1395,10 @@ class SyncPlanTests(unittest.TestCase):
         accounts = [{"name": "konto", "partner_id": 4, "hardware_id": "hw",
                      "refresh_token": "tok"}]
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-             patch("calibre_plugin.token_vault.account_by_name",
+             patch("calibre_plugin.token_vault.account_summary",
                    lambda _name: accounts[0]), \
              patch("calibre_plugin.token_vault.settings",
-                   lambda: {"accounts": accounts}), \
+                   lambda **_kwargs: {"accounts": accounts}), \
              patch("calibre_plugin.token_vault.save_refresh_token",
                    lambda name, token: saved.append((name, token))):
             result = vault_module.TOKEN_VAULT.keepalive_refresh()
@@ -1446,13 +1449,13 @@ class SyncPlanTests(unittest.TestCase):
                      "refresh_token": "tok"}]
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
              patch("calibre_plugin.token_vault.settings",
-                   lambda: {"accounts": []}):
+                   lambda **_kwargs: {"accounts": []}):
             self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh())
             client_mock.assert_not_called()
         with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
              patch("calibre_plugin.token_vault.settings",
-                   lambda: {"accounts": accounts}), \
-             patch("calibre_plugin.token_vault.account_by_name",
+                   lambda **_kwargs: {"accounts": accounts}), \
+             patch("calibre_plugin.token_vault.account_summary",
                    lambda _name: accounts[0]):
             with vault_module.TOKEN_VAULT._lock:
                 self.assertEqual(
@@ -1656,17 +1659,18 @@ class CollectionPlanTests(unittest.TestCase):
         self.assertEqual([("u2", "t2", "Neu")],
                          plan_collection_updates(series_map, state))
 
-    def test_recorded_collections_ignore_broken_state(self):
+    def test_plan_collection_updates_ignores_broken_state(self):
         state = {"u1": {"tolino_id": "t1", "collections": "kaputt"}}
         self.assertEqual([("u1", "t1", "Adamsberg")],
                          plan_collection_updates({"u1": "Adamsberg"}, state))
-        self.assertEqual(set(), recorded_collections(None))
-        self.assertEqual(set(), recorded_collections({"collections": ["  "] }))
+        state = {"u1": {"tolino_id": "t1", "collections": ["  "]}}
+        self.assertEqual([("u1", "t1", "Adamsberg")],
+                         plan_collection_updates({"u1": "Adamsberg"}, state))
         self.assertFalse(remember_collection(None, "u1", "Adamsberg"))
         self.assertFalse(remember_collection({}, "", "Adamsberg"))
         self.assertFalse(remember_collection({}, "u1", "   "))
 
-    def test_recorded_collections_survive_plan_sync(self):
+    def test_plan_collection_updates_preserve_collections_during_plan_sync(self):
         """Der Zustand wird bei jedem Sync neu aufgebaut – die gemerkten
         Zuordnungen dürfen dabei nicht verloren gehen."""
         book = {"uuid": "u1", "title": "A", "authors": "A", "isbn": "1",

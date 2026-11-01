@@ -584,7 +584,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
                 return None
 
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-                patch("calibre_plugin.token_vault.account_by_name",
+                patch("calibre_plugin.token_vault.account_summary",
                       lambda _name: {"refresh_token": "neu-token",
                                      "hardware_id": "hw-neu"}):
             ui_module.workers.TOKEN_VAULT.login(

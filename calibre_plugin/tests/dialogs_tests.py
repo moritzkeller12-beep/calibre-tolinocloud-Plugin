@@ -8,7 +8,7 @@ import unittest
 from . import ui_base_tests
 from ..plan import normalize_removals
 from ..run_context import RunContext
-from ._support import (FakeMenu, FakeMessageBox, FakeTableItem,
+from ._support import (FakeMenu, FakeMessageBox, FakeTableItem, _read_ids,
                       compare_inventory, start_cdp_stubs,
                       stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
@@ -24,12 +24,6 @@ def _marked_rows(indexes):
 
     return patch("calibre_plugin.ui_dialogs._selected_rows",
                  lambda _table: list(indexes))
-
-
-def _read_ids(dialog, finished):
-    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
-    return [tolino_id for tolino_id, _book, state, _uuid
-            in dialog.selected_read_changes() if state is finished]
 
 
 def _action_cell(dialog, index, column):

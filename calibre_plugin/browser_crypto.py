@@ -8,14 +8,14 @@ import hashlib
 # festen leeren Passphrase des Readers.
 
 
-def _evp_bytes_to_key(password, salt, key_len=32, iv_len=16):
+def _evp_bytes_to_key(password, salt):
     """OpenSSL EVP_BytesToKey (MD5) as used by CryptoJS."""
     derived = b""
     previous = b""
-    while len(derived) < key_len + iv_len:
+    while len(derived) < 48:
         previous = hashlib.md5(previous + password + salt).digest()
         derived += previous
-    return derived[:key_len], derived[key_len:key_len + iv_len]
+    return derived[:32], derived[32:48]
 
 
 def _pkcs7_unpad(data):

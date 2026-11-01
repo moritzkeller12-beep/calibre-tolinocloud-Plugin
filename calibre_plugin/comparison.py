@@ -175,6 +175,15 @@ def _progress_state(tolino_id, progress_known, progress_by_id):
 _READING_STATUSES = frozenset(("identical", "changed"))
 
 
+def reading_state(entry):
+    """Den veränderbaren Lesebereich eines State-Eintrags sicher anlegen."""
+    reading = entry.get("reading")
+    if not isinstance(reading, dict):
+        reading = {}
+        entry["reading"] = reading
+    return reading
+
+
 def store_reading_state(state, comparison):
     """Bekannte Cloud-Lesewerte in den State des abgefragten Kontos übernehmen.
 
@@ -211,10 +220,7 @@ def store_reading_state(state, comparison):
         before_entry = dict(entry)
         entry["tolino_id"] = tolino_id
         entry["calibre_id"] = book_id
-        reading = entry.get("reading")
-        if not isinstance(reading, dict):
-            reading = {}
-            entry["reading"] = reading
+        reading = reading_state(entry)
         before_reading = dict(reading)
         if read_known:
             reading["read"] = bool(read.cloud)

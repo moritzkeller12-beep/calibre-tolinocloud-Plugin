@@ -11,7 +11,7 @@ from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
 from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
-    FakeText,start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+    FakeText, _ReadingDb, start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -202,40 +202,30 @@ class DashboardAccountSwitchTests(unittest.TestCase):
                 "percent": 37, "current": "130", "last": "350",
                 "position": "Ops/B.html"}}}}}, active="zweites")
 
-        class Db:
-            field_metadata = {
-                TOLINO_READ_COLUMN: {"datatype": "bool"},
-                TOLINO_PROGRESS_COLUMN: {"datatype": "int"},
-            }
-
-            def __init__(self):
-                self.values = {TOLINO_READ_COLUMN: {},
-                               TOLINO_PROGRESS_COLUMN: {}}
-                self.new_api = self
-
-            @staticmethod
-            def all_book_ids():
-                return [1]
-
-            @staticmethod
-            def get_metadata(_book_id):
-                return {"uuid": uuid}
-
-            @staticmethod
-            def has_id(book_id):
-                return book_id == 1
-
-            def field_for(self, column, book_id):
-                return self.values[column].get(book_id)
-
-            def set_field(self, column, values):
-                self.values[column].update(values)
-
-        db = Db()
+        db = _ReadingDb({1: uuid})
         dashboard.gui = type("Gui", (), {"current_db": db})()
         self.assertTrue(dashboard.switch_account("zweites"))
         self.assertIs(False, db.values[TOLINO_READ_COLUMN][1])
         self.assertEqual(37, db.values[TOLINO_PROGRESS_COLUMN][1])
+        self.assertTrue(dashboard.switch_account("erstes"))
+        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
+        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
+
+    def test_switching_to_an_account_without_values_clears_the_old_ones(self):
+        uuid = "44444444-4444-4444-4444-444444444444"
+        ui_module, dashboard, _calls = self._run(2)
+        config.save_account("erstes", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": True, "progress": {"percent": 100}}}}},
+            active="erstes")
+        config.save_account("zweites", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1}}}, active="zweites")
+
+        db = _ReadingDb({1: uuid}, read={1: True}, progress={1: 100})
+        dashboard.gui = type("Gui", (), {"current_db": db})()
+        self.assertTrue(dashboard.switch_account("zweites"))
+        self.assertIsNone(db.values[TOLINO_READ_COLUMN][1])
+        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
         self.assertTrue(dashboard.switch_account("erstes"))
         self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
         self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
@@ -456,6 +446,24 @@ class SettingsLockTests(unittest.TestCase):
         first["state"]["u1"] = {"tolino_id": "t1"}
         self.assertEqual({}, second["state"])
         self.assertEqual({}, config.DEFAULT_ACCOUNT["state"])
+
+    def test_ui_and_token_metadata_do_not_copy_book_state(self):
+        import copy
+        real_deepcopy = copy.deepcopy
+
+        def guarded(value):
+            if isinstance(value, dict):
+                raise AssertionError("Buchzustand wurde unnötig kopiert")
+            return real_deepcopy(value)
+
+        with patch("calibre_plugin.config.copy.deepcopy", guarded):
+            values = config.settings()
+            self.assertNotIn("state", values["accounts"][0])
+            self.assertTrue(config.set_active_account("konto"))
+            self.assertEqual(("tok",), config.account_secrets("konto"))
+            self.assertTrue(config.save_refresh_token("konto", "neu"))
+            self.assertEqual("neu", config.account_summary(
+                "konto")["refresh_token"])
 
     def test_save_account_waits_for_the_settings_lock(self):
         import threading
@@ -702,7 +710,7 @@ class LoginPreflightTests(unittest.TestCase):
         return patch.multiple(
             "calibre_plugin.token_vault",
             TolinoClient=FakeClient,
-            account_by_name=lambda _name: ({} if token is None else {
+            account_summary=lambda _name: ({} if token is None else {
                 "refresh_token": token, "hardware_id": hardware}),
             account_secrets=lambda _name: () if token is None else (token,),
         )
@@ -775,7 +783,7 @@ class LoginPreflightTests(unittest.TestCase):
         with patch.multiple(
                 "calibre_plugin.token_vault",
                 TolinoClient=RefreshClient,
-                account_by_name=lambda _name: dict(stored),
+                account_summary=lambda _name: dict(stored),
                 save_refresh_token=lambda _name, value: stored.update(
                     refresh_token=value)):
             client = TOKEN_VAULT.login("konto", 4)
