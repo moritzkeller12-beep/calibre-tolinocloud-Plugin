@@ -1188,6 +1188,23 @@ class SyncDataResponseShapeTests(unittest.TestCase):
         self.assertEqual({(self.PUB, "Brunetti")}, client.collection_pairs())
         self.assertEqual(1, len(calls))
 
+    def test_progress_by_id_reads_the_bookmark_patch(self):
+        progress = {"op": "replace",
+                    "path": "/publications/%s/bookmark/12" % self.PUB,
+                    "value": {"currentPosition": "192",
+                              "lastPosition": "590", "progress": 0.3288,
+                              "position": "Ops/017.html#point(/1/4/74:0)",
+                              "modified": 100}}
+        client, calls = self._client([progress])
+        result = client.progress_by_id()
+        self.assertEqual(33, result[self.PUB]["percent"])
+        self.assertEqual("192", result[self.PUB]["current"])
+        self.assertEqual("590", result[self.PUB]["last"])
+        self.assertEqual(1, len(calls))
+        # Lesestatus und Fortschritt teilen denselben Snapshot.
+        self.assertEqual(set(), client.read_ids())
+        self.assertEqual(1, len(calls))
+
     def test_remove_with_tag_id_takes_the_book_out_again(self):
         removed = {"op": "remove",
                    "path": "/publications/%s/tags/6438286" % self.PUB,

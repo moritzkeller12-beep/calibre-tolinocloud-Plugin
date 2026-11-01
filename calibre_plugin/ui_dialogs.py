@@ -30,20 +30,14 @@ def _by_authors(row):
             str(row.get("title") or "").casefold())
 
 
-def _by_hint(row):
-    return (str(row.get("explanation") or ""), _by_title(row)[0])
+def _by_field(field):
+    return lambda row: (str(row.get(field) or ""), _by_title(row)[0])
 
 
-def _by_isbn(row):
-    return (str(row.get("isbn") or ""), _by_title(row)[0])
-
-
-def _by_tolino_id(row):
-    return (str(row.get("tolino_id") or ""), _by_title(row)[0])
-
-
-def _by_uuid(row):
-    return (str(row.get("uuid") or ""), _by_title(row)[0])
+_by_hint = _by_field("explanation")
+_by_isbn = _by_field("isbn")
+_by_tolino_id = _by_field("tolino_id")
+_by_uuid = _by_field("uuid")
 
 
 def _by_calibre(row):
@@ -61,6 +55,16 @@ def _metadata_first(row):
 
 def _read_first(row):
     return ((0 if row.get("read") else 1,)
+            + _by_title(row))
+
+
+def _by_progress(row):
+    """Bücher mit Fortschritt zuerst, danach absteigend nach Prozent."""
+    progress = row.get("progress")
+    percent = (getattr(progress, "percent", None)
+               if getattr(progress, "known", False) else None)
+    return ((0 if percent is not None else 1,)
+            + (-int(percent) if percent is not None else 0,)
             + _by_title(row))
 
 
@@ -207,6 +211,9 @@ class InventoryDialog(QDialog):
         _Column("Autor(en)", "Autor(en)", _by_authors),
         _Column("Hinweis", "Grund und Unterschiede des Vergleichs.",
                 _by_hint),
+        _Column("Fortschritt",
+                "Lesefortschritt aus tolino (nur Anzeige, kein "
+                "Rückschreiben).", _by_progress),
         _Column("ISBN", "ISBN (technisch, ausgeblendet)", _by_isbn, True),
         _Column("tolino-ID",
                 "tolino-ID der Cloud-Kopie (technisch, ausgeblendet)",
@@ -222,6 +229,7 @@ class InventoryDialog(QDialog):
     TITLE_COLUMN = HEADERS.index("Buchtitel")
     AUTHORS_COLUMN = HEADERS.index("Autor(en)")
     HINT_COLUMN = HEADERS.index("Hinweis")
+    PROGRESS_COLUMN = HEADERS.index("Fortschritt")
     GROUP_FILTERS = (
         ("Alle", None),
         ("Aktion nötig", "action"),
@@ -763,10 +771,14 @@ class InventoryDialog(QDialog):
             explanation = (explanation + " " + note).strip()
         if row.get("delete_cloud"):
             explanation = (explanation + " Wird beim Start aus tolino gelöscht.").strip()
+        progress = row.get("progress")
+        progress_text = (progress.text if progress is not None
+                         else "")
         return (
             "✓" if has_book else "",
             "✓" if in_cloud else "",
             row.get("title", ""), row.get("authors", ""), explanation,
+            progress_text,
             row.get("isbn", ""), row.get("tolino_id", ""), row.get("uuid", ""),
         )
 

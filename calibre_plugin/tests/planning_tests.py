@@ -383,10 +383,11 @@ class SyncPlanTests(unittest.TestCase):
                 return 1
 
         database = Database()
-        self.assertEqual(["tolino_read", "tolino_ignore"],
+        self.assertEqual(["tolino_read", "tolino_progress", "tolino_ignore"],
                          create_custom_columns(database))
         self.assertEqual(
             [("tolino_read", "Gelesen (tolino)", "bool", False, True, {}),
+             ("tolino_progress", "tolino gelesen %", "int", False, True, {}),
              ("tolino_ignore", "Ignoriert (tolino)", "bool", False, True, {})],
             database.calls)
         # Zweiter Klick: nichts doppelt anlegen, auch wenn Calibre die neue
@@ -435,6 +436,7 @@ class SyncPlanTests(unittest.TestCase):
         """Text fuer die ID, Ja/Nein fuer Lesestatus und Ignorieren."""
         self.assertEqual([("tolino_id", "tolino-ID", "text"),
                           ("tolino_read", "Gelesen (tolino)", "bool"),
+                          ("tolino_progress", "tolino gelesen %", "int"),
                           ("tolino_ignore", "Ignoriert (tolino)", "bool")],
                          list(CUSTOM_COLUMNS))
 
@@ -445,7 +447,8 @@ class SyncPlanTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError) as caught:
             create_custom_columns(WithoutColumns())
-        for label in ("#tolino_id", "#tolino_read", "#tolino_ignore"):
+        for label in ("#tolino_id", "#tolino_read", "#tolino_progress",
+                      "#tolino_ignore"):
             self.assertIn(label, str(caught.exception))
 
     def test_custom_column_availability_accepts_calibre_field_metadata(self):
@@ -1838,6 +1841,23 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertEqual("conflict", rows[0]["match_reason"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("t-known", state["u1"]["tolino_id"])
+
+    def test_identifier_embedded_isbn_matches_despite_a_different_title(self):
+        """Die ISBN aus ``DT0400.<ISBN>_…`` ist ein echter Abgleichsschlüssel."""
+        metadata = {1: {"uuid": "u1", "title": "Lokaler Titel",
+                        "authors": "Autorin", "isbn": "9783832170141",
+                        "formats": ["EPUB"]}}
+        inventory = {"PublicationInventory": {"ebook": [{
+            "deliverableId": "d1",
+            "epubMetaData": {
+                "identifier": "DT0400.9783832170141_A38978050",
+                "title": "Cloud-Titel",
+                "author": [{"name": "Autorin"}],
+            }}]}}
+        rows = compare_inventory(metadata, {}, inventory, ["EPUB"])
+        self.assertEqual("d1", rows[0]["tolino_id"])
+        self.assertEqual("isbn", rows[0]["match_reason"])
+        self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
     def test_matching_always_uses_isbn_or_title_and_author_pair(self):
         metadata = self._metadata(title="Gleich", authors="Autor")

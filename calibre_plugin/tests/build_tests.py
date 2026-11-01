@@ -8,7 +8,13 @@ import zipfile
 from pathlib import Path
 
 from build_plugin import (FILES, ICON, MARKER, ROOT, SOURCE, build_plugin,
-                          strip_comments)
+                          strip_source)
+
+
+def _docstring_owners(text):
+    owners = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    return [node for node in ast.walk(ast.parse(text))
+            if isinstance(node, owners) and ast.get_docstring(node) is not None]
 
 
 class PluginArchiveTests(unittest.TestCase):
@@ -28,12 +34,12 @@ class PluginArchiveTests(unittest.TestCase):
                         continue
                     source_text = (SOURCE / name).read_text(encoding="utf-8")
                     packaged_text = archive.read(name).decode("utf-8")
-                    # Kommentare fallen weg; Code, Docstrings und Zeilennummern
-                    # bleiben unverändert.
+                    # Das Release bleibt zeilengleich und ausführbar, enthält
+                    # aber weder Kommentare noch Docstrings.
                     self.assertEqual(source_text.count("\n"),
                                      packaged_text.count("\n"), name)
-                    self.assertEqual(ast.dump(ast.parse(source_text)),
-                                     ast.dump(ast.parse(packaged_text)), name)
+                    compile(packaged_text, name, "exec")
+                    self.assertEqual([], _docstring_owners(packaged_text), name)
                     comments = [token for token in tokenize.generate_tokens(
                         io.StringIO(packaged_text).readline)
                         if token.type == tokenize.COMMENT]
@@ -56,22 +62,28 @@ class PluginArchiveTests(unittest.TestCase):
                     ["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"],
                     entrypoints)
 
-    def test_comment_stripping_keeps_shebang_docstrings_and_line_numbers(self):
+    def test_source_stripping_keeps_line_numbers_and_runtime_code(self):
         source = (b"#!/usr/bin/env python3\n"
                   b"# -*- coding: utf-8 -*-\n"
                   b'"""Doc."""\n'
                   b"\n"
                   b"# ganz weg\n"
-                  b"x = 1  # auch weg\n")
-        stripped = strip_comments(source)
+                  b"def answer():\n"
+                  b'    """Antwort."""\n'
+                  b"    return 42  # auch weg\n")
+        stripped = strip_source(source)
         self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
-        self.assertIn(b'"""Doc."""', stripped)
+        self.assertNotIn(b"Doc.", stripped)
+        self.assertNotIn(b"Antwort", stripped)
         self.assertNotIn(b"weg", stripped)
         self.assertTrue(stripped.startswith(
             b"#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"))
-        self.assertEqual(b"x = 1", stripped.splitlines()[5])
+        self.assertEqual(b"    return 42", stripped.splitlines()[7])
+        namespace = {}
+        exec(compile(stripped, "<test>", "exec"), namespace)
+        self.assertEqual(42, namespace["answer"]())
         # Nicht zerlegbarer Quelltext wird unverändert ausgeliefert.
-        self.assertEqual(b"x = (\n", strip_comments(b"x = (\n"))
+        self.assertEqual(b"x = (\n", strip_source(b"x = (\n"))
 
     def test_the_documented_version_matches_the_plugin_version(self):
         """README und CHANGELOG zeigen dieselbe Nummer wie __init__.py."""

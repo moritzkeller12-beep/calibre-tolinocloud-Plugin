@@ -280,15 +280,16 @@ class InventoryDialogSortTests(unittest.TestCase):
             self.assertEqual(
                 ("Upload", "Metadaten", "Gelesen",
                  "Calibre", "tolino", "Buchtitel", "Autor(en)",
-                 "Hinweis", "ISBN", "tolino-ID", "UUID"), headers)
-            # 8 sichtbare Spalten + 3 technische.
-            self.assertEqual(11, len(headers))
+                 "Hinweis", "Fortschritt", "ISBN", "tolino-ID", "UUID"),
+                headers)
+            # 9 sichtbare Spalten + 3 technische.
+            self.assertEqual(12, len(headers))
             visible = [name for index, name in enumerate(headers)
                        if index not in dialog_cls.TECHNICAL_COLUMNS]
-            self.assertEqual(8, len(visible))
-            self.assertEqual(8, len(headers) - len(dialog_cls.TECHNICAL_COLUMNS))
+            self.assertEqual(9, len(visible))
+            self.assertEqual(9, len(headers) - len(dialog_cls.TECHNICAL_COLUMNS))
             self.assertEqual(len(headers), len(dialog_cls.COLUMNS))
-            self.assertEqual((8, 9, 10), dialog_cls.TECHNICAL_COLUMNS)
+            self.assertEqual((9, 10, 11), dialog_cls.TECHNICAL_COLUMNS)
             for gone in ("Wo", "Status"):
                 self.assertNotIn(gone, headers)
             for column in dialog_cls.TECHNICAL_COLUMNS:

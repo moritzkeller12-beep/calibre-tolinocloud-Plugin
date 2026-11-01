@@ -430,11 +430,12 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertEqual(row["authors"], dialog.table.items[(index, 6)])
                 self.assertEqual(row["explanation"],
                                  dialog.table.items[(index, 7)])
-                self.assertEqual(row["isbn"], dialog.table.items[(index, 8)])
+                self.assertEqual("", dialog.table.items[(index, 8)])
+                self.assertEqual(row["isbn"], dialog.table.items[(index, 9)])
                 self.assertEqual(row["tolino_id"],
-                                 dialog.table.items[(index, 9)])
-                self.assertEqual(row.get("uuid", ""),
                                  dialog.table.items[(index, 10)])
+                self.assertEqual(row.get("uuid", ""),
+                                 dialog.table.items[(index, 11)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
                 upload = dialog._check(index, 0)
@@ -475,7 +476,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             self.assertEqual(90, dialog.table.header.widths[6])
             self.assertFalse(dialog.attributes[55])
             # Nur die technischen Spalten sind zunächst verborgen.
-            self.assertEqual({8: True, 9: True, 10: True}, dialog.table.hidden)
+            self.assertEqual({9: True, 10: True, 11: True}, dialog.table.hidden)
             self.assertIn("Sammlungen in tolino übernommen",
                           dialog.note.text())
             self.assertIn("1 offen", dialog.note.text())
@@ -494,9 +495,9 @@ class InventoryDialogBuildTests(unittest.TestCase):
         ui_module, dialog = self._build({"automatic": 1})
         try:
             dialog._toggle_technical_columns(True)
-            self.assertEqual({8: False, 9: False, 10: False}, dialog.table.hidden)
+            self.assertEqual({9: False, 10: False, 11: False}, dialog.table.hidden)
             dialog._toggle_technical_columns(False)
-            self.assertEqual({8: True, 9: True, 10: True}, dialog.table.hidden)
+            self.assertEqual({9: True, 10: True, 11: True}, dialog.table.hidden)
             self.assertIn("Sammlungen in tolino übernommen",
                           dialog.note.text())
             self.assertIn("1 offen", dialog.note.text())

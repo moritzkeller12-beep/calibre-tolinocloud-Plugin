@@ -5,7 +5,7 @@
 
 Aktuelle Version: **0.1.06** (Quelle: [`__init__.py`](__init__.py)).
 
-Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino Cloud.
+Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino Cloud und zeigt den Lesefortschritt aus tolino in Calibre an.
 
 ## Installation
 
@@ -25,7 +25,10 @@ Die Spalten lassen sich einzeln unter **Einstellungen …** des Plugins anlegen;
 
 - `#tolino_id` (Text): speichert die tolino-Zuordnung in der Bibliothek.
 - `#tolino_read` (Ja/Nein): zeigt den Calibre-Lesestatus nur informativ; Änderungen an tolino sind ausschließlich im Vergleichsfenster auswählbar.
+- `#tolino_progress` (Anzeigename „tolino gelesen %“, Zahl 0–100): zeigt den aus tolino gelesenen Lesefortschritt samt Position im Vergleichsfenster. Der Wert wird nie nach tolino zurückgeschrieben; bei unbekanntem Stand bleibt die Spalte unverändert. Bei einer bereits angelegten Spalte bleibt der bisherige Anzeigename erhalten und lässt sich in Calibre über den Spaltenkopf ändern.
 - `#tolino_ignore` (Ja/Nein): bei «Ja» wird ein Buch vom Abgleich ausgeschlossen, etwa wenn es bereits gekauft in tolino liegt.
+
+Für den Abgleich liest das Plugin eine ISBN auch aus tolino-Produktkennungen wie `DT0400.9783832170141_…`; die Kennung selbst bleibt weiterhin keine Deliverable-ID.
 
 ## Hinweise
 

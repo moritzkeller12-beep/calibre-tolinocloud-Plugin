@@ -534,29 +534,37 @@ class PrepareWorker(QObject):
                         % (migrated, plural(migrated, "Buch", "Bücher")))
         return state
 
-    def _load_inventory(self, client):
-        """Load cloud inventory and read status without hiding failures."""
-        inventory = client.inventory()
-        read_known = True
+    def _load_optional(self, label, loader):
+        """Optionale Cloud-Daten laden; ein Fehler bleibt «unbekannt»."""
         try:
-            read_ids = client.read_ids()
+            return loader(), True
         except Exception as exc:
-            # «Unbekannt» ist ein eigener Zustand: niemals als
-            # «nichts gelesen» ausgeben.
-            read_ids = None
-            read_known = False
-            log_warning("Lesestatus konnte nicht geladen werden: "
-                        + sanitize_error(exc, self.context.secrets()))
-        return inventory, read_ids, read_known
+            log_warning("%s konnte nicht geladen werden: %s"
+                        % (label, sanitize_error(
+                            exc, self.context.secrets())))
+            return None, False
 
-    def _build_comparison(self, state, inventory, read_ids):
+    def _load_inventory(self, client):
+        """Load inventory, read status and progress without hiding failures."""
+        inventory = client.inventory()
+        read_ids, read_known = self._load_optional(
+            "Lesestatus", client.read_ids)
+        progress_by_id, progress_known = None, False
+        loader = getattr(client, "progress_by_id", None)
+        if read_known and callable(loader):
+            progress_by_id, progress_known = self._load_optional(
+                "Lesefortschritt", loader)
+        return inventory, read_ids, read_known, progress_by_id, progress_known
+
+    def _build_comparison(self, state, inventory, read_ids, progress_by_id):
         """Build comparison rows and drop stale cloud IDs from state."""
         columns = self.context.columns
         comparison = compare_inventory(
             self.metadata, state, inventory, self.context.preferred_formats,
             use_metadata_ids=columns.get("id", True),
             read_ids=read_ids,
-            read_column=bool(columns.get("read")))
+            read_column=bool(columns.get("read")),
+            progress_by_id=progress_by_id)
         for row in comparison:
             stale_id = str(row.get("stale_cloud_id") or "").strip()
             book_uuid = str(row.get("uuid") or "").strip()
@@ -579,11 +587,13 @@ class PrepareWorker(QObject):
             if self._stop_requested():
                 return
             self.progress.emit("Lade Cloud-Bestand …")
-            inventory, read_ids, read_known = self._load_inventory(client)
+            (inventory, read_ids, read_known,
+             progress_by_id, progress_known) = self._load_inventory(client)
             if self._stop_requested():
                 return
             self.progress.emit("Vergleiche Bibliothek …")
-            comparison = self._build_comparison(state, inventory, read_ids)
+            comparison = self._build_comparison(
+                state, inventory, read_ids, progress_by_id)
             if self._stop_requested():
                 return
             self.ready.emit({
@@ -592,6 +602,7 @@ class PrepareWorker(QObject):
                 "state": state,
                 "comparison": comparison,
                 "read_status_known": read_known,
+                "progress_status_known": progress_known,
                 "hardware": client.hardware,
             })
         except Exception as exc:

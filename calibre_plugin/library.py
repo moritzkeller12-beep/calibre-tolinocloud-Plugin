@@ -8,6 +8,8 @@ TOLINO_COLUMN = "#tolino_id"
 # #tolino_read zeigt den lokalen Lesestatus nur informativ an.
 TOLINO_IGNORE_COLUMN = "#tolino_ignore"
 TOLINO_READ_COLUMN = "#tolino_read"
+# #tolino_progress spiegelt den aus tolino gelesenen Lesefortschritt (0-100).
+TOLINO_PROGRESS_COLUMN = "#tolino_progress"
 
 # Calibre liefert ein Ja/Nein-Feld je nach Weg als Bool, Text oder Zahl.
 _TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
@@ -54,14 +56,23 @@ def metadata_tolino_id(metadata, account_name=None):
     return str(value or "").strip()
 
 
+def _column_available(database, column, datatypes):
+    fields = database.field_metadata
+    return column in fields and fields[column].get("datatype") in datatypes
+
+
 def bool_column_available(database, column):
     """True, wenn Calibre ``column`` als Ja/Nein-Feld kennt.
 
     Ein Text- oder Zahlenfeld gilt nicht: dort stuenden fremde Werte, die
     wie ein versehentliches «ignoriert» aussehen koennten.
     """
-    fields = database.field_metadata
-    return column in fields and fields[column].get("datatype") == "bool"
+    return _column_available(database, column, ("bool",))
+
+
+def integer_column_available(database, column):
+    """True, wenn Calibre ``column`` als Zahl (int/float) kennt."""
+    return _column_available(database, column, ("int", "float"))
 
 
 def bool_column_value(metadata, column):
@@ -92,6 +103,7 @@ def metadata_ignored(metadata):
 CUSTOM_COLUMNS = (
     ("tolino_id", "tolino-ID", "text"),
     ("tolino_read", "Gelesen (tolino)", "bool"),
+    ("tolino_progress", "tolino gelesen %", "int"),
     ("tolino_ignore", "Ignoriert (tolino)", "bool"),
 )
 
@@ -157,7 +169,38 @@ def column_state(database):
     Spalten.
     """
     return {"id": TOLINO_COLUMN in database.field_metadata,
-            "read": bool_column_available(database, TOLINO_READ_COLUMN)}
+            "read": bool_column_available(database, TOLINO_READ_COLUMN),
+            "progress": integer_column_available(
+                database, TOLINO_PROGRESS_COLUMN)}
+
+
+_SKIP = object()
+
+
+def _progress_value(value):
+    if value is None:
+        return None
+    try:
+        value = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return _SKIP
+    return value if 0 <= value <= 100 else _SKIP
+
+
+def _update_column(database, column, updates, convert, datatypes):
+    """Gemeinsamer Weg für die informativen Calibre-Spalten."""
+    if not updates or not _column_available(database, column, datatypes):
+        return 0
+    api = database.new_api
+    values = {}
+    for book_id, raw in updates:
+        if book_id is not None and api.has_id(book_id):
+            value = convert(raw)
+            if value is not _SKIP:
+                values[book_id] = value
+    if values:
+        api.set_field(column, values)
+    return len(values)
 
 
 def update_read_status(database, updates):
@@ -166,19 +209,19 @@ def update_read_status(database, updates):
     Die Spalte bleibt informativ: geschrieben wird nur, was tolino nach einem
     Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung.
     """
-    if not updates or not bool_column_available(
-            database, TOLINO_READ_COLUMN):
-        return 0
-    api = database.new_api
-    values = {}
-    for book_id, finished in updates:
-        if book_id is None or not api.has_id(book_id):
-            continue
-        values[book_id] = bool(finished)
-    if not values:
-        return 0
-    api.set_field(TOLINO_READ_COLUMN, values)
-    return len(values)
+    return _update_column(database, TOLINO_READ_COLUMN, updates, bool,
+                          ("bool",))
+
+
+def update_progress_status(database, updates):
+    """Cloud-Fortschritt (0-100) in ``#tolino_progress`` spiegeln.
+
+    Die Spalte ist rein informativ. ``None`` leert sie, wenn die Cloud für
+    ein zugeordnetes Buch keinen Bookmark mehr liefert; unbekannte Stände
+    werden vom Aufrufer gar nicht erst übergeben.
+    """
+    return _update_column(database, TOLINO_PROGRESS_COLUMN, updates,
+                          _progress_value, ("int", "float"))
 
 
 def update_tolino_ids(database, updates, account_name=None):

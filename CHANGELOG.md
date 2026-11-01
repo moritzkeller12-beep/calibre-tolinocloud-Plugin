@@ -4,10 +4,14 @@ Aktuelle Version: **0.1.06** (Quelle: [`__init__.py`](__init__.py)).
 
 ## 0.1.06
 
+- Neue informative Calibre-Spalte `#tolino_progress` (Anzeigename „tolino gelesen %“, Zahl 0–100): Sie zeigt den Lesefortschritt aus den `bookmark`-Patches der tolino-Cloud, im Vergleichsfenster zusätzlich mit Position (z. B. `33 % · 192/590`). Der Wert wird nie nach tolino zurückgeschrieben; bei unbekanntem Cloud-Stand bleibt die Spalte unverändert.
+- Der Bestandsvergleich liest Lesestatus und Fortschritt aus demselben `sync-data`-Snapshot. Ein fehlender Bookmark bedeutet «kein Fortschritt», nicht «0 Prozent»; ein fehlgeschlagener Abruf wird als «unbekannt» angezeigt.
+- Für den Abgleich extrahiert das Plugin eine gültige ISBN aus tolino-Produktkennungen wie `DT0400.9783832170141_A38978050`. Die Kennung bleibt weiterhin keine Deliverable-ID für Download oder Löschen.
 - Nicht bestätigte Zuordnungen (widersprechende ISBN oder Autor) werden nicht mehr im Zustand gespeichert; Serien folgen damit nicht automatisch dem falschen Cloud-Buch.
 - Der Titel+Autor-Index prüft den Autorennamen zusätzlich ohne ae/oe/ue-Ersatz («Michael» ≠ «Michal»).
 - Download-Callbacks sind GUI-geschützt, Cloud-Antworten werden vor dem Speichern als EPUB/PDF geprüft, und EPUB/PDF erhalten feste MIME-Typen.
 - Ein später Refresh-Token-Callback legt kein entferntes Konto neu an; Relogin wartet länger auf den Keep-alive-Lock. WebSocket-Nachrichten sind auf 16 MiB begrenzt, der IndexedDB-Scan liest per Cursor statt `getAll()`.
+- Der Release-Build entfernt jetzt zusätzlich Docstrings aus den Plugin-Modulen; Code, Kodierung und Zeilennummern bleiben erhalten. Das verkleinert das ZIP, ohne das Laufzeitverhalten zu ändern.
 
 ## 0.1.05
 

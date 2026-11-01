@@ -13,8 +13,8 @@ from .config import (PREFERRED_FORMATS, account_by_name,
                      set_active_account, settings)
 from .run_context import RunContext
 from .library import (TOLINO_IGNORE_COLUMN, column_state,
-                      bool_column_available, update_read_status,
-                      update_tolino_ids)
+                      bool_column_available, update_progress_status,
+                      update_read_status, update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
 from .tolino import (RELOGIN, TolinoError, hardware_id, log_warning,
@@ -47,24 +47,51 @@ def _persist_sync_result(dialog, state, updates):
         failures.append("Sync-Zustand")
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s" % sanitize_error(exc))
-    if columns.get("id"):
+    writers = (
+        ("id", "tolino-IDs",
+         lambda db: update_tolino_ids(
+             db, updates, account_name=account_name)),
+        ("read", "Lesestatus",
+         lambda db: update_read_status(
+             db, list(getattr(worker, "read_updates", ()) or ()))),
+    )
+    for key, label, write in writers:
+        if not columns.get(key):
+            continue
         try:
-            update_tolino_ids(
-                dialog.gui.current_db, updates, account_name=account_name)
+            write(dialog.gui.current_db)
         except Exception as exc:
-            failures.append("tolino-IDs")
-            log_warning("Tolino-IDs konnten nicht in Calibre geschrieben "
-                        "werden: %s" % sanitize_error(exc))
-    if columns.get("read"):
-        try:
-            update_read_status(
-                dialog.gui.current_db,
-                list(getattr(worker, "read_updates", ()) or ()))
-        except Exception as exc:
-            failures.append("Lesestatus")
-            log_warning("Lesestatus konnte nicht in Calibre geschrieben "
-                        "werden: %s" % sanitize_error(exc))
+            failures.append(label)
+            log_warning("%s: Schreiben in Calibre fehlgeschlagen: %s"
+                        % (label, sanitize_error(exc)))
     return failures
+
+
+def _mirror_progress(dashboard, comparison, columns):
+    """Cloud-Fortschritt einmalig in die informative Calibre-Spalte spiegeln.
+
+    Der Fortschritt wird nie zurückgeschrieben. Nur ein bekannter Cloud-Stand
+    wird übernommen; bei einem fehlgeschlagenen Abruf bleibt die Spalte
+    unangetastet. Ein Fehler beim lokalen Schreiben darf den Vergleich nicht
+    verhindern.
+    """
+    if not (columns or {}).get("progress"):
+        return
+    updates = []
+    for row in comparison:
+        progress = row.get("progress")
+        if (row.get("book_id") is None or not row.get("tolino_id")
+                or progress is None
+                or not getattr(progress, "known", False)):
+            continue
+        updates.append((row["book_id"], progress.percent))
+    if not updates:
+        return
+    try:
+        update_progress_status(dashboard.gui.current_db, updates)
+    except Exception as exc:
+        log_warning("Lesefortschritt konnte nicht in Calibre geschrieben "
+                    "werden: %s" % sanitize_error(exc))
 
 
 def _sync_cancelled_text(outcome):
@@ -570,6 +597,10 @@ class SyncDashboard(DashboardParts, QDialog):
             hardware.setText(str(payload["hardware"]))
         if payload.get("read_status_known") is False:
             log_warning("Lesestatus unbekannt – er bleibt unverändert.")
+        if payload.get("progress_status_known") is False:
+            log_warning("Lesefortschritt unbekannt – die Spalte bleibt "
+                        "unverändert.")
+        _mirror_progress(self, payload["comparison"], context.columns)
         try:
             selection = self._confirm_comparison(
                 payload["comparison"], context,

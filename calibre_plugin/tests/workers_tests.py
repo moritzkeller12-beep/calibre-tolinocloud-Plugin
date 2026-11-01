@@ -867,6 +867,10 @@ class PrepareWorkerTests(unittest.TestCase):
             def read_ids(self):
                 return {"t-1"}
 
+            def progress_by_id(self):
+                return {"t-1": {"percent": 33, "current": "192",
+                                 "last": "590"}}
+
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw-A", "refresh_token": "tok-A", "state": {},
                     "preferred_formats": ["EPUB"],
@@ -897,8 +901,11 @@ class PrepareWorkerTests(unittest.TestCase):
         _args, kwargs = captured[0]
         # Der Vergleich bekommt den Metadaten-Snapshot unverändert mit ...
         self.assertEqual({1: {"title": "A"}}, _args[0])
-        # ... und den Lesestatus als eigenen Eingang.
+        # ... und den Lesestatus sowie den Fortschritt als eigene Eingänge.
         self.assertIn("read_ids", kwargs)
+        self.assertEqual({"percent": 33, "current": "192", "last": "590"},
+                         kwargs["progress_by_id"]["t-1"])
+        self.assertTrue(payload["progress_status_known"])
 
     def test_cancel_between_login_and_inventory_fails_softly(self):
         ui_module = self._ui()
@@ -1597,7 +1604,16 @@ class InventorySchemaTests(unittest.TestCase):
             ["authors", "isbn", "title", "tolino_id"], sorted(records[0]))
         self.assertEqual("d1", records[0]["tolino_id"])
         self.assertEqual("", records[1]["tolino_id"])
-        self.assertEqual("978-3-16-148410-0", records[1]["isbn"])
+        self.assertEqual("9783161484100", records[1]["isbn"])
+
+    def test_identifier_embedded_isbn_is_normalized_for_matching(self):
+        client = self._client({"PublicationInventory": {"ebook": [
+            {"epubMetaData": {
+                "identifier": "DT0400.9783832170141_A38978050",
+                "title": "Gekauft"}}]}})
+        records = client.inventory()
+        self.assertEqual("", records[0]["tolino_id"])
+        self.assertEqual("9783832170141", records[0]["isbn"])
 
     def test_an_identifier_only_record_makes_the_ids_incomplete(self):
         """Keine Deliverable-Kennung heisst: kein Beweis fuer Loeschungen.

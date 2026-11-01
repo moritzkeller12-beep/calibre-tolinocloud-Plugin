@@ -23,13 +23,17 @@ def tag_patch(op, book_id, name, category, revision=None, tag_id=None):
     return {"op": op, "value": value, "path": path}
 
 
-def tag_path_parts(path):
-    """Return (book ID, tag ID) for valid publication tag paths."""
+def _publication_path_parts(path, kind):
     parts = str(path or "").split("/")
     if (len(parts) < 4 or parts[1] != "publications"
-            or parts[3] != "tags" or not parts[2]):
+            or parts[3] != kind or not parts[2]):
         return None
     return str(parts[2]), str(parts[4] if len(parts) > 4 else "")
+
+
+def tag_path_parts(path):
+    """Return (book ID, tag ID) for valid publication tag paths."""
+    return _publication_path_parts(path, "tags")
 
 
 def tag_id_from_patch(item):
@@ -62,6 +66,91 @@ def active_tags(patches, category, name=None):
 def read_ids(patches):
     return {book_id for book_id, _name in active_tags(
         patches, "system", READ_TAG)}
+
+
+def bookmark_path_parts(path):
+    """Return (book ID, bookmark ID) for a publication bookmark path."""
+    return _publication_path_parts(path, "bookmark")
+
+
+def _position_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _progress_percent(value, current, last):
+    """Prozentwert aus ``progress`` oder aus current/last ableiten."""
+    percent = None
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        raw = None
+    if raw is not None:
+        if 0 <= raw <= 1:
+            percent = round(raw * 100)
+        elif 0 < raw <= 100:
+            percent = round(raw)
+    if percent is None:
+        try:
+            current_number, last_number = int(current), int(last)
+        except (TypeError, ValueError):
+            current_number = last_number = 0
+        if last_number > 0:
+            percent = round(current_number / last_number * 100)
+    if percent is None:
+        return None
+    return max(0, min(100, int(percent)))
+
+
+def _bookmark_entry(value):
+    if not isinstance(value, dict):
+        return None
+    current = _position_text(value.get("currentPosition"))
+    last = _position_text(value.get("lastPosition"))
+    percent = _progress_percent(value.get("progress"), current, last)
+    if percent is None and not current and not last:
+        return None
+    try:
+        modified = int(value.get("modified") or 0)
+    except (TypeError, ValueError):
+        modified = 0
+    return {
+        "percent": percent,
+        "current": current,
+        "last": last,
+        "position": str(value.get("position") or "").strip(),
+        "modified": modified,
+    }
+
+
+def reading_progress(patches):
+    """Reduce bookmark patches to one progress entry per book.
+
+    Die Cloud schreibt Lesezeichen als ``/bookmark/<id>``-Patches. Pro Buch
+    zählt der zuletzt geänderte Eintrag; ein ``remove`` entfernt ihn.
+    """
+    active = {}
+    for item in patches:
+        if not isinstance(item, dict):
+            continue
+        parts = bookmark_path_parts(item.get("path"))
+        if parts is None:
+            continue
+        book_id = parts[0]
+        if str(item.get("op") or "add") == "remove":
+            active.pop(book_id, None)
+            continue
+        entry = _bookmark_entry(item.get("value"))
+        if entry is None:
+            continue
+        previous = active.get(book_id)
+        if previous is not None and previous["modified"] > entry["modified"]:
+            continue
+        active[book_id] = entry
+    return active
 
 
 def collection_pairs(patches):

@@ -1249,12 +1249,15 @@ class AccountStateBindingTests(unittest.TestCase):
 
         class Db:
             field_metadata = {TOLINO_COLUMN: {},
-                              "#tolino_read": {"datatype": "bool"}}
+                              "#tolino_read": {"datatype": "bool"},
+                              "#tolino_progress": {"datatype": "int"}}
 
         class NoColumn:
             field_metadata = {}
 
         self.assertTrue(column_state(Db())["id"])
         self.assertTrue(column_state(Db())["read"])
+        self.assertTrue(column_state(Db())["progress"])
         self.assertFalse(column_state(NoColumn())["id"])
         self.assertFalse(column_state(NoColumn())["read"])
+        self.assertFalse(column_state(NoColumn())["progress"])

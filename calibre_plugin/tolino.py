@@ -734,6 +734,15 @@ class TolinoClient:
         _revision, patches = self.sync_snapshot()
         return _sync_data.read_ids(patches)
 
+    def progress_by_id(self):
+        """Lesefortschritt je tolino-ID aus denselben sync-data-Daten.
+
+        Die Werte sind reine Anzeige: Das Plugin schreibt keine Leseposition
+        in die Cloud zurück. Der Snapshot wird mit `read_ids` geteilt.
+        """
+        _revision, patches = self.sync_snapshot()
+        return _sync_data.reading_progress(patches)
+
     def _current_revision(self, revision):
         """Revision fuer einen Schreibvorgang: die aktuelle, nie None.
 

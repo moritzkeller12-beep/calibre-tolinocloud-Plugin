@@ -37,11 +37,13 @@ def parsed_inventory(value):
 
 
 def compare_inventory(metadata, state, inventory, preferred_formats=(),
-                      use_metadata_ids=True, read_ids=(), read_column=False):
+                      use_metadata_ids=True, read_ids=(), read_column=False,
+                      progress_by_id=None):
     """Comparison test helper: normalize raw Tolino fixtures at the boundary."""
     return _compare_inventory(
         metadata, state, parsed_inventory(inventory), preferred_formats,
-        use_metadata_ids, read_ids, read_column)
+        use_metadata_ids, read_ids, read_column,
+        progress_by_id=progress_by_id)
 
 
 def _full(exc):

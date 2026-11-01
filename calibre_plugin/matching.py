@@ -29,6 +29,53 @@ def normalize_isbn(value):
     return re.sub(r"[^0-9x]+", "", str(value or "").casefold())
 
 
+def is_valid_isbn(value):
+    """True for an ISBN-10/ISBN-13 with a correct check digit.
+
+    Only a valid ISBN may identify a book automatically; arbitrary digits
+    in the ISBN field are not a unique key.
+    """
+    digits = normalize_isbn(value).upper()
+    if len(digits) == 10:
+        total = 0
+        for index, character in enumerate(digits):
+            if character == "X":
+                if index != 9:
+                    return False
+                digit = 10
+            elif character.isdigit():
+                digit = int(character)
+            else:
+                return False
+            total += digit * (10 - index)
+        return total % 11 == 0
+    if len(digits) == 13 and digits.isdigit():
+        total = sum((1 if index % 2 == 0 else 3) * int(character)
+                    for index, character in enumerate(digits))
+        return total % 10 == 0
+    return False
+
+
+def isbn_from_identifier(value):
+    """Extract a valid ISBN from a product identifier such as
+    ``DT0400.9783832170141_A38978050``.
+
+    Tolino liefert bei gekauften E-Books oft keine eigene ISBN, sondern nur
+    diese Produktkennung. Für den Abgleich wird daraus die eingebettete,
+    gültige ISBN gelesen; die Kennung selbst bleibt weiterhin keine
+    Deliverable-ID.
+    """
+    text = str(value or "")
+    for match in re.finditer(
+            r"(?<!\d)[0-9Xx][0-9Xx\s-]{8,20}[0-9Xx](?!\d)", text):
+        candidate = normalize_isbn(match.group(0))
+        if len(candidate) == 13 and not candidate.startswith(("978", "979")):
+            continue
+        if is_valid_isbn(candidate):
+            return candidate
+    return ""
+
+
 _AUTHOR_SEPARATORS = re.compile(r"[\W_]+")
 _AUTHOR_FILLER = {"and", "und", "et", "y", "with", "mit"}
 
