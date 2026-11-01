@@ -103,42 +103,52 @@ class TokenVault:
         return rotated
 
 TOKEN_VAULT = TokenVault()
-_KEEPALIVE_STOP = threading.Event()
 _KEEPALIVE_THREAD = None
+_KEEPALIVE_STOP = None
+_KEEPALIVE_LOCK = threading.Lock()
 
 
 def start_token_keepalive(interval=45 * 60):
-    """Rotate saved refresh tokens periodically in a daemon thread."""
-    global _KEEPALIVE_THREAD
-    if _KEEPALIVE_THREAD is not None:
-        return None
-    _KEEPALIVE_STOP.clear()
+    """Rotate saved refresh tokens periodically in one daemon thread."""
+    global _KEEPALIVE_THREAD, _KEEPALIVE_STOP
+    wait = max(60, interval)
+    with _KEEPALIVE_LOCK:
+        if _KEEPALIVE_THREAD is not None and _KEEPALIVE_THREAD.is_alive():
+            return None
+        # Jeder Lauf bekommt sein eigenes Stop-Event; ein alter Thread kann
+        # einen Neustart damit nicht versehentlich wieder aktivieren.
+        stop = threading.Event()
 
-    def loop():
-        while not _KEEPALIVE_STOP.wait(max(60, interval)):
-            TOKEN_VAULT.keepalive_refresh()
+        def loop():
+            while not stop.wait(wait):
+                TOKEN_VAULT.keepalive_refresh()
 
-    _KEEPALIVE_THREAD = threading.Thread(
-        target=loop, name="tolino-token-keepalive", daemon=True)
-    _KEEPALIVE_THREAD.start()
-    log_info("Tolino-Keep-alive gestartet: alle %d Minuten."
-             % (max(60, interval) // 60))
-    return _KEEPALIVE_THREAD
+        thread = threading.Thread(
+            target=loop, name="tolino-token-keepalive", daemon=True)
+        _KEEPALIVE_THREAD, _KEEPALIVE_STOP = thread, stop
+        thread.start()
+    log_info("Tolino-Keep-alive gestartet: alle %d Minuten." % (wait // 60))
+    return thread
 
 
 def stop_token_keepalive(timeout=2):
     """Keep-alive-Schleife anhalten -- aus dem Shutdown des Plugins.
 
-    Calibre prüft beim Herunterfahren, ob noch Threads laufen, und meldet
-    sonst «Thread still alive: tolino-token-keepalive». Ein atexit-Haken
-    käme dafür zu spät: er läuft erst am Ende des Interpreters, die Prüfung
-    davor.
+    Ein Thread, der nach dem Timeout noch in einer Netzwerkoperation steckt,
+    bleibt referenziert; solange er lebt, startet kein zweiter Keep-alive.
     """
-    global _KEEPALIVE_THREAD
-    _KEEPALIVE_STOP.set()
-    thread, _KEEPALIVE_THREAD = _KEEPALIVE_THREAD, None
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=max(0.1, timeout))
+    global _KEEPALIVE_THREAD, _KEEPALIVE_STOP
+    with _KEEPALIVE_LOCK:
+        thread, stop = _KEEPALIVE_THREAD, _KEEPALIVE_STOP
+        if thread is None:
+            return True
+        stop.set()
+        if thread.is_alive():
+            thread.join(timeout=max(0.1, timeout))
+        if thread.is_alive():
+            return False
+        _KEEPALIVE_THREAD = _KEEPALIVE_STOP = None
+        return True
 
 
 def check_stored_login(account_name, partner_id, lock_timeout=5):

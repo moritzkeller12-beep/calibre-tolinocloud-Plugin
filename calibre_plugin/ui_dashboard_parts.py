@@ -141,7 +141,8 @@ class DashboardParts:
         self.account_quick = _combo(
             tip="Jedes Konto hat eine eigene Anmeldung und einen eigenen "
                 "Sync-Stand.",
-            slot=self.quick_account_changed)
+            slot=lambda index: self._account_selected(
+                index, self.account_quick))
         self.account_quick_label = QLabel("Konto")
         self.login_button = _button(
             "Bei tolino anmelden",
@@ -188,7 +189,9 @@ class DashboardParts:
 
     def _build_account_settings(self):
         form = self.settings_dialog.accounts_form
-        self.account_select = _combo(slot=self.account_changed)
+        self.account_select = _combo(
+            slot=lambda index: self._account_selected(
+                index, self.account_select))
         self.account_new = _button("Konto hinzufügen", slot=self.new_account)
         self.account_remove = _button("Konto entfernen …",
                                       slot=self.remove_account)

@@ -127,30 +127,37 @@ def _bookmark_entry(value):
 
 
 def reading_progress(patches):
-    """Reduce bookmark patches to one progress entry per book.
+    """Reduce bookmark patches to the newest progress entry per book.
 
-    Die Cloud schreibt Lesezeichen als ``/bookmark/<id>``-Patches. Pro Buch
-    zählt der zuletzt geänderte Eintrag; ein ``remove`` entfernt ihn.
+    Jedes Lesezeichen bleibt unter seiner ``bookmark/<id>`` getrennt; ein
+    ``remove`` löscht nur dieses eine Lesezeichen. Angezeigt wird danach das
+    zuletzt geänderte noch vorhandene Lesezeichen des Buchs.
     """
-    active = {}
+    active, order, newest = {}, 0, {}
     for item in patches:
         if not isinstance(item, dict):
             continue
         parts = bookmark_path_parts(item.get("path"))
         if parts is None:
             continue
-        book_id = parts[0]
+        key = (parts[0], parts[1])
         if str(item.get("op") or "add") == "remove":
-            active.pop(book_id, None)
+            active.pop(key, None)
             continue
         entry = _bookmark_entry(item.get("value"))
         if entry is None:
             continue
-        previous = active.get(book_id)
-        if previous is not None and previous["modified"] > entry["modified"]:
-            continue
-        active[book_id] = entry
-    return active
+        order += 1
+        previous = active.get(key)
+        if previous is None or entry["modified"] >= previous[0]["modified"]:
+            active[key] = (entry, order)
+    for (book_id, _bookmark_id), (entry, sequence) in active.items():
+        previous = newest.get(book_id)
+        if (previous is None or entry["modified"] > previous[0]["modified"]
+                or (entry["modified"] == previous[0]["modified"]
+                    and sequence > previous[1])):
+            newest[book_id] = (entry, sequence)
+    return {book_id: entry for book_id, (entry, _sequence) in newest.items()}
 
 
 def collection_pairs(patches):

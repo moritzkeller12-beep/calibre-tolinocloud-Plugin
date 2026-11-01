@@ -88,6 +88,12 @@ class FakeTableItem:
     def checkState(self):
         return self._check_state
 
+    def isChecked(self):
+        return bool(self._check_state)
+
+    def setChecked(self, value):
+        self.setCheckState(2 if value else 0)
+
     def setToolTip(self, text):
         self.tooltip = text
 

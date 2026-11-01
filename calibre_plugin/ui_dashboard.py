@@ -12,6 +12,7 @@ from .config import (PREFERRED_FORMATS, account_by_name,
                      save_account, save_credentials,
                      set_active_account, settings)
 from .run_context import RunContext
+from .identifiers import book_uuid
 from .library import (TOLINO_IGNORE_COLUMN, column_state,
                       bool_column_available, update_progress_status,
                       update_read_status, update_tolino_ids)
@@ -25,6 +26,66 @@ from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
                                  report_skipped_uploads)
 from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
+
+
+def _book_ids_by_uuid(dashboard):
+    """Aktuelle Calibre-Nummer je UUID -- nie die gespeicherte Nummer raten."""
+    api = getattr(
+        getattr(getattr(dashboard, "gui", None), "current_db", None),
+        "new_api", None)
+    if api is None:
+        return {}
+    mapping = {}
+    for book_id in api.all_book_ids():
+        key = book_uuid(api.get_metadata(book_id))
+        if key:
+            mapping[key] = book_id
+    return mapping
+
+
+def _reading_column_updates(state, book_ids_by_uuid):
+    """Gespeicherte Lese-Spaltenwerte eines Kontos als Schreibaufträge."""
+    read_updates, progress_updates = [], []
+    for key, entry in (state or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        book_id = book_ids_by_uuid.get(str(key))
+        reading = entry.get("reading")
+        if book_id is None or not isinstance(reading, dict):
+            continue
+        if isinstance(reading.get("read"), bool):
+            read_updates.append((book_id, reading["read"]))
+        progress = reading.get("progress")
+        if isinstance(progress, dict) and "percent" in progress:
+            progress_updates.append((book_id, progress.get("percent")))
+    return read_updates, progress_updates
+
+
+def _mirror_account_reading(dashboard, account_name=None):
+    """Gespeicherte Lesewerte des angezeigten Kontos in Calibre spiegeln."""
+    try:
+        account = account_by_name(
+            account_name or getattr(dashboard, "account_name", "")) or {}
+        state = load_state(account.get("state"))
+        read_updates, progress_updates = _reading_column_updates(
+            state, _book_ids_by_uuid(dashboard))
+        if not (read_updates or progress_updates):
+            return 0
+        database = dashboard.gui.current_db
+        written = (update_read_status(database, read_updates)
+                   if read_updates else 0)
+        if progress_updates:
+            written += update_progress_status(database, progress_updates)
+        if written:
+            _refresh_library_view(
+                dashboard,
+                [book_id for book_id, _value
+                 in read_updates + progress_updates])
+        return written
+    except Exception as exc:
+        log_warning("Lese-Spalten konnten nicht aktualisiert werden: %s"
+                    % sanitize_error(exc))
+        return 0
 
 
 def _persist_sync_result(dialog, state, updates):
@@ -42,19 +103,22 @@ def _persist_sync_result(dialog, state, updates):
     failures = []
     try:
         if account_name:
-            save_account(account_name, {"state": state}, active=account_name)
+            save_account(account_name, {"state": state}, create=False)
     except Exception as exc:
         failures.append("Sync-Zustand")
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s" % sanitize_error(exc))
-    writers = (
+    writers = [
         ("id", "tolino-IDs",
          lambda db: update_tolino_ids(
              db, updates, account_name=account_name)),
-        ("read", "Lesestatus",
-         lambda db: update_read_status(
-             db, list(getattr(worker, "read_updates", ()) or ()))),
-    )
+    ]
+    if account_name and account_name == str(
+            getattr(dialog, "account_name", "") or ""):
+        writers.append(
+            ("read", "Lesestatus",
+             lambda db: update_read_status(
+                 db, list(getattr(worker, "read_updates", ()) or ()))))
     for key, label, write in writers:
         if not columns.get(key):
             continue
@@ -200,14 +264,6 @@ class SyncDashboard(DashboardParts, QDialog):
         """Merken, dass die Geräte-ID von Hand geändert wurde."""
         self._hardware_edited = True
 
-    def account_changed(self, index):
-        """Konto in den Einstellungen gewechselt."""
-        self._account_selected(index, self.account_select)
-
-    def quick_account_changed(self, index):
-        """Konto auf der ersten Seite gewechselt."""
-        self._account_selected(index, self.account_quick)
-
     def _account_selected(self, index, combo):
         """Gewähltes Konto übernehmen -- ein Weg für beide Comboboxen."""
         if index < 0 or not getattr(self, "account_names", None):
@@ -228,8 +284,9 @@ class SyncDashboard(DashboardParts, QDialog):
             return False
         if name not in getattr(self, "account_names", ()):
             return False
-        # Ein laufender Vorgang bleibt an sein Startkonto gebunden.
-        if _dialog_busy(self):
+        # Eine laufende Anmeldeprüfung bleibt an ihr Startkonto gebunden.
+        login = getattr(self, "login_thread", None)
+        if login is not None and login.isRunning():
             try:
                 self.load_values()
             except Exception:
@@ -300,6 +357,7 @@ class SyncDashboard(DashboardParts, QDialog):
         self.refresh.setText("")
         self.formats.setText(", ".join(values["preferred_formats"]))
         self.update_status()
+        _mirror_account_reading(self, self.account_name)
 
     def open_settings(self):
         """Einstellungen öffnen – speichert beim Schliessen."""
@@ -402,11 +460,6 @@ class SyncDashboard(DashboardParts, QDialog):
         """The account this dialog shows – never a different 'active' one."""
         return account_by_name(getattr(self, "account_name", None))
 
-    def run_context(self, values=None):
-        """Konto und Optionen des Laufs als expliziter Kontext."""
-        values = self.values() if values is None else values
-        return RunContext.from_values(values)
-
     def values(self):
         """Sichtbare Werte des Kontos -- nie Zugangsdaten.
 
@@ -486,7 +539,7 @@ class SyncDashboard(DashboardParts, QDialog):
         eine Zeile und die Fehlermeldung knapp.
         """
         self._login_cleanup()
-        context = self.run_context()
+        context = RunContext.from_values(self.values())
         log_warning("Anmeldung abgelehnt: " + str(message))
         self.status.setText("Anmeldung abgelaufen – bitte neu anmelden.")
         self._start_login_window(context)
@@ -506,7 +559,8 @@ class SyncDashboard(DashboardParts, QDialog):
         self.status.setText(
             "Bitte im Browserfenster anmelden, bis die Bücherliste erscheint.")
         worker = BrowserLoginWorker(
-            context.partner_id, self.hardware.text().strip())
+            context.account_name, context.partner_id,
+            self.hardware.text().strip())
         worker.progress.connect(self._login_progress)
         worker.completed.connect(self.login_completed)
         worker.failed.connect(self.login_failed)
@@ -515,10 +569,11 @@ class SyncDashboard(DashboardParts, QDialog):
 
     @gui_guard
     def login_completed(self, refresh, hardware):
+        """Der Worker hat den Token bereits im richtigen Konto gespeichert."""
         self._login_cleanup()
         if hardware:
             self.hardware.setText(str(hardware))
-        self.store_refresh(refresh, str(hardware or ""))
+        self.refresh.setText("")
         self.status.setText("Angemeldet.")
         offer_next_step(self)
 
@@ -638,17 +693,27 @@ class SyncDashboard(DashboardParts, QDialog):
         metadata = payload["metadata"]
         state = payload["state"]
         self._finish_prepare()
+        active_name = str(getattr(self, "account_name", "") or "")
+        is_active = active_name == account_name
+        if is_active:
+            _mirror_account_reading(self, account_name)
 
         # Den rotierten Token speichert bereits der Client-Callback.
         hardware = getattr(self, "hardware", None)
-        if (payload.get("hardware") and hardware is not None
-                and self.account_name == account_name):
+        if payload.get("hardware") and hardware is not None and is_active:
             hardware.setText(str(payload["hardware"]))
         if payload.get("read_status_known") is False:
             log_warning("Lesestatus unbekannt – er bleibt unverändert.")
         if payload.get("progress_status_known") is False:
             log_warning("Lesefortschritt unbekannt – die Spalte bleibt "
                         "unverändert.")
+        if not is_active:
+            log_warning("Vergleich für «%s» abgeschlossen; angezeigt wird «%s»."
+                        % (account_name, active_name))
+            self.status.setText(
+                "Vergleich für Konto «%s» abgeschlossen. Angezeigt wird «%s»."
+                % (account_name, active_name))
+            return
         try:
             selection = self._confirm_comparison(
                 payload["comparison"], context,
@@ -710,7 +775,9 @@ class SyncDashboard(DashboardParts, QDialog):
             self.status.setText(
                 "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
             return
-        if comparison is not None:
+        if (comparison is not None
+                and str(getattr(self, "account_name", "") or "")
+                == context.account_name):
             _mirror_progress(self, comparison, context.columns)
         if not total and not skipped_uploads:
             # Calibre zeigt info_dialog nur mit show=True an.

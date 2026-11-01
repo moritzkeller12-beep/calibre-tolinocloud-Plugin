@@ -6,13 +6,13 @@ from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
 from .planning_values import plural
 from .token_vault import TOKEN_VAULT
-from .config import account_secrets, save_account
+from .config import account_secrets, load_state, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
-                         metadata_fingerprint)
-from .identifiers import display_title, migrate_state_keys, state_entry
+                         metadata_fingerprint, store_reading_state)
+from .identifiers import (display_title, migrate_state_keys, state_entry,
+                          valid_book_uuid)
 from .library import image_suffix
-from .config import load_state
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
 
@@ -36,13 +36,20 @@ class SyncWorker(QObject):
         # (tolino-ID, Calibre-Nummer, gelesen?) je ausdrücklich gewählter
         # Änderung aus dem Vergleichsfenster. Leer heisst: Lesestatus bleibt
         # unangetastet und die Spalte unverändert.
-        self.read_changes = [
-            (str(tolino_id), book_id, bool(finished))
-            for tolino_id, book_id, finished in (read_changes or ())
-            if str(tolino_id or "").strip()]
-        self.read_marks = [tolino_id for tolino_id, _id, finished
+        self.read_changes = []
+        for change in (read_changes or ()):
+            values = tuple(change) if isinstance(change, (tuple, list)) else ()
+            if len(values) < 3:
+                continue
+            tolino_id = str(values[0] or "").strip()
+            if not tolino_id:
+                continue
+            book_uuid = valid_book_uuid(values[3]) if len(values) > 3 else ""
+            self.read_changes.append(
+                (tolino_id, values[1], bool(values[2]), book_uuid))
+        self.read_marks = [tolino_id for tolino_id, _id, finished, _uuid
                            in self.read_changes if finished]
-        self.read_unmarks = [tolino_id for tolino_id, _id, finished
+        self.read_unmarks = [tolino_id for tolino_id, _id, finished, _uuid
                              in self.read_changes if not finished]
         self.titles = {str(key): str(value)
                        for key, value in (titles or {}).items()
@@ -166,7 +173,7 @@ class SyncWorker(QObject):
             return
         try:
             save_account(self.account_name, {"state": self.state},
-                         active=self.account_name)
+                         create=False)
         except Exception as exc:
             raise TolinoError(
                 "Der Sync-Zwischenstand konnte nicht gespeichert werden. "
@@ -290,13 +297,36 @@ class SyncWorker(QObject):
                 lambda: client.mark_read_many(book_ids, finished=finished),
                 done, total)
             if ok:
-                self.read_updates.extend(
-                    (book_id, finished) for _tolino, book_id, state
-                    in self.read_changes
-                    if state is finished and book_id is not None)
+                stored = False
+                for _tolino, book_id, state, book_uuid in self.read_changes:
+                    if state is not finished:
+                        continue
+                    if book_id is not None:
+                        self.read_updates.append((book_id, finished))
+                    stored = self._store_read_state(book_uuid, finished) or stored
+                if stored:
+                    self._persist_state()
                 self.progress.emit(done, total, done_text)
             done += 1
         return done
+
+    def _store_read_state(self, book_uuid, finished):
+        """Bestätigten Lesestatus im Account-State dieses Laufs sichern."""
+        key = valid_book_uuid(book_uuid)
+        if not key:
+            return False
+        entry = self.state.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+            self.state[key] = entry
+        reading = entry.get("reading")
+        if not isinstance(reading, dict):
+            reading = {}
+            entry["reading"] = reading
+        if reading.get("read") is bool(finished):
+            return False
+        reading["read"] = bool(finished)
+        return True
 
     def _load_collection_pairs(self, client, collection_ops, done, total):
         """Cloud-Zuordnungen lesen; ein Fehler zaehlt jede Aktion als beendet."""
@@ -599,6 +629,10 @@ class PrepareWorker(QObject):
                 state, inventory, read_ids, progress_by_id)
             if self._stop_requested():
                 return
+            if store_reading_state(state, comparison):
+                # Nur bestehende Konten aktualisieren: ein während des
+                # Vergleichs entferntes Konto darf nicht wieder erscheinen.
+                save_account(self.account_name, {"state": state}, create=False)
             self.ready.emit({
                 "context": self.context,
                 "metadata": self.metadata,

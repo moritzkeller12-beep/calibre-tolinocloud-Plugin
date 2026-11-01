@@ -99,37 +99,30 @@ def _decrypt_reader_blob(value):
     return cryptojs_decrypt(text).strip()
 
 
-def _refresh_field_text(json_text):
-    """The refresh-ish string field of a decrypted reader JSON bundle."""
+def _json_field_text(value, names):
+    """First non-empty string field from a JSON object; '' when none."""
     try:
-        parsed = json.loads(json_text)
+        parsed = json.loads(value)
     except ValueError:
-        return None
+        return ""
     if not isinstance(parsed, dict):
-        return None
-    for name in ("refresh",) + TOKEN_VALUE_KEYS:
+        return ""
+    for name in names:
         nested = parsed.get(name)
         if isinstance(nested, str) and nested.strip():
             return nested.strip()
-    return None
+    return ""
+
+
+def _refresh_field_text(json_text):
+    """The refresh-ish string field of a decrypted reader JSON bundle."""
+    return _json_field_text(json_text, ("refresh",) + TOKEN_VALUE_KEYS) or None
 
 
 def _hardware_from_reader_blob(value):
     """hardwareId from a decrypted userInfos blob; '' when there is none."""
     plain = _decrypt_reader_blob(value)
-    if not plain:
-        return ""
-    try:
-        parsed = json.loads(plain)
-    except ValueError:
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    for name in HARDWARE_VALUE_KEYS:
-        nested = parsed.get(name)
-        if isinstance(nested, str) and nested.strip():
-            return nested.strip()
-    return ""
+    return _json_field_text(plain, HARDWARE_VALUE_KEYS) if plain else ""
 
 
 def _unwrap_refresh_candidate(token, max_depth=3):

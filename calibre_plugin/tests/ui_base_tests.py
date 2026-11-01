@@ -438,13 +438,15 @@ class InventoryDialogBuildTests(unittest.TestCase):
                                  dialog.table.items[(index, 11)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
-                upload = dialog._check(index, 0)
-                metadata = dialog._check(index, 1)
-                mark_read = dialog._check(index, 2)
-                self.assertTrue(upload.item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-                self.assertEqual(in_cloud, bool(metadata.item.flags() &
+                upload = dialog.table.item(index, 0)
+                metadata = dialog.table.item(index, 1)
+                mark_read = dialog.table.item(index, 2)
+                self.assertTrue(upload.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+                self.assertEqual(ui_module.dialogs.Qt.AlignmentFlag.AlignCenter,
+                                 upload.text_alignment)
+                self.assertEqual(in_cloud, bool(metadata.flags() &
                                                 ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
-                self.assertEqual(in_cloud, bool(mark_read.item.flags() &
+                self.assertEqual(in_cloud, bool(mark_read.flags() &
                                                 ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
                 # Vorbelegt ist, was der Vergleich vorschlägt; die Lese-Marke
                 # bleibt unangetastet.

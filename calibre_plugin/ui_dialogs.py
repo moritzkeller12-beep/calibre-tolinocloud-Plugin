@@ -103,67 +103,38 @@ def row_capabilities(row):
     }
 
 
-class _ActionCheck:
-    """Sicht auf eine Check-Zelle; der Zustand liegt im QTableWidgetItem."""
-
-    def __init__(self, item):
-        self.item = item
-
-    def isChecked(self):
-        return self.item.checkState() == Qt.CheckState.Checked
-
-    def setChecked(self, value):
-        # Ohne expliziten CheckState zeichnet Qt kein leeres Kästchen.
-        self.item.setCheckState(
-            Qt.CheckState.Checked if value else Qt.CheckState.Unchecked)
-
-    def setEnabled(self, enabled):
-        flags = self.item.flags()
-        # Checkbar bleibt das Feld auch deaktiviert: Qt zeichnet das
-        # Kästchen dann grau, statt es ganz zu verstecken.
-        flags |= Qt.ItemFlag.ItemIsUserCheckable
-        if enabled:
-            flags |= Qt.ItemFlag.ItemIsEnabled
-        else:
-            flags &= ~Qt.ItemFlag.ItemIsEnabled
-        self.item.setFlags(flags)
-
-    def setToolTip(self, text):
-        self.item.setToolTip(str(text or ""))
-
-
 class _CenteredCheckDelegate(QStyledItemDelegate):
     """Zeichnet Check-Indikatoren mittig; die ganze Zelle schaltet um."""
 
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+        show_check = bool(
+            opt.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator)
+        # Der native Delegate zeichnet alles ausser dem Indikator; der wird
+        # anschliessend mittig statt links gesetzt.
+        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        QStyledItemDelegate.paint(self, painter, opt, index)
         style = opt.widget.style() if opt.widget is not None else None
-        if style is None:
-            QStyledItemDelegate.paint(self, painter, option, index)
+        if not show_check or style is None:
             return
-        style.drawPrimitive(
-            QStyle.PrimitiveElement.PE_PanelItemViewItem,
-            opt, painter, opt.widget)
-        if opt.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator:
-            if opt.checkState == Qt.CheckState.PartiallyChecked:
-                opt.state |= QStyle.StateFlag.State_NoChange
-            elif opt.checkState == Qt.CheckState.Checked:
-                opt.state |= QStyle.StateFlag.State_On
-            else:
-                opt.state |= QStyle.StateFlag.State_Off
-            rect = style.subElementRect(
-                QStyle.SubElement.SE_ItemViewItemCheckIndicator,
-                opt, opt.widget)
-            opt.rect = QStyle.alignedRect(
-                opt.direction, Qt.AlignmentFlag.AlignCenter,
-                rect.size(), opt.rect)
-            opt.state &= ~QStyle.StateFlag.State_HasFocus
-            style.drawPrimitive(
-                QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
-                opt, painter, opt.widget)
+        check = QStyleOptionViewItem(opt)
+        check.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemCheckIndicator,
+            check, opt.widget)
+        check.rect = QStyle.alignedRect(
+            opt.direction, Qt.AlignmentFlag.AlignCenter, rect.size(), opt.rect)
+        if check.checkState == Qt.CheckState.PartiallyChecked:
+            check.state |= QStyle.StateFlag.State_NoChange
+        elif check.checkState == Qt.CheckState.Checked:
+            check.state |= QStyle.StateFlag.State_On
         else:
-            QStyledItemDelegate.paint(self, painter, option, index)
+            check.state |= QStyle.StateFlag.State_Off
+        check.state &= ~QStyle.StateFlag.State_HasFocus
+        style.drawPrimitive(
+            QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
+            check, painter, opt.widget)
 
     def editorEvent(self, event, model, option, index):
         if event.type() in (QEvent.Type.MouseButtonRelease,
@@ -477,15 +448,12 @@ class InventoryDialog(QDialog):
         for column in self.TECHNICAL_COLUMNS:
             self.table.setColumnHidden(column, not self._technical_visible)
 
-    def _check(self, row_index, column):
-        """Check-Controller einer Aktionszelle; der Zustand liegt in der Zelle."""
-        return _ActionCheck(self.table.item(row_index, column))
-
     def _choice_changed(self, row_index, column):
         """Die Zeile hält die Auswahl; die Zelle zeigt sie nur an."""
         row = self.rows[row_index]
         key = self.ACTION_KEYS[column]
-        checked = bool(self._check(row_index, column).isChecked())
+        checked = (self.table.item(row_index, column).checkState()
+                   == Qt.CheckState.Checked)
         if key == "read":
             row["read"].chosen = checked
         else:
@@ -501,7 +469,8 @@ class InventoryDialog(QDialog):
         previous = self._syncing_checks
         self._syncing_checks = True
         try:
-            self._check(row_index, column).setChecked(value)
+            self.table.item(row_index, column).setCheckState(
+                Qt.CheckState.Checked if value else Qt.CheckState.Unchecked)
         finally:
             self._syncing_checks = previous
 
@@ -573,11 +542,12 @@ class InventoryDialog(QDialog):
                 if row.get(key) and row_capabilities(row).get(key)}
 
     def selected_read_changes(self):
-        """(tolino-ID, Calibre-Nummer, gelesen?) der offenen Änderungen.
+        """(tolino-ID, Calibre-Nr., gelesen?, UUID) der offenen Änderungen.
 
         Die Zeile kennt Cloud-Stand und Auswahl; übertragen wird nur die
-        Abweichung. Die Calibre-Nummer wandert mit, damit der bestätigte
-        Stand ohne zweite Suche in die Spalte #tolino_read wandert.
+        Abweichung. Calibre-Nummer und UUID wandern mit, damit der bestätigte
+        Stand im richtigen Konto-State landet und in die Spalte #tolino_read
+        gespiegelt werden kann.
         """
         changes = []
         for row in self.rows:
@@ -585,7 +555,7 @@ class InventoryDialog(QDialog):
             if not row_capabilities(row)["read"] or not state.changed:
                 continue
             changes.append((str(row["tolino_id"]), row.get("book_id"),
-                            state.chosen))
+                            state.chosen, str(row.get("uuid") or "")))
         return changes
 
     def _marked_row_indexes(self):
@@ -742,15 +712,24 @@ class InventoryDialog(QDialog):
         )
         for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(specs):
             item = QTableWidgetItem("")
-            check = _ActionCheck(item)
-            check.setEnabled(enabled)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Checkbar bleibt das Feld auch deaktiviert: Qt zeichnet das
+            # Kästchen dann grau, statt es ganz zu verstecken.
+            flags = item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+            if enabled:
+                flags |= Qt.ItemFlag.ItemIsEnabled
+            else:
+                flags &= ~Qt.ItemFlag.ItemIsEnabled
+            item.setFlags(flags)
             # Eine deaktivierte Aktion nie angehakt zeigen -- sonst sähe eine
             # ignorierte oder zum Löschen markierte Zeile ausgewählt aus.
-            check.setChecked(bool(row.get(key)) and enabled)
+            item.setCheckState(Qt.CheckState.Checked
+                               if bool(row.get(key)) and enabled
+                               else Qt.CheckState.Unchecked)
             if (key == "upload" and row.get("match_reason") in
                     ("title_only", "ambiguous")):
                 tooltip = "Kann ein Duplikat erzeugen."
-            check.setToolTip(
+            item.setToolTip(
                 self.IGNORED_TOOLTIP if ignored
                 else tooltip if enabled
                 else (self.DELETE_TOOLTIP if delete_cloud
@@ -869,7 +848,7 @@ class InventoryDialog(QDialog):
         Frueher zaehlten vier Methoden dieselben Zeilen je sechsmal -- bei
         jedem Klick und nach jedem Neuaufbau.
         """
-        uploads, metadata = set(), set()
+        uploads = metadata = 0
         marked_read = marked_unread = deletions = undecided = 0
         review_groups = ("review", "duplicate_tolino", "not_matchable")
         for row in self.rows:
@@ -879,9 +858,9 @@ class InventoryDialog(QDialog):
             if caps["delete"] and row.get("delete_cloud"):
                 deletions += 1
             if caps["upload"] and row.get("upload"):
-                uploads.add(row["book_id"])
+                uploads += 1
             if caps["metadata"] and row.get("metadata"):
-                metadata.add(row["book_id"])
+                metadata += 1
             if not caps["read"]:
                 continue
             state = row["read"]
@@ -891,9 +870,8 @@ class InventoryDialog(QDialog):
                 marked_read += 1
             else:
                 marked_unread += 1
-        work = (len(uploads) + len(metadata) + marked_read
-                + marked_unread + deletions)
-        return {"uploads": len(uploads), "metadata": len(metadata),
+        work = uploads + metadata + marked_read + marked_unread + deletions
+        return {"uploads": uploads, "metadata": metadata,
                 "read": marked_read, "unread": marked_unread,
                 "deletions": deletions, "undecided": undecided,
                 "work": work}
@@ -960,21 +938,6 @@ class InventoryDialog(QDialog):
             return None
         return self.rows[row_index]
 
-    def _cached_or_new_client(self):
-        """Client holen -- im Worker-Thread, ohne Widget-Zugriff.
-
-        Fehler werden als Exception weitergereicht; Meldungsfenster und
-        Zustand bleiben Sache des GUI-Threads.
-        """
-        if self._cached_client is not None:
-            return self._cached_client
-        if self.client_factory is None:
-            raise RuntimeError("Keine Anmeldung verfügbar.")
-        client = self.client_factory()
-        if client is not None:
-            self._cached_client = client
-        return client
-
     def _start_action(self, call, on_done, on_failed, text=""):
         """Netzaufruf auslagern; genau eine Aktion zur Zeit.
 
@@ -1027,9 +990,12 @@ class InventoryDialog(QDialog):
             "Buchdatei wird aus tolino geladen …")
 
     def _download_content(self, tolino_id):
-        """Buchdatei ohne Zusatzdateien im Hintergrund laden."""
-        client = self._cached_or_new_client()
-        return client.download(tolino_id)
+        """Buchdatei im Hintergrund laden; die Anmeldung bleibt gecacht."""
+        if self._cached_client is None:
+            if self.client_factory is None:
+                raise RuntimeError("Keine Anmeldung verfügbar.")
+            self._cached_client = self.client_factory()
+        return self._cached_client.download(tolino_id)
 
     @gui_guard
     def _download_finished(self, result):
@@ -1060,19 +1026,15 @@ class InventoryDialog(QDialog):
         info_dialog(self, "Buch gespeichert", "Gespeichert unter: %s" % path,
                     show=True, show_copy_button=False)
 
-    def _action_failed(self, title, summary, exc, context):
-        """Nach einem gescheiterten Netzaufruf: aufräumen, neu anmelden, melden."""
-        self._end_action()
-        self._cached_client = None
-        error_dialog(self, title,
-                     summary + "\n\n" + report_error(exc, context), show=True)
-
     @gui_guard
     def _download_failed(self, exc):
-        self._action_failed(
-            "Cloud-Download fehlgeschlagen",
-            "Der Download ist fehlgeschlagen. Details stehen im Calibre-Log.",
-            exc, "Download")
+        """Nach einem Downloadfehler die Anmeldung erneuern und melden."""
+        self._end_action()
+        self._cached_client = None
+        error_dialog(
+            self, "Cloud-Download fehlgeschlagen",
+            "Der Download ist fehlgeschlagen. Details stehen im Calibre-Log."
+            "\n\n" + report_error(exc, "Download"), show=True)
 
     def delete_marked_from_cloud(self):
         """Markierte Cloud-Kopien zum Löschen vormerken.

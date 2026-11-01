@@ -167,7 +167,8 @@ def upload_jobs(dialog, metadata, uploads):
 def plan_counts(preparation, uploads):
     """Zahlen des Laufs -- eine Regel für Plan, Text und Fortschritt."""
     changes = preparation.get("read_changes") or ()
-    marked = sum(1 for _tolino, _book, finished in changes if finished)
+    marked = sum(1 for change in changes
+                 if len(change) > 2 and change[2])
     unmarked = len(changes) - marked
     counts = {
         "uploads": int(uploads),

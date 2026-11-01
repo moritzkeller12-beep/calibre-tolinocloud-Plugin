@@ -1362,6 +1362,8 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         original = config.PREFERENCES
         try:
             config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("konto", {}, active="konto")
+            config.save_account("default", {}, active="default")
             config.save_credentials("konto", "tok-1", "hw-1")
             account = config.account_by_name("konto")
             self.assertEqual("tok-1", account["refresh_token"])

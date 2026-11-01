@@ -13,7 +13,7 @@ from ..sync_data import reading_progress
 def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
 
-    return [tolino_id for tolino_id, _book, state
+    return [tolino_id for tolino_id, _book, state, _uuid
             in dialog.selected_read_changes() if state is finished]
 
 
@@ -159,6 +159,20 @@ class ProgressReducerTests(unittest.TestCase):
         patches = [self._patch("add", {"progress": 0.4}),
                    self._patch("remove", {"progress": 0.4})]
         self.assertEqual({}, reading_progress(patches))
+
+    def test_removing_one_bookmark_keeps_the_other_progress(self):
+        patches = [
+            self._patch("replace", {"progress": 0.25, "modified": 100},
+                        tag="1"),
+            self._patch("replace", {"progress": 0.75, "modified": 200},
+                        tag="2"),
+        ]
+        self.assertEqual(75, reading_progress(patches)["b1"]["percent"])
+        self.assertEqual(25, reading_progress(
+            patches + [self._patch("remove", {}, tag="2")])["b1"]["percent"])
+        self.assertEqual({}, reading_progress(
+            patches + [self._patch("remove", {}, tag="2"),
+                       self._patch("remove", {}, tag="1")]))
 
     def test_foreign_and_malformed_paths_are_ignored(self):
         patches = [
@@ -330,7 +344,7 @@ class ReadColumnDialogTests(_QtDialogTest):
     def _cell(dialog, title):
         index = next(i for i, row in enumerate(dialog.rows)
                      if row["title"] == title)
-        return index, dialog._check(index, 2)
+        return index, dialog.table.item(index, 2)
 
     def test_calibre_value_is_a_note_not_a_default_or_action(self):
         ui_module = self._ui()
@@ -386,7 +400,7 @@ class ReadColumnDialogTests(_QtDialogTest):
         row = dict(self._rows()[0],
                    read=ReadState(known=False, cloud=True, local=True))
         dialog = ui_module.dialogs.InventoryDialog([row])
-        self.assertFalse(dialog._check(0, 2).item.flags() &
+        self.assertFalse(dialog.table.item(0, 2).flags() &
                          ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))

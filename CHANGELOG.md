@@ -4,6 +4,11 @@ Aktuelle Version: **0.1.06** (Quelle: [`__init__.py`](__init__.py)).
 
 ## 0.1.06
 
+- Lesestatus und Lesefortschritt werden jetzt vollständig kontobezogen im vorhandenen Konto-Zustand gespeichert (`state[book_uuid]["reading"]`). `#tolino_read` und `#tolino_progress` zeigen ausschließlich den Stand des ausgewählten Kontos; beim Konto-Wechsel werden die gespeicherten Werte anhand der Calibre-UUID übernommen.
+- Nach einem erfolgreichen Vergleich werden bekannte Cloud-Lesewerte auch dann gespeichert, wenn der Vergleich abgebrochen wird. Unbekannte Abrufe überschreiben keine gespeicherten Werte; ein erfolgreicher Abruf ohne Bookmark speichert `percent=None` und leert die Fortschrittsspalte, statt `0 %` anzuzeigen.
+- Manuelle Leseänderungen werden nur nach einer bestätigten Cloud-Operation im richtigen Konto-State gespeichert. Ein paralleler Konto-Wechsel bleibt abgesichert: Ergebnisse von Konto A landen weiterhin im A-State und überschreiben weder die Anzeige noch den State von Konto B.
+- Alte States ohne `reading` bleiben verlustfrei; die Leseinformationen werden beim ersten erfolgreichen Vergleich ergänzt. Veraltete `calibre_id`-Werte werden für die Anzeige nicht verwendet, weil die Zuordnung über die UUID erfolgt.
+- Das virtuelle Standardkonto einer frischen Installation heißt wieder `default`; der erste Vergleich kann seinen Zustand mit `save_account(..., create=False)` speichern, ohne ein gelöschtes Konto neu anzulegen.
 - Neue informative Calibre-Spalte `#tolino_progress` (Anzeigename „tolino gelesen %“, Zahl 0–100): Sie zeigt den Lesefortschritt aus den `bookmark`-Patches der tolino-Cloud, im Vergleichsfenster zusätzlich mit Position (z. B. `33 % · 192/590`). Der Wert wird nie nach tolino zurückgeschrieben; bei unbekanntem Cloud-Stand bleibt die Spalte unverändert.
 - Der Bestandsvergleich liest Lesestatus und Fortschritt aus demselben `sync-data`-Snapshot. Ein fehlender Bookmark bedeutet «kein Fortschritt», nicht «0 Prozent»; ein fehlgeschlagener Abruf wird als «unbekannt» angezeigt.
 - Für den Abgleich extrahiert das Plugin eine gültige ISBN aus tolino-Produktkennungen wie `DT0400.9783832170141_A38978050`. Die Kennung bleibt weiterhin keine Deliverable-ID für Download oder Löschen.

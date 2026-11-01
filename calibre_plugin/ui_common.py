@@ -209,16 +209,21 @@ def _set_enabled(owner, names, enabled):
 
 
 def _apply_busy(dialog, busy):
-    """Disable account/partner/sync controls while an operation runs.
+    """Disable sync controls while keeping the account switch available.
 
-    Der Statustext kommt von den Startern -- sie wissen, was läuft; hier
-    würde nur geraten.
+    Während Vergleich oder Sync darf das angezeigte Konto gewechselt werden;
+    die laufende Aktion bleibt über RunContext an ihr Startkonto gebunden.
+    Eine laufende Anmeldeprüfung blockiert den Wechsel dagegen weiterhin.
     """
-    _set_enabled(dialog, ("account_quick", "account_select", "account_new",
-                          "account_remove", "partner", "login_button",
-                          "settings_button", "hardware", "refresh",
-                          "formats"),
-                 not busy)
+    switchable = bool(getattr(dialog, "thread", None)
+                      or getattr(dialog, "prepare_thread", None))
+    _set_enabled(dialog, ("account_new", "account_remove", "partner",
+                          "login_button", "settings_button", "hardware",
+                          "refresh", "formats"), not busy)
+    # Während Vergleich/Sync bleibt die Kontoauswahl bedienbar. Das gilt
+    # auch dann, wenn `_apply_busy` vor dem Setzen des Threads läuft.
+    _set_enabled(dialog, ("account_quick", "account_select"),
+                 not busy or switchable)
 
 
 LOGIN_NEXT_STEP = "Anmeldung erneut starten; Details stehen im Calibre-Log."

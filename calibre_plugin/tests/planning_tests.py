@@ -1209,6 +1209,29 @@ class SyncPlanTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
+    def test_first_install_uses_the_virtual_default_account(self):
+        """Frischer Store: „default“ muss lesbar und beschreibbar sein."""
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            values = config.settings()
+            self.assertEqual("default", values["active_account"])
+            self.assertEqual(["default"],
+                             [item["name"] for item in values["accounts"]])
+            account = config.account_by_name("default")
+            self.assertEqual("default", account["name"])
+            self.assertEqual({}, account["state"])
+            # Der erste Vergleich schreibt in das virtuelle Default-Konto,
+            # ohne ein zweites Konto anzulegen.
+            self.assertTrue(config.save_account(
+                "default", {"state": {"u": {"tolino_id": "t"}}},
+                create=False))
+            saved = config.account_by_name("default")
+            self.assertEqual("t", saved["state"]["u"]["tolino_id"])
+            self.assertEqual("default", config.settings()["active_account"])
+        finally:
+            config.PREFERENCES = original
+
     def test_settings_do_not_return_obsolete_options(self):
         original = config.PREFERENCES
         try:
@@ -1402,9 +1425,20 @@ class SyncPlanTests(unittest.TestCase):
         self.addCleanup(setattr, config, "PREFERENCES", original)
         config.save_account("konto", {"refresh_token": "alt",
                                       "hardware_id": "hw"}, active="konto")
+        config.save_account("behalten", {}, active="behalten")
         config.remove_account("konto")
         config.save_refresh_token("konto", "spaet")
+        self.assertFalse(config.save_hardware_id("konto", "hw-spaet"))
+        self.assertFalse(config.save_credentials("konto", "tok", "hw"))
         self.assertEqual({}, config.account_by_name("konto"))
+
+    def test_a_fresh_default_account_can_store_its_first_token(self):
+        original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        self.assertTrue(config.save_refresh_token("default", "erster"))
+        self.assertEqual("erster",
+                         config.account_by_name("default")["refresh_token"])
 
     def test_keepalive_refresh_skips_when_there_is_nothing_to_do(self):
         """Ohne Token und bei laufender Rotation passiert nichts."""

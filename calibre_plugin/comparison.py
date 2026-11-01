@@ -172,6 +172,63 @@ def _progress_state(tolino_id, progress_known, progress_by_id):
         last=item.get("last", ""), position=item.get("position", ""))
 
 
+_READING_STATUSES = frozenset(("identical", "changed"))
+
+
+def store_reading_state(state, comparison):
+    """Bekannte Cloud-Lesewerte in den State des abgefragten Kontos übernehmen.
+
+    Nur eindeutig zugeordnete Zeilen dürfen schreiben. Unbekannte Abrufe
+    lassen den gespeicherten Wert unverändert; ein erfolgreicher Abruf ohne
+    Bookmark speichert dagegen ausdrücklich ``percent=None``.
+    """
+    if not isinstance(state, dict):
+        return 0
+    changed = 0
+    for row in comparison or ():
+        if (not isinstance(row, dict)
+                or row.get("status") not in _READING_STATUSES):
+            continue
+        key = valid_book_uuid(row.get("uuid"))
+        tolino_id = str(row.get("tolino_id") or "").strip()
+        book_id = row.get("book_id")
+        if not key or not tolino_id or book_id is None:
+            continue
+        read = row.get("read")
+        progress = row.get("progress")
+        read_known = bool(read is not None and getattr(read, "known", False))
+        progress_known = bool(progress is not None
+                              and getattr(progress, "known", False))
+        if not (read_known or progress_known):
+            continue
+        entry = state.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+            state[key] = entry
+        recorded = str(entry.get("tolino_id") or "").strip()
+        if recorded and recorded != tolino_id:
+            continue
+        before_entry = dict(entry)
+        entry["tolino_id"] = tolino_id
+        entry["calibre_id"] = book_id
+        reading = entry.get("reading")
+        if not isinstance(reading, dict):
+            reading = {}
+            entry["reading"] = reading
+        before_reading = dict(reading)
+        if read_known:
+            reading["read"] = bool(read.cloud)
+        if progress_known:
+            reading["progress"] = {
+                "percent": progress.percent,
+                "current": progress.current,
+                "last": progress.last,
+                "position": progress.position,
+            }
+        if entry != before_entry or reading != before_reading:
+            changed += 1
+    return changed
+
 
 class _RemoteIndex:
     """Cloud-Zeilen plus Lookup-Indizes -- in derselben Reihenfolge.

@@ -214,10 +214,7 @@ def normalize_hardware_id(value):
         return ""
     compact = text.replace("-", "")
     if re.fullmatch(r"[0-9a-fA-F]{32}", compact):
-        formatted = "%s-%s-%s-%s-%s" % (
-            compact[0:8], compact[8:12], compact[12:16],
-            compact[16:20], compact[20:32])
-        return formatted.lower()
+        return str(uuid.UUID(hex=compact))
     return text
 
 

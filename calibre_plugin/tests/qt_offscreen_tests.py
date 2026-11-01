@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
 def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
 
-    return [tolino_id for tolino_id, _book, state
+    return [tolino_id for tolino_id, _book, state, _uuid
             in dialog.selected_read_changes() if state is finished]
 
 
@@ -80,19 +80,44 @@ class InventoryDialogQtTests(unittest.TestCase):
             "tolino_id": "cloud-1", "read_column": True,
             "read": ReadState(cloud=False, local=True),
         }])
-        check = dialog._check(0, 2)
-        self.assertFalse(check.isChecked())
+        check = dialog.table.item(0, 2)
+        self.assertEqual(Qt.CheckState.Unchecked, check.checkState())
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
         self.assertIn("Calibre-Lesestatus: gelesen", dialog.table.item(0, 7).text())
 
-        check.setChecked(True)
+        check.setCheckState(Qt.CheckState.Checked)
         self.assertEqual(["cloud-1"], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
 
-        check.setChecked(False)
+        check.setCheckState(Qt.CheckState.Unchecked)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
+        dialog.close()
+
+    def test_a_click_anywhere_in_the_check_cell_toggles_it(self):
+        dialog = InventoryDialog([{
+            "title": "Read me", "authors": "Author",
+            "status": "identical", "group": "unchanged", "book_id": 1,
+            "tolino_id": "cloud-3", "read": ReadState(cloud=False),
+        }])
+        delegate = dialog.table.itemDelegateForColumn(2)
+        model, index = dialog.table.model(), dialog.table.model().index(0, 2)
+
+        class Click:
+            @staticmethod
+            def type():
+                return QEvent.Type.MouseButtonRelease
+
+            @staticmethod
+            def button():
+                return Qt.MouseButton.LeftButton
+
+        self.assertTrue(delegate.editorEvent(
+            Click(), model, QStyleOptionViewItem(), index))
+        self.assertEqual(Qt.CheckState.Checked,
+                         dialog.table.item(0, 2).checkState())
+        self.assertEqual(["cloud-3"], _read_ids(dialog, True))
         dialog.close()
 
     def test_title_column_stays_wider_than_author_column(self):
@@ -121,7 +146,7 @@ class InventoryDialogQtTests(unittest.TestCase):
             "tolino_id": "cloud-2", "read_column": True,
             "read": ReadState(cloud=True, local=False),
         }])
-        dialog._check(0, 2).setChecked(False)
+        dialog.table.item(0, 2).setCheckState(Qt.CheckState.Unchecked)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual(["cloud-2"], _read_ids(dialog, False))
         self.assertFalse(dialog.rows[0]["read"].local)

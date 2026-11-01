@@ -38,20 +38,28 @@ def _account(value, fallback_name=DEFAULT_ACCOUNT_NAME):
     return result
 
 
+def _named_accounts(raw):
+    """Namen und Rohdatensatz je Konto, ohne andere Zustände zu kopieren."""
+    if not isinstance(raw, list) or not raw:
+        # Auf einer frischen Installation ist das Default-Konto nur virtuell.
+        yield DEFAULT_ACCOUNT_NAME, {}
+        return
+    names = set()
+    for index, value in enumerate(raw):
+        source = value if isinstance(value, dict) else {}
+        fallback = "account-%d" % (index + 1)
+        base = str(source.get("name") or fallback).strip() or fallback
+        name, number = base, index + 1
+        while name in names:
+            name, number = "%s-%d" % (base, number), number + 1
+        names.add(name)
+        yield name, source
+
+
 def _account_list(raw):
     """Normalize fresh-store account records; never inspect legacy top-level keys."""
-    if not isinstance(raw, list) or not raw:
-        return [_account({}, DEFAULT_ACCOUNT_NAME)]
-    accounts = [_account(item, "account-%d" % (index + 1))
-                for index, item in enumerate(raw)]
-    names = set()
-    for index, item in enumerate(accounts):
-        base, number = item["name"], index + 1
-        while item["name"] in names:
-            item["name"] = "%s-%d" % (base, number)
-            number += 1
-        names.add(item["name"])
-    return accounts
+    return [_account(dict(value, name=name), name)
+            for name, value in _named_accounts(raw)]
 
 
 def _accounts_and_active():
@@ -85,11 +93,15 @@ def settings():
         }
 
 
-def save_account(name, values, active=None, preferred_formats=None):
+def save_account(name, values, active=None, preferred_formats=None,
+                 create=True):
     """Persist one account without changing any other account's state.
 
     `preferred_formats` schreibt die globalen Formate im selben Commit mit;
-    der Dialog braucht dafür keinen zweiten Schreibaufruf.
+    der Dialog braucht dafür keinen zweiten Schreibaufruf. Mit
+    ``create=False`` werden nur bestehende Konten aktualisiert: ein
+    verspäteter Hintergrund-Schreibvorgang darf kein gelöschtes Konto
+    wieder anlegen.
     """
     with _SETTINGS_LOCK:
         accounts, current_active = _accounts_and_active()
@@ -102,6 +114,8 @@ def save_account(name, values, active=None, preferred_formats=None):
                 accounts[index] = normalized
                 break
         else:
+            if not create:
+                return False
             accounts.append(normalized)
         chosen = active or current_active
         if chosen not in {item["name"] for item in accounts}:
@@ -112,12 +126,45 @@ def save_account(name, values, active=None, preferred_formats=None):
             PREFERENCES[PREFERRED_FORMATS] = copy.deepcopy(
                 list(preferred_formats))
         PREFERENCES.commit()
+        return True
 
 
 def account_by_name(name):
-    """Return the stored account dict for ``name`` -- never a different one."""
-    return next((item for item in settings()["accounts"]
-                 if item["name"] == name), {})
+    """Return one account without copying every other account's state."""
+    with _SETTINGS_LOCK:
+        accounts = PREFERENCES.get("accounts", None)
+        for stored_name, value in _named_accounts(accounts):
+            if stored_name == name:
+                return _account(dict(value, name=stored_name), stored_name)
+    return {}
+
+
+def _update_account(name, values, allow_default=False):
+    """Update one existing account; callbacks never recreate deleted accounts."""
+    if not name:
+        return False
+    with _SETTINGS_LOCK:
+        raw = PREFERENCES.get("accounts", None)
+        records = raw if isinstance(raw, list) else []
+        if records:
+            for index, (stored_name, source) in enumerate(
+                    _named_accounts(records)):
+                if stored_name != name:
+                    continue
+                accounts = list(records)
+                accounts[index] = _account(
+                    dict(source, **values, name=stored_name), stored_name)
+                PREFERENCES["accounts"] = accounts
+                PREFERENCES.commit()
+                return True
+        # Auf einer frischen Installation ist das Default-Konto nur virtuell.
+        if not (allow_default and not records and name == DEFAULT_ACCOUNT_NAME):
+            return False
+        PREFERENCES["accounts"] = [_account(dict(values, name=name), name)]
+        if not PREFERENCES.get("active_account"):
+            PREFERENCES["active_account"] = name
+        PREFERENCES.commit()
+        return True
 
 
 def set_active_account(name):
@@ -133,12 +180,10 @@ def save_credentials(account_name, refresh_token, hardware):
     Das aktive Konto bleibt unberührt: der Keep-alive rotiert alle Konten,
     ein Token-Rotationsschritt darf die Auswahl nicht umschalten.
     """
-    if not account_name:
-        return
-    save_account(account_name, {
+    return _update_account(account_name, {
         "refresh_token": refresh_token,
         "hardware_id": hardware,
-    })
+    }, allow_default=True)
 
 
 def save_refresh_token(account_name, token):
@@ -150,22 +195,22 @@ def save_refresh_token(account_name, token):
     ein gerade entferntes Konto nicht wieder erzeugen.
     """
     token = str(token or "").strip()
-    if account_name and token and account_by_name(account_name):
-        save_account(account_name, {"refresh_token": token})
+    if token:
+        return _update_account(account_name, {"refresh_token": token},
+                               allow_default=True)
+    return False
 
 
 def clear_refresh_token(account_name):
     """Einen eindeutig abgelehnten Refresh-Token aus dem Konto loeschen."""
-    if not account_name or not account_by_name(account_name):
-        return False
-    save_account(account_name, {"refresh_token": ""})
-    return True
+    return _update_account(account_name, {"refresh_token": ""})
 
 
 def save_hardware_id(account_name, hardware):
     """Die Geraete-ID im Konto sichern -- die Config ist ihre einzige Quelle."""
-    if account_name:
-        save_account(account_name, {"hardware_id": str(hardware or "")})
+    return _update_account(account_name,
+                           {"hardware_id": str(hardware or "")},
+                           allow_default=True)
 
 
 def account_secrets(account_name):

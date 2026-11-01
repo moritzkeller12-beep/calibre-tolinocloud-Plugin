@@ -6,7 +6,8 @@ import unittest
 from . import ui_base_tests
 from .. import config
 from ..partners import PARTNERS
-from ..library import TOLINO_COLUMN
+from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
+                       TOLINO_READ_COLUMN)
 from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
@@ -186,6 +187,84 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         self.assertFalse(dashboard.switch_account("gibt-es-nicht"))
         self.assertFalse(dashboard.switch_account(""))
         self.assertEqual([], calls)
+
+    def test_reading_columns_follow_the_selected_account(self):
+        uuid = "33333333-3333-3333-3333-333333333333"
+        ui_module, dashboard, _calls = self._run(2)
+        config.save_account("erstes", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": True, "progress": {
+                "percent": 100, "current": "350", "last": "350",
+                "position": "Ops/A.html"}}}}}, active="erstes")
+        config.save_account("zweites", {"state": {uuid: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": False, "progress": {
+                "percent": 37, "current": "130", "last": "350",
+                "position": "Ops/B.html"}}}}}, active="zweites")
+
+        class Db:
+            field_metadata = {
+                TOLINO_READ_COLUMN: {"datatype": "bool"},
+                TOLINO_PROGRESS_COLUMN: {"datatype": "int"},
+            }
+
+            def __init__(self):
+                self.values = {TOLINO_READ_COLUMN: {},
+                               TOLINO_PROGRESS_COLUMN: {}}
+                self.new_api = self
+
+            @staticmethod
+            def all_book_ids():
+                return [1]
+
+            @staticmethod
+            def get_metadata(_book_id):
+                return {"uuid": uuid}
+
+            @staticmethod
+            def has_id(book_id):
+                return book_id == 1
+
+            def field_for(self, column, book_id):
+                return self.values[column].get(book_id)
+
+            def set_field(self, column, values):
+                self.values[column].update(values)
+
+        db = Db()
+        dashboard.gui = type("Gui", (), {"current_db": db})()
+        self.assertTrue(dashboard.switch_account("zweites"))
+        self.assertIs(False, db.values[TOLINO_READ_COLUMN][1])
+        self.assertEqual(37, db.values[TOLINO_PROGRESS_COLUMN][1])
+        self.assertTrue(dashboard.switch_account("erstes"))
+        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
+        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
+
+    def test_account_switch_stays_available_while_a_comparison_runs(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+
+        class Widget:
+            def setEnabled(self, value):
+                self.enabled = value
+
+        dialog = type("Dashboard", (), {})()
+        dialog.account_quick = Widget()
+        dialog.account_select = Widget()
+        dialog.thread = None
+        dialog.prepare_thread = None
+        ui_module.common._apply_busy(dialog, True)
+        self.assertFalse(dialog.account_quick.enabled)
+        # `_apply_busy` läuft vor dem Setzen des Threads. Sobald der Lauf
+        # sichtbar ist, muss die Kontoauswahl wieder bedienbar sein.
+        dialog.thread = object()
+        ui_module.common._apply_busy(dialog, True)
+        self.assertTrue(dialog.account_quick.enabled)
+        self.assertTrue(dialog.account_select.enabled)
+        dialog.thread = None
+        ui_module.common._apply_busy(dialog, True)
+        self.assertFalse(dialog.account_quick.enabled)
 
 class ColumnSetupButtonTests(unittest.TestCase):
     """Je Calibre-Spalte ein Knopf in den Einstellungen."""
@@ -789,8 +868,8 @@ class LoginPreflightTests(unittest.TestCase):
                 pass
 
         class LoginWorker:
-            def __init__(self, partner_id, hardware):
-                self.arguments = (partner_id, hardware)
+            def __init__(self, account_name, partner_id, hardware):
+                self.arguments = (account_name, partner_id, hardware)
                 self.progress = Signal()
                 self.completed = Signal()
                 self.failed = Signal()
@@ -848,7 +927,7 @@ class LoginPreflightTests(unittest.TestCase):
         # Die beiden Ergebnis-Slots des Anmeldefensters: hier nur Empfaenger.
         dashboard.login_completed = lambda *args: None
         dashboard.login_failed = lambda *args: None
-        names = ("browser_login", "_check_stored_login", "run_context",
+        names = ("browser_login", "_check_stored_login",
                  "_start_login_window", "_login_running",
                  "login_still_valid", "login_rejected", "login_check_busy",
                  "_login_cleanup", "store_refresh", "_login_progress")
@@ -933,7 +1012,8 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsNot(check_thread, dashboard.login_thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
+        self.assertEqual(("konto", 4, "hw-1"),
+                         dashboard.login_worker.arguments)
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
 
@@ -980,7 +1060,8 @@ class LoginPreflightTests(unittest.TestCase):
             RunContext.from_values(dashboard.values()))
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
+        self.assertEqual(("konto", 4, "hw-1"),
+                         dashboard.login_worker.arguments)
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertFalse(dashboard.primary.enabled)
         self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
@@ -1072,7 +1153,7 @@ class LoginMessageTests(unittest.TestCase):
             "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
-        dashboard.store_refresh = lambda refresh, hardware="": None
+        dashboard.refresh = FakeText()
         dashboard.update_status = lambda: None
         dashboard._login_cleanup = lambda: None
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
@@ -1099,7 +1180,7 @@ class LoginMessageTests(unittest.TestCase):
             "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
-        dashboard.store_refresh = lambda refresh, hardware="": None
+        dashboard.refresh = FakeText()
         dashboard.update_status = lambda: None
         dashboard._login_cleanup = lambda: None
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
@@ -1133,8 +1214,8 @@ class LoginMessageTests(unittest.TestCase):
             "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
+        dashboard.refresh = FakeText()
         dashboard.primary = Primary()
-        dashboard.store_refresh = lambda refresh, hardware="": None
         dashboard.update_status = lambda: None
         dashboard._login_cleanup = lambda: None
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
@@ -1296,3 +1377,26 @@ class AccountStateBindingTests(unittest.TestCase):
         self.assertFalse(column_state(NoColumn())["id"])
         self.assertFalse(column_state(NoColumn())["read"])
         self.assertFalse(column_state(NoColumn())["progress"])
+
+
+class BrowserLoginPersistenceTests(unittest.TestCase):
+    """Der Browser-Token überlebt ein sofort geschlossenes Dashboard."""
+
+    def test_worker_saves_credentials_before_reporting_completion(self):
+        ui_module = ui_module_for(self)
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        events = []
+        worker = ui_module.auth_workers.BrowserLoginWorker("konto", 4, "hw")
+        for name in ("progress", "completed", "failed"):
+            setattr(worker, name, type("Signal", (), {
+                "emit": lambda self, *args, _name=name:
+                    events.append((_name,) + args)})())
+        with patch.object(ui_module.auth_workers, "grab_live_refresh",
+                          lambda *args, **kwargs: ("tok", "hw")), \
+             patch.object(ui_module.auth_workers, "save_credentials",
+                          lambda *args: events.append(("save",) + args) or True):
+            worker.run()
+        self.assertEqual([
+            ("save", "konto", "tok", "hw"),
+            ("completed", "tok", "hw"),
+        ], events)
