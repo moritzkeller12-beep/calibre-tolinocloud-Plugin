@@ -842,7 +842,7 @@ class SingleBookActionTests(_QtDialogTest):
             @staticmethod
             def download(tolino_id, **kwargs):
                 events.append(("download", tolino_id))
-                return b"data"
+                return b"PK\x03\x04data"
 
         class FileDialog:
             @staticmethod
@@ -1570,6 +1570,24 @@ class BackgroundCallTests(unittest.TestCase):
         self.assertEqual("/tmp/chosen.pdf", written["path"])
         self.assertEqual(b"%PDF-1.7 test", written["data"])
 
+    def test_an_html_error_page_is_not_saved_as_epub(self):
+        """Nur EPUB (ZIP) und PDF gelten als heruntergeladenes Buch."""
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None,
+            qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
+        self.addCleanup(ui_module._restore_stubs_for_tests)
+        dialog = self._dialog(ui_module)
+        dialog._download_path = "/tmp/chosen.epub"
+        dialog._end_action = lambda: None
+        opened = []
+        errors = []
+        ui_module.dialogs.open = lambda *args, **kwargs: opened.append(args)
+        ui_module.dialogs.error_dialog = (
+            lambda *args, **kwargs: errors.append(args))
+        dialog._download_finished(b"<html>error</html>")
+        self.assertEqual([], opened)
+        self.assertEqual(1, len(errors))
+
     def test_the_download_leaves_the_gui_thread(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
@@ -1584,7 +1602,7 @@ class BackgroundCallTests(unittest.TestCase):
             @staticmethod
             def download(tolino_id, **kwargs):
                 seen.append(threading.current_thread())
-                return b"data"
+                return b"PK\x03\x04data"
 
         dialog = self._dialog(ui_module)
         dialog.client_factory = lambda: Client()

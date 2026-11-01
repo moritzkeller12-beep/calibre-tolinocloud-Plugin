@@ -144,10 +144,12 @@ def save_refresh_token(account_name, token):
     """Einen rotierten Token im Konto sichern; leer loescht nichts.
 
     Der Client meldet jede Token-Antwort hier; eine Antwort ohne
-    `refresh_token` darf den gespeicherten Zugang nicht ausleeren.
+    `refresh_token` darf den gespeicherten Zugang nicht ausleeren. Ein
+    unbekanntes Konto wird nicht angelegt: ein verspaeteter Callback darf
+    ein gerade entferntes Konto nicht wieder erzeugen.
     """
     token = str(token or "").strip()
-    if account_name and token:
+    if account_name and token and account_by_name(account_name):
         save_account(account_name, {"refresh_token": token})
 
 

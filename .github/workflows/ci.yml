@@ -24,6 +24,9 @@ jobs:
         run: python3 -m pip install --quiet pycryptodome pyflakes PyQt6
 
       - name: Unit tests
+        env:
+          # Offene Sockets und Threads früh sichtbar machen.
+          PYTHONWARNINGS: error::ResourceWarning
         run: python3 -m unittest calibre_plugin.test_sync
 
       - name: PyQt6 offscreen dialog smoke test

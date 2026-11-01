@@ -1,9 +1,9 @@
 # tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.1.05-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.1.06-blue)](__init__.py)
 
-Aktuelle Version: **0.1.05** (Quelle: [`__init__.py`](__init__.py)).
+Aktuelle Version: **0.1.06** (Quelle: [`__init__.py`](__init__.py)).
 
 Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino Cloud.
 
@@ -29,6 +29,6 @@ Die Spalten lassen sich einzeln unter **Einstellungen …** des Plugins anlegen;
 
 ## Hinweise
 
-Das Plugin nutzt eine inoffizielle tolino-Schnittstelle; deren Verfügbarkeit kann sich ändern. Zugangsdaten werden kontobezogen gespeichert. Fehlermeldungen enthalten einen Code mit Abhilfe in der [Fehlercodeliste](docs/fehlercodes.md).
+Das Plugin nutzt eine inoffizielle tolino-Schnittstelle; deren Verfügbarkeit kann sich ändern. Zugangsdaten werden kontobezogen in Calibres Einstellungen gespeichert; der Refresh-Token liegt dort im Klartext in der JSON-Datei. Fehlermeldungen enthalten einen Code mit Abhilfe in der [Fehlercodeliste](docs/fehlercodes.md).
 
 Lizenz: [GPL-3.0-or-later](LICENSE). Änderungen: [CHANGELOG](CHANGELOG.md).

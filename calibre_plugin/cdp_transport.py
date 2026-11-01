@@ -8,6 +8,11 @@ import struct
 import time
 
 
+# Eine DevTools-Nachricht ist klein; ein Riesenframe ist ein Fehler, kein
+# Grund, beliebig viel Speicher zu belegen.
+_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
+
 # ---------------------------------------------------------------- WebSocket
 
 class _Ws:
@@ -105,6 +110,9 @@ class _Ws:
                 length = struct.unpack(">H", self._read_exact(2, deadline))[0]
             elif length == 127:
                 length = struct.unpack(">Q", self._read_exact(8, deadline))[0]
+            if (length > _MAX_MESSAGE_BYTES
+                    or len(fragmented) + length > _MAX_MESSAGE_BYTES):
+                raise OSError("websocket message too large")
             mask = self._read_exact(4, deadline) if masked else b""
             payload = self._read_exact(length, deadline)
             if mask:

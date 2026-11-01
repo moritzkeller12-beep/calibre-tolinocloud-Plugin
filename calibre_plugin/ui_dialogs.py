@@ -7,7 +7,7 @@ from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
                         QVBoxLayout, QStyledItemDelegate, QStyle,
                         QStyleOptionViewItem, QEvent, Qt, _set_enabled,
-                        start_call)
+                        gui_guard, start_call)
 from .planning_values import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import comparison_sort_key, sort_comparison_rows
@@ -1020,14 +1020,27 @@ class InventoryDialog(QDialog):
         client = self._cached_or_new_client()
         return client.download(tolino_id)
 
+    @gui_guard
     def _download_finished(self, result):
         path = self._download_path
         self._end_action()
-        if result[:4] == b"%PDF" and path.casefold().endswith(".epub"):
+        data = bytes(result or b"")
+        is_pdf = data[:4] == b"%PDF"
+        is_epub = data[:4] == b"PK\x03\x04"
+        if path.casefold().endswith(".epub") and is_pdf:
             path = path[:-5] + ".pdf"
+        elif path.casefold().endswith(".pdf") and is_epub:
+            path = path[:-4] + ".epub"
+        if not (is_pdf or is_epub):
+            # Eine HTML-Fehlerseite oder ein leerer Body ist kein Buch.
+            error_dialog(
+                self, "Download ungültig",
+                "Die Cloud-Antwort ist keine EPUB- oder PDF-Datei. "
+                "Gespeichert wurde nichts.", show=True)
+            return
         try:
             with open(path, "wb") as handle:
-                handle.write(result)
+                handle.write(data)
         except OSError as exc:
             message = report_error(exc, "Speichern")
             error_dialog(self, "Speichern fehlgeschlagen",
@@ -1043,6 +1056,7 @@ class InventoryDialog(QDialog):
         error_dialog(self, title,
                      summary + "\n\n" + report_error(exc, context), show=True)
 
+    @gui_guard
     def _download_failed(self, exc):
         self._action_failed(
             "Cloud-Download fehlgeschlagen",

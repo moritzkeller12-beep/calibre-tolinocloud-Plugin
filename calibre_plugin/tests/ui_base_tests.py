@@ -527,7 +527,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             @staticmethod
             def download(tolino_id, **kwargs):
                 events.append(("download", kwargs))
-                return b"data"
+                return b"PK\x03\x04data"
 
         class FileDialog:
             @staticmethod

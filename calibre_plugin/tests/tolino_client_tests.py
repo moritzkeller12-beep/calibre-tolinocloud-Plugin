@@ -1120,6 +1120,19 @@ class MultipartMemoryTests(unittest.TestCase):
         # ~2x the file (bytes + joined body), never a multiple of it.
         self.assertLess(peak, size * 3)
 
+
+class MultipartMimeTypeTests(unittest.TestCase):
+    """Bekannte Buchformate brauchen keine System-MIME-Datenbank."""
+
+    def test_epub_keeps_its_mime_type_without_a_system_guess(self):
+        from ..tolino import TolinoClient
+        with patch("calibre_plugin.tolino.mimetypes.guess_type",
+                   return_value=(None, None)):
+            body, _content_type = TolinoClient._multipart(
+                {}, b"data", "book.epub")
+        self.assertIn(b"Content-Type: application/epub+zip", body)
+
+
 class SyncDataResponseShapeTests(unittest.TestCase):
     """Die sync-data-Antwort des Servers trägt die Marken-ID im Pfad.
 

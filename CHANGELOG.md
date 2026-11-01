@@ -1,8 +1,15 @@
 # Änderungen
 
-Aktuelle Version: **0.1.05** (Quelle: [`__init__.py`](__init__.py)).
+Aktuelle Version: **0.1.06** (Quelle: [`__init__.py`](__init__.py)).
 
-## Aktuell
+## 0.1.06
+
+- Nicht bestätigte Zuordnungen (widersprechende ISBN oder Autor) werden nicht mehr im Zustand gespeichert; Serien folgen damit nicht automatisch dem falschen Cloud-Buch.
+- Der Titel+Autor-Index prüft den Autorennamen zusätzlich ohne ae/oe/ue-Ersatz («Michael» ≠ «Michal»).
+- Download-Callbacks sind GUI-geschützt, Cloud-Antworten werden vor dem Speichern als EPUB/PDF geprüft, und EPUB/PDF erhalten feste MIME-Typen.
+- Ein später Refresh-Token-Callback legt kein entferntes Konto neu an; Relogin wartet länger auf den Keep-alive-Lock. WebSocket-Nachrichten sind auf 16 MiB begrenzt, der IndexedDB-Scan liest per Cursor statt `getAll()`.
+
+## 0.1.05
 
 - Der Plugin-Build entfernt Kommentare aus den Modulen, behält aber Code, Docstrings, Kodierung und Zeilennummern; `__init__.py` bleibt unverändert.
 - Beschädigte Zustandseinträge zählen wie fehlende: Vergleich und Planung brechen nicht ab, und ein bestätigter Upload wird wieder gespeichert.

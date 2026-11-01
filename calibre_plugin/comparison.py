@@ -208,13 +208,15 @@ def _remote_rows(inventory, read_known, read_ids):
 
 
 def _find_remote_match(index, stored_id, local_isbn, title_key,
-                       author_key, matched):
+                       author_key, authors, matched):
     """Ersten eindeutigen Treffer in der dokumentierten Reihenfolge finden.
 
     Rueckgabe ``(row_index, reason, ambiguous, candidates)``. Ein Treffer
     verbraucht die Zeile erst beim Aufrufer; mehrere freie Treffer auf
     denselben Schluessel sind ein Prueffall und werden nicht nach
-    Listenposition ausgewaehlt.
+    Listenposition ausgewaehlt. Der Titel+Autor-Schluessel transliteriert
+    ae/oe/ue; deshalb muss bei diesem Grund zusaetzlich `authors_match`
+    zustimmen («Michael» und «Michal» sind nicht derselbe Name).
     """
     attempts = []
     if stored_id:
@@ -222,8 +224,10 @@ def _find_remote_match(index, stored_id, local_isbn, title_key,
     if is_valid_isbn(local_isbn):
         attempts.append((index.by_isbn.get(local_isbn, ()), "isbn"))
     if title_key and author_key:
-        attempts.append((index.by_title_author.get((title_key, author_key), ()),
-                         "title_author"))
+        title_author = [
+            item for item in index.by_title_author.get((title_key, author_key), ())
+            if authors_match(authors, index.rows[item]["authors"])]
+        attempts.append((title_author, "title_author"))
     for indexes, reason in attempts:
         free = [item for item in indexes if item not in matched]
         if len(free) == 1:
@@ -258,7 +262,9 @@ def _matched_status(metadata, remote, old, selected_format,
     same_fields = _same_comparison_fields(metadata, remote)
     current_meta_fp = metadata_fingerprint(metadata)
     # Nur ein nach PUT per GET bestaetigter Patch darf explizite Inventarwerte
-    # ueberstimmen.
+    # ueberstimmen. Bewusster Kompromiss: aendert die Cloud den Titel spaeter,
+    # gilt die Zeile weiter als gleich -- sonst wuerde jede externe Aenderung
+    # beim naechsten Sync sofort wieder ueberschrieben.
     verified_metadata_matches = (
         bool(old.get("meta_verified_fp"))
         and old.get("meta_verified_fp") == current_meta_fp)
@@ -297,7 +303,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                             if fmt in local_formats), None)
     local_isbn = normalize_isbn(isbn)
     remote_index, match_reason, ambiguous, candidates = _find_remote_match(
-        remote, stored_id, local_isbn, title_key, author_key, matched)
+        remote, stored_id, local_isbn, title_key, author_key, authors, matched)
     file_changed = False
     tolino_id = ""
     status = "new_in_calibre"
@@ -310,7 +316,10 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
             authors, author_key, local_isbn)
         if override:
             match_reason = override
-        if book_uuid and tolino_id:
+        if book_uuid and tolino_id and status != "review":
+            # Nur bestaetigte Zuordnungen bleiben kleben: ein Prueffall
+            # (etwa widersprechende ISBN) darf die Serie nicht automatisch
+            # dem falschen Cloud-Buch zuordnen.
             # Calibre-ID erhält die Zuordnung, falls die UUID später fehlt.
             entry = state.get(book_uuid)
             if not isinstance(entry, dict):

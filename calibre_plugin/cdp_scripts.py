@@ -30,8 +30,8 @@ _TOKEN_SCAN_HELPERS = r"""
       }
       return;
     }
-    if (typeof value !== 'object' || seen.indexOf(value) >= 0) return;
-    seen.push(value);
+    if (typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
     for (var key in value) {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       var v = value[key];
@@ -69,7 +69,7 @@ __TOKEN_SCAN_HELPERS__
     try {
       for (var i = 0; i < store.length; i++) {
         var value = store.getItem(store.key(i));
-        if (value) walk(value, 0, []);
+        if (value) walk(value, 0, new Set());
       }
     } catch (e) {}
   }
@@ -121,11 +121,16 @@ __TOKEN_SCAN_HELPERS__
         names.forEach(function (storeName) {
           try {
             var tx = db.transaction(storeName, 'readonly');
-            var req = tx.objectStore(storeName).getAll();
-            req.onsuccess = function () {
-              (req.result || []).forEach(function (entry) {
-                walk(entry, 0, []);
-              });
+            // Cursor statt getAll(): Der Reader kann Buchinhalte offline
+            // halten; materialisiert wird immer nur ein Datensatz.
+            var req = tx.objectStore(storeName).openCursor();
+            req.onsuccess = function (event) {
+              var cursor = event.target.result;
+              if (cursor) {
+                walk(cursor.value, 0, new Set());
+                cursor.continue();
+                return;
+              }
               remaining -= 1;
               if (remaining <= 0) { db.close(); finish(); }
             };

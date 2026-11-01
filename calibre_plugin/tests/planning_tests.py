@@ -1392,6 +1392,17 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("neu", account["refresh_token"])
         self.assertEqual("hw", account["hardware_id"])
 
+    def test_a_late_token_callback_does_not_recreate_a_removed_account(self):
+        """Ein verspaeteter Refresh darf kein geloeschtes Konto anlegen."""
+        original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.save_account("konto", {"refresh_token": "alt",
+                                      "hardware_id": "hw"}, active="konto")
+        config.remove_account("konto")
+        config.save_refresh_token("konto", "spaet")
+        self.assertEqual({}, config.account_by_name("konto"))
+
     def test_keepalive_refresh_skips_when_there_is_nothing_to_do(self):
         """Ohne Token und bei laufender Rotation passiert nichts."""
         accounts = [{"name": "A", "partner_id": 4, "hardware_id": "hw",
@@ -1768,16 +1779,31 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
     def test_same_title_different_valid_isbn_is_review(self):
+        state = {}
         rows = compare_inventory(
-            self._metadata(authors="Autor", isbn="9783161484100"), {},
+            self._metadata(authors="Autor", isbn="9783161484100"), state,
             [{"deliverableId": "t1", "title": "Titel", "authors": "Autor",
               "isbn": "9780306406157"}], ["EPUB"])
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("conflict", rows[0]["match_reason"])
         self.assertNotEqual("new_in_calibre", rows[0]["status"])
         # Die gefundene Cloud-Kopie bleibt technisch sichtbar, wird aber
-        # nicht als automatischer Treffer verbucht.
+        # nicht als automatischer Treffer verbucht -- und darf deshalb auch
+        # nicht als klebrige Zuordnung im Zustand landen.
         self.assertEqual("t1", rows[0]["tolino_id"])
+        self.assertNotIn("u1", state)
+
+    def test_a_transliterated_author_collision_is_not_automatically_matched(self):
+        """«Michael» und «Michal» teilen den Index-Schluessel, sind aber verschieden."""
+        state = {}
+        rows = compare_inventory(
+            self._metadata(authors="Michael Ende"), state,
+            [{"deliverableId": "t1", "title": "Titel",
+              "authors": "Michal Ende"}], ["EPUB"])
+        self.assertEqual("review", rows[0]["status"])
+        self.assertEqual("title_only", rows[0]["match_reason"])
+        self.assertEqual("", rows[0]["tolino_id"])
+        self.assertNotIn("u1", state)
 
     def test_unique_title_and_author_match_identically(self):
         rows = compare_inventory(

@@ -18,6 +18,9 @@ from .partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
 from . import sync_data as _sync_data
 
 CHROME_MAJOR = "153"
+# Feste MIME-Typen fuer Formate, die mimetypes je nach System nicht kennt.
+_FIXED_MIME_TYPES = {".epub": "application/epub+zip",
+                     ".pdf": "application/pdf"}
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36" % CHROME_MAJOR
@@ -503,8 +506,11 @@ class TolinoClient:
                            ("Content-Disposition: form-data; name=\"%s\"\r\n\r\n" % key).encode(),
                            str(value).encode(), b"\r\n"])
         name = os.path.basename(str(filename))
+        suffix = os.path.splitext(name)[1].casefold()
         guessed_type = mimetypes.guess_type(name)
-        mime = next(iter(guessed_type), None) or "application/octet-stream"
+        mime = (_FIXED_MIME_TYPES.get(suffix)
+                or next(iter(guessed_type), None)
+                or "application/octet-stream")
         chunks.extend([b"--" + boundary + b"\r\n",
                        ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n' % (field, name)).encode(),
                        ("Content-Type: %s\r\n\r\n" % mime).encode(),

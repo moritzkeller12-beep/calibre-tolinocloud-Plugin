@@ -63,8 +63,13 @@ class TokenVault:
         return {"refresh_token": refresh,
                 "hardware_id": str(account.get("hardware_id") or "")}
 
-    def relogin(self, client, timeout=5):
-        """Refresh once under the shared lock using the freshest saved token."""
+    def relogin(self, client, timeout=30):
+        """Refresh once under the shared lock using the freshest saved token.
+
+        Der Keep-alive haelt den Lock ueber den Netzaufruf und dessen
+        WAF-Retries. Ein Sync, der waehrenddessen neu anmelden muss, wartet
+        besser kurz, statt mit S91 fatal abzubrechen.
+        """
         with self._held_lock(timeout):
             values = self._stored_credentials(client.account_name)
             client.refresh = values["refresh_token"]
