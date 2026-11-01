@@ -1927,6 +1927,18 @@ class FileChangeIntegrityTests(unittest.TestCase):
             [{"deliverableId": "t1", "title": "Gleich", "authors": "Autor"}],
             ["EPUB"])[0]
 
+    def test_a_broken_state_entry_is_treated_as_empty_and_repaired(self):
+        metadata = self._metadata()
+        state = {"u1": "kaputt"}
+        row = self._row(metadata, state)
+        self.assertEqual("t1", row["tolino_id"])
+        self.assertEqual("identical", row["status"])
+        self.assertEqual({"tolino_id": "t1", "calibre_id": 1}, state["u1"])
+
+    def test_metadata_planning_skips_a_broken_state_entry(self):
+        self.assertEqual([], plan_metadata_updates(
+            self._metadata(), {"u1": "kaputt"}, [], only_book_ids={1}))
+
     def test_changed_file_wins_over_equal_metadata(self):
         metadata = self._metadata()
         state = {"u1": {

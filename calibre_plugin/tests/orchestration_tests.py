@@ -724,14 +724,13 @@ class NoSilentDeadEndTests(unittest.TestCase):
         with patch("calibre_plugin.ui_dashboard.save_account", boom), \
              patch("calibre_plugin.ui_dashboard.update_tolino_ids",
                    lambda *args, **kwargs: None), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
+             patch("calibre_plugin.ui_dashboard.error_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             ui_module.dashboard.SyncDashboard.sync_completed(
                 dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
-        # Der Abschlussdialog kommt trotz Speicherfehler: der Upload ist
-        # gelaufen und darf nicht als «nichts passiert» erscheinen.
         self.assertEqual(1, len(boxes))
         self.assertIn("1 hochgeladen", boxes[0][2])
+        self.assertIn("Sync-Zustand", boxes[0][2])
 
     def test_a_column_write_error_still_finishes_the_dialog(self):
         """Ein Calibre-Fehler nach dem Lauf darf den Dialog nicht sperren."""
@@ -767,13 +766,14 @@ class NoSilentDeadEndTests(unittest.TestCase):
         with patch("calibre_plugin.ui_dashboard.save_account",
                    lambda *args, **kwargs: None), \
              patch("calibre_plugin.ui_dashboard.update_tolino_ids", boom), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
+             patch("calibre_plugin.ui_dashboard.error_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             ui_module.dashboard.SyncDashboard.sync_completed(
                 dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
         self.assertEqual([True], finished)
         self.assertEqual(1, len(boxes))
         self.assertIn("1 hochgeladen", boxes[0][2])
+        self.assertIn("tolino-IDs", boxes[0][2])
 
 
 class CloudCopyAssignmentPlanTests(unittest.TestCase):

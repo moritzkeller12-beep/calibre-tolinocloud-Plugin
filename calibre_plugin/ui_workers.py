@@ -10,10 +10,10 @@ from .config import account_secrets, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint)
-from .identifiers import display_title, migrate_state_keys
+from .identifiers import display_title, migrate_state_keys, state_entry
 from .library import image_suffix
 from .config import load_state
-from .tolino import (TolinoApiError, TolinoAuthError, log_warning,
+from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
 
 
@@ -168,8 +168,14 @@ class SyncWorker(QObject):
             save_account(self.account_name, {"state": self.state},
                          active=self.account_name)
         except Exception as exc:
-            log_warning("Teilstand konnte nicht gespeichert werden: %s"
-                        % sanitize_error(exc))
+            raise TolinoError(
+                "Der Sync-Zwischenstand konnte nicht gespeichert werden. "
+                "Bereits durchgeführte Cloud-Änderungen bleiben bestehen; "
+                "bitte vor einem erneuten Lauf den Cloud-Bestand prüfen.",
+                short=("Der Sync-Zwischenstand konnte nicht gespeichert werden. "
+                       "Cloud-Änderungen bleiben bestehen; bitte den Bestand "
+                       "vor einem erneuten Lauf prüfen."),
+                detail=sanitize_error(exc, account_secrets(self.account_name))) from exc
 
     @staticmethod
     def _delete_or_skip(client, deliverable_id):
@@ -236,7 +242,6 @@ class SyncWorker(QObject):
 
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
-        changed = False
         for book_uuid, tolino_id, operation in delete_ops:
             def finish(deleted):
                 self._finish_operation(
@@ -261,13 +266,11 @@ class SyncWorker(QObject):
                 if isinstance(entry, dict) and entry.get("calibre_id") is not None:
                     self.updates.append((entry.get("calibre_id"), ""))
                 state.pop(book_uuid, None)
-                changed = True
+                self._persist_state()
             done += 1
             if deleted:
                 self.progress.emit(done, total,
                                    "Erledigt: %s" % self._label(book_uuid))
-        if changed:
-            self._persist_state()
         return done
 
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
@@ -406,7 +409,7 @@ class SyncWorker(QObject):
                 self.progress.emit(done, total, "Fehlgeschlagen: %s"
                                    % job.label())
                 continue
-            entry = dict(self.state.get(job.book_uuid) or {})
+            entry = dict(state_entry(self.state, job.book_uuid))
             entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
             entry.pop("collections", None)
             self.state[job.book_uuid] = entry

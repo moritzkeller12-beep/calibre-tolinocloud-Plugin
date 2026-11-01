@@ -1,9 +1,13 @@
 # Änderungen
 
-Die aktuelle Version steht in [`__init__.py`](__init__.py).
+Aktuelle Version: **0.1.05** (Quelle: [`__init__.py`](__init__.py)).
 
 ## Aktuell
 
+- Der Plugin-Build entfernt Kommentare aus den Modulen, behält aber Code, Docstrings, Kodierung und Zeilennummern; `__init__.py` bleibt unverändert.
+- Beschädigte Zustandseinträge zählen wie fehlende: Vergleich und Planung brechen nicht ab, und ein bestätigter Upload wird wieder gespeichert.
+- Bei Speicherfehlern nach Cloud-Änderungen stoppt der Sync und meldet den bestätigten Teilstand; fehlgeschlagene abschließende Calibre-Schreibvorgänge werden angezeigt.
+- Ein nicht gespeicherter rotierter Zugang beendet die Anmeldung mit bereinigter Fehlermeldung. CI prüft auch Pushes auf Versionsbranches.
 - Browser-Anmeldung und Token-Verarbeitung vereinfacht: abgelehnte Refresh-Tokens werden entfernt, unerwartete Fehler sichtbar gemeldet und Windows-Browser über die Registry gefunden.
 - Der WebSocket-Transport beantwortet Ping-Nachrichten; Dashboard, Inventarverarbeitung und Calibre-Zugriffe sind gestrafft. Bestehende Zustandsmigrationen und Löschbestätigungen bleiben erhalten.
 - Doppelprüfungen in Tests zusammengeführt und zusätzliche Fehlerfälle für Anmeldung, Token-Dekodierung und Geräte-Registrierung abgesichert.

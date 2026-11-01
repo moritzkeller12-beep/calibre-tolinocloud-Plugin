@@ -1,7 +1,7 @@
 """Conservative Calibre-to-tolino inventory comparison and sync signatures."""
 import hashlib
 
-from .identifiers import valid_book_uuid
+from .identifiers import state_entry, valid_book_uuid
 from .library import metadata_tolino_id, normalize_formats
 from .matching import (author_tokens, authors_match, normalize_isbn,
                        normalize_match_text, normalize_title,
@@ -286,7 +286,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     title = _metadata_text(metadata, "title")
     authors = _metadata_text(metadata, "authors")
     isbn = _metadata_text(metadata, "isbn")
-    old = state.get(book_uuid, {}) if book_uuid else {}
+    old = state_entry(state, book_uuid)
     stored_id = str(old.get("tolino_id") or
                     (metadata_tolino_id(metadata) if use_metadata_ids else "")
                     or "").strip()
@@ -312,7 +312,10 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
             match_reason = override
         if book_uuid and tolino_id:
             # Calibre-ID erhält die Zuordnung, falls die UUID später fehlt.
-            entry = state.setdefault(book_uuid, {})
+            entry = state.get(book_uuid)
+            if not isinstance(entry, dict):
+                entry = {}
+                state[book_uuid] = entry
             entry["tolino_id"] = tolino_id
             entry.setdefault("calibre_id", book_id)
     elif ambiguous:
@@ -450,9 +453,10 @@ def metadata_fingerprint(metadata):
 
 
 def content_fingerprint(metadata, format_name):
-    """Hash of the format FILE itself (uuid|format|size:mtime); '' when the
-    signature was never collected – an unknown file must never be mistaken
-    for an unchanged one, so '' blocks in-place metadata updates."""
+    """Hash uuid, format and size/mtime; return '' if no signature was read.
+
+    This is not a content hash: equal size and mtime can hide file changes.
+    """
     signatures = metadata.get("format_signatures")
     signature = (str(signatures.get(format_name) or "")
                  if isinstance(signatures, dict) else "")

@@ -1,7 +1,7 @@
 """Pure sync-plan construction and collection/metadata action planning."""
 from typing import NamedTuple
 
-from .identifiers import valid_book_uuid
+from .identifiers import state_entry, valid_book_uuid
 from .library import normalize_formats
 
 
@@ -177,7 +177,7 @@ def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
         book_uuid = valid_book_uuid(metadata.get("uuid"))
         if not book_uuid or book_uuid in upload_uuids:
             continue
-        old = state.get(book_uuid) or {}
+        old = state_entry(state, book_uuid)
         tolino_id = str(old.get("tolino_id") or "")
         if not tolino_id:
             continue

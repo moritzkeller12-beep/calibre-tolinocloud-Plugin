@@ -1,11 +1,14 @@
 """Tests for building a Calibre-installable plugin archive."""
 import ast
+import io
 import tempfile
+import tokenize
 import unittest
 import zipfile
 from pathlib import Path
 
-from build_plugin import FILES, ICON, MARKER, ROOT, SOURCE, build_plugin
+from build_plugin import (FILES, ICON, MARKER, ROOT, SOURCE, build_plugin,
+                          strip_comments)
 
 
 class PluginArchiveTests(unittest.TestCase):
@@ -23,7 +26,18 @@ class PluginArchiveTests(unittest.TestCase):
                 for name in FILES:
                     if name == MARKER or name in ("__init__.py", ICON):
                         continue
-                    self.assertEqual((SOURCE / name).read_bytes(), archive.read(name))
+                    source_text = (SOURCE / name).read_text(encoding="utf-8")
+                    packaged_text = archive.read(name).decode("utf-8")
+                    # Kommentare fallen weg; Code, Docstrings und Zeilennummern
+                    # bleiben unverändert.
+                    self.assertEqual(source_text.count("\n"),
+                                     packaged_text.count("\n"), name)
+                    self.assertEqual(ast.dump(ast.parse(source_text)),
+                                     ast.dump(ast.parse(packaged_text)), name)
+                    comments = [token for token in tokenize.generate_tokens(
+                        io.StringIO(packaged_text).readline)
+                        if token.type == tokenize.COMMENT]
+                    self.assertEqual([], comments, name)
                 self.assertEqual((ROOT / "__init__.py").read_bytes(),
                                  archive.read("__init__.py"))
                 self.assertTrue(archive.read(ICON).startswith(
@@ -42,8 +56,25 @@ class PluginArchiveTests(unittest.TestCase):
                     ["calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction"],
                     entrypoints)
 
-    def test_the_current_version_is_defined_once(self):
-        """README and CHANGELOG link to __init__.py instead of repeating it."""
+    def test_comment_stripping_keeps_shebang_docstrings_and_line_numbers(self):
+        source = (b"#!/usr/bin/env python3\n"
+                  b"# -*- coding: utf-8 -*-\n"
+                  b'"""Doc."""\n'
+                  b"\n"
+                  b"# ganz weg\n"
+                  b"x = 1  # auch weg\n")
+        stripped = strip_comments(source)
+        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+        self.assertIn(b'"""Doc."""', stripped)
+        self.assertNotIn(b"weg", stripped)
+        self.assertTrue(stripped.startswith(
+            b"#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"))
+        self.assertEqual(b"x = 1", stripped.splitlines()[5])
+        # Nicht zerlegbarer Quelltext wird unverändert ausgeliefert.
+        self.assertEqual(b"x = (\n", strip_comments(b"x = (\n"))
+
+    def test_the_documented_version_matches_the_plugin_version(self):
+        """README und CHANGELOG zeigen dieselbe Nummer wie __init__.py."""
         tree = ast.parse((ROOT / "__init__.py").read_text(encoding="utf-8"))
         assignment = next(
             node for node in tree.body
@@ -53,7 +84,7 @@ class PluginArchiveTests(unittest.TestCase):
         version = "%d.%d.%02d" % ast.literal_eval(assignment.value)
         for name in ("README.md", "CHANGELOG.md"):
             text = (ROOT / name).read_text(encoding="utf-8")
-            self.assertNotIn(version, text, name)
+            self.assertIn(version, text, name)
 
 
 if __name__ == "__main__":

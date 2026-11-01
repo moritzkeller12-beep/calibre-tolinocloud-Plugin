@@ -1345,6 +1345,22 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
+    def test_failed_token_rotation_save_stops_login_without_exposing_tokens(self):
+        logs = []
+        def fail(_token):
+            raise OSError("old-secret new-secret access-secret")
+
+        client = TolinoClient(4, "hw", "old-secret", token_callback=fail)
+        with self.assertRaises(TolinoAuthError) as caught:
+            client._apply_token_response({"access_token": "access-secret",
+                                          "refresh_token": "new-secret"})
+        with patch("calibre_plugin.tolino.log_warning", logs.append):
+            shown = tolino_module.report_error(caught.exception, "Login")
+        self.assertIn("erneuerte Zugang", shown)
+        self.assertIsNone(client.access)
+        for secret in ("old-secret", "new-secret", "access-secret"):
+            self.assertNotIn(secret, shown + " ".join(logs))
+
     def test_clear_refresh_token_keeps_hardware_and_state(self):
         original = config.PREFERENCES
         try:

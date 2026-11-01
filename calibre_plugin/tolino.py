@@ -297,7 +297,14 @@ class TolinoClient:
         # Den rotierten Single-Use-Token vor weiteren Anfragen speichern.
         self.refresh = new_refresh
         if new_refresh != previous_refresh and self.token_callback:
-            self.token_callback(self.refresh)
+            try:
+                self.token_callback(self.refresh)
+            except Exception as exc:
+                detail = sanitize_error(exc, (previous_refresh, new_refresh, self.access))
+                self.access = None
+                raise TolinoAuthError(
+                    "Der erneuerte Zugang konnte nicht gespeichert werden. " + RELOGIN,
+                    code="A01", detail=detail) from None
 
         self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
         return self.refresh

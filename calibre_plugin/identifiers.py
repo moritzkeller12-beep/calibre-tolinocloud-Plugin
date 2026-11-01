@@ -72,6 +72,12 @@ def migrate_state_keys(metadata_by_id, state):
     return migrated
 
 
+def state_entry(state, key):
+    """Zustandseintrag eines Buchs -- fremde Formen zählen als leer."""
+    entry = state.get(key) if key and isinstance(state, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
 def state_keys_by_book_id(state):
     """Calibre-Nummer → gespeicherter Zustandsschlüssel in EINEM Durchlauf.
 

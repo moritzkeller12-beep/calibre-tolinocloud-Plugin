@@ -39,10 +39,12 @@ def _persist_sync_result(dialog, state, updates):
         getattr(worker, "account_name", None)
         or getattr(dialog, "account_name", "") or "")
     columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
+    failures = []
     try:
         if account_name:
             save_account(account_name, {"state": state}, active=account_name)
     except Exception as exc:
+        failures.append("Sync-Zustand")
         log_warning("Ergebnis der Synchronisierung konnte nicht "
                     "gespeichert werden: %s" % sanitize_error(exc))
     if columns.get("id"):
@@ -50,6 +52,7 @@ def _persist_sync_result(dialog, state, updates):
             update_tolino_ids(
                 dialog.gui.current_db, updates, account_name=account_name)
         except Exception as exc:
+            failures.append("tolino-IDs")
             log_warning("Tolino-IDs konnten nicht in Calibre geschrieben "
                         "werden: %s" % sanitize_error(exc))
     if columns.get("read"):
@@ -58,8 +61,10 @@ def _persist_sync_result(dialog, state, updates):
                 dialog.gui.current_db,
                 list(getattr(worker, "read_updates", ()) or ()))
         except Exception as exc:
+            failures.append("Lesestatus")
             log_warning("Lesestatus konnte nicht in Calibre geschrieben "
                         "werden: %s" % sanitize_error(exc))
+    return failures
 
 
 def _sync_cancelled_text(outcome):
@@ -683,11 +688,18 @@ class SyncDashboard(DashboardParts, QDialog):
         """
         outcome = dict(getattr(self.worker, "outcome", None) or {})
         try:
-            _persist_sync_result(self, state, updates)
+            failures = _persist_sync_result(self, state, updates)
         finally:
             # Auch ein unerwarteter Fehler beim Schreiben in Calibre darf
             # den Dialog nicht im Zustand «läuft» zurücklassen.
             self.finish_thread()
+        if failures:
+            error_dialog(self, "Speichern fehlgeschlagen",
+                         "Nicht gespeichert: %s. Cloud-Änderungen bleiben "
+                         "bestehen; bitte den Bestand prüfen.\n\n%s"
+                         % (", ".join(failures), sync_result_text(outcome, "")),
+                         show=True)
+            return
         if outcome.get("cancelled"):
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)
@@ -710,17 +722,20 @@ class SyncDashboard(DashboardParts, QDialog):
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
         try:
-            _persist_sync_result(
+            failures = _persist_sync_result(
                 self, getattr(worker, "state", {}),
                 getattr(worker, "updates", ()))
         finally:
             self.finish_thread()
-        if cancelled:
+        if cancelled and not failures:
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)
             return
         result = sync_result_text(outcome, "")
         text = str(message or "Synchronisierung fehlgeschlagen.")
+        if failures:
+            text += ("\n\nNicht gespeichert: %s. Cloud-Änderungen bleiben "
+                     "bestehen; bitte den Bestand prüfen." % ", ".join(failures))
         if outcome.get("failed") and result:
             text += "\n\n" + result
 

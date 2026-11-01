@@ -193,6 +193,95 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual([(2, "u2", "EPUB", None)], uploads)
         self.assertIsNone(worker.state["u2"]["tolino_id"])
 
+    def test_successful_deletion_is_persisted_before_next_cloud_change(self):
+        ui_module = self._ui()
+        calls = []
+        state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": "t2"}}
+
+        class FakeClient:
+            def delete(self, tolino_id):
+                calls.append(("delete", tolino_id))
+
+        worker = ui_module.workers.SyncWorker(
+            RunContext.from_values(self._settings(state)), [],
+            [("u1", "t1"), ("u2", "t2")], state=state)
+        with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
+                   return_value=FakeClient()), \
+             patch("calibre_plugin.ui_workers.save_account",
+                   side_effect=lambda _name, values, **_kw: calls.append(
+                       ("save", tuple(sorted(values["state"]))))):
+            worker.run()
+        self.assertEqual([("delete", "t1"), ("save", ("u2",)),
+                          ("delete", "t2"), ("save", ())], calls)
+
+    def test_a_broken_state_entry_does_not_lose_a_confirmed_upload(self):
+        ui_module = self._ui()
+        state = {"u1": "kaputt"}
+        saved = []
+
+        class FakeClient:
+            def upload(self, path):
+                return "new-1"
+
+        worker = ui_module.workers.SyncWorker(
+            RunContext.from_values(self._settings(state)),
+            [SyncJob(1, "u1", "EPUB", None, "/book", None, "A")], [],
+            state=state)
+        with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
+                   return_value=FakeClient()), \
+             patch("calibre_plugin.ui_workers.save_account",
+                   lambda _name, values, **_kw: saved.append(values["state"])):
+            worker.run()
+        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+        self.assertEqual({"u1": {"tolino_id": "new-1", "calibre_id": 1}},
+                         saved[0])
+
+    def test_persistence_failure_stops_after_confirmed_cloud_change(self):
+        ui_module = self._ui()
+        calls, emitted = [], {}
+
+        class FakeClient:
+            def upload(self, path):
+                calls.append(("upload", path))
+                return "new-1"
+
+            def delete(self, tolino_id):
+                calls.append(("delete", tolino_id))
+
+        for mode in ("upload", "delete"):
+            with self.subTest(mode=mode):
+                calls.clear()
+                emitted.clear()
+                jobs = ([SyncJob(1, "u1", "EPUB", "old-1", "/book", None, "A"),
+                         SyncJob(2, "u2", "EPUB", None, "/next", None, "B")]
+                        if mode == "upload" else [])
+                removals = [] if jobs else [("u1", "old-1"), ("u2", "old-2")]
+                worker = ui_module.workers.SyncWorker(
+                    RunContext.from_values(self._settings({})), jobs, removals,
+                    state={"u1": {"tolino_id": "old-1", "calibre_id": 1},
+                           "u2": {"tolino_id": "old-2", "calibre_id": 2}})
+                worker.failed.connect(lambda message: emitted.update(failed=message))
+                worker.completed.connect(lambda *args: emitted.update(completed=args))
+                with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
+                           return_value=FakeClient()), \
+                     patch("calibre_plugin.ui_workers.save_account",
+                           side_effect=OSError("Platte voll tok-A")):
+                    worker.run()
+                self.assertEqual(1, len(calls))
+                self.assertNotIn("completed", emitted)
+                self.assertIn("Cloud-Änderungen bleiben bestehen", emitted["failed"])
+                self.assertNotIn("tok-A", emitted["failed"])
+                self.assertEqual(1, sum(op["status"] == "succeeded"
+                                        for op in worker.operations))
+                self.assertEqual(1, sum(op["status"] == "not_started"
+                                        for op in worker.operations))
+                if mode == "upload":
+                    self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+                    self.assertEqual([(1, "new-1")], worker.updates)
+                else:
+                    self.assertNotIn("u1", worker.state)
+                    self.assertEqual([(1, "")], worker.updates)
+
     def test_failed_cover_keeps_the_uploaded_id(self):
         ui_module = self._ui()
         state = {}
