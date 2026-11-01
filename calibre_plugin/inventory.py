@@ -64,13 +64,11 @@ def normalize_inventory_record(item):
     Rueckgabe::
 
         {"tolino_id": <Deliverable-Kennung oder "">,
-         "has_deliverable_id": bool,
          "title": str, "authors": str, "isbn": str}
 
     ``tolino_id`` bleibt leer, wenn nur ``identifier`` existiert: diese
     Kennung taugt weder fuer ``/downloadinfo`` noch fuer
-    ``/deletecontent``. ``has_deliverable_id`` sagt, ob die Kopie fuer
-    Loeschungen ueberhaupt ansprechbar ist.
+    ``/deletecontent``.
     """
     deliverable = _inventory_id_in(item, _INVENTORY_ID_KEYS)
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
@@ -79,7 +77,6 @@ def normalize_inventory_record(item):
         item, ("isbn", "ISBN", "isbn13", "isbn10", "identifier"))
     return {
         "tolino_id": deliverable,
-        "has_deliverable_id": bool(deliverable),
         "title": str(title or "").strip(),
         "authors": _inventory_author(author),
         "isbn": str(isbn or "").strip(),

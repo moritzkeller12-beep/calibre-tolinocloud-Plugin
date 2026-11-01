@@ -9,7 +9,7 @@ from . import ui_base_tests
 from ..plan import normalize_removals
 from ..run_context import RunContext
 from ._support import (FakeMenu, FakeMessageBox, FakeTableItem,
-                      _ui_source_text, compare_inventory, start_cdp_stubs,
+                      compare_inventory, start_cdp_stubs,
                       stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
@@ -398,7 +398,7 @@ class InventoryDialogSortTests(unittest.TestCase):
                              [row["metadata"] for row in rows])
             # Empfehlungen lassen die Leseauswahl unangetastet.
             self.assertEqual([False] * 5,
-                             [dialog._read_state(row).chosen for row in rows])
+                             [row["read"].chosen for row in rows])
             self.assertEqual([], _read_ids(dialog, True))
             # Ausdrücklich angehakt zählt sie aber -- nur mit Tolino-ID.
             dialog._set_row_choice(0, "read", True)
@@ -428,10 +428,6 @@ class InventoryDialogSortTests(unittest.TestCase):
 class ComparisonLayoutTests(unittest.TestCase):
     """Der Bestandsvergleich bleibt kurz: 7 sichtbare Spalten und EIN Knopf
     für alle zeilenbezogenen Aktionen."""
-
-    @staticmethod
-    def _source():
-        return _ui_source_text()
 
     def test_the_menu_offers_every_row_action(self):
         """Die Spalten-Aktionen gelten auch für markierte Zeilen."""
@@ -524,15 +520,15 @@ class InventoryDialogReadStateTests(_QtDialogTest):
             # Schon gelesen: angehakt -- aber anklickbar, damit man es auch
             # wieder auf ungelesen setzen kann.
             self.assertTrue(read_cell["Gelesen"].isChecked())
-            self.assertTrue(read_cell["Gelesen"].enabled)
+            self.assertTrue(read_cell["Gelesen"].item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             self.assertIn("Ausgewählt = gelesen",
-                          read_cell["Gelesen"].tooltip)
+                          read_cell["Gelesen"].item.toolTip())
             # Ungelesen: leer, aber anklickbar.
             self.assertFalse(read_cell["Ungelesen"].isChecked())
-            self.assertTrue(read_cell["Ungelesen"].enabled)
+            self.assertTrue(read_cell["Ungelesen"].item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             # Ohne Cloud-Kopie gibt es keine Lese-Marke.
-            self.assertFalse(read_cell["Nur lokal"].enabled)
-            self.assertIn("in tolino", read_cell["Nur lokal"].tooltip)
+            self.assertFalse(read_cell["Nur lokal"].item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertIn("in tolino", read_cell["Nur lokal"].item.toolTip())
             # Nur echte Änderungen gehen an die Cloud -- und ohne Klick
             # wird nichts ungelesen.
             self.assertEqual([], _read_ids(dialog, True))
@@ -892,21 +888,15 @@ class SingleBookActionTests(_QtDialogTest):
         finally:
             ui_module._restore_stubs_for_tests()
 
-    def test_download_without_a_marked_row_does_nothing(self):
+    def test_download_requires_exactly_one_marked_row(self):
         ui_module = self._ui()
         try:
-            events = self._download(ui_module, [])
-            self.assertEqual(["information"], self._kinds(events))
-            self.assertIn("Markiere zuerst", events[0][1])
-        finally:
-            ui_module._restore_stubs_for_tests()
-
-    def test_download_refuses_several_rows_before_any_dialog(self):
-        ui_module = self._ui()
-        try:
-            events = self._download(ui_module, [0, 1])
-            self.assertEqual(["information"], self._kinds(events))
-            self.assertIn("nur für ein Buch", events[0][1])
+            for marked, hint in (([], "Markiere zuerst"),
+                                 ([0, 1], "nur für ein Buch")):
+                with self.subTest(marked=marked):
+                    events = self._download(ui_module, marked)
+                    self.assertEqual(["information"], self._kinds(events))
+                    self.assertIn(hint, events[0][1])
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1070,10 +1060,10 @@ class CloudDeletionDialogTests(_QtDialogTest):
                           dialog.table.items[(index, 7)])
             for column in (0, 1, 2):
                 cell = _action_cell(dialog, index, column)
-                self.assertFalse(cell.enabled)
+                self.assertFalse(cell.item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
                 self.assertFalse(cell.isChecked())
             self.assertIn("Zum Löschen",
-                          _action_cell(dialog, index, 0).tooltip)
+                          _action_cell(dialog, index, 0).item.toolTip())
             self.assertIn("1 Löschung", dialog.summary.text())
             self.assertIn("(1)", dialog.confirm.text())
             self.assertFalse(any(kind == "question"
@@ -1081,7 +1071,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             # Die nicht markierte Cloud-Kopie bleibt unangetastet.
             other = self._index(dialog, "Behalten")
             self.assertFalse(dialog.rows[other].get("delete_cloud"))
-            self.assertTrue(_action_cell(dialog, other, 1).enabled)
+            self.assertTrue(_action_cell(dialog, other, 1).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1096,7 +1086,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self.assertEqual([("u-1", "t-1", "Löschen")],
                              dialog.selected_cloud_deletions())
             self.assertTrue(dialog.rows[index].get("delete_cloud"))
-            self.assertFalse(_action_cell(dialog, index, 0).enabled)
+            self.assertFalse(_action_cell(dialog, index, 0).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1115,8 +1105,8 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self.assertFalse(dialog.rows[index].get("delete_cloud"))
             self.assertNotIn("Wird beim Start aus tolino gelöscht.",
                              dialog.table.items[(index, 7)])
-            self.assertTrue(_action_cell(dialog, index, 0).enabled)
-            self.assertTrue(_action_cell(dialog, index, 1).enabled)
+            self.assertTrue(_action_cell(dialog, index, 0).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+            self.assertTrue(_action_cell(dialog, index, 1).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             self.assertFalse(any("nichts geändert" in text.casefold()
                                  for kind, text in calls
                                  if kind == "information"))
@@ -1171,30 +1161,19 @@ class CloudDeletionPlanTests(unittest.TestCase):
         ui_module = self._ui()
         try:
             dashboard = self._dashboard(ui_module)
-            state = {"u-1": {"tolino_id": "t-1", "calibre_id": 1,
-                             "title": "Titel"}}
-            preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-                dashboard, RunContext.from_values(self._settings()),
-                self._metadata(), state,
-                self._selection([("u-1", "t-1", "Titel")]))
+            cases = (("u-1", "t-1", "Titel", {"calibre_id": 1}),
+                     ("u-9", "t-9", "Alt", {}))
+            for uuid, tolino_id, title, extra in cases:
+                with self.subTest(uuid=uuid):
+                    state = {uuid: dict(extra, tolino_id=tolino_id, title=title)}
+                    preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+                        dashboard, RunContext.from_values(self._settings()),
+                        self._metadata(), state,
+                        self._selection([(uuid, tolino_id, title)]))
+                    self.assertEqual([(uuid, tolino_id)], preparation["removals"])
+                    self.assertEqual({tolino_id: title}, preparation["removal_titles"])
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual([("u-1", "t-1")], preparation["removals"])
-        self.assertEqual({"t-1": "Titel"}, preparation["removal_titles"])
-
-    def test_explicitly_marked_cloud_copy_is_planned_once(self):
-        ui_module = self._ui()
-        try:
-            dashboard = self._dashboard(ui_module)
-            state = {"u-9": {"tolino_id": "t-9", "title": "Alt"}}
-            preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-                dashboard, RunContext.from_values(self._settings()),
-                self._metadata(), state,
-                self._selection([("u-9", "t-9", "Alt")]))
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual([("u-9", "t-9")], preparation["removals"])
-        self.assertEqual({"t-9": "Alt"}, preparation["removal_titles"])
 
     def test_confirmed_selection_carries_marked_deletions(self):
         ui_module = self._ui()
@@ -1389,9 +1368,9 @@ class IgnoredRowDialogTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
             self.assertEqual(1, len(dialog.rows))
             self.assertEqual("ignored", dialog.rows[0]["group"])
-            self.assertFalse(dialog._check(0, 0).enabled)
+            self.assertFalse(dialog._check(0, 0).item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             self.assertFalse(dialog._check(0, 0).isChecked())
-            self.assertIn("ignoriert", dialog._check(0, 0).tooltip)
+            self.assertIn("ignoriert", dialog._check(0, 0).item.toolTip())
             self.assertEqual(
                 (False, False),
                 ui_module.dialogs.InventoryDialog.default_actions(

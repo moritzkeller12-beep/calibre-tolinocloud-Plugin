@@ -9,7 +9,6 @@ Die Testklassen selbst liegen thematisch in ``tests/*_tests.py``;
 import importlib
 import sys
 import types
-from pathlib import Path
 from unittest.mock import patch
 
 import calibre_plugin.cdp as cdp_module
@@ -27,7 +26,7 @@ def parsed_inventory(value):
     Produktivcode normalisiert genau einmal.
     """
     if isinstance(value, list):
-        return [item if "has_deliverable_id" in item
+        return [item if "tolino_id" in item
                 else normalize_inventory_record(item)
                 for item in value if isinstance(item, dict)]
     records, problems, valid_envelope = parse_inventory(value)
@@ -43,19 +42,6 @@ def compare_inventory(metadata, state, inventory, preferred_formats=(),
     return _compare_inventory(
         metadata, state, parsed_inventory(inventory), preferred_formats,
         use_metadata_ids, read_ids, read_column)
-
-
-# Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
-# der Einstieg; Dialoge, Worker und Dashboard liegen in eigenen Modulen.
-UI_SOURCE_FILES = ("ui.py", "ui_common.py", "ui_dialogs.py",
-                   "ui_workers.py", "ui_auth_workers.py",
-                   "ui_dashboard.py", "dashboard_plan.py")
-
-
-def _ui_source_text():
-    base = Path(__file__).resolve().parent.parent
-    return "\n".join((base / name).read_text(encoding="utf-8")
-                      for name in UI_SOURCE_FILES)
 
 
 def _full(exc):
@@ -218,6 +204,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
                         "calibre_plugin.ui_workers",
                         "calibre_plugin.ui_auth_workers",
                         "calibre_plugin.ui_dashboard",
+                        "calibre_plugin.ui_dashboard_parts",
                         "calibre_plugin.dashboard_plan"):
         sys.modules.pop(module_name, None)
     import calibre_plugin
@@ -227,7 +214,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
                       "token_candidates", "browser_crypto", "ui_workers",
                       "ui_auth_workers", "ui_dashboard",
-                      "dashboard_plan"):
+                      "ui_dashboard_parts", "dashboard_plan"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
     modules_before_entry = set(sys.modules)
@@ -237,6 +224,8 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # not re-export them or import them eagerly.
     ui_module.common = importlib.import_module("calibre_plugin.ui_common")
     ui_module.dashboard = importlib.import_module("calibre_plugin.ui_dashboard")
+    ui_module.dashboard_parts = importlib.import_module(
+        "calibre_plugin.ui_dashboard_parts")
     ui_module.dialogs = importlib.import_module("calibre_plugin.ui_dialogs")
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")

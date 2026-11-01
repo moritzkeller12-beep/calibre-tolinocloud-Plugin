@@ -230,10 +230,14 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        message = str(ctx.exception)
+        message = _full(ctx.exception)
         self.assertIn("bei tolino anmelden", message)
-        # Genau ein Login-Versuch: der zweite Kandidat wird bewusst
-        # NICHT mehr probiert (kein Replay-Feuerwerk).
+        self.assertIn("gültiger Zugang", message)
+        self.assertIn("Tolino hat den Zugang", ctx.exception.detail)
+        self.assertIn("Sekunden alt", message)
+        self.assertNotIn(fresh, message)
+        self.assertNotIn(other, message)
+        # Kein Replay des zweiten Kandidaten nach einer Ablehnung.
         self.assertEqual([fresh], logins)
 
     def test_grab_live_refresh_never_retries_a_rejected_candidate(self):
@@ -495,44 +499,6 @@ class LiveGrabTests(unittest.TestCase):
         self.assertEqual(
             ["eb22e4cf-bb01-4550-bff7-334446bb20b1"], seen_hw)
 
-    def test_grab_live_refresh_still_fails_when_no_new_candidate_appears(self):
-        """Weder Storage noch Nachschub waehrend der Wartephase => klare
-        Fehlermeldung mit dem ersten Endpoint-Fehler."""
-        from ..browser_login import grab_live_refresh
-        spent = self._jwt(time.time() - 10, "sess-live")
-
-        class FailingClient(object):
-            def __init__(self, partner_id, hw):
-                self.refresh = None
-                self.hardware = hw
-
-            def _login(self):
-                raise TolinoAuthError("Tolino HTTP 400: invalid_grant")
-
-        grabs = []
-
-        def next_grab(*_args, **_kwargs):
-            grabs.append(1)
-            if len(grabs) == 1:
-                return {"refresh": [spent], "hardware": []}
-            return None
-
-        with patch("calibre_plugin.cdp.launch_reader_window",
-                   return_value=9223), \
-             patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
-             patch("calibre_plugin.cdp.grab_once_from_grabber",
-                   side_effect=next_grab), \
-             patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=1)
-        message = _full(ctx.exception)
-        self.assertIn("gültiger Zugang", message)
-        self.assertIn("Tolino hat den Zugang", ctx.exception.detail)
-        # Die Meldung nennt nur das ALTER des geprüften Kandidaten
-        # («5 Sekunden alt» vs. «3700 Sekunden alt»), nie seinen Wert.
-        self.assertIn("Sekunden alt", message)
-        self.assertNotIn(spent, message)
-
     def test_grab_live_refresh_waits_while_window_is_on_partner_login_page(self):
         """Der Partner-Login-Tab ist kein geschlossenes Fenster.
 
@@ -600,9 +566,11 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=None), \
              patch("calibre_plugin.cdp.grabber_window_state",
-                   return_value={"window": True, "reader_tab": False}):
+                   return_value={"window": True, "reader_tab": False}), \
+             patch("calibre_plugin.cdp.close_grabber_window") as closer:
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=0)
+        closer.assert_not_called()
         message = str(ctx.exception)
         self.assertIn("Zeitüberschreitung", message)
         self.assertIn("nicht abgeschlossen", message)
@@ -894,6 +862,35 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
                                        "Crypto.Cipher": None}):
             self.assertEqual("", cryptojs_decrypt(blob))
 
+    def test_invalid_blobs_and_jwt_payloads_are_rejected(self):
+        from ..browser_crypto import _pkcs7_unpad, cryptojs_decrypt
+        from ..token_candidates import _jwt_payload, _unwrap_refresh_candidate
+
+        for value in ("%%%", "U2FsdGVk", "☃", base64.b64encode(
+                b"Salted__" + b"12345678" + b"x" * 17).decode()):
+            with self.subTest(value=value):
+                self.assertEqual("", cryptojs_decrypt(value))
+        for data in (b"", b"x", b"x" * 15 + b"\x00",
+                     b"x" * 14 + b"\x01\x02"):
+            self.assertIsNone(_pkcs7_unpad(data))
+        for token in ("", "a.☃.c", "a.!.c", "a.W10.c"):
+            self.assertIsNone(_jwt_payload(token))
+        opaque = "opaque-token-value-without-a-jwt-shape"
+        for plain, expected in ((opaque, opaque),
+                                (json.dumps({"refresh": opaque}), opaque),
+                                ('{"refresh": "short"}', None),
+                                ('["not a token"]', None),
+                                ('{"refresh": "[not a token]"}', None)):
+            blob = self._encrypt(plain)
+            self.assertEqual(expected or blob, _unwrap_refresh_candidate(blob))
+
+    def test_unexpected_decoder_failure_is_not_hidden(self):
+        from ..token_candidates import _decrypt_reader_blob
+        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
+                   side_effect=RuntimeError("broken decoder")):
+            with self.assertRaisesRegex(RuntimeError, "broken decoder"):
+                _decrypt_reader_blob("U2FsdGVk")
+
     def test_unwrap_decrypts_reader_user_token_blob(self):
         """Der verschluesselte Kandidat wird zum echten JWT – und ist
         damit datierbar (Altersnotiz statt Struktur-Hinweis)."""
@@ -1138,23 +1135,56 @@ class PlatformBrowserPathTests(unittest.TestCase):
             handle.write("browser")
         return path
 
-    def test_windows_roots_share_one_search_and_skip_duplicate_labels(self):
-        program_files = r"C:\Program Files"
-        program_files_x86 = r"C:\Program Files (x86)"
-        chrome = os.path.join(
-            program_files, r"Google\Chrome\Application\chrome.exe")
-        duplicate_chrome = os.path.join(
-            program_files_x86, r"Google\Chrome\Application\chrome.exe")
-        chromium = os.path.join(
-            program_files_x86, r"Chromium\Application\chrome.exe")
-        existing_paths = {chrome, duplicate_chrome, chromium}
-        with patch.dict(os.environ, {
-                "PROGRAMFILES": program_files,
-                "PROGRAMFILES(X86)": program_files_x86}), \
-                patch.object(os.path, "isfile",
-                             side_effect=lambda path: path in existing_paths):
-            found = browser_finder._platform_browser_paths("win32")
-        self.assertEqual([[chrome], [chromium]], found)
+    def test_windows_reads_registered_app_paths_and_checks_they_exist(self):
+        """Nur Registry-Treffer zaehlen; geratene Programmordner gibt es nicht."""
+        app_paths = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+        chrome = r"C:\Users\me\AppData\Local\Google\Chrome\Application\chrome.exe"
+        edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        missing = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+
+        class FakeWinreg(object):
+            HKEY_CURRENT_USER = "HKCU"
+            HKEY_LOCAL_MACHINE = "HKLM"
+            KEY_READ = 1
+            KEY_WOW64_64KEY = 2
+            KEY_WOW64_32KEY = 4
+
+            def __init__(self):
+                self.values = {
+                    ("HKCU", app_paths): {},
+                    ("HKLM", app_paths): {},
+                    ("HKCU", app_paths + r"\chrome.exe"): {"": '"' + chrome + '"'},
+                    ("HKLM", app_paths + r"\chrome.exe"): {"": chrome},
+                    ("HKLM", app_paths + r"\msedge.exe"): {"": edge},
+                    ("HKLM", app_paths + r"\brave.exe"): {"": missing},
+                }
+
+            def OpenKey(self, root, path, reserved=0, access=0):
+                key = (root, path)
+                if key not in self.values:
+                    raise FileNotFoundError(path)
+                return key
+
+            def QueryValueEx(self, key, name):
+                return self.values[key][name], 1
+
+            def CloseKey(self, key):
+                pass
+
+        existing = {chrome, edge}
+        with patch.object(os.path, "isfile",
+                          side_effect=lambda path: path in existing):
+            found = browser_finder._windows_browser_paths(FakeWinreg())
+        self.assertEqual([[chrome], [edge]], found)
+
+    @unittest.skipUnless(os.name == "nt",
+                         "Windows-Registry nur unter Windows pruefbar")
+    def test_windows_registry_returns_only_existing_executables(self):
+        """Auf Windows: jeder gefundene Pfad ist eine echte .exe-Datei."""
+        for argv in browser_finder._windows_browser_paths():
+            self.assertEqual(1, len(argv))
+            self.assertTrue(os.path.isfile(argv[0]))
+            self.assertEqual(".exe", os.path.splitext(argv[0])[1].lower())
 
     def test_macos_checks_system_and_user_application_directories(self):
         with tempfile.TemporaryDirectory() as home:

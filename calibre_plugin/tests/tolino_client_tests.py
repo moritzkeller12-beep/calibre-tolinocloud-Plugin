@@ -1,6 +1,5 @@
 """Tolino-Client, Transport, Tokens und Fehlertexte."""
 
-import ast
 import base64
 import calibre_plugin.tolino as tolino_module
 import os
@@ -13,7 +12,6 @@ from .. import config
 from ..partners import PARTNERS, WEBREADER_URL
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, active_tags, tag_id_from_patch
-from ..run_context import RunContext
 from ..browser_login import grab_live_refresh
 from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
 from pathlib import Path
@@ -578,7 +576,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
 
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=Exception("no devices")), \
+                   side_effect=tolino_module.TolinoApiError("no devices")), \
              patch("calibre_plugin.tolino.TolinoClient._register_hardware",
                    return_value=False):
             with self.assertRaises(TolinoApiError) as ctx:
@@ -632,7 +630,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client = self._client("configured-hw")
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=Exception("no devices")), \
+                   side_effect=tolino_module.TolinoApiError("no devices")), \
              patch("calibre_plugin.tolino.time.sleep"):
             data = client.inventory()
         self.assertEqual([], data)
@@ -645,6 +643,32 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         self.assertEqual("TOLINO_WEBREADER",
                          register_headers.get("client_type"))
         self.assertEqual("configured-hw", client.hardware)
+
+    def test_failed_hardware_callback_is_nonfatal_and_redacted(self):
+        client = self._client()
+        client.refresh = "refresh-secret"
+        client.access = "access-secret"
+        client.hardware_callback = lambda _hardware: (_ for _ in ()).throw(
+            RuntimeError("refresh-secret access-secret"))
+        with patch("calibre_plugin.tolino.log_warning") as warning:
+            client._notify_hardware()
+        message = warning.call_args.args[0]
+        self.assertIn("Geräte-ID", message)
+        self.assertNotIn("refresh-secret", message)
+        self.assertNotIn("access-secret", message)
+        self.assertIn("[REDACTED]", message)
+
+    def test_unexpected_recovery_error_is_not_hidden(self):
+        client = self._client()
+        with patch("calibre_plugin.tolino.urlopen",
+                   side_effect=self._error400(b"{}")), \
+             patch.object(client, "fetch_hardware_id",
+                          side_effect=RuntimeError("device bug")), \
+             patch.object(client, "_register_hardware") as register:
+            with self.assertRaisesRegex(RuntimeError, "device bug"):
+                client.inventory()
+        register.assert_not_called()
+        self.assertFalse(client._in_device_recovery)
 
     def test_registered_current_device_raises_without_extra_calls(self):
         """Ist das konfigurierte Geraet bereits das registrierte, kommt
@@ -687,7 +711,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client = self._client("configured-hw")
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=Exception("no devices")), \
+                   side_effect=tolino_module.TolinoApiError("no devices")), \
              patch("calibre_plugin.tolino.time.sleep",
                    side_effect=sleeps.append):
             data = client.inventory()
@@ -953,24 +977,6 @@ class ErrorCodeTests(unittest.TestCase):
 
 class UserTextTests(unittest.TestCase):
     """Einheitliche, kurze Nutzertexte."""
-
-    WORDS = ("häkchen", "anhaken", "angehakt", "deliverable", "von hand zuordnen")
-
-    def _visible_strings(self, path):
-        """Alle String-Konstanten ohne Docstrings (also die sichtbaren Texte)."""
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        docstrings = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
-                body = getattr(node, "body", None)
-                if body and isinstance(body[0], ast.Expr) and isinstance(
-                        getattr(body[0], "value", None), ast.Constant):
-                    docstrings.add(id(body[0].value))
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant)
-                    and isinstance(node.value, str)
-                    and id(node) not in docstrings):
-                yield node.value
 
     def test_reported_message_is_one_clean_line(self):
         """Genau «Text (Code A01)» – ohne Zeilenumbruch und ohne Traceback."""
@@ -1336,6 +1342,50 @@ class PersistCredentialsDedupTests(unittest.TestCase):
             account = config.account_by_name("konto")
             self.assertEqual("neu", account["refresh_token"])
             self.assertEqual("hw", account["hardware_id"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_clear_refresh_token_keeps_hardware_and_state(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("konto", {
+                "refresh_token": "alt", "hardware_id": "hw",
+                "state": {"u1": {"tolino_id": "t1"}},
+            }, active="konto")
+            self.assertTrue(config.clear_refresh_token("konto"))
+            account = config.account_by_name("konto")
+            self.assertEqual("", account["refresh_token"])
+            self.assertEqual("hw", account["hardware_id"])
+            self.assertEqual({"u1": {"tolino_id": "t1"}}, account["state"])
+            self.assertFalse(config.clear_refresh_token("fehlt"))
+        finally:
+            config.PREFERENCES = original
+
+    def test_token_vault_only_clears_explicitly_rejected_tokens(self):
+        from urllib.error import HTTPError
+        from ..token_vault import TokenVault
+
+        cases = ((400, b'{"error":"invalid_grant",'
+                       b'"error_description":"reuse exceeded"}', ""),
+                 (500, b"temporary failure", "alt"))
+        original = config.PREFERENCES
+        try:
+            for status, body, expected in cases:
+                with self.subTest(status=status):
+                    config.PREFERENCES = config.JSONConfig("test")
+                    config.save_account("konto", {
+                        "refresh_token": "alt", "hardware_id": "hw",
+                    }, active="konto")
+                    error = HTTPError("https://example.invalid/token", status,
+                                      "Error", {}, None)
+                    error.read = lambda: body
+                    with patch("calibre_plugin.tolino.urlopen", side_effect=error):
+                        with self.assertRaises(TolinoAuthError):
+                            TokenVault().login("konto", 4)
+                    account = config.account_by_name("konto")
+                    self.assertEqual(expected, account["refresh_token"])
+                    self.assertEqual("hw", account["hardware_id"])
         finally:
             config.PREFERENCES = original
 

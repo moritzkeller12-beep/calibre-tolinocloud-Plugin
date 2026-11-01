@@ -38,7 +38,7 @@ def cryptojs_decrypt(b64_text):
         return ""
     try:
         raw = base64.b64decode("".join(str(b64_text or "").split()), validate=False)
-    except Exception:
+    except ValueError:
         return ""
     if len(raw) < 32 or raw[:8] != b"Salted__":
         return ""

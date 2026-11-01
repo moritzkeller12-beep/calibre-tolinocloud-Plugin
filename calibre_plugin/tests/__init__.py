@@ -16,7 +16,7 @@ def _install_calibre_config_stub():
     Testpaket, das jeder dokumentierte Testeinstieg zuerst lädt.
     """
     try:
-        import calibre.utils.config  # noqa: F401
+        __import__("calibre.utils.config")
     except ImportError:
         pass
     else:

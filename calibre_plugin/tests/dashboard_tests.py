@@ -219,12 +219,12 @@ class ColumnSetupButtonTests(unittest.TestCase):
             seen.append(list(labels))
             return list(labels)
 
-        with patch("calibre_plugin.ui_dashboard.create_custom_columns",
+        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
                    fake_create), \
              patch("calibre_plugin.ui_dashboard.column_state",
                    lambda _db: {"id": True, "read": True,
                                 "ignore": True}), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
+             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             dashboard.create_columns("tolino_ignore")
         # Genau diese eine Spalte wird angelegt -- nicht alle drei.
@@ -240,9 +240,9 @@ class ColumnSetupButtonTests(unittest.TestCase):
         ui_module = self._ui()
         calls, boxes = [], []
         dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard.create_custom_columns",
+        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
                    lambda _db, _labels: []), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
+             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             dashboard.create_columns("tolino_read")
         self.assertIn("schon vorhanden", boxes[0][2])
@@ -259,10 +259,10 @@ class ColumnSetupButtonTests(unittest.TestCase):
         ui_module = self._ui()
         calls, errors = [], []
         dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard.create_custom_columns", boom), \
-             patch("calibre_plugin.ui_dashboard.log_warning",
+        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns", boom), \
+             patch("calibre_plugin.ui_dashboard_parts.log_warning",
                    lambda _text: None), \
-             patch("calibre_plugin.ui_dashboard.error_dialog",
+             patch("calibre_plugin.ui_dashboard_parts.error_dialog",
                    lambda *args, **kwargs: errors.append(args)):
             dashboard.create_columns("tolino_id")
         self.assertIn("create_custom_column", errors[0][2])
@@ -639,23 +639,17 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertEqual("invalid", status)
         self.assertIn("Bitte bei tolino anmelden", detail)
 
-    def test_a_running_sync_blocks_the_check(self):
-        records = []
-        with self._patch_client(records):
-            with vault_module.TOKEN_VAULT._lock:
-                status, detail = vault_module.check_stored_login("konto", 4)
-        # NICHT „invalid": der Zugang ist ungeprueft, nicht abgelehnt.
-        self.assertEqual(("busy", ""), (status, detail))
-        self.assertEqual([], records)
-
-    def test_a_parallel_rotation_blocks_the_check(self):
-        records = []
-        with self._patch_client(records):
-            with vault_module.TOKEN_VAULT._lock:
-                status, detail = vault_module.check_stored_login(
-                    "konto", 4, lock_timeout=0)
-        self.assertEqual(("busy", ""), (status, detail))
-        self.assertEqual([], records)
+    def test_a_locked_vault_blocks_the_check(self):
+        # Der Zugang ist ungeprüft, nicht abgelehnt; das gilt auch ohne Wartezeit.
+        for kwargs in ({}, {"lock_timeout": 0}):
+            with self.subTest(kwargs=kwargs):
+                records = []
+                with self._patch_client(records):
+                    with vault_module.TOKEN_VAULT._lock:
+                        status, detail = vault_module.check_stored_login(
+                            "konto", 4, **kwargs)
+                self.assertEqual(("busy", ""), (status, detail))
+                self.assertEqual([], records)
 
     def test_a_late_401_uses_the_latest_stored_refresh_token(self):
         stored = {"refresh_token": "saved-old", "hardware_id": "hw-1"}
@@ -1183,20 +1177,26 @@ class LoginMessageTests(unittest.TestCase):
             "information": staticmethod(lambda *args: boxes.append(args)),
             "warning": staticmethod(lambda *args: boxes.append(args)),
         })
+        cases = ((tolino_module.TolinoAuthError(
+                      "Kein Chromium-Browser gefunden (tok-geheim)", code="B01",
+                      short="Browser-Anmeldung nicht möglich"),
+                  "Browser-Anmeldung nicht möglich (Code B01)"),
+                 (RuntimeError("unerwartet: tok-geheim"),
+                  "Anmeldung nicht abgeschlossen (Code E99)"))
         try:
             with patch("calibre_plugin.ui_dashboard.log_warning",
                        lambda text: logged.append(text)):
-                dashboard.login_failed(tolino_module.TolinoAuthError(
-                    "Kein Chromium-Browser gefunden (tok-geheim)", code="B01",
-                    short="Browser-Anmeldung nicht möglich"))
+                for error, title in cases:
+                    with self.subTest(error=error):
+                        dashboard.login_failed(error)
+                        self.assertEqual(title, boxes[-1][1])
+                        self.assertIn("Anmeldung erneut starten", boxes[-1][2])
+                        self.assertNotIn("tok-geheim", boxes[-1][2])
+                        self.assertIn("Anmeldung fehlgeschlagen.", dashboard.status.value)
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(boxes))
-        self.assertEqual("Browser-Anmeldung nicht möglich (Code B01)", boxes[0][1])
-        self.assertIn("Anmeldung erneut starten", boxes[0][2])
-        self.assertNotIn("tok-geheim", boxes[0][2])
+        self.assertEqual(len(cases), len(boxes))
         self.assertNotIn("tok-geheim", " ".join(logged))
-        self.assertIn("Anmeldung fehlgeschlagen.", dashboard.status.value)
 
 class AccountStateBindingTests(unittest.TestCase):
     """Das im Dialog angezeigte Konto IST das Konto, dessen State
@@ -1204,15 +1204,18 @@ class AccountStateBindingTests(unittest.TestCase):
     Tolino-ID-Spalte folgt EINER Regel (nur bei genau einem Konto)."""
 
     def test_account_by_name_ignores_the_active_account(self):
-        accounts = [
-            {"name": "alpha", "state": {"u1": {"tolino_id": "id-a"}}},
-            {"name": "beta", "state": {"u2": {"tolino_id": "id-b"}}},
-        ]
+        original = config.PREFERENCES
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.PREFERENCES = config.JSONConfig("test")
+        config.save_account("alpha", {"state": {"u1": {"tolino_id": "id-a"}}},
+                            active="alpha")
+        config.save_account("beta", {"state": {"u2": {"tolino_id": "id-b"}}},
+                            active="beta")
         self.assertEqual({"u1": {"tolino_id": "id-a"}},
-                         config.account_by_name("alpha", accounts)["state"])
+                         config.account_by_name("alpha")["state"])
         self.assertEqual({"u2": {"tolino_id": "id-b"}},
-                         config.account_by_name("beta", accounts)["state"])
-        self.assertEqual({}, config.account_by_name("gone", accounts))
+                         config.account_by_name("beta")["state"])
+        self.assertEqual({}, config.account_by_name("gone"))
 
     def test_set_active_account_switches_without_touching_state(self):
         original = config.PREFERENCES

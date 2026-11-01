@@ -144,15 +144,11 @@ def plan_collection_updates(series_map, state):
 def metadata_update_fields(metadata):
     """Tolino /meta payload fields for an in-place metadata update."""
     fields = {}
-    title = str(metadata.get("title") or "").strip()
-    if title:
-        fields["title"] = title
-    authors = str(metadata.get("authors") or "").strip()
-    if authors:
-        fields["author"] = authors
-    isbn = str(metadata.get("isbn") or "").strip()
-    if isbn:
-        fields["isbn"] = isbn
+    for source, target in (("title", "title"), ("authors", "author"),
+                           ("isbn", "isbn")):
+        value = str(metadata.get(source) or "").strip()
+        if value:
+            fields[target] = value
     return fields
 
 

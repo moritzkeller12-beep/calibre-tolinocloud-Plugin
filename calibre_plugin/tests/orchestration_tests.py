@@ -74,7 +74,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         def warning(*args, **kwargs):
             warnings.append(args)
 
-        ui_module.dashboard.QMessageBox = type(
+        ui_module.dashboard_parts.QMessageBox = type(
             "QMessageBox", (), {"warning": staticmethod(warning)})
 
     @staticmethod
@@ -878,7 +878,7 @@ class ReplacementConfirmationTests(unittest.TestCase):
                 asked.append(args)
                 return answer
 
-        ui_module.dashboard.QMessageBox = Box
+        ui_module.dashboard_parts.QMessageBox = Box
         dashboard._start_sync_worker(
             RunContext.from_values(settings), _preparation(jobs=jobs), {})
         return dashboard, asked

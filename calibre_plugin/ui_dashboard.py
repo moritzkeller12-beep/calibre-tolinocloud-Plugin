@@ -1,10 +1,7 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
-from .ui_common import (CANCEL_MESSAGE, QComboBox, QDialog,
-                        QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
-                        QLabel, QLineEdit, QMessageBox, QProgressBar,
-                        QPushButton, QThread, QVBoxLayout, _apply_busy,
-                        _dialog_busy, gui_guard,
-                        start_worker,
+from .ui_common import (CANCEL_MESSAGE, QDialog, QInputDialog,
+                        QMessageBox, QThread, _apply_busy, _dialog_busy,
+                        gui_guard, start_worker,
                         LOGIN_NEXT_STEP, _login_failure_guidance,
                         _stop_thread, sync_result_detail,
                         sync_result_text, Qt)
@@ -15,61 +12,19 @@ from .config import (PREFERRED_FORMATS, account_by_name,
                      save_account, save_credentials,
                      set_active_account, settings)
 from .run_context import RunContext
-from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS, TOLINO_IGNORE_COLUMN,
-                      create_custom_columns, column_state, bool_column_available,
-                      update_read_status, update_tolino_ids)
+from .library import (TOLINO_IGNORE_COLUMN, column_state,
+                      bool_column_available, update_read_status,
+                      update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
-from .partners import PARTNERS
-from .tolino import (RELOGIN, hardware_id, log_warning,
+from .tolino import (RELOGIN, TolinoError, hardware_id, log_warning,
                      normalize_refresh_token, report_error, sanitize_error)
+from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
+from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
+                                 confirm_replacements, offer_next_step,
+                                 report_skipped_uploads)
 from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
-from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
-
-
-class SettingsDialog(QDialog):
-    """Bündelt Übertragungsoptionen und Kontoverwaltung."""
-
-    def __init__(self, dashboard):
-        QDialog.__init__(self, dashboard)
-        self.dashboard = dashboard
-        self.setWindowTitle("Einstellungen")
-        self.setMinimumWidth(620)
-        layout = QVBoxLayout(self)
-
-        self.transfer = QGroupBox("Einstellungen")
-        self.transfer_form = QFormLayout(self.transfer)
-        layout.addWidget(self.transfer)
-
-        self.accounts = QGroupBox("Konten und Verbindung")
-        self.accounts_form = QFormLayout(self.accounts)
-        layout.addWidget(self.accounts)
-
-        self.close_button = QPushButton("Speichern und schließen")
-        self.close_button.setToolTip(
-            "Speichert die Änderungen und schließt die Einstellungen.")
-        self.close_button.clicked.connect(self.dashboard.close_settings)
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        bottom.addWidget(self.close_button)
-        layout.addLayout(bottom)
-
-
-@gui_guard
-def _offer_next_step(dialog):
-    """Nach der Anmeldung ist der Hauptknopf der naechste Schritt.
-
-    Kein modaler Dialog: der Knopf wird
-    Standardknopf und bekommt den Fokus, damit «Enter» den Vergleich startet
-    -- die Statuszeile sagt vorher, was er tut. Als freie Funktion, weil
-    Vorablauf und Anmeldung sie aus verschiedenen Zustaenden aufrufen.
-    """
-    primary = getattr(dialog, "primary", None)
-    if primary is None:
-        return
-    primary.setDefault(True)
-    primary.setFocus()
 
 
 def _persist_sync_result(dialog, state, updates):
@@ -83,8 +38,6 @@ def _persist_sync_result(dialog, state, updates):
     account_name = str(
         getattr(worker, "account_name", None)
         or getattr(dialog, "account_name", "") or "")
-    # Die Spalten des Laufs stehen im Kontext des Workers -- nicht mehr am
-    # Dialog: dort waeren sie ein zweiter, veralteter Zustand.
     columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
     try:
         if account_name:
@@ -132,7 +85,7 @@ def _sync_failure_heading(outcome):
     return "Fehlgeschlagen", "Fehlgeschlagen: "
 
 
-class SyncDashboard(QDialog):
+class SyncDashboard(DashboardParts, QDialog):
     def __init__(self, gui):
         QDialog.__init__(self, gui)
         self.gui = gui
@@ -147,156 +100,9 @@ class SyncDashboard(QDialog):
         self.account_name = ""
         self.setWindowTitle("tolino Cloud Sync")
         self.setMinimumWidth(560)
-        root = QVBoxLayout(self)
-        self._build_intro(root)
-        self._build_main_actions(root)
-        self.settings_dialog = SettingsDialog(self)
-        self._build_transfer_settings()
-        self._build_account_settings()
-        self._build_footer(root)
+        self._build_ui()
         self.load_values()
 
-    def _build_intro(self, root):
-        """Kurze Erklaerung des Ablaufs ueber den Knoepfen."""
-        intro = QLabel(
-            "Melde dich bei tolino an, vergleiche die Bibliotheken und "
-            "wähle aus, was übertragen wird. Erst danach wird etwas geändert.")
-        intro.setWordWrap(True)
-        root.addWidget(intro)
-
-    def _build_main_actions(self, root):
-        """Buchhaendler, Anmeldung und der eine Hauptknopf."""
-        # --- Ein Ablauf: anmelden, dann vergleichen ------------------------
-        self.partner = QComboBox()
-        for pid, partner in sorted(PARTNERS.items()):
-            self.partner.addItem(partner["name"], pid)
-        self.partner.setToolTip(
-            "Bei diesem Händler hast du dein tolino-Konto.")
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-        # Kontoauswahl direkt auf der ersten Seite -- aber nur, wenn es
-        # wirklich mehrere Konten gibt. Bei einem einzigen Konto wäre die
-        # Zeile nur Ballast.
-        self.account_quick = QComboBox()
-        self.account_quick.setToolTip(
-            "Jedes Konto hat eine eigene Anmeldung und einen eigenen Sync-Stand.")
-        self.account_quick.currentIndexChanged.connect(
-            self.quick_account_changed)
-        self.account_quick_label = QLabel("Konto")
-        # Der Anmeldeknopf steht wieder sichtbar auf der ersten Seite --
-        # auch wenn schon ein Zugang gespeichert ist, denn genau dann
-        # braucht man ihn, wenn der Zugang abgelaufen ist.
-        self.login_button = QPushButton("Bei tolino anmelden")
-        self.login_button.setToolTip(
-            "Öffnet ein Browserfenster zur Anmeldung.")
-        self.login_button.clicked.connect(self.browser_login)
-        self.primary = QPushButton("Bibliothek vergleichen …")
-        self.primary.setToolTip(
-            "Vergleicht deine Calibre-Bibliothek mit tolino.")
-        self.primary.clicked.connect(self.primary_action)
-        self.progress_label = QLabel("Bereit")
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setVisible(False)
-        self.progress_label.setVisible(False)
-        self.settings_button = QPushButton("Einstellungen …")
-        self.settings_button.setToolTip("Upload-Formate und Konten.")
-        self.settings_button.clicked.connect(self.open_settings)
-
-        action_form = QFormLayout()
-        action_form.addRow("Buchhändler", self.partner)
-        action_form.addRow(self.account_quick_label, self.account_quick)
-        action_form.addRow("", self.login_button)
-        action_form.addRow("", self.primary)
-        action_form.addRow("", self.status)
-        action_form.addRow("", self.progress_label)
-        action_form.addRow("", self.progress)
-        action_form.addRow("", self.settings_button)
-        root.addLayout(action_form)
-
-    def _build_transfer_settings(self):
-        """Upload-Optionen und ein Knopf je Calibre-Spalte."""
-        transfer = self.settings_dialog.transfer_form
-        self.formats = QLineEdit()
-        self.formats.setToolTip(
-            "EPUB oder PDF, durch Komma getrennt. Es wird das erste "
-            "vorhandene Format hochgeladen.")
-        transfer.addRow("Upload-Formate", self.formats)
-        # Die Spalten von Hand anzulegen ist fehleranfaellig. Je Spalte ein
-        # eigener Knopf: er legt NUR seine Spalte an, wenn sie fehlt, und
-        # laesst Vorhandenes unberuehrt.
-        self.column_buttons = {}
-        for index, (label, _name, datatype) in enumerate(CUSTOM_COLUMNS):
-            button = QPushButton("#%s anlegen …" % label)
-            button.setToolTip(
-                "Legt die Spalte #%s (%s) an, falls sie fehlt. Vorhandene "
-                "Spalten bleiben unverändert."
-                % (label, COLUMN_KIND_NAMES.get(datatype, datatype)))
-            button.clicked.connect(
-                lambda _checked=False, key=label: self.create_columns(key))
-            self.column_buttons[label] = button
-            # Nur die erste Zeile traegt die Beschriftung; drei eigene
-            # Zeilen sind der klarere Weg als ein Knopf fuer alles.
-            transfer.addRow("Calibre-Spalten" if index == 0 else "", button)
-
-    def _build_account_settings(self):
-        """Kontoverwaltung und die beiden technischen Zugangsfelder."""
-        accounts = self.settings_dialog.accounts_form
-        self.account_select = QComboBox()
-        self.account_new = QPushButton("Konto hinzufügen")
-        self.account_remove = QPushButton("Konto entfernen …")
-        account_buttons = QHBoxLayout()
-        account_buttons.addWidget(self.account_new)
-        account_buttons.addWidget(self.account_remove)
-        self.account_select.currentIndexChanged.connect(self.account_changed)
-        self.account_new.clicked.connect(self.new_account)
-        self.account_remove.clicked.connect(self.remove_account)
-        self.hardware = QLineEdit()
-        self.refresh = QLineEdit()
-        self.refresh.setEchoMode(QLineEdit.EchoMode.Password)
-        # Das Feld zeigt den Token nicht an: das Konto ist die Quelle, ein
-        # leeres Feld heisst «gespeicherten Zugang behalten».
-        self.refresh.setPlaceholderText(
-            "Gespeichert – nur zum Ersetzen eintippen")
-        accounts.addRow("Aktives Konto", self.account_select)
-        accounts.addRow("", account_buttons)
-        accounts.addRow("Geräte-ID (automatisch)", self.hardware)
-        accounts.addRow("Zugangstoken (nur bei Problemen ändern)", self.refresh)
-        # Das Feld ist Handeingabe ohne Zustand; abgemeldet wird ausdruecklich
-        # hier -- sonst gaebe es keinen Weg mehr, den Zugang zu loeschen.
-        self.logout_button = QPushButton("Abmelden")
-        self.logout_button.setToolTip(
-            "Löscht den gespeicherten Zugang dieses Kontos.")
-        self.logout_button.clicked.connect(self.logout)
-        accounts.addRow("", self.logout_button)
-
-    def _build_footer(self, root):
-        """Schliessen-Knopf ohne QDialogButtonBox (Qt6-Rollenwarnung)."""
-        close = QPushButton("Schließen")
-        close.clicked.connect(self.close)
-        root.addWidget(close)
-
-    def create_columns(self, label):
-        """Genau diese Calibre-Spalte anlegen -- vorhandene bleibt unberührt."""
-        database = getattr(self.gui, "current_db", None)
-        try:
-            created = create_custom_columns(database, (label,))
-        except Exception as exc:
-            log_warning("Spalte #%s konnte nicht angelegt werden: %s"
-                        % (label, sanitize_error(exc)))
-            error_dialog(self, "Spalte nicht angelegt", str(exc), show=True)
-            return
-        if not created:
-            info_dialog(
-                self, "Calibre-Spalte",
-                "Die Spalte #%s ist schon vorhanden." % label,
-                show=True, show_copy_button=False)
-            return
-        info_dialog(
-            self, "Calibre-Spalte angelegt",
-            "Angelegt: #%s.\n\nCalibre neu starten, damit die Spalte in der "
-            "Bibliothek nutzbar ist." % label,
-            show=True, show_copy_button=False)
     def _save_visible_account(self, values=None):
         """Das sichtbare Konto und die globalen Optionen EINMAL einlesen.
 
@@ -310,15 +116,10 @@ class SyncDashboard(QDialog):
         values = values or self.values()
         name = str(values.get("account_name") or "")
         if not name:
-            # Das angezeigte Konto existiert nicht mehr (z. B. extern
-            # geänderte Einstellungen). Dann darf weder der Zustand eines
-            # anderen Kontos noch ein leerer Zustand unter dem alten Namen
-            # gespeichert werden.
+            # Fehlende Konten dürfen keinen fremden Zustand überschreiben.
             log_warning("Das sichtbare Konto existiert nicht mehr; "
                         "Änderungen wurden nicht gespeichert.")
             return
-        # Formate und Konto in EINEM Commit: vorher waren es zwei
-        # vollständige Snapshots und zwei Schreibvorgänge.
         save_account(name, values, active=name,
                      preferred_formats=values[PREFERRED_FORMATS])
 
@@ -350,9 +151,7 @@ class SyncDashboard(QDialog):
             return False
         if name not in getattr(self, "account_names", ()):
             return False
-        # Während Sync/Vorbereitung/Anmeldung bleibt das Konto stehen: Der
-        # laufende Kontext gehört zum gestarteten Konto. (Die Worker-Logik
-        # sichert zusätzlich selbst gegen den Kontonamen ab.)
+        # Ein laufender Vorgang bleibt an sein Startkonto gebunden.
         if _dialog_busy(self):
             try:
                 self.load_values()
@@ -419,9 +218,7 @@ class SyncDashboard(QDialog):
                 save_account(self.account_name, {"partner_id": partner_id})
         self.partner.setCurrentIndex(max(0, self.partner.findData(partner_id)))
         self.hardware.setText(values["hardware_id"] or hardware_id())
-        # Der Token steht NUR im Konto (config). Ein Feldinhalt war ein
-        # zweiter Ort, der einen im Hintergrund rotierten Token mit der
-        # alten Kopie ueberschreiben konnte -- jetzt bleibt es leer.
+        # Das leere Feld darf einen rotierten Token nicht überschreiben.
         self.refresh.setText("")
         self.formats.setText(", ".join(values["preferred_formats"]))
         self.update_status()
@@ -463,7 +260,6 @@ class SyncDashboard(QDialog):
             self.status.setText("Nicht angemeldet.")
         self.progress.setVisible(running)
         self.progress_label.setVisible(running)
-        # Knopf und Tooltip folgen dem gespeicherten Zugang.
         login_button = getattr(self, "login_button", None)
         if login_button is not None:
             if logged_in:
@@ -481,9 +277,6 @@ class SyncDashboard(QDialog):
         else:
             _apply_busy(self, False)
             self.primary.setText("Bibliothek vergleichen …")
-            # Ohne Zugang gibt es nichts zu vergleichen -- der Grund steht
-            # im Tooltip und in der Statuszeile, der Anmeldeknopf ist direkt
-            # darüber sichtbar.
             self.primary.setEnabled(logged_in)
             self.primary.setToolTip(
                 "Vergleicht deine Calibre-Bibliothek mit tolino."
@@ -543,10 +336,7 @@ class SyncDashboard(QDialog):
         wuerde ein spaeteres Speichern einen parallelen Worker-Fortschritt
         ueberschreiben.
         """
-        # Nur ohne Kontonamen auf das aktive Konto zurückfallen. Ist der
-        # angezeigte Name gesetzt, aber nicht mehr vorhanden, bleibt der
-        # Zustand leer -- sonst landeten die Werte eines anderen Kontos
-        # unter diesem Namen in den Einstellungen.
+        # Ein fehlendes angezeigtes Konto darf kein anderes überschreiben.
         account = self._selected_account()
         if not isinstance(account, dict):
             account = {}
@@ -605,7 +395,7 @@ class SyncDashboard(QDialog):
         """Prüfung bestanden: Anmeldung bleibt gültig."""
         self._login_cleanup()
         self.status.setText("Angemeldet.")
-        _offer_next_step(self)
+        offer_next_step(self)
 
     @gui_guard
     def login_rejected(self, message=""):
@@ -648,23 +438,20 @@ class SyncDashboard(QDialog):
         if hardware:
             self.hardware.setText(str(hardware))
         self.store_refresh(refresh, str(hardware or ""))
-        # Erfolg steht in der Statuszeile -- kein zusaetzlicher modaler
-        # Dialog fuer den Normalfall.
         self.status.setText("Angemeldet.")
-        _offer_next_step(self)
+        offer_next_step(self)
 
     @gui_guard
     def login_failed(self, error):
         """Fehlgeschlagene Anmeldung: Ursache + naechster Schritt nennen."""
         self._login_cleanup()
-        # Technische Details (inkl. Traceback) nur ins Log.
-        # Der sichtbare Zugang ist ein bekanntes Geheimnis: er darf
-        # weder im Dialog noch im Log auftauchen.
+        # Technische Details nur bereinigt protokollieren.
         secrets = tuple(token for token in
                         (self._stored_refresh(), self._typed_refresh()) if token)
         detail = report_error(error, "Anmeldefenster", secrets)
         log_warning("Anmeldung nicht abgeschlossen: " + detail)
-        title = "%s (Code %s)" % (_login_failure_guidance(error), error.code)
+        code = error.code if isinstance(error, TolinoError) else "E99"
+        title = "%s (Code %s)" % (_login_failure_guidance(error), code)
         self.status.setText("Anmeldung fehlgeschlagen.")
         QMessageBox.warning(self, title, LOGIN_NEXT_STEP)
 
@@ -677,7 +464,6 @@ class SyncDashboard(QDialog):
     def _login_cleanup(self):
         self.login_thread = None
         self.login_worker = None
-        # `update_status` sperrt bzw. gibt die Bedienelemente selbst frei.
         self.update_status()
 
     @staticmethod
@@ -772,14 +558,12 @@ class SyncDashboard(QDialog):
         state = payload["state"]
         self._finish_prepare()
 
-        # Nur die Hardware-ID gehört nach dem Vergleich in die Einstellungen.
-        # Der Token wird durch den Client-Callback beim Rotieren gespeichert.
+        # Den rotierten Token speichert bereits der Client-Callback.
         hardware = getattr(self, "hardware", None)
         if (payload.get("hardware") and hardware is not None
                 and self.account_name == account_name):
             hardware.setText(str(payload["hardware"]))
         if payload.get("read_status_known") is False:
-            # Der Dialog zeigt denselben Hinweis in der Tabelle.
             log_warning("Lesestatus unbekannt – er bleibt unverändert.")
         try:
             selection = self._confirm_comparison(
@@ -792,8 +576,8 @@ class SyncDashboard(QDialog):
                 return
             preparation = _dashboard_plan.plan_actions(
                 self, context, metadata, state, selection)
-            if preparation["removals"] and not self._confirm_deletions(
-                    preparation["removals"], state,
+            if preparation["removals"] and not confirm_deletions(
+                    self, preparation["removals"], state,
                     preparation.get("removal_titles")):
                 return
             self._start_sync_worker(context, preparation, state)
@@ -802,32 +586,6 @@ class SyncDashboard(QDialog):
             # Traceback im Slot verschwinden: der Nutzer sähe sonst nur ein
             # geschlossenes Fenster und keinen einzigen Upload.
             self._show_prepare_error(exc, context)
-
-    def _confirm_deletions(self, removals, state, titles=None):
-        """Ausdrücklich markierte Cloud-Kopien vor dem Löschen bestätigen.
-
-        `titles` enthält die Titel der im Vergleich markierten Kopien; als
-        Rückfall kommen die Namen aus dem gespeicherten Zustand.
-        """
-        titles = titles if isinstance(titles, dict) else {}
-        lines = []
-        for key, tolino_id in removals:
-            entry = state.get(key) if isinstance(state, dict) else {}
-            title = (titles.get(str(tolino_id))
-                     or (entry.get("title") if isinstance(entry, dict) else "")
-                     or key)
-            lines.append("- %s" % title)
-        yes = QMessageBox.StandardButton.Yes
-        no = QMessageBox.StandardButton.No
-        answer = QMessageBox.question(
-            self, "Bücher aus tolino löschen?",
-            ("1 Buch wird aus tolino gelöscht (in Calibre bleibt es):\n\n%s"
-             if len(removals) == 1 else
-             "%d Bücher werden aus tolino gelöscht (in Calibre bleiben sie):\n\n%s")
-            % (("\n".join(lines),) if len(removals) == 1 else
-               (len(removals), "\n".join(lines))),
-            yes | no, no)
-        return answer == yes
 
     def _confirm_comparison(self, comparison, context, client_factory=None,
                             automatic=0):
@@ -846,9 +604,6 @@ class SyncDashboard(QDialog):
             })
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        # Die Auswahl des bestätigten Fensters entscheidet, was
-        # passiert -- jede Aktion für sich; eine leere Auswahl ändert
-        # nichts.
         return {
             "uploads": dialog._selected_book_ids("upload"),
             "metadata": dialog._selected_book_ids("metadata"),
@@ -856,82 +611,28 @@ class SyncDashboard(QDialog):
             "cloud_deletions": dialog.selected_cloud_deletions(),
         }
 
-    def _confirm_replacements(self, jobs):
-        """Ersetzen einer vorhandenen Cloud-Kopie vorher ansprechen.
-
-        Ein Upload mit alter Kopie loescht diese danach (`SyncWorker`,
-        `job.old_id`), und die alten Sammlungen gelten nicht mehr. Der
-        Tooltip am Haekchen sagte das bisher nur; jetzt steht es mit
-        Titeln vor dem Lauf -- Standardantwort «Nein».
-        """
-        titles = []
-        for job in jobs[:20]:
-            label = getattr(job, "label", None)
-            titles.append("- %s" % (label() if callable(label) else "Buch"))
-        count = len(jobs)
-        if count == 1:
-            text = ("Die Cloud-Kopie dieses Buchs wird ersetzt. Lesestatus, "
-                    "Lesefortschritt und Sammlungen der alten Kopie gehen "
-                    "verloren:\n\n%s" % "\n".join(titles))
-        else:
-            text = ("Die Cloud-Kopie dieser %d Bücher wird ersetzt. "
-                    "Lesestatus, Lesefortschritt und Sammlungen der alten "
-                    "Kopien gehen verloren:\n\n%s"
-                    % (count, "\n".join(titles)))
-        if len(jobs) > 20:
-            text += "\n- … und %d weitere" % (len(jobs) - 20)
-        yes = QMessageBox.StandardButton.Yes
-        no = QMessageBox.StandardButton.No
-        answer = QMessageBox.question(
-            self, "Cloud-Kopie ersetzen?", text, yes | no, no)
-        return answer == yes
-
-    def _report_skipped_uploads(self, skipped_uploads, nothing_else=False):
-        """Bücher ohne verwendbare Datei melden; True heisst «nichts zu tun».
-
-        `nothing_else` sagt, dass ausser diesen übersprungenen Uploads keine
-        Aktion mehr übrig ist: dann endet der Lauf hier, und die Meldung sagt
-        das auch.
-        """
-        text = ("Diese Bücher haben keine Datei im gewählten Format:\n\n%s"
-                % "\n".join(skipped_uploads))
-        if not nothing_else:
-            text += "\n\nDie übrigen Aktionen werden trotzdem ausgeführt."
-        QMessageBox.warning(
-            self, "Einige Bücher wurden nicht hochgeladen", text)
-        return bool(nothing_else)
-
     def _start_sync_worker(self, context, preparation, state):
         """Übersprungene Uploads melden und den Hintergrundlauf starten."""
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
-        # Das Vergleichsfenster kann beliebig lange offen bleiben; in der
-        # Zeit darf der Keep-alive den (single-use) Token rotieren. Deshalb
-        # nimmt der Vault im Worker den GESPEICHERTEN Zugang des Kontos
-        # unmittelbar vor dem Login -- ein zweiter Snapshot hier waere
-        # derselbe Aufruf mit demselben Ergebnis.
+        # Der Vault liest den möglicherweise rotierten Token erst beim Login.
         total = _dashboard_plan.plan_counts(preparation, len(jobs))["steps"]
         if not total and not skipped_uploads:
-            # Kein stiller Lauf: ohne ausführbare Aktion gibt es eine
-            # Antwort statt eines Hintergrundstarts.
-            # Calibre zeigt ein info_dialog nur mit show=True an; ohne das
-            # Argument entsteht das Fenster und bleibt unsichtbar.
+            # Calibre zeigt info_dialog nur mit show=True an.
             info_dialog(self, "Nichts zu tun",
                         _dashboard_plan.nothing_to_do_text(preparation),
                         show=True, show_copy_button=False)
             return
-        if skipped_uploads and self._report_skipped_uploads(
-                skipped_uploads, nothing_else=not total):
+        if skipped_uploads and report_skipped_uploads(
+                self, skipped_uploads, nothing_else=not total):
             return
         replacements = [job for job in jobs
                         if getattr(job, "old_id", None)]
-        if replacements and not self._confirm_replacements(replacements):
+        if replacements and not confirm_replacements(self, replacements):
             self.status.setText(
                 "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
             return
         plan = _dashboard_plan.plan_text(preparation, len(jobs))
-        # Der Plan steht im Log, auch wenn der Lauf danach scheitert;
-        # Zugangsdaten werden dabei nicht ausgegeben.
         log_warning("Sync geplant: %s" % plan)
         _apply_busy(self, True)
         self.progress.setRange(0, total)
@@ -948,8 +649,6 @@ class SyncDashboard(QDialog):
         worker.failed.connect(self.sync_failed)
         start_worker(self, worker, QThread(self), "thread", "worker")
         self.progress.setValue(0)
-        # Der Plan steht sofort im Fenster: der Nutzer sieht, dass der Lauf
-        # begonnen hat und was er tut.
         self.progress_label.setText(plan)
         self.update_status()
 

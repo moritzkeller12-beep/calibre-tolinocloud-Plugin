@@ -190,7 +190,8 @@ class ReadColumnDialogTests(_QtDialogTest):
         row = dict(self._rows()[0],
                    read=ReadState(known=False, cloud=True, local=True))
         dialog = ui_module.dialogs.InventoryDialog([row])
-        self.assertFalse(dialog._check(0, 2).enabled)
+        self.assertFalse(dialog._check(0, 2).item.flags() &
+                         ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
 

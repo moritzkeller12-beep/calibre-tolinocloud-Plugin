@@ -7,8 +7,8 @@ sofort zurueck; niemand sonst haelt eine zweite Kopie.
 import contextlib
 import threading
 
-from .config import (account_by_name, account_secrets, save_hardware_id,
-                     save_refresh_token, settings)
+from .config import (account_by_name, account_secrets, clear_refresh_token,
+                     save_hardware_id, save_refresh_token, settings)
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
                      log_info, log_warning, normalize_refresh_token,
                      sanitize_error)
@@ -30,6 +30,8 @@ class TokenVault:
                     account_name, token),
                 hardware_callback=lambda hardware: save_hardware_id(
                     account_name, hardware))
+            client.token_rejected_callback = lambda: clear_refresh_token(
+                account_name)
             if not values["hardware_id"]:
                 # Die erzeugte ID gehoert ins Konto, sonst wechselt sie je Lauf.
                 save_hardware_id(account_name, client.hardware)

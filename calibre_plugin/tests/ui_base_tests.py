@@ -440,9 +440,11 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 upload = dialog._check(index, 0)
                 metadata = dialog._check(index, 1)
                 mark_read = dialog._check(index, 2)
-                self.assertTrue(upload.enabled)
-                self.assertEqual(in_cloud, metadata.enabled)
-                self.assertEqual(in_cloud, mark_read.enabled)
+                self.assertTrue(upload.item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+                self.assertEqual(in_cloud, bool(metadata.item.flags() &
+                                                ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
+                self.assertEqual(in_cloud, bool(mark_read.item.flags() &
+                                                ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
                 # Vorbelegt ist, was der Vergleich vorschlägt; die Lese-Marke
                 # bleibt unangetastet.
                 self.assertEqual(bool(row["upload"]), upload.isChecked())

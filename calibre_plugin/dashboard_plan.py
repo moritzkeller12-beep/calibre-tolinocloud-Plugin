@@ -43,7 +43,6 @@ def local_metadata(dialog, context, state=None):
                 item, "authors", metadata_value(item, "author"))),
             "isbn": display_value(isbn),
             "formats": metadata_value(item, "formats"),
-            "last_modified": str(metadata_value(item, "last_modified")),
             "tolino_id": (metadata_tolino_id(item, context.account_name)
                           if context.columns.get("id") else ""),
             "series": str(metadata_value(item, "series") or "").strip(),

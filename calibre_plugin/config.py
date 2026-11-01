@@ -113,12 +113,10 @@ def save_account(name, values, active=None, preferred_formats=None):
         PREFERENCES.commit()
 
 
-def account_by_name(name, accounts=None):
+def account_by_name(name):
     """Return the stored account dict for ``name`` -- never a different one."""
-    if accounts is None:
-        accounts = settings()["accounts"]
-    return next((item for item in accounts
-                 if isinstance(item, dict) and item.get("name") == name), {})
+    return next((item for item in settings()["accounts"]
+                 if item["name"] == name), {})
 
 
 def set_active_account(name):
@@ -151,6 +149,14 @@ def save_refresh_token(account_name, token):
     token = str(token or "").strip()
     if account_name and token:
         save_account(account_name, {"refresh_token": token})
+
+
+def clear_refresh_token(account_name):
+    """Einen eindeutig abgelehnten Refresh-Token aus dem Konto loeschen."""
+    if not account_name or not account_by_name(account_name):
+        return False
+    save_account(account_name, {"refresh_token": ""})
+    return True
 
 
 def save_hardware_id(account_name, hardware):

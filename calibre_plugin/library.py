@@ -143,11 +143,7 @@ def create_custom_columns(database, labels=None):
                         in missing))
     created = []
     for label, name, datatype in missing:
-        try:
-            create(label, name, datatype, False, editable=True, display={})
-        except TypeError:
-            # Aeltere Fassungen kennen die Schluesselwoerter nicht.
-            create(label, name, datatype, False)
+        create(label, name, datatype, False, editable=True, display={})
         CREATED_COLUMNS.add(label)
         created.append(label)
     return created
@@ -199,13 +195,7 @@ def update_tolino_ids(database, updates, account_name=None):
         if not account_name:
             values[book_id] = new_id
             continue
-        # `field_for` liest nur die eine Spalte; `get_metadata` holt für
-        # jedes Buch den ganzen Datensatz.
-        field_for = getattr(api, "field_for", None)
-        if callable(field_for):
-            raw = field_for(TOLINO_COLUMN, book_id)
-        else:
-            raw = _column_value(api.get_metadata(book_id))
+        raw = api.field_for(TOLINO_COLUMN, book_id)
         account_ids = _decode_tolino_ids(raw)
         if account_ids is None:
             # Migrate a legacy single ID when this account first writes the
@@ -256,10 +246,7 @@ def safe_format_path(database, book_id, format_name):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
     try:
         path = api.format_abspath(book_id, format_name)
-    except ValueError as exc:
-        raise ValueError("Calibre returned no path for book %r format %s" %
-                         (book_id, format_name)) from exc
-    except (IndexError, KeyError, OSError) as exc:
+    except (ValueError, IndexError, KeyError, OSError) as exc:
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name)) from exc
     if not isinstance(path, str) or not path:

@@ -42,11 +42,8 @@ def _browser_sec_headers():
     }
 
 
-# Immer derselbe Satz, wenn nur eine neue Anmeldung hilft.
 RELOGIN = "Bitte bei tolino anmelden."
-# Der Refresh-Token ist single-use: rotiert ihn gerade jemand anderes,
-# darf diese Stelle ihn nicht ebenfalls einloesen (Keycloak bricht die
-# Sitzung dann ab). Kurz warten, dann erneut versuchen.
+# Gleichzeitige Einlösung eines Single-Use-Tokens beendet die Sitzung.
 BUSY_MESSAGE = "Die Anmeldung wird gerade erneuert, bitte kurz warten."
 RELOGIN_THEN = "Danach bei tolino anmelden."
 def _trace_text(exc):
@@ -126,14 +123,9 @@ def _download_token(deliverable_id):
     """
     raw = str(deliverable_id).encode("utf-8")
     return _url_quote(base64.b64encode(raw).decode("ascii"), safe="")
-# registerhw muss am BOSH-Dienst ankommen, bevor die ID akzeptiert wird
-# (Feldbefund: ein Verbindungstest direkt nach der Registrierung
-# warf noch 400, der naechste Versuch Sekunden spaeter lief) -- vor dem
-# ersten und vor dem letzten Retry wird kurz gewartet.
+# Feldbefund: Nach registerhw wird die Geräte-ID verzögert akzeptiert.
 _REGISTER_SETTLE_SECONDS = 1.5
-# Feldbefund: der erste Token-Aufruf nach der Browser-Anmeldung traf
-# die Bot-Schutz-Laufzeitbahn (403 + HTML-Fehlerseite), jeder spaetere Klick
-# lief durch -- zwei Warteversuche, bevor der Fehler sichtbar wird.
+# Feldbefund: Der erste Token-Aufruf kann am Bot-Schutz scheitern.
 _WAF_RETRY_SECONDS = (2.0, 5.0)
 _BOT_CHECK_MARKERS = (
     "zugriff geblockt", "access denied", "captcha", "cloudfront",
@@ -255,7 +247,8 @@ class TolinoClient:
     """Small stdlib-only client for the endpoints used by the web reader."""
 
     def __init__(self, partner_id, hardware, refresh=None, timeout=45,
-                 token_callback=None, hardware_callback=None):
+                 token_callback=None, hardware_callback=None,
+                 token_rejected_callback=None):
         try:
             partner_id = int(partner_id)
         except (TypeError, ValueError):
@@ -272,8 +265,7 @@ class TolinoClient:
         self.last_error_text = None
         self.token_callback = token_callback
         self.hardware_callback = hardware_callback
-        # Beide setzt der Token-Vault, sobald er diesen Client erzeugt;
-        # ohne Vault meldet sich der Client direkt an.
+        self.token_rejected_callback = token_rejected_callback
         self.token_vault = None
         self._in_device_recovery = False
         self._hw_registered_now = False
@@ -302,9 +294,7 @@ class TolinoClient:
         previous_refresh = self.refresh
         self.access = data["access_token"]
         new_refresh = data.get("refresh_token", self.refresh)
-        # CRITICAL: Save the new refresh token IMMEDIATELY before any further use
-        # Tolino invalidates refresh tokens after single use, so we must persist
-        # the new token before making any authenticated requests with it
+        # Den rotierten Single-Use-Token vor weiteren Anfragen speichern.
         self.refresh = new_refresh
         if new_refresh != previous_refresh and self.token_callback:
             self.token_callback(self.refresh)
@@ -327,14 +317,14 @@ class TolinoClient:
         except (TolinoApiError, TolinoAuthError) as exc:
             detail = str(exc)
             folded = detail.casefold()
-            session_ended = ("not active" in folded
-                             or "session not active" in folded)
+            session_ended = "not active" in folded
             token_rejected = ("invalid_grant" in folded
                               or "reuse exceeded" in folded)
             if session_ended or token_rejected:
                 # A stale refresh token must never be tried again.
                 self.refresh = self.access = None
                 self.expires_at = 0
+                self._notify_token_rejected()
             if session_ended:
                 raise TolinoAuthError(
                     "Die tolino-Sitzung ist beendet. " + RELOGIN,
@@ -348,6 +338,16 @@ class TolinoClient:
                 short="Die Anmeldung bei tolino ist fehlgeschlagen.")
 
         return self._apply_token_response(data)
+
+    def _notify_token_rejected(self):
+        """Den abgelehnten Token aus der Config loeschen lassen."""
+        callback = self.token_rejected_callback
+        if callback:
+            try:
+                callback()
+            except Exception as exc:
+                log_warning("Abgelehnter Token konnte nicht geloescht "
+                            "werden: %s" % sanitize_error(exc))
 
     def _request(self, url, method="GET", data=None, form=False,
                  authenticated=True, content_type=None, _extra_headers=None):
@@ -428,11 +428,7 @@ class TolinoClient:
                 and url != self.partner.get("token_url")):
             if retry["hardware"]:
                 self._hw_registered_now = False
-                try:
-                    recovered = self._recover_device_registration()
-                except Exception:
-                    recovered = False
-                if recovered:
+                if self._recover_device_registration():
                     retry["hardware"] = False
                     if self._hw_registered_now:
                         time.sleep(_REGISTER_SETTLE_SECONDS)
@@ -531,7 +527,6 @@ class TolinoClient:
         self._request(BASE_URL + "/deletecontent?deliverableId="
                       + _url_quote(str(deliverable_id)))
 
-    # --- In-place metadata: update an existing book via /meta -----------
     META_URL = BASE_URL + "/meta"
 
     def update_metadata(self, deliverable_id, fields):
@@ -568,7 +563,6 @@ class TolinoClient:
                 short="tolino hat die Metadaten nicht übernommen.")
         return verified_metadata
 
-    # --- Device list: resolve the real hardware ID ----------------------
 
     DEVICES_URL = "https://bosh.pageplace.de/bosh/rest/handshake/devices/list"
 
@@ -600,8 +594,9 @@ class TolinoClient:
         if callback:
             try:
                 callback(self.hardware)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_warning("Geräte-ID konnte nicht gespeichert werden: %s"
+                            % sanitize_error(exc, (self.refresh, self.access)))
 
     def _register_hardware(self):
         """Register this hardware id at the BOSH service (reference flow)."""
@@ -617,7 +612,7 @@ class TolinoClient:
                               content_type="application/json",
                               _extra_headers=extra)
                 return True
-            except Exception:
+            except TolinoError:
                 continue
         return False
 
@@ -629,7 +624,7 @@ class TolinoClient:
         try:
             try:
                 registered = normalize_hardware_id(self.fetch_hardware_id())
-            except Exception:
+            except TolinoError:
                 registered = ""
             if registered:
                 if registered == normalize_hardware_id(self.hardware):
@@ -645,7 +640,6 @@ class TolinoClient:
         finally:
             self._in_device_recovery = False
 
-    # --- Download: fetch an uploaded ebook back -------------------------
 
     def download(self, deliverable_id):
         """Download one book from the cloud as bytes."""
@@ -694,14 +688,11 @@ class TolinoClient:
                                  code="N02", short="Der Download von Tolino ist fehlgeschlagen.")
         return content
 
-    # --- Collections & read state via sync-data patches -----------------
 
     SYNC_DATA_URL = BASE_URL + "/sync-data?paths=publications"
 
     def _sync_patch(self, payload):
-        # Jeder Schreibvorgang macht den Zwischenspeicher ungültig: danach
-        # wird wieder gelesen, damit keine veraltete Revision weitergereicht
-        # wird.
+        # Nach Schreibvorgängen muss die Revision neu gelesen werden.
         self._sync_cache = None
         data = self._request(self.SYNC_DATA_URL, "PATCH", payload,
                              content_type="application/json")

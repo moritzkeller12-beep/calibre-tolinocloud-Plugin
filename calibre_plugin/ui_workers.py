@@ -26,8 +26,7 @@ class SyncWorker(QObject):
                  series_map=None, read_changes=None, titles=None,
                  metadata=None, state=None):
         QObject.__init__(self)
-        # Eigene Kopie: Jede Persistenz (Tokenrotation, Zustand, tolino-ID)
-        # gehoert zu dem beim Start erfassten Konto dieses Laufs.
+        # Alle Schreibvorgänge gehören zum Startkonto dieses Laufs.
         self.context = context
         self.account_name = self.context.account_name
         self.jobs = list(jobs or ())
@@ -45,8 +44,6 @@ class SyncWorker(QObject):
                            in self.read_changes if finished]
         self.read_unmarks = [tolino_id for tolino_id, _id, finished
                              in self.read_changes if not finished]
-        # Titel für sichtbare Texte: Schlüssel sind Kennung und tolino-ID.
-        # Ohne Titel steht «Buch <Nummer>» -- nie eine UUID.
         self.titles = {str(key): str(value)
                        for key, value in (titles or {}).items()
                        if value}
@@ -56,8 +53,7 @@ class SyncWorker(QObject):
             if isinstance(item, dict) and item.get("uuid")
         }
         self.cancelled = False
-        # Eine private Kopie je Lauf: Uploads und Löschungen schreiben in
-        # dasselbe Objekt, das `_persist_state` sichert.
+        # Der Worker ändert und speichert eine private Zustandskopie.
         self.state = copy.deepcopy(state) if isinstance(state, dict) else {}
         self.updates = []
         # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
@@ -86,8 +82,6 @@ class SyncWorker(QObject):
         if book_id is None and isinstance(entry, dict):
             book_id = entry.get("calibre_id")
         return display_title(text, book_id)
-
-    # --- Ergebnis-/Persistenz-Helfer ------------------------------------
 
     def _add_operation(self, kind, label, status=OP_NOT_STARTED, **extra):
         operation = dict(extra, kind=kind, label=label, status=status)
@@ -288,8 +282,6 @@ class SyncWorker(QObject):
         for operation, book_ids, finished, start_text, done_text in actions:
             if operation is None:
                 continue
-            # `read_op`/`unread_op` entstehen nur bei nicht leeren Listen --
-            # eine leere Auswahl kann hier also nicht mehr auftreten.
             ok, _result = self._step(
                 client, checkpoint, operation, start_text,
                 lambda: client.mark_read_many(book_ids, finished=finished),
@@ -394,7 +386,6 @@ class SyncWorker(QObject):
             metadata = self.metadata_by_uuid.get(record.book_uuid)
             if isinstance(entry, dict) and metadata:
                 entry["meta_verified_fp"] = metadata_fingerprint(metadata)
-            # Keep the confirmed Tolino-ID mapping current.
             self.updates.append((record.book_id, record.tolino_id))
             changed = True
             done += 1
@@ -462,15 +453,12 @@ class SyncWorker(QObject):
                 self.completed.emit(state, self.updates)
                 raise _SyncCancelled()
 
-            # Erst Metadaten, dann Uploads; jede Phase hält ihre Persistenzlogik.
             done = self._run_metadata_updates(
                 client, meta_ops, checkpoint, done, total)
             done = self._run_uploads(
                 client, upload_ops, checkpoint, done, total)
             done = self._run_deletions(
                 client, delete_ops, checkpoint, state, done, total)
-            # Lesestatus nur für ausdrücklich im Vergleichsfenster
-            # ausgewählte Bücher übertragen.
             done = self._run_read_marks(
                 client, read_op, unread_op, checkpoint, done, total)
             collection_ops = self._plan_collection_operations()
@@ -514,8 +502,6 @@ class PrepareWorker(QObject):
         # Ausgangszustand des Kontos; der Worker kopiert ihn vor dem
         # Vergleich, damit nichts Unbestaetigtes in den Einstellungen landet.
         self.state = state
-        # Wartezeit auf eine laufende Keep-alive-Rotation, bevor der Lauf
-        # mit «Anmeldung wird gerade erneuert» abbricht.
         self.lock_timeout = lock_timeout
         self.account_name = self.context.account_name
         self.cancelled = False

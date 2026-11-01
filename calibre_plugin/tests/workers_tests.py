@@ -875,9 +875,6 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_complete_inventory_clears_stale_cloud_id_in_worker_state(self):
-        ui_module = self._ui()
-        payloads = []
-
         class FakeClient:
             refresh = "rot"
             hardware = "hw"
@@ -889,7 +886,7 @@ class PrepareWorkerTests(unittest.TestCase):
                 return self.refresh
 
             def inventory(self):
-                return []
+                return inventory
 
             def read_ids(self):
                 return set()
@@ -900,50 +897,21 @@ class PrepareWorkerTests(unittest.TestCase):
                     "hardware_id": "hw", "refresh_token": "tok",
                     "state": {"u-stale": {"tolino_id": "gone"}},
                     "preferred_formats": ["EPUB"]}
-        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
-            worker = ui_module.workers.PrepareWorker(
-                RunContext.from_values(settings), metadata,
-                state=settings.get("state"))
-            worker.ready.connect(payloads.append)
-            worker.run()
-        ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(payloads))
-        self.assertNotIn("tolino_id", payloads[0]["state"]["u-stale"])
-
-    def test_complete_inventory_clears_stale_cloud_id_even_with_review_records(self):
-        ui_module = self._ui()
-        payloads = []
-
-        class FakeClient:
-            refresh = "rot"
-            hardware = "hw"
-
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def login(self):
-                return self.refresh
-
-            def inventory(self):
-                return parsed_inventory([{}])
-
-            def read_ids(self):
-                return set()
-
-        metadata = {1: {"uuid": "u-stale", "title": "A",
-                        "formats": ["EPUB"]}}
-        settings = {"account_name": "A", "partner_id": 4,
-                    "hardware_id": "hw", "refresh_token": "tok",
-                    "state": {"u-stale": {"tolino_id": "gone"}},
-                    "preferred_formats": ["EPUB"]}
-        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
-            worker = ui_module.workers.PrepareWorker(
-                RunContext.from_values(settings), metadata,
-                state=settings.get("state"))
-            worker.ready.connect(payloads.append)
-            worker.run()
-        ui_module._restore_stubs_for_tests()
-        self.assertNotIn("tolino_id", payloads[0]["state"]["u-stale"])
+        for inventory in ([], parsed_inventory([{}])):
+            with self.subTest(inventory=inventory):
+                ui_module = self._ui()
+                payloads = []
+                try:
+                    with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
+                        worker = ui_module.workers.PrepareWorker(
+                            RunContext.from_values(settings), metadata,
+                            state=settings.get("state"))
+                        worker.ready.connect(payloads.append)
+                        worker.run()
+                    self.assertEqual(1, len(payloads))
+                    self.assertNotIn("tolino_id", payloads[0]["state"]["u-stale"])
+                finally:
+                    ui_module._restore_stubs_for_tests()
 
     def test_a_partly_readable_inventory_still_compares(self):
         """Einzelne nicht zuordenbare Cloud-Datensätze verhindern den Vergleich nicht."""
@@ -978,7 +946,7 @@ class PrepareWorkerTests(unittest.TestCase):
         ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(payloads))
         self.assertIsInstance(payloads[0], dict)
-        self.assertEqual([[{"tolino_id": "d1", "has_deliverable_id": True,
+        self.assertEqual([[{"tolino_id": "d1",
                             "title": "", "authors": "", "isbn": ""}]],
                          compared)
         self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
@@ -1491,7 +1459,6 @@ class InventorySchemaTests(unittest.TestCase):
                               "title": "Gekauft"}}]}})
         bought_records = bought.inventory()
         self.assertEqual("", bought_records[0]["tolino_id"])
-        self.assertFalse(bought_records[0]["has_deliverable_id"])
 
     def test_an_unreadable_envelope_never_looks_like_an_empty_library(self):
         for data in ({}, {"unexpected": "shape"},
@@ -1513,7 +1480,7 @@ class InventorySchemaTests(unittest.TestCase):
             {"deliverableId": "d1"},
             {"etwas": "anderes"}]}})
         self.assertEqual(2, len(client.inventory()))
-        self.assertEqual(1, sum(not record["has_deliverable_id"]
+        self.assertEqual(1, sum(not record["tolino_id"]
                                 for record in client.inventory()))
         self.assertEqual({"d1"}, {record["tolino_id"]
                                    for record in client.inventory()
@@ -1527,8 +1494,7 @@ class InventorySchemaTests(unittest.TestCase):
         records = client.inventory()
         self.assertEqual(1, len(records))
         self.assertEqual("Titel", records[0]["title"])
-        self.assertTrue(records[0]["has_deliverable_id"])
-        self.assertEqual("d7", client.inventory()[0]["tolino_id"])
+        self.assertEqual("d7", records[0]["tolino_id"])
 
     def test_the_client_returns_normalised_records_only(self):
         """EINE Form fuer Vergleich und sichere Loeschlogik."""
@@ -1539,11 +1505,8 @@ class InventorySchemaTests(unittest.TestCase):
                               "title": "K"}}]}})
         records = client.inventory()
         self.assertEqual(
-            ["authors", "has_deliverable_id", "isbn", "title",
-             "tolino_id"], sorted(records[0]))
-        self.assertTrue(records[0]["has_deliverable_id"])
+            ["authors", "isbn", "title", "tolino_id"], sorted(records[0]))
         self.assertEqual("d1", records[0]["tolino_id"])
-        self.assertFalse(records[1]["has_deliverable_id"])
         self.assertEqual("", records[1]["tolino_id"])
         self.assertEqual("978-3-16-148410-0", records[1]["isbn"])
 
@@ -1559,7 +1522,6 @@ class InventorySchemaTests(unittest.TestCase):
                               "title": "Gekauft"}}]}})
         records = client.inventory()
         self.assertEqual("", records[0]["tolino_id"])
-        self.assertFalse(records[0]["has_deliverable_id"])
 
 class ReadStatusUnknownTests(unittest.TestCase):
     """P2: «unbekannt» ist weder gelesen noch ungelesen."""
@@ -1655,9 +1617,10 @@ class ReadStatusUnknownTests(unittest.TestCase):
                  "book_id": 1, "tolino_id": "t1",
                  "read": ReadState(known=False),
                  "explanation": "In beiden vorhanden."}], options={})
-            self.assertFalse(dialog._check(0, 2).enabled)
+            self.assertFalse(dialog._check(0, 2).item.flags() &
+                             ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
             self.assertFalse(dialog._check(0, 2).isChecked())
-            self.assertIn("unbekannt", dialog._check(0, 2).tooltip)
+            self.assertIn("unbekannt", dialog._check(0, 2).item.toolTip())
             self.assertIn("Lesestatus unbekannt",
                           dialog.table.items[(0, 7)])
             self.assertIn("Lesestatus unbekannt", dialog.note.text())

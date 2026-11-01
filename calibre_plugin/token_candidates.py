@@ -20,7 +20,7 @@ def _jwt_payload(token):
         seg += "=" * (-len(seg) % 4)
         payload = json.loads(base64.urlsafe_b64decode(seg.encode("ascii")))
         return payload if isinstance(payload, dict) else None
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -96,10 +96,7 @@ def _decrypt_reader_blob(value):
     text = str(value or "")
     if not text or not text.lstrip().startswith("U2FsdGVk"):
         return ""
-    try:
-        return (cryptojs_decrypt(text) or "").strip()
-    except Exception:
-        return ""
+    return cryptojs_decrypt(text).strip()
 
 
 def _refresh_field_text(json_text):
@@ -145,29 +142,15 @@ def _unwrap_refresh_candidate(token, max_depth=3):
         plain = _decrypt_reader_blob(current)
         if not plain:
             break
+        if plain.startswith("{"):
+            plain = _refresh_field_text(plain) or ""
         if _jwt_shaped(plain):
-            # Trusted plaintext under a refresh-ish key, even without iat.
             return plain
         if plain.startswith("U2FsdGVk"):
             current = plain
             continue
-        if plain.startswith("{"):
-            nested = _refresh_field_text(plain)
-            if not nested:
-                break
-            if _jwt_shaped(nested):
-                return nested
-            if nested.startswith("U2FsdGVk"):
-                current = nested
-                continue
-            if (len(nested) > 20 and nested.isprintable()
-                    and not nested.startswith(("{", "["))):
-                return nested
-            break
-        if plain.startswith("["):
-            break
-        # Trusted raw plaintext: an opaque real token beats ciphertext.
-        if len(plain) > 20 and plain.isprintable():
+        if (len(plain) > 20 and plain.isprintable()
+                and not plain.startswith(("{", "["))):
             return plain
         break
     return text

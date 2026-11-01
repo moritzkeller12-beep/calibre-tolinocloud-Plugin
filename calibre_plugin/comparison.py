@@ -7,7 +7,6 @@ from .matching import (author_tokens, authors_match, normalize_isbn,
                        normalize_match_text, normalize_title,
                        normalized_authors)
 
-# Hinweis einer Zeile, deren Buch in Calibre vom Abgleich ausgenommen ist.
 IGNORED_EXPLANATION = (
     "In Calibre als «ignoriert» markiert (#tolino_ignore) – wird weder "
     "hochgeladen noch abgeglichen.")
@@ -191,15 +190,14 @@ def _remote_rows(inventory, read_known, read_ids):
     for record in inventory:
         # Auch Datensätze ohne eindeutige Cloud-ID bleiben sichtbar;
         # andernfalls erschiene das Buch als neu und könnte ein Duplikat erzeugen.
-        tolino_id = (record["tolino_id"]
-                     if record["has_deliverable_id"] else "")
+        tolino_id = record["tolino_id"]
         rows.append({
             "book_id": None,
             "title": record["title"],
             "authors": record["authors"],
             "isbn": record["isbn"],
             "tolino_id": tolino_id,
-            "cloud_id_missing": not record["has_deliverable_id"],
+            "cloud_id_missing": not bool(tolino_id),
             "status": "only_tolino",
             "file_changed": False,
             "read": _read_flags(tolino_id, read_known, read_ids),
@@ -249,9 +247,7 @@ def _metadata_conflict(remote, authors, author_key, local_isbn):
 def _matched_status(metadata, remote, old, selected_format,
                     authors, author_key, local_isbn):
     """Status einer eindeutig zugeordneten Zeile (Dateisignatur zuerst)."""
-    # Die Dateisignatur entscheidet VOR dem Status: gleiche Metadaten
-    # duerfen eine geänderte Buchdatei nicht als «keine Unterschiede»
-    # verdecken.
+    # Gleiche Metadaten dürfen eine geänderte Datei nicht verdecken.
     file_changed = _file_changed(metadata, old, selected_format)
     if not remote["tolino_id"]:
         # Die Cloud-Kopie ist nicht ansprechbar. Ein Upload könnte ein Duplikat
@@ -284,9 +280,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                           use_metadata_ids, matched,
                           disputed, read_known, read_ids, read_column=False):
     """Eine lokale Vergleichszeile -- inklusive einer bestaetigten Zuordnung."""
-    # Ausschluss aus der Calibre-Spalte: das Buch wird weiter zugeordnet
-    # (sonst erschiene seine Cloud-Kopie als «nur in tolino»), aber es
-    # bekommt keine Aktion.
+    # Ignorierte Bücher bleiben zugeordnet, erhalten aber keine Aktion.
     ignored = bool(metadata.get("ignored"))
     book_uuid = valid_book_uuid(metadata.get("uuid"))
     title = _metadata_text(metadata, "title")
@@ -317,10 +311,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         if override:
             match_reason = override
         if book_uuid and tolino_id:
-            # Die Calibre-Nummer mitschreiben: sie findet den Eintrag
-            # wieder, falls Calibre spaeter keine lesbare Kennung mehr
-            # liefert. Ohne Kennung wird KEIN Zustand angelegt -- eine
-            # unbestätigte Prueffzeile darf keine Zuordnung vortäuschen.
+            # Calibre-ID erhält die Zuordnung, falls die UUID später fehlt.
             entry = state.setdefault(book_uuid, {})
             entry["tolino_id"] = tolino_id
             entry.setdefault("calibre_id", book_id)

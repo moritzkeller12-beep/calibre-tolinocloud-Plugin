@@ -23,10 +23,6 @@ from ..plan import (metadata_update_fields, plan_collection_updates,
                     remember_collection, series_map_from_metadata)
 from ..plan import UploadRecord
 from ..inventory import normalize_inventory_record
-from ..library import (cover_bytes as library_cover_bytes,
-                       normalize_formats as library_normalize_formats,
-                       safe_format_path as library_safe_format_path,
-                       update_tolino_ids as library_update_tolino_ids)
 from ..matching import (author_tokens, authors_match, normalize_isbn,
                         normalize_match_text,
                         normalized_authors)
@@ -141,8 +137,6 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_normalize_formats_handles_all_calibre_shapes(self):
         self.assertEqual(["EPUB", "PDF"], normalize_formats(("EPUB", "PDF")))
-        self.assertEqual(["EPUB", "PDF"],
-                         library_normalize_formats(("EPUB", "PDF")))
         self.assertEqual(["EPUB", "PDF"], normalize_formats("EPUB, PDF"))
         class FormatsList:
             def __iter__(self):
@@ -227,8 +221,6 @@ class SyncPlanTests(unittest.TestCase):
 
         database = Database("/library/book.epub")
         self.assertEqual("/library/book.epub", safe_format_path(database, 1, "EPUB"))
-        self.assertEqual("/library/book.epub",
-                         library_safe_format_path(database, 1, "EPUB"))
         self.assertEqual((1, "EPUB"), database.new_api.args)
         with self.assertRaises(ValueError):
             safe_format_path(Database(None), 1, "EPUB")
@@ -329,7 +321,6 @@ class SyncPlanTests(unittest.TestCase):
         for value in (b"cover", None):
             database = Database(value)
             self.assertIs(value, cover_bytes(database, 1))
-            self.assertIs(value, library_cover_bytes(database, 1))
             self.assertFalse(database.new_api.as_file)
 
     def test_stale_stored_cloud_id_is_not_shown_as_a_cloud_match(self):
@@ -481,8 +472,9 @@ class SyncPlanTests(unittest.TestCase):
             def has_id(book_id):
                 return book_id == 7
 
-            def get_metadata(self, book_id):
-                return {TOLINO_COLUMN: self.current[book_id]}
+            def field_for(self, field, book_id):
+                assert field == TOLINO_COLUMN
+                return self.current[book_id]
 
             def set_field(self, field, values):
                 self.writes.append((field, values))
@@ -527,9 +519,7 @@ class SyncPlanTests(unittest.TestCase):
         database = Database()
         self.assertTrue(column_state(database)["id"])
         self.assertEqual(1, update_tolino_ids(database, [(7, "bosh_8_new")]))
-        self.assertEqual(1, library_update_tolino_ids(
-            database, [(7, "bosh_8_new")]))
-        self.assertEqual([(TOLINO_COLUMN, {7: "bosh_8_new"})] * 2,
+        self.assertEqual([(TOLINO_COLUMN, {7: "bosh_8_new"})],
                          database.new_api.writes)
         # Nach dem Löschen einer Cloud-Kopie wird die Spalte geleert.
         self.assertEqual(1, update_tolino_ids(database, [(7, "")]))
@@ -560,8 +550,9 @@ class SyncPlanTests(unittest.TestCase):
             def has_id(book_id):
                 return book_id == 7
 
-            def get_metadata(self, book_id):
-                return {TOLINO_COLUMN: self.value}
+            def field_for(self, field, book_id):
+                assert field == TOLINO_COLUMN and book_id == 7
+                return self.value
 
             def set_field(self, field, values):
                 self.writes.append((field, values))
@@ -593,8 +584,9 @@ class SyncPlanTests(unittest.TestCase):
             def has_id(book_id):
                 return book_id == 7
 
-            def get_metadata(self, _book_id):
-                return {TOLINO_COLUMN: self.value}
+            def field_for(self, field, book_id):
+                assert field == TOLINO_COLUMN and book_id == 7
+                return self.value
 
             def set_field(self, _field, values):
                 self.value = values[7]
@@ -672,7 +664,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("978-3-1234-5678-9", record["isbn"])
         self.assertEqual("bosh_8_543897186788677497438396920",
                          record["tolino_id"])
-        self.assertTrue(record["has_deliverable_id"])
         rows = compare_inventory(
             {1: {"uuid": "u1", "title": "Der echte Tolino-Titel",
                  "authors": "Eine Autorin", "isbn": "9783123456789",
@@ -784,7 +775,6 @@ class SyncPlanTests(unittest.TestCase):
                 "epubMetaData": {"title": "Titel"}}
         normalized = normalize_inventory_record(item)
         self.assertEqual("d7", normalized["tolino_id"])
-        self.assertTrue(normalized["has_deliverable_id"])
         self.assertEqual("Titel", normalized["title"])
         rows = compare_inventory(
             {}, {}, {"PublicationInventory": {"edata": [item]}}, ["EPUB"])
@@ -798,7 +788,7 @@ class SyncPlanTests(unittest.TestCase):
             "deliverableId": "d9", "title": "Titel",
             "author": [{"name": "Autorin"}],
             "epubMetaData": {"isbn": "978-3-16-148410-0"}})
-        self.assertTrue(record["has_deliverable_id"])
+        self.assertTrue(record["tolino_id"])
         rows = compare_inventory(
             {1: {"uuid": "u1", "title": "Titel", "authors": "Autorin",
                  "isbn": "978-3-16-148410-0", "formats": ["EPUB"]}},
@@ -1468,33 +1458,22 @@ class MetadataUpdatePlanTests(unittest.TestCase):
     def test_selected_upload_is_never_silently_converted(self):
         """"Hochladen" heisst hochladen – kein heimliches /meta."""
         book = self._book()
-        state = self._state(book, meta_fp="stale")
         uploads = [UploadRecord(1, "u1", "EPUB", "d1")]
-        updates = plan_metadata_updates({1: book}, state, uploads, {1})
-        self.assertEqual([], updates)
+        for content_fp in (content_fingerprint(book, "EPUB"), "other-file"):
+            with self.subTest(content_fp=content_fp):
+                state = self._state(book, content_fp=content_fp, meta_fp="stale")
+                updates = plan_metadata_updates({1: book}, state, uploads, {1})
+                self.assertEqual([], updates)
 
-    def test_replaced_file_stays_a_full_upload(self):
-        book = self._book()
-        state = self._state(book, content_fp="other-file", meta_fp="stale")
-        uploads = [UploadRecord(1, "u1", "EPUB", "d1")]
-        updates = plan_metadata_updates({1: book}, state, uploads, {1})
-        self.assertEqual([], updates)
-
-    def test_selected_metadata_update_does_not_need_the_book_file(self):
-        """Metadaten lassen sich ohne ausgewählte Buchdatei patchen."""
-        book = self._book(format_signatures={})
+    def test_metadata_update_does_not_require_a_book_file_or_upload_format(self):
+        """Metadaten lassen sich ohne Signatur und mit anderen Formaten patchen."""
         state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
-        updates = plan_metadata_updates({1: book}, state, [], {1})
-        self.assertEqual(1, len(updates))
-
-    def test_metadata_update_does_not_require_a_preferred_upload_format(self):
-        """PDF-only/formatless books still support in-place metadata updates."""
-        book = self._book(formats=["PDF"], format_signatures={})
-        state = {"u1": {"tolino_id": "d1", "meta_fp": "stale"}}
-        updates = plan_metadata_updates(
-            {1: book}, state, [], {1})
-        self.assertEqual(1, len(updates))
-        self.assertEqual("d1", updates[0][2])
+        for formats in (["EPUB"], ["PDF"]):
+            with self.subTest(formats=formats):
+                book = self._book(formats=formats, format_signatures={})
+                updates = plan_metadata_updates({1: book}, state, [], {1})
+                self.assertEqual(1, len(updates))
+                self.assertEqual("d1", updates[0][2])
 
     def test_legacy_state_without_fingerprints_is_updated_when_selected(self):
         """Ohne gespeicherte Fingerabdrücke ist der Cloud-Stand unbekannt --
@@ -1503,14 +1482,6 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         state = {"u1": {"tolino_id": "d1", "fingerprint": "x"}}
         updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
-
-    def test_selected_metadata_update_is_planned(self):
-        book = self._book()
-        state = self._state(book, meta_fp="stale")
-        updates = plan_metadata_updates({1: book}, state, [], {1})
-        self.assertEqual(1, len(updates))
-        self.assertEqual((1, "u1", "d1"), (updates[0][0], updates[0][1],
-                                           updates[0][2]))
 
     def test_selected_metadata_update_reconciles_even_if_fingerprint_matches(self):
         book = self._book()
@@ -1605,16 +1576,11 @@ class CollectionPlanTests(unittest.TestCase):
                          series_map_from_metadata(metadata))
         self.assertEqual({}, series_map_from_metadata(None))
 
-    def test_pairs_only_include_books_already_in_the_cloud(self):
-        series_map = {"u1": "Adamsberg", "u2": "Adamsberg", "u3": "Neu"}
-        state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": ""},
-                 "u3": {}}
-        self.assertEqual([("u1", "t1", "Adamsberg")],
-                         plan_collection_updates(series_map, state))
-
-    def test_pairs_are_sorted_and_deduplicated(self):
-        series_map = {"u1": "SciFi", "u2": "Adamsberg"}
-        state = {"u1": {"tolino_id": "t2"}, "u2": {"tolino_id": "t1"}}
+    def test_pairs_only_include_cloud_books_in_sorted_order(self):
+        series_map = {"u1": "SciFi", "u2": "Adamsberg",
+                      "u3": "Adamsberg", "u4": "Neu"}
+        state = {"u1": {"tolino_id": "t2"}, "u2": {"tolino_id": "t1"},
+                 "u3": {"tolino_id": ""}, "u4": {}}
         self.assertEqual([("u2", "t1", "Adamsberg"), ("u1", "t2", "SciFi")],
                          plan_collection_updates(series_map, state))
 
@@ -1975,17 +1941,19 @@ class FileChangeIntegrityTests(unittest.TestCase):
         self.assertIn("Buchdatei unterscheidet sich", row["explanation"])
         self.assertNotIn("keine Unterschiede", row["explanation"])
 
-    def test_unchanged_file_with_equal_metadata_is_identical(self):
+    def test_equal_metadata_with_unchanged_or_unknown_file_is_identical(self):
         metadata = self._metadata()
-        state = {"u1": {
-            "tolino_id": "t1",
-            "content_fp": content_fingerprint(metadata[1], "EPUB"),
-            "meta_fp": metadata_fingerprint(metadata[1]),
-        }}
-        row = self._row(metadata, state)
-        self.assertEqual("identical", row["status"])
-        self.assertFalse(row["file_changed"])
-        self.assertIn("keine Unterschiede", row["explanation"])
+        signature = content_fingerprint(metadata[1], "EPUB")
+        for has_signature in (True, False):
+            with self.subTest(has_signature=has_signature):
+                entry = {"tolino_id": "t1",
+                         "meta_fp": metadata_fingerprint(metadata[1])}
+                if has_signature:
+                    entry["content_fp"] = signature
+                row = self._row(metadata, {"u1": entry})
+                self.assertEqual("identical", row["status"])
+                self.assertFalse(row["file_changed"])
+                self.assertIn("keine Unterschiede", row["explanation"])
 
     def test_pure_metadata_change_does_not_claim_a_new_file(self):
         metadata = self._metadata(title="Neuer Titel")
@@ -2033,17 +2001,6 @@ class FileChangeIntegrityTests(unittest.TestCase):
               "authors": "Autor"}], ["EPUB"])
         self.assertEqual("changed", rows[0]["status"])
         self.assertIn("Nur Metadaten unterscheiden sich", rows[0]["explanation"])
-
-    def test_missing_previous_file_signature_is_not_a_change_claim(self):
-        """Ohne alten Datei-Fingerabdruck gibt es keinen Vergleich -- und
-        damit auch keine Behauptung, die Datei habe sich geändert."""
-        metadata = self._metadata()
-        state = {"u1": {"tolino_id": "t1",
-                         "meta_fp": metadata_fingerprint(metadata[1])}}
-        row = self._row(metadata, state)
-        self.assertEqual("identical", row["status"])
-        self.assertFalse(row["file_changed"])
-        self.assertIn("keine Unterschiede", row["explanation"])
 
     def test_default_action_is_upload_for_a_changed_file(self):
         """Die geänderte Datei empfiehlt Hochladen -- auch bei gleichen Feldern."""

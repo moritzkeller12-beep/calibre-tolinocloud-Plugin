@@ -67,8 +67,6 @@ def _tokens_match(left_tokens, right_tokens):
 
     def consistent(extra, other):
         for token in extra:
-            if token in other:
-                continue
             if len(token) == 1:
                 if any(item.startswith(token) for item in other):
                     continue

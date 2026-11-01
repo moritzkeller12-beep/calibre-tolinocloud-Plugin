@@ -109,9 +109,7 @@ class _ActionCheck:
         return self.item.checkState() == Qt.CheckState.Checked
 
     def setChecked(self, value):
-        # Auch «Unchecked» explizit setzen: Ein frisches QTableWidgetItem
-        # meldet zwar Unchecked, hat aber noch keine CheckStateRole. Ohne
-        # setCheckState zeichnet Qt kein leeres Kästchen.
+        # Ohne expliziten CheckState zeichnet Qt kein leeres Kästchen.
         self.item.setCheckState(
             Qt.CheckState.Checked if value else Qt.CheckState.Unchecked)
 
@@ -126,16 +124,8 @@ class _ActionCheck:
             flags &= ~Qt.ItemFlag.ItemIsEnabled
         self.item.setFlags(flags)
 
-    @property
-    def enabled(self):
-        return bool(self.item.flags() & Qt.ItemFlag.ItemIsEnabled)
-
     def setToolTip(self, text):
         self.item.setToolTip(str(text or ""))
-
-    @property
-    def tooltip(self):
-        return self.item.toolTip()
 
 
 class _CenteredCheckDelegate(QStyledItemDelegate):
@@ -227,7 +217,6 @@ class InventoryDialog(QDialog):
     COLUMNS = ACTION_COLUMNS + DATA_COLUMNS
     HEADERS = tuple(column.label for column in COLUMNS)
     ACTION_KEYS = ("upload", "metadata", "read")
-    # Technische Spalten stehen ganz rechts und sind standardmässig aus.
     TECHNICAL_COLUMNS = tuple(index for index, column in enumerate(COLUMNS)
                               if column.technical)
     TITLE_COLUMN = HEADERS.index("Buchtitel")
@@ -242,7 +231,6 @@ class InventoryDialog(QDialog):
         ("Ignoriert", "ignored"),
     )
 
-    # Ein Klick ändert die Auswahl. Die Zusammenfassung zählt die Änderungen.
     READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
     IGNORED_TOOLTIP = ("In Calibre ignoriert (%s) – wird nicht "
                        "abgeglichen." % TOLINO_IGNORE_COLUMN)
@@ -281,7 +269,6 @@ class InventoryDialog(QDialog):
           "sind bereits ungelesen oder liegen nicht in der Cloud"),
          lambda row: (row_capabilities(row)["read"]
                       and row.get("read"))),
-        # Download arbeitet nur für eine markierte Cloud-Kopie.
         ("Aus tolino herunterladen …", "download_selected", (),
          lambda row: row_capabilities(row)["download"]),
         ("Aus der tolino Cloud löschen …", "delete_marked_from_cloud", (),
@@ -300,7 +287,6 @@ class InventoryDialog(QDialog):
         Upload-Vorschlag.
         """
         caps = row_capabilities(row)
-        # Ignorierte und zum Löschen markierte Zeilen bleiben unberührt.
         if not caps["usable"]:
             return (False, False)
         # Bei unsicheren Zuordnungen könnte ein Upload Duplikate erzeugen.
@@ -329,8 +315,7 @@ class InventoryDialog(QDialog):
         self._syncing_checks = False
         self._call_thread = None
         self.rows = []
-        # Zusammenfassung und Startknopf entstehen erst mit dem Footer;
-        # der Tabellenaufbau aktualisiert die Zusammenfassung schon.
+        # Der Tabellenaufbau aktualisiert die Zusammenfassung vor dem Footer.
         self.summary = None
         self.confirm = None
         self.action_feedback = None
@@ -357,7 +342,6 @@ class InventoryDialog(QDialog):
             # Die Calibre-Spalte wird nur angezeigt. Die Auswahl folgt dem
             # Lesestatus des aktuell ausgewählten Tolino-Kontos.
             self.rows.append(row)
-        # Ausgewählte Aktionen zuerst, dann Titel/Autor(en).
         self.rows = sort_comparison_rows(self.rows)
 
     def _build_header(self, layout):
@@ -419,8 +403,6 @@ class InventoryDialog(QDialog):
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows)
-        # Strg-/Shift-Klick und Strg+A werden in Tooltips und Menue
-        # versprochen.
         self.table.setSelectionMode(
             QTableWidget.SelectionMode.ExtendedSelection)
         for index, column in enumerate(self.COLUMNS):
@@ -441,7 +423,6 @@ class InventoryDialog(QDialog):
 
     def _build_footer(self, layout):
         """Rueckmeldung, technische Spalten und die Abschlussknoepfe."""
-        # Bilanz einer Zeilen-Aktion – nicht modal, direkt unter der Tabelle.
         self.action_feedback = QLabel()
         self.action_feedback.setWordWrap(True)
         layout.addWidget(self.action_feedback)
@@ -472,8 +453,6 @@ class InventoryDialog(QDialog):
         self.recommend.clicked.connect(self.apply_recommended)
         self.clear_selection.clicked.connect(self.clear_all_selection)
         self.row_actions.clicked.connect(self.choose_row_action)
-        # Erst jetzt gibt es den Knopf: die Zusammenfassung zeigt so von
-        # Anfang an die Zahl der ausgewählten Aktionen darauf.
         self._update_summary()
 
     def _automatic_note(self):
@@ -491,10 +470,6 @@ class InventoryDialog(QDialog):
         for column in self.TECHNICAL_COLUMNS:
             self.table.setColumnHidden(column, not self._technical_visible)
 
-    def _read_state(self, row):
-        """Lesestatus der Zeile."""
-        return row["read"]
-
     def _check(self, row_index, column):
         """Check-Controller einer Aktionszelle; der Zustand liegt in der Zelle."""
         return _ActionCheck(self.table.item(row_index, column))
@@ -505,7 +480,7 @@ class InventoryDialog(QDialog):
         key = self.ACTION_KEYS[column]
         checked = bool(self._check(row_index, column).isChecked())
         if key == "read":
-            self._read_state(row).chosen = checked
+            row["read"].chosen = checked
         else:
             row[key] = checked
         self._update_summary()
@@ -542,7 +517,7 @@ class InventoryDialog(QDialog):
             for row in self.rows:
                 row.pop("delete_cloud", None)
                 row["upload"] = row["metadata"] = False
-                state = self._read_state(row)
+                state = row["read"]
                 state.chosen = state.cloud
             self._rebuild_table(self.rows)
             return
@@ -599,7 +574,7 @@ class InventoryDialog(QDialog):
         """
         changes = []
         for row in self.rows:
-            state = self._read_state(row)
+            state = row["read"]
             if not row_capabilities(row)["read"] or not state.changed:
                 continue
             changes.append((str(row["tolino_id"]), row.get("book_id"),
@@ -709,7 +684,7 @@ class InventoryDialog(QDialog):
             return False
         column = self.ACTION_KEYS.index(key)
         if key == "read":
-            state = self._read_state(row)
+            state = row["read"]
             if state.chosen == bool(value):
                 return False
             state.chosen = bool(value)
@@ -778,10 +753,10 @@ class InventoryDialog(QDialog):
     def _row_display_values(self, row, has_book, in_cloud):
         """Render explanation and the non-action cells for one comparison row."""
         explanation = str(row.get("explanation", "") or "")
-        if in_cloud and not self._read_state(row).known:
+        if in_cloud and not row["read"].known:
             explanation = (explanation + " Lesestatus unbekannt.").strip()
         elif in_cloud and has_book and row.get("read_column"):
-            local = self._read_state(row).local
+            local = row["read"].local
             note = ("Calibre-Lesestatus: leer." if local is None
                     else "Calibre-Lesestatus: %s." % (
                         "gelesen" if local else "ungelesen"))
@@ -800,7 +775,6 @@ class InventoryDialog(QDialog):
         self.table.setUpdatesEnabled(False)
         self._syncing_checks = True
         try:
-            # Zeilen sind die einzige Quelle der Auswahl.
             self.rows = [dict(row) for row in rows]
             self.table.setRowCount(0)
             self.table.setRowCount(len(self.rows))
@@ -834,13 +808,9 @@ class InventoryDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(self.HINT_COLUMN,
                                     QHeaderView.ResizeMode.Stretch)
-        # Der Titel ist manuell verstellbar; beim ersten Anzeigen und beim
-        # Fenster-Resize bekommt er den groesseren Textanteil.
         header.setSectionResizeMode(self.TITLE_COLUMN,
                                     QHeaderView.ResizeMode.Interactive)
         header.resizeSection(self.TITLE_COLUMN, 160)
-        # Der Autor bleibt schmal, damit der Titel nicht von langen Namen
-        # ueberholt wird.
         header.setSectionResizeMode(self.AUTHORS_COLUMN,
                                     QHeaderView.ResizeMode.Interactive)
         header.resizeSection(self.AUTHORS_COLUMN, 90)
@@ -903,7 +873,7 @@ class InventoryDialog(QDialog):
                 metadata.add(row["book_id"])
             if not caps["read"]:
                 continue
-            state = self._read_state(row)
+            state = row["read"]
             if not state.changed:
                 continue
             if state.chosen:
@@ -1103,7 +1073,6 @@ class InventoryDialog(QDialog):
                 "Es wurde nichts geändert: Die markierten Bücher liegen nicht "
                 "in tolino oder sind bereits zum Löschen markiert.")
             return
-        # Die endgültige Löschliste wird einmalig vor dem Sync bestätigt.
         for row in candidates:
             row["delete_cloud"] = True
             row["upload"] = False

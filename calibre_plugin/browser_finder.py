@@ -146,11 +146,10 @@ def _collect_candidates(home=None):
     return found, status
 
 
-_WINDOWS_BROWSERS = (
-    "Google\\Chrome\\Application\\chrome.exe",
-    "Chromium\\Application\\chrome.exe",
-    "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
-    "Microsoft\\Edge\\Application\\msedge.exe",
+# Windows registriert installierte Browser unter "App Paths".
+_WINDOWS_BROWSER_EXECUTABLES = (
+    "chrome.exe", "chromium.exe", "brave.exe", "msedge.exe",
+    "vivaldi.exe", "opera.exe",
 )
 
 _DARWIN_BROWSERS = (
@@ -176,12 +175,48 @@ def _installed_under(roots, browsers):
     return found
 
 
-def _windows_browser_paths(environ=None):
-    """Browser in den Windows-Programmverzeichnissen."""
-    environ = os.environ if environ is None else environ
-    roots = (environ.get("PROGRAMFILES") or r"C:\Program Files",
-             environ.get("PROGRAMFILES(X86)") or r"C:\Program Files (x86)")
-    return _installed_under(roots, _WINDOWS_BROWSERS)
+def _windows_browser_paths(winreg_module=None):
+    """Nur von Windows registrierte Browser: App-Paths, keine geratenen Ordner."""
+    if winreg_module is None:
+        try:
+            import winreg as winreg_module
+        except ImportError:
+            return []
+    app_paths = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+    roots = (winreg_module.HKEY_CURRENT_USER,
+             winreg_module.HKEY_LOCAL_MACHINE)
+    views = tuple(dict.fromkeys((
+        0, getattr(winreg_module, "KEY_WOW64_64KEY", 0),
+        getattr(winreg_module, "KEY_WOW64_32KEY", 0))))
+    found = []
+    seen = set()
+    for root in roots:
+        for view in views:
+            access = winreg_module.KEY_READ | view
+            for executable in _WINDOWS_BROWSER_EXECUTABLES:
+                try:
+                    key = winreg_module.OpenKey(
+                        root, app_paths + "\\" + executable, 0, access)
+                except OSError:
+                    continue
+                try:
+                    value, _kind = winreg_module.QueryValueEx(key, "")
+                except OSError:
+                    continue
+                finally:
+                    winreg_module.CloseKey(key)
+                path = str(value or "").strip().strip('"')
+                if not path:
+                    continue
+                path = os.path.expandvars(path)
+                if not os.path.isfile(path):
+                    continue
+                normalized = os.path.normcase(os.path.abspath(path))
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                found.append([path])
+    return found
 
 
 def _macos_browser_paths(home=None):
