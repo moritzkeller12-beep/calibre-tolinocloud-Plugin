@@ -1,7 +1,7 @@
 """Pure sync-plan construction and collection/metadata action planning."""
 from typing import NamedTuple
 
-from .identifiers import valid_book_uuid
+from .identifiers import state_entry, valid_book_uuid
 from .library import normalize_formats
 
 
@@ -25,14 +25,11 @@ class MetaUpdateRecord(NamedTuple):
 
 def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
     """Build upload jobs for selected Calibre book IDs with a supported format."""
-    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
-        raise ValueError("Preparation requires metadata and sync state mappings.")
     selected_ids = set(upload_book_ids or ())
     preferred_formats = normalize_formats(preferred_formats)
     uploads = []
-    for book_id in selected_ids:
-        metadata = metadata_by_id.get(book_id)
-        if not isinstance(metadata, dict):
+    for book_id, metadata in metadata_by_id.items():
+        if book_id not in selected_ids or not isinstance(metadata, dict):
             continue
         book_uuid = valid_book_uuid(metadata.get("uuid"))
         if not book_uuid:
@@ -48,8 +45,8 @@ def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
     return uploads
 
 
-def merge_removals(explicit=()):
-    """Combine user-picked cloud deletions.
+def normalize_removals(explicit=()):
+    """Normalize user-picked cloud deletions.
 
     `explicit` holds (book_uuid, tolino_id, title) triples marked in the
     comparison dialog. A cloud copy is deleted once. Returns the selected
@@ -79,9 +76,7 @@ def merge_removals(explicit=()):
 def series_map_from_metadata(metadata_by_id):
     """uuid -> Serienname fuer alle Buecher mit Serie.
 
-    Reine Zuordnung ohne Cloud-Zugriff: die Sammlungen der Tolino Cloud
-    entstehen erst, wenn der Nutzer "Serien in der Cloud anlegen"
-    eingeschaltet hat.
+    Reine Zuordnung ohne Cloud-Zugriff.
     """
     series_map = {}
     if not isinstance(metadata_by_id, dict):
@@ -149,46 +144,40 @@ def plan_collection_updates(series_map, state):
 def metadata_update_fields(metadata):
     """Tolino /meta payload fields for an in-place metadata update."""
     fields = {}
-    title = str(metadata.get("title") or "").strip()
-    if title:
-        fields["title"] = title
-    authors = metadata.get("authors")
-    if isinstance(authors, (list, tuple, set)):
-        authors = ", ".join(str(name) for name in authors)
-    authors = str(authors or "").strip()
-    if authors:
-        fields["author"] = authors
-    isbn = str(metadata.get("isbn") or "").strip()
-    if isbn:
-        fields["isbn"] = isbn
+    for source, target in (("title", "title"), ("authors", "author"),
+                           ("isbn", "isbn")):
+        value = str(metadata.get(source) or "").strip()
+        if value:
+            fields[target] = value
     return fields
 
 
 def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     """In-place Metadaten-Updates (/meta) für die ausgewählten Bücher.
 
-    Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat und sich
-    Titel/Autor(en)/ISBN/Serie geändert haben oder der gespeicherte Zustand
-    keinen passenden Metadaten-Fingerabdruck kennt. `only_book_ids` enthält
-    die vom Nutzer ausgewählten Bücher. Bücher, die ohnehin hochgeladen werden, werden NIE
-    zusätzlich gepatcht – der Upload trägt die Metadaten mit.
+    Ein Buch kommt in Frage, wenn es bereits eine Cloud-Kopie hat und
+    `metadata_update_fields` etwas zu schreiben hat. Ob die Cloud schon
+    denselben Stand kennt, entscheidet der Vergleich (`meta_verified_fp`),
+    nicht diese Planung. `only_book_ids` enthält die vom Nutzer ausgewählten
+    Bücher. Bücher, die ohnehin hochgeladen werden, werden NIE zusätzlich
+    gepatcht – der Upload trägt die Metadaten mit.
 
     Returns the planned metadata updates.
     """
-    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
-        raise ValueError("Preparation requires metadata and sync state mappings.")
     upload_uuids = {str(record.book_uuid) for record in uploads}
-    requested = {str(item) for item in only_book_ids}
+    # In Bibliotheksreihenfolge laufen, aber Schluessel als Text vergleichen:
+    # Calibre liefert IDs als int, Aufrufer koennen sie als str uebergeben.
+    selected_ids = {str(value) for value in only_book_ids or ()}
     updates = []
     for book_id, metadata in metadata_by_id.items():
+        if str(book_id) not in selected_ids:
+            continue
         if not isinstance(metadata, dict):
             raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
-        if str(book_id) not in requested:
-            continue
         book_uuid = valid_book_uuid(metadata.get("uuid"))
         if not book_uuid or book_uuid in upload_uuids:
             continue
-        old = state.get(book_uuid) or {}
+        old = state_entry(state, book_uuid)
         tolino_id = str(old.get("tolino_id") or "")
         if not tolino_id:
             continue

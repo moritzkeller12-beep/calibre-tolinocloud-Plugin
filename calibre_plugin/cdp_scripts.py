@@ -16,7 +16,11 @@ _TOKEN_SCAN_HELPERS = r"""
   function walk(value, depth, seen) {
     if (!value || depth > 6) return;
     if (typeof value === 'string') {
-      if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
+      // Nur ein echter JWT ist ein Refresh-Kandidat: ein dreiteiliger
+      // Hostname (webreader.mytolino.com) ist keiner. Dieselbe Schwelle
+      // wie in _jwt_shaped (80 Zeichen).
+      if (value.length >= 80 &&
+          /^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(value)) {
         push(value, 'refresh');
         return;
       }
@@ -140,28 +144,6 @@ __TOKEN_SCAN_HELPERS__
   });
 })(__DB_NAME__)
 """.replace("__TOKEN_SCAN_HELPERS__", _TOKEN_SCAN_HELPERS)
-
-
-_EXCHANGE_SNIPPET = r"""
-(function (tokenUrl, body) {
-  return fetch(tokenUrl, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: body,
-    credentials: 'omit',
-    referrer: 'https://webreader.mytolino.com/'
-  }).then(function (response) {
-    return response.text().then(function (text) {
-      return JSON.stringify({
-        status: response.status,
-        body: text.substring(0, 4096)
-      });
-    });
-  }).catch(function (err) {
-    return JSON.stringify({status: 0, body: 'fetch failed: ' + err});
-  });
-})(TOKEN_URL_PLACEHOLDER, BODY_PLACEHOLDER)
-"""
 
 
 def idb_expression(db_name):

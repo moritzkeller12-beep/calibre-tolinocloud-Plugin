@@ -1,4 +1,6 @@
 """Real-PyQt6 offscreen smoke test for InventoryDialog (Calibre APIs stubbed)."""
+
+from ..comparison import ReadState
 import importlib.util
 import os
 import sys
@@ -10,35 +12,21 @@ if importlib.util.find_spec("PyQt6") is None:  # die CI installiert PyQt6
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
-                             QComboBox, QDialog, QFileDialog, QFormLayout,
-                             QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
-                             QLabel,
-                             QLineEdit, QMenu, QMessageBox, QProgressBar,
-                             QPushButton, QTableWidget, QTableWidgetItem,
-                             QVBoxLayout)
+from PyQt6.QtCore import QEvent, QObject, QThread, Qt, pyqtSignal
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                             QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+                             QHeaderView, QInputDialog, QLabel, QLineEdit,
+                             QMenu, QMessageBox, QProgressBar, QPushButton,
+                             QStyle, QStyledItemDelegate,
+                             QStyleOptionViewItem, QTableWidget,
+                             QTableWidgetItem, QVBoxLayout)
 
 
 def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
+
     return [tolino_id for tolino_id, _book, state
             in dialog.selected_read_changes() if state is finished]
-
-
-class _TableWidget(QTableWidget):
-    SelectRows = QAbstractItemView.SelectionBehavior.SelectRows
-    ExtendedSelection = QAbstractItemView.SelectionMode.ExtendedSelection
-
-
-class _HeaderView(QHeaderView):
-    Stretch = QHeaderView.ResizeMode.Stretch
-    ResizeToContents = QHeaderView.ResizeMode.ResizeToContents
-
-
-class _QtCompat:
-    AscendingOrder = Qt.SortOrder.AscendingOrder
-    DescendingOrder = Qt.SortOrder.DescendingOrder
 
 
 def _install_calibre_qt_shim():
@@ -50,12 +38,15 @@ def _install_calibre_qt_shim():
         "QComboBox": QComboBox, "QDialog": QDialog,
         "QFileDialog": QFileDialog, "QFormLayout": QFormLayout,
         "QGroupBox": QGroupBox, "QHBoxLayout": QHBoxLayout,
-        "QHeaderView": _HeaderView, "QInputDialog": QInputDialog,
+        "QHeaderView": QHeaderView, "QInputDialog": QInputDialog,
         "QLabel": QLabel,
         "QLineEdit": QLineEdit, "QMenu": QMenu, "QMessageBox": QMessageBox,
         "QProgressBar": QProgressBar, "QPushButton": QPushButton,
-        "QTableWidget": _TableWidget, "QTableWidgetItem": QTableWidgetItem,
-        "QVBoxLayout": QVBoxLayout, "Qt": _QtCompat,
+        "QTableWidget": QTableWidget, "QTableWidgetItem": QTableWidgetItem,
+        "QVBoxLayout": QVBoxLayout,
+        "QStyledItemDelegate": QStyledItemDelegate,
+        "QStyle": QStyle, "QStyleOptionViewItem": QStyleOptionViewItem,
+        "QEvent": QEvent, "Qt": Qt,
         "pyqtSignal": pyqtSignal,
     }
     for name, value in names.items():
@@ -86,10 +77,10 @@ class InventoryDialogQtTests(unittest.TestCase):
         dialog = InventoryDialog([{
             "title": "Calibre marks read", "authors": "Author",
             "status": "identical", "group": "unchanged", "book_id": 1,
-            "tolino_id": "cloud-1", "read_in_cloud": False,
-            "read_local": True, "read_column": True,
+            "tolino_id": "cloud-1", "read_column": True,
+            "read": ReadState(cloud=False, local=True),
         }])
-        check = dialog.read_checks[0]
+        check = dialog._check(0, 2)
         self.assertFalse(check.isChecked())
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
@@ -104,14 +95,33 @@ class InventoryDialogQtTests(unittest.TestCase):
         self.assertEqual([], _read_ids(dialog, False))
         dialog.close()
 
+    def test_title_column_stays_wider_than_author_column(self):
+        dialog = InventoryDialog([{
+            "title": "Der Lehrling des Feldschers und die Reise durch das Königreich",
+            "authors": "Christoph Magnus Freiherr von und zu Hohenstein-Waldburg",
+            "status": "identical", "group": "unchanged", "book_id": 1,
+            "tolino_id": "cloud-1", "isbn": "9781234567890",
+            "read_column": True,
+            "read": ReadState(cloud=False, local=False),
+        }])
+        dialog.show()
+        self.app.processEvents()
+        for width in (640, 760, 960):
+            dialog.resize(width, 560)
+            self.app.processEvents()
+            header = dialog.table.horizontalHeader()
+            self.assertGreater(header.sectionSize(5), header.sectionSize(6))
+            self.assertGreaterEqual(header.sectionSize(5), 100)
+        dialog.close()
+
     def test_explicit_unread_selection_changes_only_the_cloud_target(self):
         dialog = InventoryDialog([{
             "title": "Cloud marks read", "authors": "Author",
             "status": "identical", "group": "unchanged", "book_id": 1,
-            "tolino_id": "cloud-2", "read_in_cloud": True,
-            "read_local": False, "read_column": True,
+            "tolino_id": "cloud-2", "read_column": True,
+            "read": ReadState(cloud=True, local=False),
         }])
-        dialog.read_checks[0].setChecked(False)
+        dialog._check(0, 2).setChecked(False)
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual(["cloud-2"], _read_ids(dialog, False))
         self.assertFalse(dialog.rows[0]["read"].local)

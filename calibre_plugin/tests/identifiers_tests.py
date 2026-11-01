@@ -4,10 +4,11 @@ import unittest
 from unittest.mock import patch
 from . import orchestration_tests
 from ..plan import plan_metadata_updates, plan_sync
+from ..run_context import RunContext
 from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
@@ -39,15 +40,13 @@ class BookIdentifierSourceTests(unittest.TestCase):
 
     UUID = "8f3c5f0e-1a2b-4c3d-9e8f-001122334455"
 
-    def test_normalize_reads_every_representation(self):
+    def test_normalize_reads_text_and_uuid_objects_only(self):
         from ..identifiers import normalize_uuid_text
         import uuid
         self.assertEqual(self.UUID, normalize_uuid_text(uuid.UUID(self.UUID.upper())))
         self.assertEqual(self.UUID, normalize_uuid_text(self.UUID.upper()))
-        self.assertEqual(self.UUID, normalize_uuid_text("UUID('%s')" % self.UUID))
-        self.assertEqual(self.UUID, normalize_uuid_text("b'%s'" % self.UUID))
-        self.assertEqual(self.UUID, normalize_uuid_text(
-            self.UUID.encode("utf-8")))
+        self.assertEqual("uuid('%s')" % self.UUID,
+                         normalize_uuid_text("UUID('%s')" % self.UUID))
         self.assertEqual("", normalize_uuid_text(None))
 
     def test_the_database_placeholder_is_not_a_key(self):
@@ -63,11 +62,11 @@ class BookIdentifierSourceTests(unittest.TestCase):
     def test_is_real_uuid_accepts_every_real_representation(self):
         from ..identifiers import is_real_uuid
         import uuid
-        for value in (self.UUID, self.UUID.upper(), uuid.UUID(self.UUID),
-                      "UUID('%s')" % self.UUID):
+        for value in (self.UUID, self.UUID.upper(), uuid.UUID(self.UUID)):
             with self.subTest(value=value):
                 self.assertTrue(is_real_uuid(value))
-        for value in ("Dune", "Der Schwarm", "calibre-7", "dummy", "", None):
+        for value in ("Dune", "Der Schwarm", "calibre-7", "dummy", "", None,
+                      "UUID('%s')" % self.UUID, self.UUID.encode("utf-8")):
             with self.subTest(value=value):
                 self.assertFalse(is_real_uuid(value))
 
@@ -91,7 +90,7 @@ class BookIdentifierSourceTests(unittest.TestCase):
         self.assertEqual("alter-schluessel", valid_book_uuid("alter-schluessel"))
 
     def test_the_comparison_remembers_the_calibre_id(self):
-        from ..identifiers import state_key_for
+        from ..identifiers import state_keys_by_book_id
         metadata = {7: {"uuid": self.UUID, "title": "A", "authors": "B",
                         "formats": ["EPUB"], "last_modified": "1",
                         "format_signatures": {}}}
@@ -100,16 +99,28 @@ class BookIdentifierSourceTests(unittest.TestCase):
             "deliverableId": "t1", "title": "A", "authors": "B"}],
             ["EPUB"], use_metadata_ids=False)
         self.assertEqual(7, state[self.UUID]["calibre_id"])
-        self.assertEqual(self.UUID, state_key_for(state, 7))
+        self.assertEqual(self.UUID, state_keys_by_book_id(state).get(7, ""))
+
+    def test_migration_does_not_pop_a_missing_key_twice(self):
+        """Der einmal gebaute Index darf nach dem Verschieben nicht stale poppen."""
+        from ..identifiers import migrate_state_keys
+        other = "9f3c5f0e-1a2b-4c3d-9e8f-001122334466"
+        state = {"alt-a": {"calibre_id": 1, "tolino_id": "a"},
+                 "alt-b": {"calibre_id": 1, "tolino_id": "b"}}
+        migrated = migrate_state_keys(
+            {1: {"uuid": self.UUID}, 2: {"uuid": other}}, state)
+        self.assertEqual(1, migrated)
+        self.assertIn("alt-a", state)
 
     def test_a_known_state_entry_is_found_by_calibre_id(self):
-        from ..identifiers import state_key_for
+        from ..identifiers import state_keys_by_book_id
         state = {"alter-schluessel": {"calibre_id": 7, "tolino_id": "t1"},
                  "anderer": {"calibre_id": "8", "tolino_id": "t2"}}
-        self.assertEqual("alter-schluessel", state_key_for(state, 7))
-        self.assertEqual("anderer", state_key_for(state, "8"))
-        self.assertEqual("", state_key_for(state, 9))
-        self.assertEqual("", state_key_for(None, 7))
+        keys = state_keys_by_book_id(state)
+        self.assertEqual("alter-schluessel", keys.get(7, ""))
+        self.assertEqual("anderer", keys.get(8, ""))
+        self.assertEqual("", keys.get(9, ""))
+        self.assertEqual({}, state_keys_by_book_id(None))
 
 class SilentIdentifierDeadEndTests(unittest.TestCase):
     """Ohne lesbare Kennung muss der Lauf trotzdem etwas tun."""
@@ -136,6 +147,10 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         dashboard.columns = {"id": False}
         return dashboard
 
+    @staticmethod
+    def _context(dashboard):
+        return RunContext.from_values(dashboard.values(), dashboard.columns)
+
     def _books(self, library=None):
         if library is None:
             library = type("Library", (), {"new_api": type("Api", (), {
@@ -156,7 +171,9 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             authors=["Frank Schatzing"], formats=["EPUB"],
             last_modified="2026-01-01")
         dashboard = self._dashboard(books)
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual(BookIdentifierSourceTests.UUID, metadata[7]["uuid"])
         uploads = plan_sync(metadata, {}, ["EPUB"],
                             upload_book_ids={7})
@@ -188,16 +205,20 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         books = {"library": database, "metadata": {7: metadata_row}}
         dashboard = self._dashboard(
             books, settings={"state": "", "preferred_formats": ["EPUB"]})
-        with patch("calibre_plugin.ui_common.os.stat",
+        with patch("calibre_plugin.planning_values.os.stat",
                    return_value=type("Stat", (), {
                        "st_size": 1, "st_mtime": 1.0})()):
-            metadata = self.dashboard_plan.local_metadata(dashboard)
+            metadata = self.dashboard_plan.local_metadata(
+                dashboard, self._context(dashboard),
+                dashboard.values().get("state"))
         self.assertEqual(["EPUB"], database.stat_formats)
         self.assertEqual({"EPUB": "1:1000"}, metadata[7]["format_signatures"])
 
     def test_a_blank_uuid_still_gets_a_stable_key_and_the_upload_runs(self):
         dashboard = self._dashboard(self._books())
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual("calibre-7", metadata[7]["uuid"])
         # Der Vergleich merkt sich die Cloud-Kopie unter der Ersatzkennung.
         state = {}
@@ -216,11 +237,12 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         self.assertEqual("t1", meta_updates[0][2])
 
     def test_a_stored_entry_keeps_its_old_key(self):
-        state = {"frueher": {"calibre_id": 7, "tolino_id": "t1",
-                             "fingerprint": "1:1"}}
+        state = {"frueher": {"calibre_id": 7, "tolino_id": "t1"}}
         dashboard = self._dashboard(self._books(), {
             "state": state, "preferred_formats": ["EPUB"]})
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual("frueher", metadata[7]["uuid"])
 
     def test_a_title_as_uuid_keeps_the_stored_state_key(self):
@@ -236,7 +258,9 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             formats=["EPUB"], last_modified="2026-01-01")
         dashboard = self._dashboard(books, {
             "state": state, "preferred_formats": ["EPUB"]})
-        metadata = self.dashboard_plan.local_metadata(dashboard)
+        metadata = self.dashboard_plan.local_metadata(
+            dashboard, self._context(dashboard),
+            dashboard.values().get("state"))
         self.assertEqual(title, metadata[7]["uuid"])
         # A legacy fingerprint isn't part of the authoritative state anymore;
         # without file and metadata signatures a sync must be offered.

@@ -1,11 +1,11 @@
 """Dependency-free websocket and DevTools HTTP transport helpers."""
 import base64
+from http.client import HTTPException
 import json
 import secrets
 import socket
 import struct
 import time
-from urllib.parse import urlsplit
 
 
 # ---------------------------------------------------------------- WebSocket
@@ -29,14 +29,20 @@ class _Ws:
             "Sec-WebSocket-Key: %s\r\n"
             "Sec-WebSocket-Version: 13\r\n\r\n" % (path, host, port, key)
         )
-        sock.sendall(request.encode("ascii"))
-        sock.settimeout(timeout)
-        data = b""
-        while b"\r\n\r\n" not in data:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
+        try:
+            sock.sendall(request.encode("ascii"))
+            sock.settimeout(timeout)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except OSError:
+            # Auch ein Timeout beim Handshake ist ein OSError. Ohne das
+            # Schliessen blieb der Socket bis zum Garbage Collector offen.
+            sock.close()
+            raise
         head, _, rest = data.partition(b"\r\n\r\n")
         if b" 101 " not in head.split(b"\r\n", 1)[0]:
             sock.close()
@@ -46,9 +52,9 @@ class _Ws:
         ws.buf = rest
         return ws
 
-    def send_json(self, obj):
-        payload = json.dumps(obj).encode("utf-8")
-        header = bytearray([0x81])  # FIN + text frame
+    def _send_frame(self, opcode, payload):
+        """Send one masked, final frame."""
+        header = bytearray([0x80 | opcode])
         mask = secrets.token_bytes(4)
         length = len(payload)
         if length < 126:
@@ -63,6 +69,9 @@ class _Ws:
         masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         self.sock.sendall(bytes(header) + masked)
 
+    def send_json(self, obj):
+        self._send_frame(0x1, json.dumps(obj).encode("utf-8"))
+
     def _read_exact(self, n, deadline):
         while len(self.buf) < n:
             remaining = deadline - time.time()
@@ -72,10 +81,7 @@ class _Ws:
             try:
                 chunk = self.sock.recv(65536)
             except socket.timeout:
-                # Zeitfenster ohne Daten: DIE Deadline entscheidet,
-                # nicht das 5-Sekunden-Slice. Frueher wanderte dieser
-                # timeout als OSError nach oben und tötete den Lauscher
-                # bei jeder laengeren Stillphase des Readers.
+                # Ein Timeout des 5-Sekunden-Slices ist nicht die Deadline.
                 continue
             if not chunk:
                 raise OSError("websocket closed")
@@ -88,8 +94,7 @@ class _Ws:
         fragmented = bytearray()
         fragmented_opcode = None
         while True:
-            # RFC-6455-Framekopf: byte 0 = FIN/opcode, byte 1 = MASK bit + Laenge.
-            # Byte 1 auszulassen kappte jede CDP-Antwort an falscher Stelle.
+            # RFC 6455: FIN/Opcode und MASK/Länge belegen je ein Byte.
             header = self._read_exact(2, deadline)
             final = bool(header[0] & 0x80)
             opcode = header[0] & 0x0F
@@ -107,7 +112,9 @@ class _Ws:
                                 for i, b in enumerate(payload))
             if opcode == 0x8:  # close
                 raise OSError("websocket closed by peer")
-            if opcode in (0x9, 0xA):  # ping/pong: ignore
+            if opcode in (0x9, 0xA):  # answer ping; ignore pong
+                if opcode == 0x9:
+                    self._send_frame(0xA, payload)
                 continue
             if opcode in (0x1, 0x2):
                 if not final:
@@ -121,7 +128,6 @@ class _Ws:
                     continue
                 message = bytes(fragmented)
                 opcode = fragmented_opcode
-                fragmented = bytearray()
                 fragmented_opcode = None
             else:
                 continue
@@ -138,25 +144,14 @@ class _Ws:
             pass
 
 
-def _is_loopback_url(url):
-    """True fuer 127.0.0.1/localhost/::1 -- der Browser-Debug-Port."""
-    try:
-        host = urlsplit(str(url or "")).hostname or ""
-    except (TypeError, ValueError):
-        return False
-    return host in ("127.0.0.1", "localhost", "::1")
-
-
 def _http_get_json(url, timeout=5):
     """Fetch a local DevTools JSON endpoint without using environment proxies."""
-    if not _is_loopback_url(url):
-        return None
     try:
         from urllib.request import ProxyHandler, build_opener
         opener = build_opener(ProxyHandler({}))
         with opener.open(url, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8", "replace"))
-    except Exception:
+    except (OSError, HTTPException, ValueError):
         return None
 
 

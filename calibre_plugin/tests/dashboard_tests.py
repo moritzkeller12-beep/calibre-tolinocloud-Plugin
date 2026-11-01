@@ -7,14 +7,14 @@ from . import ui_base_tests
 from .. import config
 from ..partners import PARTNERS
 from ..library import TOLINO_COLUMN
+from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
     FakeText,start_cdp_stubs, stop_cdp_stubs, ui_module_for)
-from pathlib import Path
 from unittest.mock import patch
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
@@ -87,7 +87,10 @@ class DashboardAccountSwitchTests(unittest.TestCase):
             pass
 
     def _dashboard(self):
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         for name in ("account_select", "account_quick", "partner", "hardware",
                      "refresh", "formats", "account_quick_label", "status",
                      "progress", "progress_label", "primary", "covers",
@@ -197,13 +200,13 @@ class ColumnSetupButtonTests(unittest.TestCase):
     def _dashboard(ui_module, calls):
         """Stub ohne Qt-Aufbau, aber mit den echten Methoden gebunden."""
         cls = ui_module.dashboard.SyncDashboard
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.columns = {"id": False}
-        dashboard.columns = {"id": False, "read": False}
         dashboard.update_status = lambda: calls.append("status")
-        for name in ("create_columns", "_refresh_column_flags"):
-            setattr(dashboard, name, getattr(cls, name).__get__(dashboard))
+        dashboard.create_columns = cls.create_columns.__get__(dashboard)
         return dashboard
 
     def test_one_button_creates_only_its_own_column(self):
@@ -216,36 +219,35 @@ class ColumnSetupButtonTests(unittest.TestCase):
             seen.append(list(labels))
             return list(labels)
 
-        with patch("calibre_plugin.ui_dashboard.create_custom_columns",
+        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
                    fake_create), \
              patch("calibre_plugin.ui_dashboard.column_state",
                    lambda _db: {"id": True, "read": True,
                                 "ignore": True}), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
+             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             dashboard.create_columns("tolino_ignore")
         # Genau diese eine Spalte wird angelegt -- nicht alle drei.
         self.assertEqual([["tolino_ignore"]], seen)
         self.assertIn("#tolino_ignore", boxes[0][2])
         self.assertIn("neu starten", boxes[0][2])
-        self.assertTrue(dashboard.columns.get("id"))
-        self.assertTrue(dashboard.columns.get("read"))
-        self.assertEqual(["status"], calls)
+        # Calibre kennt die neue Spalte erst nach einem Neustart; hier
+        # wird kein Spaltenstatus vorgetäuscht.
+        self.assertEqual([], calls)
 
     def test_an_existing_column_says_so_and_changes_nothing(self):
         from unittest.mock import patch
         ui_module = self._ui()
         calls, boxes = [], []
         dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard.create_custom_columns",
+        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
                    lambda _db, _labels: []), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
+             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             dashboard.create_columns("tolino_read")
         self.assertIn("schon vorhanden", boxes[0][2])
         self.assertIn("#tolino_read", boxes[0][2])
         self.assertEqual([], calls)
-        self.assertFalse(dashboard.columns.get("read"))
 
     def test_a_refused_creation_is_reported_instead_of_crashing(self):
         from unittest.mock import patch
@@ -257,10 +259,10 @@ class ColumnSetupButtonTests(unittest.TestCase):
         ui_module = self._ui()
         calls, errors = [], []
         dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard.create_custom_columns", boom), \
-             patch("calibre_plugin.ui_dashboard.log_warning",
+        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns", boom), \
+             patch("calibre_plugin.ui_dashboard_parts.log_warning",
                    lambda _text: None), \
-             patch("calibre_plugin.ui_dashboard.error_dialog",
+             patch("calibre_plugin.ui_dashboard_parts.error_dialog",
                    lambda *args, **kwargs: errors.append(args)):
             dashboard.create_columns("tolino_id")
         self.assertIn("create_custom_column", errors[0][2])
@@ -296,7 +298,10 @@ class DashboardPrimaryActionTests(unittest.TestCase):
             def setToolTip(self, text):
                 self.tooltip = text
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.thread = object() if running else None
         dashboard.refresh = LineEdit(token)
         # Der Zugang kommt aus dem Konto: der Stub sagt, was drin steht.
@@ -458,7 +463,10 @@ class TokenRotationWriteBackTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
         self.addCleanup(restore)
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         for name in ("account_select", "account_quick", "partner", "hardware",
                      "refresh", "formats", "account_quick_label", "status",
                      "progress", "progress_label", "primary", "covers",
@@ -470,7 +478,7 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         # Die ECHTEN Methoden an das gefaelschte Fenster binden.
         for name in ("load_values", "values", "_selected_account",
                      "update_status", "_stored_refresh", "_typed_refresh",
-                     "_effective_refresh", "_secret_tokens", "store_refresh",
+                     "_effective_refresh", "store_refresh",
                      "logout", "_save_visible_account"):
             setattr(dashboard, name,
                     getattr(ui_module.dashboard.SyncDashboard, name).__get__(dashboard))
@@ -500,9 +508,10 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         _ui_module, dashboard = self._ui("alt-token")
         self._rotate("rotiert")
         dashboard.refresh.setText("selbst-eingetragen")
-        self.assertEqual("selbst-eingetragen",
-                         dashboard.values()["refresh_token"])
-        dashboard._save_visible_account()
+        self.assertEqual("selbst-eingetragen", dashboard._typed_refresh())
+        # `values()` traegt keine Zugangsdaten; gespeichert wird ausdruecklich.
+        self.assertNotIn("refresh_token", dashboard.values())
+        dashboard.store_refresh("selbst-eingetragen")
         self.assertEqual("selbst-eingetragen", self._stored())
         # Feld geleert: der gespeicherte Zugang bleibt -- abgemeldet wird
         # ausdruecklich ueber den Knopf.
@@ -530,11 +539,34 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         self.assertEqual("", self._stored())
         self.assertEqual("", dashboard.refresh.text())
 
-    def test_untouched_hardware_field_keeps_the_adopted_id(self):
+    def test_the_visible_hardware_field_is_the_manual_override(self):
         _ui_module, dashboard = self._ui()
         config.save_account("konto", {"hardware_id": "adoptiert"},
                             active="konto")
-        self.assertEqual("adoptiert", dashboard.values()["hardware_id"])
+        self.assertEqual("hw-1", dashboard.values()["hardware_id"])
+        dashboard.hardware.setText("manuell")
+        self.assertEqual("manuell", dashboard.values()["hardware_id"])
+
+    def test_a_missing_account_never_saves_another_accounts_state(self):
+        """Ist der angezeigte Name weg, darf nicht das aktive Konto
+        unter diesem Namen gespeichert werden."""
+        _ui_module, dashboard = self._ui("alt-token")
+        dashboard.account_name = "verschwunden"
+        values = dashboard.values()
+        self.assertEqual("", values["account_name"])
+        dashboard._save_visible_account(values)
+        self.assertEqual("alt-token", self._stored("konto"))
+
+    def test_saving_the_visible_values_keeps_a_concurrent_state_write(self):
+        """Der Snapshot ohne Zustand darf keinen Worker-Fortschritt ersetzen."""
+        _ui_module, dashboard = self._ui("alt-token")
+        self.assertNotIn("state", dashboard.values())
+        values = dashboard.values()
+        config.save_account(
+            "konto", {"state": {"u": {"tolino_id": "neu"}}}, active="konto")
+        dashboard._save_visible_account(values)
+        self.assertEqual({"u": {"tolino_id": "neu"}},
+                         config.account_by_name("konto")["state"])
 
 class LoginPreflightTests(unittest.TestCase):
     """Der Anmeldeknopf prueft zuerst den GESPEICHERTEN Zugang.
@@ -548,49 +580,45 @@ class LoginPreflightTests(unittest.TestCase):
     # --- tolino.check_stored_login --------------------------------------
 
     @staticmethod
-    def _patch_client(records, error=None, rotate=True):
+    def _patch_client(records, token="tok-1", hardware="hw-1",
+                      error=None, rotate=True):
         """Replace the vault's client factory with a deterministic fake."""
-        def login(store, _timeout=5):
-            token = store.refresh_token
-            records.append((store.values.get("partner_id"), store.hardware_id, token))
+        class FakeClient:
+            def __init__(self, partner, hw, refresh, token_callback=None,
+                         hardware_callback=None):
+                records.append((partner, hw, refresh))
+                self.refresh = refresh
+                self.token_callback = token_callback
 
-            class FakeClient:
-                refresh = token
+            def login(self):
+                if error is not None:
+                    raise error
+                if rotate:
+                    self.refresh = token + "-rotated"
+                    self.token_callback(self.refresh)
+                    records.append(("persisted", self.refresh))
+                return self.refresh
 
-                def login(self):
-                    if error is not None:
-                        raise error
-                    if rotate:
-                        self.refresh = token + "-rotated"
-                        self.token_callback(self.refresh)
-                        records.append(("persisted", self.refresh))
-                    return self.refresh
-
-            client = FakeClient()
-            client.token_callback = lambda value: store.save_refresh(value)
-            client.login()
-            return client
-
-        return patch("calibre_plugin.token_vault.TOKEN_VAULT.login", login)
+        return patch.multiple(
+            "calibre_plugin.token_vault",
+            TolinoClient=FakeClient,
+            account_by_name=lambda _name: ({} if token is None else {
+                "refresh_token": token, "hardware_id": hardware}),
+            account_secrets=lambda _name: () if token is None else (token,),
+        )
 
     def test_a_working_access_is_renewed_and_saved(self):
         records = []
-        store = config.CredentialStore(
-            {"partner_id": 4, "hardware_id": "hw-1",
-             "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records):
-            status, detail = vault_module.check_stored_login(store)
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual(("valid", ""), (status, detail))
         self.assertEqual((4, "hw-1", "tok-1"), records[0])
-        self.assertEqual("tok-1-rotated", store.refresh_token)
+        self.assertEqual(("persisted", "tok-1-rotated"), records[1])
 
     def test_a_successful_check_does_not_return_a_token_to_the_ui(self):
         records = []
-        store = config.CredentialStore(
-            {"partner_id": 4, "hardware_id": "hw-1",
-             "refresh_token": "tok-1"}, "konto")
         with self._patch_client(records, rotate=False):
-            status, detail = vault_module.check_stored_login(store)
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual(("valid", ""), (status, detail))
         self.assertEqual((4, "hw-1", "tok-1"), records[0])
 
@@ -599,53 +627,32 @@ class LoginPreflightTests(unittest.TestCase):
         error = TolinoAuthError(
             "invalid_grant: refresh_token tok-1 wurde abgelehnt")
         with self._patch_client(records, error=error):
-            status, detail = vault_module.check_stored_login(
-                config.CredentialStore({"partner_id": 4,
-                                        "hardware_id": "hw-1",
-                                        "refresh_token": "tok-1"}, "konto"))
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual("invalid", status)
         self.assertNotIn("tok-1", detail)
         self.assertIn("[REDACTED]", detail)
         self.assertIn("invalid_grant", detail)
 
     def test_without_a_stored_token_nothing_is_asked(self):
-        store = config.CredentialStore(
-            {"partner_id": 4, "hardware_id": "hw-1", "refresh_token": ""},
-            "konto")
-        # Andere Tests hinterlassen ein gespeichertes Konto «konto» mit Token;
-        # ohne diese Abschirmung loeste der Test einen echten Login aus.
-        with patch("calibre_plugin.config.account_by_name",
-                   lambda *_args, **_kwargs: {}):
-            status, detail = vault_module.check_stored_login(store)
+        with self._patch_client([], token=None):
+            status, detail = vault_module.check_stored_login("konto", 4)
         self.assertEqual("invalid", status)
         self.assertIn("Bitte bei tolino anmelden", detail)
 
-    def test_a_running_sync_blocks_the_check(self):
-        records = []
-        with vault_module.TOKEN_VAULT._lock:
-            status, detail = vault_module.check_stored_login(
-                config.CredentialStore({"partner_id": 4,
-                                        "hardware_id": "hw-1",
-                                        "refresh_token": "tok-1"}, "konto"))
-        # NICHT „invalid": der Zugang ist ungeprueft, nicht abgelehnt.
-        self.assertEqual(("busy", ""), (status, detail))
-        self.assertEqual([], records)
-
-    def test_a_parallel_rotation_blocks_the_check(self):
-        records = []
-        with vault_module.TOKEN_VAULT._lock:
-            status, detail = vault_module.check_stored_login(
-                config.CredentialStore({"partner_id": 4,
-                                        "hardware_id": "hw-1",
-                                        "refresh_token": "tok-1"}, "konto"),
-                lock_timeout=0)
-        self.assertEqual(("busy", ""), (status, detail))
-        self.assertEqual([], records)
+    def test_a_locked_vault_blocks_the_check(self):
+        # Der Zugang ist ungeprüft, nicht abgelehnt; das gilt auch ohne Wartezeit.
+        for kwargs in ({}, {"lock_timeout": 0}):
+            with self.subTest(kwargs=kwargs):
+                records = []
+                with self._patch_client(records):
+                    with vault_module.TOKEN_VAULT._lock:
+                        status, detail = vault_module.check_stored_login(
+                            "konto", 4, **kwargs)
+                self.assertEqual(("busy", ""), (status, detail))
+                self.assertEqual([], records)
 
     def test_a_late_401_uses_the_latest_stored_refresh_token(self):
-        store = config.CredentialStore(
-            {"account_name": "konto", "partner_id": 4,
-             "hardware_id": "hw-1", "refresh_token": "saved-old"}, "konto")
+        stored = {"refresh_token": "saved-old", "hardware_id": "hw-1"}
         requested = []
 
         class RefreshClient:
@@ -665,22 +672,21 @@ class LoginPreflightTests(unittest.TestCase):
                 return self.refresh
 
         from ..token_vault import TOKEN_VAULT
-        with patch("calibre_plugin.token_vault.TolinoClient", RefreshClient), \
-             patch("calibre_plugin.config.account_by_name",
-                   side_effect=lambda _name: {
-                       "refresh_token": store.refresh_token,
-                       "hardware_id": store.hardware_id}):
-            client = TOKEN_VAULT.login(store)
-            store.save_refresh("rotated-by-keepalive")
+        with patch.multiple(
+                "calibre_plugin.token_vault",
+                TolinoClient=RefreshClient,
+                account_by_name=lambda _name: dict(stored),
+                save_refresh_token=lambda _name, value: stored.update(
+                    refresh_token=value)):
+            client = TOKEN_VAULT.login("konto", 4)
+            stored["refresh_token"] = "rotated-by-keepalive"
             client.access = None
             TOKEN_VAULT.relogin(client)
         self.assertEqual(["saved-old", "rotated-by-keepalive"], requested)
 
     def test_the_rotation_lock_is_released_afterwards(self):
         with self._patch_client([]):
-            vault_module.check_stored_login(config.CredentialStore(
-                {"partner_id": 4, "hardware_id": "hw-1",
-                 "refresh_token": "tok-1"}, "konto"))
+            vault_module.check_stored_login("konto", 4)
         self.assertTrue(vault_module.TOKEN_VAULT._lock.acquire(blocking=False))
         vault_module.TOKEN_VAULT._lock.release()
 
@@ -749,8 +755,8 @@ class LoginPreflightTests(unittest.TestCase):
                 self.deleted = True
 
         class CheckWorker:
-            def __init__(self, settings):
-                self.settings = settings
+            def __init__(self, context):
+                self.context = context
                 self.valid = Signal()
                 self.invalid = Signal()
                 self.busy = Signal()
@@ -796,7 +802,10 @@ class LoginPreflightTests(unittest.TestCase):
         })
 
     def _dashboard(self, ui_module, token="tok-1"):
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.account_name = "konto"
         dashboard.login_thread = None
         dashboard.login_worker = None
@@ -809,6 +818,7 @@ class LoginPreflightTests(unittest.TestCase):
             "account_name": "konto", "partner_id": 4,
             "hardware_id": "hw-1", "refresh_token": token,
         }
+        dashboard.columns = {}
         dashboard.values = lambda: dashboard.settings_values
         # Der Zugang kommt aus dem Konto: der Stub sagt, was drin steht.
         dashboard._stored_refresh = lambda: token
@@ -817,7 +827,7 @@ class LoginPreflightTests(unittest.TestCase):
         # Die beiden Ergebnis-Slots des Anmeldefensters: hier nur Empfaenger.
         dashboard.login_completed = lambda *args: None
         dashboard.login_failed = lambda *args: None
-        names = ("browser_login", "_check_stored_login",
+        names = ("browser_login", "_check_stored_login", "run_context",
                  "_start_login_window", "_login_running",
                  "login_still_valid", "login_rejected", "login_check_busy",
                  "_login_cleanup", "store_refresh", "_login_progress")
@@ -833,7 +843,8 @@ class LoginPreflightTests(unittest.TestCase):
         opened = []
         dashboard._start_login_window = lambda values: opened.append(values)
         dashboard.browser_login()
-        self.assertEqual([""], [values["refresh_token"] for values in opened])
+        self.assertEqual(["konto"],
+                         [context.account_name for context in opened])
         self.assertIsNone(dashboard.login_thread)
 
     def test_with_a_token_the_stored_access_is_checked_first(self):
@@ -847,8 +858,9 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsInstance(dashboard.login_worker, CheckWorker)
         self.assertEqual(1, dashboard.login_thread.starts)
-        self.assertIs(dashboard.settings_values,
-                      dashboard.login_worker.settings)
+        self.assertEqual("konto",
+                         dashboard.login_worker.context.account_name)
+        self.assertEqual(4, dashboard.login_worker.context.partner_id)
         self.assertIs(dashboard.login_thread,
                       dashboard.login_worker.moved_to)
         self.assertIn("geprüft", dashboard.status.text())
@@ -943,7 +955,8 @@ class LoginPreflightTests(unittest.TestCase):
         ui_module = self._ui()
         Thread, _, LoginWorker = self._fake_qt(ui_module)
         dashboard = self._dashboard(ui_module)
-        dashboard._start_login_window(dashboard.values())
+        dashboard._start_login_window(
+            RunContext.from_values(dashboard.values()))
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
         self.assertEqual((4, "hw-1"), dashboard.login_worker.arguments)
@@ -973,12 +986,15 @@ class LoginPreflightTests(unittest.TestCase):
         emitted, calls = [], []
         settings = {"partner_id": 4, "hardware_id": "hw-1",
                     "refresh_token": "tok-1", "account_name": "konto"}
-        worker = ui_module.auth_workers.SessionCheckWorker(settings)
+        worker = ui_module.auth_workers.SessionCheckWorker(
+            RunContext.from_values(settings))
         worker.valid, worker.invalid, worker.busy = (signal("valid"),
                                                      signal("invalid"),
                                                      signal("busy"))
         ui_module.auth_workers.check_stored_login = check
-        worker.run()
+        with patch("calibre_plugin.run_context.account_secrets",
+                   lambda _name: ("tok-1",)):
+            worker.run()
         return worker, emitted, calls
 
     def test_the_worker_hands_the_stored_account_to_the_check(self):
@@ -986,9 +1002,7 @@ class LoginPreflightTests(unittest.TestCase):
         _worker, emitted, calls = self._run_check_worker(
             ui_module, ("valid", ""))
         args, kwargs = calls[0]
-        self.assertEqual(1, len(args))
-        self.assertEqual("konto", args[0].account_name)
-        self.assertEqual("tok-1", args[0].refresh_token)
+        self.assertEqual(("konto", 4), args)
         self.assertEqual({}, kwargs)
         self.assertEqual([("valid",)], emitted)
 
@@ -1010,16 +1024,16 @@ class LoginPreflightTests(unittest.TestCase):
         # Auch der unerwartete Fehler verraet den Zugang nicht.
         self.assertNotIn("tok-1", emitted[0][1])
 
-    def test_the_vault_persists_rotations_into_the_worker_snapshot(self):
-        settings = {"account_name": "konto", "partner_id": 4,
-                    "hardware_id": "hw-1", "refresh_token": "tok-1"}
-        store = config.CredentialStore(settings, "konto")
-        callback = vault_module.TOKEN_VAULT._callback_for_value(
-            store.refresh_token, store.save_refresh)
-        with patch("calibre_plugin.config.save_credentials") as save:
-            callback("tok-2")
-        self.assertEqual("tok-2", settings["refresh_token"])
-        save.assert_called_once_with("konto", "tok-2", "hw-1")
+    def test_the_vault_persists_rotations_into_the_account(self):
+        original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.save_account("konto", {"refresh_token": "tok-1",
+                                      "hardware_id": "hw-1"}, active="konto")
+        config.save_refresh_token("konto", "tok-2")
+        account = config.account_by_name("konto")
+        self.assertEqual("tok-2", account["refresh_token"])
+        self.assertEqual("hw-1", account["hardware_id"])
 
 class LoginMessageTests(unittest.TestCase):
     """P2: Erfolg in der Statuszeile, Ursachen klar getrennt."""
@@ -1031,7 +1045,10 @@ class LoginMessageTests(unittest.TestCase):
         ui_module = self._ui()
         boxes = []
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
         dashboard.store_refresh = lambda refresh, hardware="": None
@@ -1050,12 +1067,15 @@ class LoginMessageTests(unittest.TestCase):
         self.assertEqual([], boxes)
         self.assertIn("Angemeldet.", dashboard.status.value)
 
-    def test_successful_login_without_open_window_has_no_close_warning(self):
-        """Die UI fragt den Fensterzustand ab, statt ein zweites Mal zu schliessen."""
+    def test_successful_login_leaves_the_close_warning_to_the_grabber(self):
+        """Das Schliessen samt Warnung liegt beim Grabber, nicht in der UI."""
         ui_module = self._ui()
         self.addCleanup(ui_module._restore_stubs_for_tests)
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
         dashboard.store_refresh = lambda refresh, hardware="": None
@@ -1064,14 +1084,11 @@ class LoginMessageTests(unittest.TestCase):
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
             dashboard)
 
-        with patch.object(ui_module.dashboard, "_verified_owner",
-                          return_value=None, create=True) as alive, \
-             patch.object(ui_module.dashboard, "close_grabber_window",
-                          create=True) as close:
+        with patch.object(ui_module.dashboard, "grabber_window_state",
+                          create=True) as alive:
             dashboard.login_completed("tok-neu", "hw-neu")
-        alive.assert_called_once_with()
-        close.assert_not_called()
-        self.assertNotIn("von Hand", dashboard.status.value)
+        alive.assert_not_called()
+        self.assertNotIn("offen", dashboard.status.value)
         self.assertIn("Angemeldet.", dashboard.status.value)
 
     def test_the_primary_button_becomes_the_next_step(self):
@@ -1089,7 +1106,10 @@ class LoginMessageTests(unittest.TestCase):
             def setFocus(self):
                 self.calls.append(("focus",))
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
         dashboard.primary = Primary()
@@ -1112,35 +1132,24 @@ class LoginMessageTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
 
-    def test_each_cause_gets_its_own_next_step(self):
+    def test_the_error_text_is_the_single_source_for_the_title(self):
         ui_module = self._ui()
         try:
             guide = ui_module.common._login_failure_guidance
-            titles = {}
-            for code in ("B05", "B06", "B08", "N01", "A02", "B07", "B03", "B04", "A06"):
-                exc = tolino_module.TolinoAuthError("egal", code=code)
-                title, step = guide(exc)
-                titles[code] = title
-                self.assertNotIn("\n", step)
-                self.assertLessEqual(len(step), 100, step)
-                self.assertLessEqual(len(title), 100, title)
-            self.assertEqual(len(titles), len(set(titles.values())),
-                             "jede Ursache braucht einen eigenen Titel")
+            cases = (("B01", "Browser-Anmeldung nicht möglich"),
+                     ("N01", "Verbindung fehlgeschlagen"),
+                     ("A01", "Anmeldung erforderlich"))
+            for code, short in cases:
+                exc = tolino_module.TolinoAuthError("egal", code=code,
+                                                    short=short)
+                self.assertEqual(short, guide(exc))
+                self.assertNotIn("\n", ui_module.common.LOGIN_NEXT_STEP)
+                self.assertLessEqual(
+                    len(ui_module.common.LOGIN_NEXT_STEP), 100)
+            # Ohne Kurztext bleibt ein neutraler, umsetzbarer Titel.
             self.assertEqual(
-                "Kein unterstützter Browser gefunden", titles["B05"])
-            self.assertEqual("Flatpak: Freigabe fehlt", titles["B08"])
-            self.assertEqual("Verbindung fehlgeschlagen", titles["N01"])
-            self.assertEqual("Zugang verbraucht", titles["A02"])
-            self.assertEqual("Anmeldung abgebrochen", titles["B03"])
-            self.assertEqual("Zeitüberschreitung bei der Anmeldung",
-                             titles["B04"])
-            self.assertEqual("Anmeldung abgelehnt", titles["A06"])
-            # Bereits formatierte Meldungen (ältere Worker) tragen den Code
-            # im Text.
-            self.assertEqual(titles["B04"],
-                             guide("Zeitüberschreitung (Code B04)")[0])
-            self.assertEqual("Anmeldung nicht abgeschlossen",
-                             guide(RuntimeError("kaputt"))[0])
+                "Anmeldung nicht abgeschlossen",
+                guide(tolino_module.TolinoAuthError("egal")))
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1153,10 +1162,14 @@ class LoginMessageTests(unittest.TestCase):
             def text():
                 return "tok-geheim"
 
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.status = FakeText()
         dashboard.refresh = Refresh()
-        dashboard._secret_tokens = lambda: ("tok-geheim",)
+        dashboard._stored_refresh = lambda: ""
+        dashboard._typed_refresh = lambda: "tok-geheim"
         dashboard._login_cleanup = lambda: None
         dashboard.login_failed = ui_module.dashboard.SyncDashboard.login_failed.__get__(
             dashboard)
@@ -1164,19 +1177,26 @@ class LoginMessageTests(unittest.TestCase):
             "information": staticmethod(lambda *args: boxes.append(args)),
             "warning": staticmethod(lambda *args: boxes.append(args)),
         })
+        cases = ((tolino_module.TolinoAuthError(
+                      "Kein Chromium-Browser gefunden (tok-geheim)", code="B01",
+                      short="Browser-Anmeldung nicht möglich"),
+                  "Browser-Anmeldung nicht möglich (Code B01)"),
+                 (RuntimeError("unerwartet: tok-geheim"),
+                  "Anmeldung nicht abgeschlossen (Code E99)"))
         try:
             with patch("calibre_plugin.ui_dashboard.log_warning",
                        lambda text: logged.append(text)):
-                dashboard.login_failed(tolino_module.TolinoAuthError(
-                    "Kein Chromium-Browser gefunden (tok-geheim)", code="B05"))
+                for error, title in cases:
+                    with self.subTest(error=error):
+                        dashboard.login_failed(error)
+                        self.assertEqual(title, boxes[-1][1])
+                        self.assertIn("Anmeldung erneut starten", boxes[-1][2])
+                        self.assertNotIn("tok-geheim", boxes[-1][2])
+                        self.assertIn("Anmeldung fehlgeschlagen.", dashboard.status.value)
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(boxes))
-        self.assertEqual("Kein unterstützter Browser gefunden (Code B05)", boxes[0][1])
-        self.assertIn("installieren", boxes[0][2])
-        self.assertNotIn("tok-geheim", boxes[0][2])
+        self.assertEqual(len(cases), len(boxes))
         self.assertNotIn("tok-geheim", " ".join(logged))
-        self.assertIn("Anmeldung fehlgeschlagen.", dashboard.status.value)
 
 class AccountStateBindingTests(unittest.TestCase):
     """Das im Dialog angezeigte Konto IST das Konto, dessen State
@@ -1184,15 +1204,18 @@ class AccountStateBindingTests(unittest.TestCase):
     Tolino-ID-Spalte folgt EINER Regel (nur bei genau einem Konto)."""
 
     def test_account_by_name_ignores_the_active_account(self):
-        accounts = [
-            {"name": "alpha", "state": {"u1": {"tolino_id": "id-a"}}},
-            {"name": "beta", "state": {"u2": {"tolino_id": "id-b"}}},
-        ]
+        original = config.PREFERENCES
+        self.addCleanup(setattr, config, "PREFERENCES", original)
+        config.PREFERENCES = config.JSONConfig("test")
+        config.save_account("alpha", {"state": {"u1": {"tolino_id": "id-a"}}},
+                            active="alpha")
+        config.save_account("beta", {"state": {"u2": {"tolino_id": "id-b"}}},
+                            active="beta")
         self.assertEqual({"u1": {"tolino_id": "id-a"}},
-                         config.account_by_name("alpha", accounts)["state"])
+                         config.account_by_name("alpha")["state"])
         self.assertEqual({"u2": {"tolino_id": "id-b"}},
-                         config.account_by_name("beta", accounts)["state"])
-        self.assertEqual({}, config.account_by_name("gone", accounts))
+                         config.account_by_name("beta")["state"])
+        self.assertEqual({}, config.account_by_name("gone"))
 
     def test_set_active_account_switches_without_touching_state(self):
         original = config.PREFERENCES
@@ -1208,7 +1231,8 @@ class AccountStateBindingTests(unittest.TestCase):
             config.set_active_account("alpha")
             values = config.settings()
             self.assertEqual("alpha", values["active_account"])
-            self.assertEqual({"u1": {"tolino_id": "id-a"}}, values["state"])
+            self.assertEqual({"u1": {"tolino_id": "id-a"}},
+                             config.account_by_name("alpha")["state"])
             # Das andere Konto bleibt unberuehrt.
             self.assertEqual({"u2": {"tolino_id": "id-b"}},
                              config.account_by_name("beta")["state"])
@@ -1221,7 +1245,7 @@ class AccountStateBindingTests(unittest.TestCase):
         Die Spalte enthaelt pro Buch ein Mapping, daher bleibt sie bei
         mehreren Konten nutzbar.
         """
-        from ..library import custom_column_available, read_column_available
+        from ..library import column_state
 
         class Db:
             field_metadata = {TOLINO_COLUMN: {},
@@ -1230,14 +1254,7 @@ class AccountStateBindingTests(unittest.TestCase):
         class NoColumn:
             field_metadata = {}
 
-        self.assertTrue(custom_column_available(Db()))
-        self.assertTrue(read_column_available(Db()))
-        self.assertFalse(custom_column_available(NoColumn()))
-        self.assertFalse(read_column_available(NoColumn()))
-
-    def test_settings_dialog_keeps_required_widgets_without_diagnostic_ui(self):
-        base = Path(__file__).resolve().parent.parent
-        settings = (base / "ui_dashboard.py").read_text(encoding="utf-8")
-        self.assertIn("QGroupBox", settings.split("class SettingsDialog", 1)[0])
-        self.assertIn("accounts_form", settings)
-        self.assertNotIn("diagnostics_form", settings)
+        self.assertTrue(column_state(Db())["id"])
+        self.assertTrue(column_state(Db())["read"])
+        self.assertFalse(column_state(NoColumn())["id"])
+        self.assertFalse(column_state(NoColumn())["read"])

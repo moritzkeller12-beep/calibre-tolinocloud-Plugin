@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.test-deps/
 
 # Editors and OS metadata
 .idea

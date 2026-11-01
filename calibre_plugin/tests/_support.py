@@ -9,7 +9,6 @@ Die Testklassen selbst liegen thematisch in ``tests/*_tests.py``;
 import importlib
 import sys
 import types
-from pathlib import Path
 from unittest.mock import patch
 
 import calibre_plugin.cdp as cdp_module
@@ -21,9 +20,14 @@ _REAL_CLOSE_WINDOW = cdp_module.close_grabber_window
 
 
 def parsed_inventory(value):
-    """Return canonical inventory records from a raw fixture or record list."""
+    """Return canonical inventory records from a raw fixture or record list.
+
+    Ein bereits normalisierter Datensatz wird unverändert übernommen:
+    Produktivcode normalisiert genau einmal.
+    """
     if isinstance(value, list):
-        return [normalize_inventory_record(item)
+        return [item if "tolino_id" in item
+                else normalize_inventory_record(item)
                 for item in value if isinstance(item, dict)]
     records, problems, valid_envelope = parse_inventory(value)
     if not valid_envelope:
@@ -40,22 +44,53 @@ def compare_inventory(metadata, state, inventory, preferred_formats=(),
         use_metadata_ids, read_ids, read_column)
 
 
-# Alle Oberflaechen-Module fuer Strukturtests. ist ui.py nur noch
-# der Einstieg; Dialoge, Worker und Dashboard liegen in eigenen Modulen.
-UI_SOURCE_FILES = ("ui.py", "ui_common.py", "ui_dialogs.py",
-                   "ui_workers.py", "ui_auth_workers.py",
-                   "ui_dashboard.py", "dashboard_plan.py")
-
-
-def _ui_source_text():
-    base = Path(__file__).resolve().parent.parent
-    return "\n".join((base / name).read_text(encoding="utf-8")
-                      for name in UI_SOURCE_FILES)
-
-
 def _full(exc):
     """Nutzertext plus Log-Detail eines TolinoError."""
     return "%s %s" % (exc, getattr(exc, "detail", ""))
+
+
+class FakeTableItem:
+    """QTableWidgetItem-Ersatz fuer alle Tabellentests."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self._check_state = 0
+        self._flags = 0
+        self.tooltip = ""
+        self.text_alignment = None
+        self._row = 0
+        self._column = 0
+
+    def row(self):
+        return self._row
+
+    def column(self):
+        return self._column
+
+    def setTextAlignment(self, alignment):
+        self.text_alignment = alignment
+
+    def setFlags(self, flags):
+        self._flags = flags
+
+    def flags(self):
+        return self._flags
+
+    def setCheckState(self, state):
+        changed = state != self._check_state
+        self._check_state = state
+        table = getattr(self, "_table", None)
+        if changed and table is not None:
+            table.itemChanged.emit(self)
+
+    def checkState(self):
+        return self._check_state
+
+    def setToolTip(self, text):
+        self.tooltip = text
+
+    def toolTip(self):
+        return self.tooltip
 
 
 def load_ui_module(get_icons_result, qt_stub=None):
@@ -92,16 +127,48 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # nicht mehr. Ein Stub mit nur ResizeMode deckt genau diesen Fehler auf.
     header_view = type("QHeaderView", (), {})
     header_view.ResizeMode = type(
-        "ResizeMode", (), {"Stretch": 1, "ResizeToContents": 2})
+        "ResizeMode", (), {"Interactive": 0, "Stretch": 1,
+                           "ResizeToContents": 2})
     qt_core.QHeaderView = header_view
+    qt_core.QStyledItemDelegate = type(
+        "QStyledItemDelegate", (),
+        {"__init__": lambda self, *args, **kwargs: None})
+    qt_core.QStyleOptionViewItem = type("QStyleOptionViewItem", (), {})
+    qt_core.QEvent = type("QEvent", (), {})
+    qt_core.QStyle = type("QStyle", (), {
+        "SubElement": type("SubElement", (), {
+            "SE_ItemViewItemCheckIndicator": 1}),
+        "alignedRect": staticmethod(lambda *args: None),
+    })
     qt_core.QDialog.Accepted = 1
     qt_core.QDialog.DialogCode = qt_core.QDialog
     qt_core.QMessageBox.Yes = 1
     qt_core.QMessageBox.No = 2
     qt_core.QMessageBox.StandardButton = qt_core.QMessageBox
-    qt_core.Qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1})
+    # Qt6-Form: Enums sind skopiert; die alten unskopierten Namen fehlen.
+    qt_core.Qt = type("Qt", (), {
+        "SortOrder": type("SortOrder", (),
+                          {"AscendingOrder": 0, "DescendingOrder": 1}),
+        "ItemFlag": type("ItemFlag", (), {
+            "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
+        "CheckState": type("CheckState", (),
+                           {"Checked": 2, "Unchecked": 0}),
+        "AlignmentFlag": type("AlignmentFlag", (), {"AlignCenter": 132}),
+        "WidgetAttribute": type("WidgetAttribute", (),
+                                 {"WA_QuitOnClose": 55}),
+    })
+    qt_core.QDialog.setAttribute = lambda self, attribute, value: (
+        setattr(self, "attributes", getattr(self, "attributes", {})),
+        self.attributes.__setitem__(attribute, value),
+    )
+    qt_core.QTableWidget.SelectionBehavior = type(
+        "SelectionBehavior", (), {"SelectRows": 1})
+    qt_core.QTableWidget.SelectionMode = type(
+        "SelectionMode", (), {"ExtendedSelection": 2})
+    qt_core.QLineEdit.EchoMode = type("EchoMode", (), {"Password": 2})
     qt_core.pyqtSignal = lambda *a, **k: None
     qt_core.Signal = lambda *a, **k: None
+    qt_core.QTableWidgetItem = FakeTableItem
     if qt_stub:
         # Zuletzt, damit ein Stub auch pyqtSignal/Signal ersetzen darf.
         for name, value in qt_stub.items():
@@ -137,6 +204,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
                         "calibre_plugin.ui_workers",
                         "calibre_plugin.ui_auth_workers",
                         "calibre_plugin.ui_dashboard",
+                        "calibre_plugin.ui_dashboard_parts",
                         "calibre_plugin.dashboard_plan"):
         sys.modules.pop(module_name, None)
     import calibre_plugin
@@ -146,7 +214,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
                       "token_candidates", "browser_crypto", "ui_workers",
                       "ui_auth_workers", "ui_dashboard",
-                      "dashboard_plan"):
+                      "ui_dashboard_parts", "dashboard_plan"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
     modules_before_entry = set(sys.modules)
@@ -156,6 +224,8 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # not re-export them or import them eagerly.
     ui_module.common = importlib.import_module("calibre_plugin.ui_common")
     ui_module.dashboard = importlib.import_module("calibre_plugin.ui_dashboard")
+    ui_module.dashboard_parts = importlib.import_module(
+        "calibre_plugin.ui_dashboard_parts")
     ui_module.dialogs = importlib.import_module("calibre_plugin.ui_dialogs")
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")
@@ -181,10 +251,10 @@ def ui_module_for(test_case, qt_stub=None):
 
 # The login helpers must not open a REAL browser window during tests.
 # On machines that have Chrome/Chromium installed (CI runners do),
-# pick_chromium() would succeed and launch_reader_window() would spawn a
+# find_browsers() would succeed and launch_reader_window() would spawn a
 # browser the tests never asked for -- every login test that asserts the
 # no-Chromium fallback would then fail or hang. Tests that need a
-# browser patch calibre_plugin.cdp.pick_chromium themselves.
+# browser patch calibre_plugin.browser_finder.find_browsers themselves.
 # close_grabber_window() is stubbed as well: the real one
 # talks to a DevTools endpoint on 127.0.0.1:9223 and must never close
 # a developer's open grabber window while the suite runs. Tests that
@@ -197,8 +267,9 @@ def start_cdp_stubs():
     """Browser-Start und echtes Fenster-Schliessen fuer die Suite stilllegen."""
     global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
     if _PICK_CHROMIUM_PATCH is None:
-        _PICK_CHROMIUM_PATCH = patch("calibre_plugin.cdp.pick_chromium",
-                                     return_value=(None, ""))
+        _PICK_CHROMIUM_PATCH = patch(
+            "calibre_plugin.browser_finder.find_browsers",
+            return_value=([], ""))
         _PICK_CHROMIUM_PATCH.start()
     if _CLOSE_WINDOW_PATCH is None:
         _CLOSE_WINDOW_PATCH = patch("calibre_plugin.cdp.close_grabber_window",
@@ -231,52 +302,6 @@ class FakeText:
 
     def text(self):
         return self.value
-
-
-class FakeSignal:
-    """Kleines Signal-Doppel für Widgettests."""
-
-    def __init__(self):
-        self.slots = []
-
-    def connect(self, slot):
-        self.slots.append(slot)
-
-    def emit(self, *args):
-        for slot in self.slots:
-            slot(*args)
-
-
-class FakeCheckBox:
-    """QCheckBox-Ersatz fuer die Zell-Widgets der Bestandsliste."""
-
-    def __init__(self):
-        self._checked = False
-        self.enabled = True
-        self.tooltip = ""
-        self.stateChanged = FakeSignal()
-        self._signals_blocked = False
-
-    def setChecked(self, value):
-        value = bool(value)
-        if value != self._checked:
-            self._checked = value
-            if not self._signals_blocked:
-                self.stateChanged.emit(int(value))
-
-    def blockSignals(self, blocked):
-        previous = self._signals_blocked
-        self._signals_blocked = bool(blocked)
-        return previous
-
-    def isChecked(self):
-        return self._checked
-
-    def setEnabled(self, value):
-        self.enabled = value
-
-    def setToolTip(self, text):
-        self.tooltip = text
 
 
 class FakeMenu:

@@ -28,78 +28,46 @@ def flatpak_permission_hint():
 def missing_browser_error(status=""):
     """Return user-facing details when no Chromium browser is available.
 
-    ``status`` ist das Ergebnis der Host-Sonde aus ``pick_chromium()``.
+    ``status`` ist das Ergebnis der Host-Sonde aus ``find_browsers()``.
     """
     message = (
         "Kein Chromium-Browser gefunden. Bitte Chrome, Chromium, Brave oder "
-        "Edge installieren – oder den Zugangsschlüssel in den "
-        "Einstellungen eintragen.")
+        "Edge installieren – oder in den Einstellungen Zugangstoken und "
+        "Geräte-ID eintragen.")
     if status == "unavailable" and in_flatpak_sandbox():
         message = (
             "Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt. "
             "Bitte «flatpak update» ausführen und Calibre danach "
             "vollständig neu starten.")
-        return message, "B06"
+        return message
     if in_flatpak_sandbox() and status not in ("empty", "unavailable"):
         message += "\n\n" + flatpak_permission_hint()
-        return message, "B08"
-    return message, "B05"
+    return message
 
 
 # PATH-independent locations for desktop-launched Calibre.
 _EXTRA_BROWSER_PATHS = (
-    "/usr/bin/chromium", "/usr/bin/chromium-browser",
-    "/usr/lib/chromium/chromium", "/usr/lib/chromium-browser/chromium-browser",
-    "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+    "/usr/lib/chromium/chromium",
     "/opt/google/chrome/chrome",
-    "/usr/bin/brave-browser", "/usr/bin/brave-browser-stable",
-    "/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
-    "/usr/bin/vivaldi", "/usr/bin/vivaldi-stable",
-    "/usr/bin/opera", "/usr/bin/opera-stable", "/snap/bin/chromium",
+    "/snap/bin/chromium",
 )
 
-# Executable aliases and display names shared by PATH and Flatpak host probing.
-# The third field preserves the smaller command set previously probed on hosts.
+# Executable aliases shared by PATH and Flatpak host probing.
 _BROWSER_COMMANDS = (
-    ("google-chrome", "Google Chrome", True),
-    ("google-chrome-stable", "Google Chrome", True),
-    ("google-chrome-beta", "Google Chrome", True),
-    ("chrome", "Google Chrome", True),
-    ("chromium", "Chromium", True),
-    ("chromium-browser", "Chromium", True),
-    ("brave-browser", "Brave", True),
-    ("brave-browser-stable", "Brave", True),
-    ("microsoft-edge", "Edge", True),
-    ("microsoft-edge-stable", "Edge", True),
-    ("microsoft-edge-beta", "Edge", False),
-    ("microsoft-edge-dev", "Edge", True),
-    ("vivaldi", "Vivaldi", True),
-    ("vivaldi-stable", "Vivaldi", True),
-    ("vivaldi-snapshot", "Vivaldi", False),
-    ("opera", "Opera", True),
-    ("opera-stable", "Opera", False),
+    "google-chrome", "google-chrome-stable", "google-chrome-beta", "chrome",
+    "chromium", "chromium-browser", "brave-browser", "brave-browser-stable",
+    "microsoft-edge", "microsoft-edge-stable", "microsoft-edge-beta",
+    "microsoft-edge-dev", "vivaldi", "vivaldi-stable", "vivaldi-snapshot",
+    "opera", "opera-stable",
 )
 
 # Keep the native Flatpak launcher and host probe mappings in one place.
 _FLATPAK_BROWSER_APPS = (
-    ("org.chromium.Chromium", "chrome", "Chromium (Flatpak)",
-     "Chromium (Flatpak, Host)"),
-    ("com.brave.Browser", "brave", "Brave (Flatpak)",
-     "Brave (Flatpak, Host)"),
-    ("com.google.Chrome", "chrome", "Chrome (Flatpak)",
-     "Chrome (Flatpak, Host)"),
-    ("com.vivaldi.Vivaldi", "vivaldi", "Vivaldi (Flatpak)",
-     "Vivaldi (Flatpak, Host)"),
+    ("org.chromium.Chromium", "chrome"),
+    ("com.brave.Browser", "brave"),
+    ("com.google.Chrome", "chrome"),
+    ("com.vivaldi.Vivaldi", "vivaldi"),
 )
-
-
-def _browser_label_for(path):
-    """Display name for a browser executable path."""
-    name = os.path.basename(str(path))
-    for command, label, _probe_on_host in _BROWSER_COMMANDS:
-        if name.startswith(command):
-            return label
-    return name
 
 
 def _sandbox_host_launchers():
@@ -115,11 +83,8 @@ def _sandbox_host_launchers():
         ">/dev/null 2>&1 && echo \"FLATPAK $a\"; done"
         "; exit 0"
     ).replace("APP_ID_LIST", " ".join(
-        app_id for app_id, _command, _label, _host_label
-        in _FLATPAK_BROWSER_APPS)).replace(
-            "HOST_COMMAND_LIST", " ".join(
-                name for name, _label, probe_on_host in _BROWSER_COMMANDS
-                if probe_on_host))
+        app_id for app_id, _command in _FLATPAK_BROWSER_APPS)).replace(
+            "HOST_COMMAND_LIST", " ".join(_BROWSER_COMMANDS))
     try:
         proc = subprocess.run([spawn, "--host", "sh", "-c", script],
                               stdout=subprocess.PIPE,
@@ -130,9 +95,7 @@ def _sandbox_host_launchers():
     output = proc.stdout or ""
     if proc.returncode != 0 and not output.strip():
         return [], "denied"
-    commands = {app_id: (command, host_label)
-                for app_id, command, _label, host_label
-                in _FLATPAK_BROWSER_APPS}
+    commands = dict(_FLATPAK_BROWSER_APPS)
     launchers = []
     for line in output.splitlines():
         kind, _, value = line.partition(" ")
@@ -140,12 +103,10 @@ def _sandbox_host_launchers():
         if not value:
             continue
         if kind == "NATIVE":
-            launchers.append(([spawn, "--host", value],
-                              "%s (Host)" % os.path.basename(value)))
+            launchers.append([spawn, "--host", value])
         elif kind == "FLATPAK" and value in commands:
-            command, label = commands[value]
-            launchers.append(([spawn, "--host", "flatpak", "run",
-                               "--command=%s" % command, value], label))
+            launchers.append([spawn, "--host", "flatpak", "run",
+                              "--command=%s" % commands[value], value])
     return launchers, ("ok" if launchers else "empty")
 
 
@@ -159,25 +120,25 @@ def _collect_candidates(home=None):
     flat = os.path.join(home, ".var", "app")
     snap = os.path.join(home, "snap")
     found = []
-    for exe, label, _probe_on_host in _BROWSER_COMMANDS:
+    for exe in _BROWSER_COMMANDS:
         path = shutil.which(exe)
         if path:
-            found.append(([path], label))
+            found.append([path])
     for path in _EXTRA_BROWSER_PATHS:
         if not (os.path.isfile(path) and os.access(path, os.X_OK)):
             continue
-        if any(path == argv[0] for argv, _label in found):
+        if any(path == argv[0] for argv in found):
             continue
-        found.append(([path], _browser_label_for(path)))
+        found.append([path])
     flatpak_bin = shutil.which("flatpak")
     if flatpak_bin and os.path.isdir(flat):
-        for app_id, command, label, _host_label in _FLATPAK_BROWSER_APPS:
+        for app_id, command in _FLATPAK_BROWSER_APPS:
             if os.path.isdir(os.path.join(flat, app_id)):
-                found.append(([flatpak_bin, "run", "--command=%s" % command,
-                               app_id], label))
+                found.append([flatpak_bin, "run", "--command=%s" % command,
+                              app_id])
     snap_bin = shutil.which("snap")
     if snap_bin and os.path.isdir(os.path.join(snap, "chromium")):
-        found.append(([snap_bin, "run", "chromium"], "Chromium (Snap)"))
+        found.append([snap_bin, "run", "chromium"])
     status = ""
     if in_flatpak_sandbox():
         launchers, status = _sandbox_host_launchers()
@@ -185,61 +146,98 @@ def _collect_candidates(home=None):
     return found, status
 
 
-_PLATFORM_BROWSER_INSTALLS = {
-    "win32": (
-        (("env", "PROGRAMFILES", "C:\\Program Files"),
-         ("env", "PROGRAMFILES(X86)", "C:\\Program Files (x86)")),
-        (("Google\\Chrome\\Application\\chrome.exe", "Google Chrome"),
-         ("Chromium\\Application\\chrome.exe", "Chromium"),
-         ("BraveSoftware\\Brave-Browser\\Application\\brave.exe", "Brave"),
-         ("Microsoft\\Edge\\Application\\msedge.exe", "Edge")),
-    ),
-    "darwin": (
-        (("path", "/Applications", ""), ("home", "Applications", "")),
-        (("Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"),
-         ("Chromium.app/Contents/MacOS/Chromium", "Chromium"),
-         ("Brave Browser.app/Contents/MacOS/Brave Browser", "Brave"),
-         ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Edge")),
-    ),
-}
+# Windows registriert installierte Browser unter "App Paths".
+_WINDOWS_BROWSER_EXECUTABLES = (
+    "chrome.exe", "chromium.exe", "brave.exe", "msedge.exe",
+    "vivaldi.exe", "opera.exe",
+)
+
+_DARWIN_BROWSERS = (
+    "Google Chrome.app/Contents/MacOS/Google Chrome",
+    "Chromium.app/Contents/MacOS/Chromium",
+    "Brave Browser.app/Contents/MacOS/Brave Browser",
+    "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+)
+
+
+def _installed_under(roots, browsers):
+    """Browser unter Standardpfaden; je relativem Pfad der erste Treffer."""
+    found = []
+    seen = set()
+    for root in roots:
+        for relative_path in browsers:
+            if relative_path in seen:
+                continue
+            path = os.path.join(root, relative_path)
+            if os.path.isfile(path):
+                found.append([path])
+                seen.add(relative_path)
+    return found
+
+
+def _windows_browser_paths(winreg_module=None):
+    """Nur von Windows registrierte Browser: App-Paths, keine geratenen Ordner."""
+    if winreg_module is None:
+        try:
+            import winreg as winreg_module
+        except ImportError:
+            return []
+    app_paths = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+    roots = (winreg_module.HKEY_CURRENT_USER,
+             winreg_module.HKEY_LOCAL_MACHINE)
+    views = tuple(dict.fromkeys((
+        0, getattr(winreg_module, "KEY_WOW64_64KEY", 0),
+        getattr(winreg_module, "KEY_WOW64_32KEY", 0))))
+    found = []
+    seen = set()
+    for root in roots:
+        for view in views:
+            access = winreg_module.KEY_READ | view
+            for executable in _WINDOWS_BROWSER_EXECUTABLES:
+                try:
+                    key = winreg_module.OpenKey(
+                        root, app_paths + "\\" + executable, 0, access)
+                except OSError:
+                    continue
+                try:
+                    value, _kind = winreg_module.QueryValueEx(key, "")
+                except OSError:
+                    continue
+                finally:
+                    winreg_module.CloseKey(key)
+                path = str(value or "").strip().strip('"')
+                if not path:
+                    continue
+                path = os.path.expandvars(path)
+                if not os.path.isfile(path):
+                    continue
+                normalized = os.path.normcase(os.path.abspath(path))
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                found.append([path])
+    return found
+
+
+def _macos_browser_paths(home=None):
+    """Browser in den macOS-Programmverzeichnissen (System und Benutzer)."""
+    home = home or os.path.expanduser("~")
+    return _installed_under(
+        ("/Applications", os.path.join(home, "Applications")),
+        _DARWIN_BROWSERS)
 
 
 def _platform_browser_paths(platform=None):
     """Find browsers in the platform's standard installation directories."""
-    roots_and_browsers = _PLATFORM_BROWSER_INSTALLS.get(
-        platform or sys.platform)
-    if roots_and_browsers is None:
-        return []
-    roots, browsers = roots_and_browsers
-    found = []
-    for kind, value, fallback in roots:
-        if kind == "env":
-            base = os.environ.get(value) or fallback
-        elif kind == "home":
-            base = os.path.join(os.path.expanduser("~"), value)
-        else:
-            base = value
-        for relative_path, label in browsers:
-            path = os.path.join(base, relative_path)
-            if (os.path.isfile(path)
-                    and not any(existing_label == label
-                                for _argv, existing_label in found)):
-                found.append(([path], label))
-    return found
+    platform = platform or sys.platform
+    if platform == "win32":
+        return _windows_browser_paths()
+    if platform == "darwin":
+        return _macos_browser_paths()
+    return []
 
 
-def chromium_candidates(home=None):
-    """Installed Chromium-family browsers, most common first."""
-    return _collect_candidates(home)[0]
-
-
-def chromium_options():
-    """All candidates, including standard Windows/macOS install paths."""
-    return _collect_candidates()[0] + _platform_browser_paths()
-
-
-def pick_chromium():
-    """(bester Kandidat oder None, Status der Host-Sonde)."""
-    found, status = _collect_candidates()
-    options = found + _platform_browser_paths()
-    return (options[0] if options else None), status
+def find_browsers(home=None):
+    """Alle Kandidaten inkl. Plattformpfade und Status der Host-Sonde."""
+    found, status = _collect_candidates(home)
+    return found + _platform_browser_paths(), status

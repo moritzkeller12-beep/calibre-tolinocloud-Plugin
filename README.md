@@ -1,7 +1,9 @@
 # tolino Cloud Sync für Calibre
 
 [![Tests](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.1.04-blue)](__init__.py)
+[![Version](https://img.shields.io/badge/Version-0.1.05-blue)](__init__.py)
+
+Aktuelle Version: **0.1.05** (Quelle: [`__init__.py`](__init__.py)).
 
 Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino Cloud.
 
@@ -11,7 +13,7 @@ Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino
 2. In Calibre: **Einstellungen → Plugins → Plugin aus Datei laden** und ZIP auswählen.
 3. Calibre neu starten.
 
-Voraussetzung: Calibre 5 oder neuer. Für automatische Anmeldung wird Chrome, Chromium, Brave oder Edge benötigt.
+Voraussetzung: Calibre 6 oder neuer. Für automatische Anmeldung wird Chrome, Chromium, Brave oder Edge benötigt.
 
 ## Benutzung
 

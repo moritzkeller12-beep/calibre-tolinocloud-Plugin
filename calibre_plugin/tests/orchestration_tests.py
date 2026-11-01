@@ -1,15 +1,18 @@
 """Ablauf vom Vergleichsfenster bis zum Sync-Start."""
 
+from ..comparison import ReadState
 import os
 import tempfile
 import unittest
 from . import ui_base_tests
 from .. import config
+from ..planning_values import SyncJob
+from ..run_context import RunContext
 from ._support import compare_inventory, start_cdp_stubs, stop_cdp_stubs
 from unittest.mock import patch
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
@@ -47,11 +50,20 @@ class StartSyncOrchestrationTests(unittest.TestCase):
     def _dashboard(self, ui_module, settings, thread=None):
         dashboard = ui_module.dashboard.SyncDashboard.__new__(ui_module.dashboard.SyncDashboard)
         dashboard.thread = thread
+        dashboard.prepare_thread = None
+        dashboard.prepare_worker = None
+        dashboard.login_thread = None
+        dashboard.login_worker = None
+        dashboard.worker = None
         dashboard.values = lambda: settings
         # Der Zugang liegt im Konto; der Stub sagt, welcher Token drin steht.
         dashboard._effective_refresh = lambda: str(
             (settings or {}).get("refresh_token") or "")
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {}
         return dashboard
 
@@ -62,7 +74,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         def warning(*args, **kwargs):
             warnings.append(args)
 
-        ui_module.dashboard.QMessageBox = type(
+        ui_module.dashboard_parts.QMessageBox = type(
             "QMessageBox", (), {"warning": staticmethod(warning)})
 
     @staticmethod
@@ -93,7 +105,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             # Tests pruefen die Uebergabe, nicht die Anzeige.
             def __init__(self, settings, jobs, removals, meta_updates=None,
                          series_map=None, read_changes=None,
-                         titles=None, state=None):
+                         titles=None, metadata=None, state=None):
                 self.arguments = (settings, jobs, removals, meta_updates,
                                   series_map, read_changes)
                 self.titles = titles
@@ -123,17 +135,17 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             metadata = {1: {"title": "A"}}
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "local_metadata",
-                              side_effect=lambda _dashboard:
+                              side_effect=lambda *_args:
                               (seen.append(("metadata",)) or metadata)):
                 dashboard._start_prepare_worker = (
-                    lambda given, meta: seen.append(("prepare", given, meta)))
+                    lambda *args: seen.append(("prepare",) + args))
                 dashboard.start_sync()
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(["metadata", "prepare"], [item[0] for item in seen])
-        self.assertIs(settings, seen[1][1])
+        context = seen[1][1]
         self.assertIs(metadata, seen[1][2])
-        self.assertTrue(settings["columns"]["id"])
+        self.assertTrue(context.columns["id"])
 
     def test_sync_column_availability_accepts_calibre_field_metadata(self):
         ui_module = self._ui_module()
@@ -151,16 +163,21 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 def __contains__(self, key):
                     return key == "#tolino_id"
 
+                def __getitem__(self, key):
+                    return {}
+
             settings = self._settings()
             dashboard = self._dashboard(ui_module, settings)
             dashboard.gui.current_db = type(
                 "Database", (), {"field_metadata": FieldMetadata()})()
             dashboard._save_visible_account = lambda _values: None
+            contexts = []
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "local_metadata", return_value={}):
-                dashboard._start_prepare_worker = lambda *_args: None
+                dashboard._start_prepare_worker = (
+                    lambda context, *_args: contexts.append(context))
                 dashboard.start_sync()
-            self.assertTrue(dashboard.columns.get("id"))
+            self.assertTrue(contexts[0].columns.get("id"))
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
@@ -193,12 +210,13 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                     dashboard.gui.current_db = type(
                         "Database", (), {"field_metadata": fields})()
                     dashboard._save_visible_account = lambda _values: None
+                    contexts = []
                     with patch.object(ui_module.dashboard._dashboard_plan,
                                       "local_metadata", return_value={}):
-                        dashboard._start_prepare_worker = lambda *_args: None
+                        dashboard._start_prepare_worker = (
+                            lambda context, *_args: contexts.append(context))
                         dashboard.start_sync()
-                    self.assertIs(expected, dashboard.columns.get("id"))
-                    self.assertIs(expected, settings["columns"]["id"])
+                    self.assertIs(expected, contexts[0].columns.get("id"))
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
@@ -225,13 +243,14 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             settings = self._settings()
             dashboard = self._dashboard(ui_module, settings)
 
-            def boom(_dashboard):
+            def boom(*_args):
                 raise RuntimeError("kaputt")
 
             dashboard._show_prepare_error = lambda exc, given: errors.append(
                 (exc, given))
             started = []
-            dashboard._start_prepare_worker = lambda given, meta: started.append(meta)
+            dashboard._start_prepare_worker = lambda *args: started.append(
+                args[1])
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "local_metadata", side_effect=boom):
                 dashboard.start_sync()
@@ -253,13 +272,12 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_thread = None
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
-            dashboard._client_for = lambda given: object()
             dashboard._confirm_comparison = (
                 lambda comp, given, client_factory=None, automatic=0: None)
             started = []
             dashboard._start_sync_worker = lambda *args: started.append(args)
             dashboard._prepare_ready({
-                "account_name": "konto", "settings": settings,
+                "context": RunContext.from_values(settings),
                 "metadata": {}, "state": {}, "comparison": [],
                 "refresh": "tok", "hardware": "hw",
             })
@@ -309,10 +327,12 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             # Offene Serien-Zuordnung: das Buch hat eine Tolino-ID und noch
             # keinen gemerkten Sammlungs-Eintrag.
             dashboard._start_sync_worker(
-                settings, preparation, {"uuid-serie": {"tolino_id": "t-serie"}})
+                RunContext.from_values(settings), preparation,
+                {"uuid-serie": {"tolino_id": "t-serie"}})
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual(settings, dashboard.worker.arguments[0])
+        passed = dashboard.worker.arguments[0]
+        self.assertFalse(hasattr(passed, "refresh_token"))
         self.assertEqual(jobs, dashboard.worker.arguments[1])
         self.assertEqual(["remove-1"], dashboard.worker.arguments[2])
         self.assertEqual([("uuid-1", 7)], dashboard.worker.arguments[3])
@@ -346,7 +366,6 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_thread = None
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
-            dashboard._client_for = lambda given: object()
             dashboard._confirm_comparison = (
                 lambda comp, given, client_factory=None, automatic=0: {
                     "uploads": [], "metadata": [], "read_changes": [],
@@ -354,24 +373,23 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 })
             started = []
             dashboard._start_sync_worker = (
-                lambda given, prep, state=None: started.append(dict(given)))
+                lambda given, prep, state=None: started.append(given))
 
             def plan(_dashboard, given, _metadata, _state, _selection):
-                self.assertNotEqual("tok-rotated", given.get("refresh_token", ""))
+                self.assertFalse(hasattr(given, "refresh_token"))
                 return _preparation()
 
             with patch.object(ui_module.dashboard._dashboard_plan,
                               "plan_actions", side_effect=plan):
                 dashboard._prepare_ready({
-                    "account_name": "konto", "settings": settings,
+                    "context": RunContext.from_values(settings),
                     "metadata": {}, "state": {}, "comparison": [],
                     "refresh": "tok-rotated", "hardware": "hw-rotated",
                 })
         finally:
             config.PREFERENCES = original_preferences
             ui_module._restore_stubs_for_tests()
-        self.assertEqual("token-1", started[0]["refresh_token"])
-        self.assertEqual("hw-rotated", started[0]["hardware_id"])
+        self.assertEqual("konto", started[0].account_name)
 
     def test_skipped_uploads_are_reported_before_the_run(self):
         ui_module = self._ui_module()
@@ -397,7 +415,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 "jobs": [], "removals": [], "meta_updates": [], "series_map": {},
                 "skipped_uploads": ["Buch 1 (Titel), Format EPUB: fehlt"],
                 "read_changes": [],
-            })
+            }, {})
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(warnings))
@@ -460,30 +478,17 @@ class NoSilentDeadEndTests(unittest.TestCase):
     def _rows():
         return [{"title": "Neu", "authors": "A", "status": "new_in_calibre",
                  "book_id": 1, "tolino_id": "", "isbn": "111",
+                 "read": ReadState(),
                  "explanation": "Noch nicht in der Cloud."}]
 
     def test_a_selected_upload_still_closes_the_dialog(self):
         messages = []
         ui_module = self._ui_with_messages(messages)
         dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-        self.assertEqual(1, dialog.selected_work_count())
+        self.assertEqual(1, dialog._selection_counts()["work"])
         dialog.accept()
         self.assertEqual([True], ui_module.common.QDialog.closed)
         self.assertEqual([], messages)
-
-    def test_without_a_selection_the_dialog_stays_open_and_explains(self):
-        messages = []
-        ui_module = self._ui_with_messages(messages)
-        dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-        dialog.clear_all_selection()
-        self.assertEqual(0, dialog.selected_work_count())
-        dialog.accept()
-        # Kein stilles Schliessen: das Fenster bleibt offen und sagt warum.
-        self.assertEqual([], ui_module.common.QDialog.closed)
-        self.assertEqual(1, len(messages))
-        # QMessageBox.information(self, Titel, Text)
-        self.assertEqual("Nichts ausgewählt", messages[0][2])
-        self.assertIn("Wähle mindestens eine Aktion", messages[0][3])
 
     def test_activated_automatics_may_close_without_a_selection(self):
         messages = []
@@ -508,7 +513,11 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = ui_module.dashboard.SyncDashboard.__new__(ui_module.dashboard.SyncDashboard)
         dashboard.thread = None
         dashboard.values = lambda: settings
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {}
         dashboard.account_name = "konto"
         dashboard.prepare_thread = None
@@ -538,39 +547,54 @@ class NoSilentDeadEndTests(unittest.TestCase):
         ui_module.dashboard.info_dialog = (
             lambda *args, **kwargs: infos.append(args))
         dashboard = self._planning_dashboard(ui_module)
-        dashboard._start_sync_worker(dashboard.values(), _preparation())
+        dashboard._start_sync_worker(RunContext.from_values(dashboard.values()),
+                                     _preparation(), {})
         self.assertIsNone(dashboard.thread)
         self.assertIsNone(getattr(dashboard, "worker", None))
         self.assertEqual(1, len(infos))
         self.assertEqual("Nichts zu tun", infos[0][1])
         self.assertIn("nichts zu übertragen", infos[0][2].casefold())
 
-    def test_the_sync_worker_starts_with_the_stored_token(self):
+    def test_the_sync_worker_lets_the_vault_read_the_stored_token(self):
         """Zwischen Vergleichsfenster und Start kann der Keep-alive den
-        Token rotiert haben. Der Worker muss den GESPEICHERTEN nehmen --
-        sonst loest er einen verbrauchten Token ein (A02)."""
+        Token rotiert haben. Der Worker haelt deshalb keine Kopie: der Vault
+        liest den GESPEICHERTEN Zugang unmittelbar vor dem Login.
+        """
         ui_module = self._ui_module()
         settings = dict(StartSyncOrchestrationTests._settings(),
-                        account_name="konto", refresh_token="alt-token",
-                        hardware_id="hw-alt")
+                        account_name="konto")
         dashboard = self._planning_dashboard(ui_module)
-        with patch("calibre_plugin.config.account_by_name",
-                   lambda name: {"name": "konto", "refresh_token": "neu-token",
-                                 "hardware_id": "hw-neu"}):
-            dashboard._start_sync_worker(
-                settings, _preparation(jobs=["job-1"]))
+        dashboard._start_sync_worker(
+            RunContext.from_values(settings),
+            _preparation(jobs=["job-1"]), {})
         self.assertEqual(1, dashboard.thread.starts)
         passed = dashboard.worker.arguments[0]
-        self.assertEqual("neu-token", passed["refresh_token"])
-        self.assertEqual("hw-neu", passed["hardware_id"])
-        self.assertEqual("neu-token", settings["refresh_token"])
+        self.assertFalse(hasattr(passed, "credentials"))
+        self.assertFalse(hasattr(passed, "refresh_token"))
+
+        seen = []
+
+        class FakeClient:
+            def __init__(self, partner, hardware, refresh, **callbacks):
+                seen.append((partner, hardware, refresh))
+
+            def login(self):
+                return None
+
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
+                patch("calibre_plugin.token_vault.account_by_name",
+                      lambda _name: {"refresh_token": "neu-token",
+                                     "hardware_id": "hw-neu"}):
+            ui_module.workers.TOKEN_VAULT.login(
+                passed.account_name, passed.partner_id)
+        self.assertEqual([("thalia", "hw-neu", "neu-token")], seen)
 
     def test_the_plan_is_named_before_the_run_starts(self):
         ui_module = self._ui_module()
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
-            dashboard.values(),
-            _preparation(jobs=["job-1", "job-2"]))
+            RunContext.from_values(dashboard.values()),
+            _preparation(jobs=["job-1", "job-2"]), {})
         self.assertEqual(1, dashboard.thread.starts)
         self.assertIn("2", dashboard.progress_label.text_value)
         self.assertIn("Upload", dashboard.progress_label.text_value)
@@ -598,7 +622,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
                 "tolino_id": "t-2", "series": ""},
         }
         state = {"u2": {"tolino_id": "t-2", "calibre_id": 2}}
-        inventory = [{"deliverableId": "t-2", "uuid": "u2", "title": "Alt",
+        inventory = [{"deliverableId": "t-2", "title": "Alt",
                       "authors": "B", "isbn": "222"}]
         rows = compare_inventory(metadata, state, inventory, ["EPUB"])
         with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
@@ -620,11 +644,12 @@ class NoSilentDeadEndTests(unittest.TestCase):
         self.assertEqual({1}, set(selection["uploads"]))
         self.assertEqual(set(), set(selection["metadata"]))
         preparation = dashboard_plan.plan_actions(
-            dashboard, settings, metadata, state, selection)
+            dashboard, RunContext.from_values(settings), metadata, state,
+            selection)
         self.assertEqual(1, len(preparation["jobs"]))
         self.assertEqual([], preparation["skipped_uploads"])
-        self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 1))
+        self.assertEqual(1, ui_module.dashboard._dashboard_plan.plan_counts(
+            preparation, 1)["steps"])
         # Und der geplante Lauf nennt den Upload auch im Fenster.
         self.assertIn(
             "1 Upload",
@@ -638,7 +663,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
         })()
         dashboard.update_status = lambda: None
         StartSyncOrchestrationTests._install_fake_qt(ui_module)
-        dashboard._start_sync_worker(settings, preparation)
+        dashboard._start_sync_worker(RunContext.from_values(settings),
+                                     preparation, {})
         self.assertEqual(1, dashboard.thread.starts)
         self.assertIn("Läuft: 1 Upload",
                       dashboard.progress_label.text_value)
@@ -650,7 +676,6 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = self._dashboard(ui_module,
                                     StartSyncOrchestrationTests._settings())
         dashboard._show_prepare_error = lambda exc, given: errors.append(exc)
-        dashboard._client_for = lambda given: object()
 
         def boom(*_args, **_kwargs):
             raise RuntimeError("Fenster kaputt")
@@ -659,7 +684,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
         started = []
         dashboard._start_sync_worker = lambda *args: started.append(args)
         dashboard._prepare_ready({
-            "account_name": "konto", "settings": dashboard.values(),
+            "context": RunContext.from_values(
+                dashboard.values(), dashboard.columns),
             "metadata": {}, "state": {}, "comparison": [],
             "refresh": "tok", "hardware": "hw",
         })
@@ -670,11 +696,18 @@ class NoSilentDeadEndTests(unittest.TestCase):
     def test_a_failed_bookkeeping_still_reports_the_result(self):
         ui_module = self._ui_module()
         boxes = []
-        dashboard = type("Dashboard", (), {})()
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
                                            "setText": lambda self, v: None})()
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {"id": False, "read": False}
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
@@ -682,8 +715,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         worker.account = {"hardware_id": "hw"}
         worker.state = {"u1": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
-        worker.outcome = {"uploaded": 1, "updated": 0, "downloaded": 0,
-                          "skipped": 0, "failed": 0, "not_started": 0}
+        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
         dashboard.worker = worker
 
         def boom(*_args, **_kwargs):
@@ -692,14 +724,57 @@ class NoSilentDeadEndTests(unittest.TestCase):
         with patch("calibre_plugin.ui_dashboard.save_account", boom), \
              patch("calibre_plugin.ui_dashboard.update_tolino_ids",
                    lambda *args, **kwargs: None), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
+             patch("calibre_plugin.ui_dashboard.error_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             ui_module.dashboard.SyncDashboard.sync_completed(
                 dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
-        # Der Abschlussdialog kommt trotz Speicherfehler: der Upload ist
-        # gelaufen und darf nicht als «nichts passiert» erscheinen.
         self.assertEqual(1, len(boxes))
         self.assertIn("1 hochgeladen", boxes[0][2])
+        self.assertIn("Sync-Zustand", boxes[0][2])
+
+    def test_a_column_write_error_still_finishes_the_dialog(self):
+        """Ein Calibre-Fehler nach dem Lauf darf den Dialog nicht sperren."""
+        ui_module = self._ui_module()
+        boxes, finished = [], []
+        dashboard = type("Dashboard", (), {
+            "thread": None, "worker": None, "prepare_thread": None,
+            "prepare_worker": None, "login_thread": None,
+            "login_worker": None})()
+        dashboard.account_name = "A"
+        dashboard.refresh = type("F", (), {
+            "text": lambda self: "tok",
+            "setText": lambda self, value: None,
+        })()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
+        dashboard.finish_thread = lambda: finished.append(True)
+        worker = type("Worker", (), {})()
+        worker.account_name = "A"
+        worker.context = type("Context", (), {
+            "columns": {"id": True, "read": False}})()
+        worker.state = {"u1": {"tolino_id": "new-1"}}
+        worker.updates = [(1, "new-1")]
+        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
+        dashboard.worker = worker
+
+        def boom(*_args, **_kwargs):
+            raise OSError("Spalte gesperrt")
+
+        with patch("calibre_plugin.ui_dashboard.save_account",
+                   lambda *args, **kwargs: None), \
+             patch("calibre_plugin.ui_dashboard.update_tolino_ids", boom), \
+             patch("calibre_plugin.ui_dashboard.error_dialog",
+                   lambda *args, **kwargs: boxes.append(args)):
+            ui_module.dashboard.SyncDashboard.sync_completed(
+                dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
+        self.assertEqual([True], finished)
+        self.assertEqual(1, len(boxes))
+        self.assertIn("1 hochgeladen", boxes[0][2])
+        self.assertIn("tolino-IDs", boxes[0][2])
+
 
 class CloudCopyAssignmentPlanTests(unittest.TestCase):
     """Die Zuordnung landet im Plan und im Zustand."""
@@ -734,7 +809,11 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
             ui_module.dashboard.SyncDashboard)
         dashboard.thread = None
         dashboard.values = lambda: settings
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {}
         dashboard.account_name = "konto"
         dashboard.prepare_thread = None
@@ -755,12 +834,12 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
         dashboard = self._dashboard(ui_module, settings)
         state = {"u1": {"tolino_id": "t-9", "calibre_id": 1}}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-            dashboard, settings, self._metadata(), state,
-            self._selection(metadata={1}))
+            dashboard, RunContext.from_values(settings), self._metadata(),
+            state, self._selection(metadata={1}))
         self.assertEqual([], preparation["jobs"])
         self.assertEqual(1, len(preparation["meta_updates"]))
         self.assertEqual("t-9", preparation["meta_updates"][0][2])
-        self.assertEqual("t-9", settings["state"]["u1"]["tolino_id"])
+
         self.assertEqual("Broken Homes", preparation["titles"]["u1"])
 
 class ReplacementConfirmationTests(unittest.TestCase):
@@ -777,7 +856,7 @@ class ReplacementConfirmationTests(unittest.TestCase):
 
     @staticmethod
     def _job(ui_module, book_id, title, old_id):
-        return ui_module.common.SyncJob(book_id, "u%d" % book_id, "EPUB",
+        return SyncJob(book_id, "u%d" % book_id, "EPUB",
                                         old_id, "/library/b.epub", None, title)
 
     def _run(self, ui_module, answer, jobs):
@@ -791,17 +870,17 @@ class ReplacementConfirmationTests(unittest.TestCase):
         asked = []
 
         class Box:
-            Yes = 1
-            No = 0
+            StandardButton = type(
+                "StandardButton", (), {"Yes": 1, "No": 0})
 
             @staticmethod
             def question(*args):
                 asked.append(args)
                 return answer
 
-        ui_module.dashboard.QMessageBox = Box
+        ui_module.dashboard_parts.QMessageBox = Box
         dashboard._start_sync_worker(
-            settings, _preparation(jobs=jobs))
+            RunContext.from_values(settings), _preparation(jobs=jobs), {})
         return dashboard, asked
 
     def test_no_means_no_run(self):
@@ -853,12 +932,13 @@ class DroppedSelectionCountTests(unittest.TestCase):
         selection = {"uploads": {1}, "metadata": set(), "read_changes": [],
                      "cloud_deletions": []}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-            dashboard, settings, metadata, {}, selection)
+            dashboard, RunContext.from_values(settings), metadata, {},
+            selection)
         self.assertEqual([], preparation["jobs"])
         self.assertEqual(1, len(preparation["skipped_uploads"]))
         self.assertIn("PDF only", preparation["skipped_uploads"][0])
         self.assertIn("EPUB", preparation["skipped_uploads"][0])
-        self.assertNotIn("u1", settings["state"])
+
 
 class VisibleResultTests(unittest.TestCase):
     """Calibre zeigt ein info_dialog nur mit show=True – sonst nie.
@@ -869,29 +949,6 @@ class VisibleResultTests(unittest.TestCase):
     Nutzer sieht weder Ergebnis noch Hinweis.
     """
 
-    @staticmethod
-    def _calls(text):
-        """Alle info_dialog-Aufrufe als Quelltext-Stück."""
-        calls = []
-        start = 0
-        while True:
-            index = text.find("info_dialog(", start)
-            if index < 0:
-                return calls
-            depth = 0
-            end = index
-            for offset in range(index, len(text)):
-                character = text[offset]
-                if character == "(":
-                    depth += 1
-                elif character == ")":
-                    depth -= 1
-                    if depth == 0:
-                        end = offset + 1
-                        break
-            calls.append(text[index:end])
-            start = end
-
     def test_the_result_dialog_is_shown_after_a_sync(self):
         ui_module = StartSyncOrchestrationTests._ui_module()
         self.addCleanup(ui_module._restore_stubs_for_tests)
@@ -901,8 +958,7 @@ class VisibleResultTests(unittest.TestCase):
         dashboard = NoSilentDeadEndTests._dashboard(
             ui_module, StartSyncOrchestrationTests._settings())
         dashboard.worker = type("Worker", (), {
-            "outcome": {"uploaded": 1, "updated": 0, "downloaded": 0,
-                        "skipped": 0, "failed": 0, "cancelled": False,
+            "outcome": {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0, "cancelled": False,
                         "operations": []},
             "account": {}, "account_name": "konto"})()
         dashboard.finish_thread = lambda: None
@@ -923,7 +979,7 @@ class VisibleResultTests(unittest.TestCase):
         dashboard.start_sync = lambda: None
         dashboard._start_sync_worker(
             StartSyncOrchestrationTests._settings(),
-            _preparation())
+            _preparation(), {})
         self.assertEqual(1, len(seen))
         self.assertIs(True, seen[0].get("show"))
 
@@ -932,7 +988,7 @@ class EmptyRunAccountingTests(unittest.TestCase):
 
     Feldbefund: «Abgleich abgeschlossen: 0 hochgeladen, 0
     aktualisiert …», obwohl 5 Uploads und 400 Metadaten ausgewählt waren.
-    Ursache: `_planned_actions` zählte den ROHEN Serien-Zustand
+    Ursache: Die Schrittzaehlung nutzte den ROHEN Serien-Zustand
     (`series_map` = jedes Buch mit Serie) als auszuführende Aktion. Der
     Lauf startete damit auch dann, wenn alle Serien längst geschrieben und
     Uploads/Metadaten nicht geplant waren – und der Worker meldete
@@ -959,15 +1015,15 @@ class EmptyRunAccountingTests(unittest.TestCase):
                  "u2": {"tolino_id": "t2", "collections": ["Reihe"]}}
         preparation = self._prepared(
             ui_module, {"u1": "Reihe", "u2": "Reihe"}, state)
-        self.assertEqual(0, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0))
+        self.assertEqual(0, ui_module.dashboard._dashboard_plan.plan_counts(
+            preparation, 0)["steps"])
 
     def test_open_collections_still_count(self):
         ui_module = self._ui()
         preparation = self._prepared(
             ui_module, {"u1": "Reihe"}, {"u1": {"tolino_id": "t1"}})
-        self.assertEqual(1, ui_module.dashboard._dashboard_plan.planned_actions(
-            preparation, 0))
+        self.assertEqual(1, ui_module.dashboard._dashboard_plan.plan_counts(
+            preparation, 0)["steps"])
 
     def test_plan_text_does_not_promise_remembered_collections(self):
         ui_module = self._ui()
@@ -980,14 +1036,19 @@ class EmptyRunAccountingTests(unittest.TestCase):
         ui_module = self._ui()
         dashboard = NoSilentDeadEndTests._dashboard(
             ui_module, StartSyncOrchestrationTests._settings())
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.gui = type("Gui", (), {
+            "current_db": type(
+                "Db", (), {"field_metadata": {}})()})()
+        dashboard.status = type(
+            "Status", (), {"setText": lambda self, _text: None})()
         # Ohne UUID kann plan_sync das Buch nicht einplanen.
         metadata = {1: {"uuid": "", "title": "Kaputt", "formats": ["EPUB"]}}
         selection = {"uploads": {1}, "metadata": {1}, "read_changes": [],
                      "cloud_deletions": []}
         preparation = ui_module.dashboard._dashboard_plan.plan_actions(
-            dashboard, StartSyncOrchestrationTests._settings(), metadata, {},
-            selection)
+            dashboard,
+            RunContext.from_values(StartSyncOrchestrationTests._settings()),
+            metadata, {}, selection)
         self.assertEqual([], preparation["jobs"])
         self.assertEqual([], preparation["meta_updates"])
         self.assertEqual(

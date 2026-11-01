@@ -7,24 +7,14 @@ _UUID_TEXT = re.compile(
 # Calibre's database path may return 'dummy' when the field is absent.
 _UUID_PLACEHOLDERS = frozenset(("none", "null", "undefined", "dummy"))
 def normalize_uuid_text(value):
-    """Normalize UUIDs represented as text, bytes, UUID objects, or reprs."""
-    if value is None:
-        return ""
-    if isinstance(value, (bytes, bytearray)):
-        value = bytes(value).decode("utf-8", "replace")
-    elif not isinstance(value, str):
-        value = str(value)
-    text = value.strip().strip("'\" \t\r\n")
-    match = _UUID_TEXT.search(text)
-    if match:
-        return match.group(0).casefold()
-    return text
+    """Normalize a UUID-shaped value to trimmed text; no byte/repr parsing."""
+    return str(value or "").strip().casefold()
 
 
 def valid_book_uuid(value):
     """Return a usable Calibre book key, or empty for junk/incomplete data."""
     text = normalize_uuid_text(value)
-    if not text or text.casefold() in _UUID_PLACEHOLDERS:
+    if not text or text in _UUID_PLACEHOLDERS:
         return ""
     if len(text) > 128 or any(character.isspace() for character in text):
         return ""
@@ -59,6 +49,8 @@ def migrate_state_keys(metadata_by_id, state):
     """Migrate fallback state keys to real UUIDs when the UUID becomes known."""
     if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
         return 0
+    # Der Index wird EINMAL gebaut; eine Suche je Buch waere quadratisch.
+    keys = state_keys_by_book_id(state)
     migrated = 0
     for book_id, metadata in metadata_by_id.items():
         if not isinstance(metadata, dict):
@@ -66,8 +58,11 @@ def migrate_state_keys(metadata_by_id, state):
         key = valid_book_uuid(metadata.get("uuid"))
         if not key or key in state:
             continue
-        old_key = state_key_for(state, book_id)
-        if not old_key or old_key == key:
+        try:
+            old_key = keys.get(int(book_id), "")
+        except (TypeError, ValueError):
+            continue
+        if not old_key or old_key == key or old_key not in state:
             continue
         entry = state.pop(old_key)
         if isinstance(entry, dict):
@@ -77,17 +72,26 @@ def migrate_state_keys(metadata_by_id, state):
     return migrated
 
 
-def state_key_for(state, book_id):
-    """Find a stored state key by its recorded Calibre book id."""
+def state_entry(state, key):
+    """Zustandseintrag eines Buchs -- fremde Formen zählen als leer."""
+    entry = state.get(key) if key and isinstance(state, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def state_keys_by_book_id(state):
+    """Calibre-Nummer → gespeicherter Zustandsschlüssel in EINEM Durchlauf.
+
+    Wer mehrere Bücher prüft, baut den Index einmal.
+    """
+    keys = {}
     if not isinstance(state, dict):
-        return ""
+        return keys
     for key, entry in state.items():
         if not isinstance(entry, dict):
             continue
         recorded = entry.get("calibre_id")
         try:
-            if recorded is not None and int(recorded) == int(book_id):
-                return str(key)
+            keys[int(recorded)] = str(key)
         except (TypeError, ValueError):
             continue
-    return ""
+    return keys

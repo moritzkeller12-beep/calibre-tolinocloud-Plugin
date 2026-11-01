@@ -6,7 +6,7 @@ _INVENTORY_CONTAINERS = ("edata", "ebook")
 # Felder, unter denen die Cloud die Kennung einer Kopie fuehrt. Bewusst NUR
 # die Kennung des Deliverables: ``identifier`` aus ``epubMetaData`` ist eine
 # ISBN/Verlagsnummer und taugt nicht fuer /deletecontent und /downloadinfo.
-_INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id", "tolino_id", "id")
+_INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id")
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
                             "ebook", "edata")
@@ -64,31 +64,22 @@ def normalize_inventory_record(item):
     Rueckgabe::
 
         {"tolino_id": <Deliverable-Kennung oder "">,
-         "has_deliverable_id": bool,
-         "identifier": <Ersatzkennung/ISBN oder "">,
-         "title": str, "authors": str, "isbn": str, "uuid": str}
+         "title": str, "authors": str, "isbn": str}
 
     ``tolino_id`` bleibt leer, wenn nur ``identifier`` existiert: diese
     Kennung taugt weder fuer ``/downloadinfo`` noch fuer
-    ``/deletecontent``. ``has_deliverable_id`` sagt, ob die Kopie fuer
-    Loeschungen ueberhaupt ansprechbar ist.
+    ``/deletecontent``.
     """
     deliverable = _inventory_id_in(item, _INVENTORY_ID_KEYS)
-    identifier = _inventory_id_in(item, ("identifier",))
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
     isbn = _nested_inventory_value(
         item, ("isbn", "ISBN", "isbn13", "isbn10", "identifier"))
-    uuid_value = _nested_inventory_value(
-        item, ("uuid", "calibreUuid", "calibre_uuid"))
     return {
         "tolino_id": deliverable,
-        "has_deliverable_id": bool(deliverable),
-        "identifier": identifier,
         "title": str(title or "").strip(),
         "authors": _inventory_author(author),
         "isbn": str(isbn or "").strip(),
-        "uuid": str(uuid_value or "").strip(),
     }
 
 

@@ -1,20 +1,8 @@
 """Fresh settings store for tolino Cloud Sync."""
+import copy
 import threading
 
-try:
-    from calibre.utils.config import JSONConfig
-except ImportError:
-    class JSONConfig(dict):
-        """In-memory stand-in for settings tests outside Calibre."""
-
-        defaults = {}
-
-        def __init__(self, *_args, **_kwargs):
-            super().__init__()
-
-        def commit(self):
-            return None
-
+from calibre.utils.config import JSONConfig
 
 # Keep the historic Lite namespace: changing it would hide existing user
 # settings and credentials in Calibre's preferences store.
@@ -37,10 +25,8 @@ def load_state(raw):
     return raw if isinstance(raw, dict) else {}
 
 
-def _copy(value):
-    return value.copy() if isinstance(value, (dict, list)) else value
-
-
+# Zustandseinträge müssen tief kopiert werden: sonst teilen Worker und
+# Einstellungen dieselben Dicts und Listen.
 def _account(value, fallback_name=DEFAULT_ACCOUNT_NAME):
     """Return one clean account record with an independent state mapping."""
     source = value if isinstance(value, dict) else {}
@@ -48,7 +34,7 @@ def _account(value, fallback_name=DEFAULT_ACCOUNT_NAME):
     result.update({key: source[key] for key in ACCOUNT_KEYS if key in source})
     result["name"] = str(source.get("name") or fallback_name).strip() or fallback_name
     state = source.get("state")
-    result["state"] = _copy(state) if isinstance(state, dict) else {}
+    result["state"] = copy.deepcopy(state) if isinstance(state, dict) else {}
     return result
 
 
@@ -67,32 +53,45 @@ def _account_list(raw):
     return accounts
 
 
+def _accounts_and_active():
+    """Normalisierte Konten und aktives Konto -- EINE Kopie je Aufruf.
+
+    `_account_list` liefert bereits unabhängige Konten (inklusive tiefer
+    Zustandskopie). Ein zweiter `deepcopy` über alle Konten wäre reine
+    Verschwendung; die aktuellen Felder werden nur einmal gezielt kopiert.
+    """
+    accounts = _account_list(PREFERENCES.get("accounts", None))
+    names = {item["name"] for item in accounts}
+    active = str(PREFERENCES.get("active_account", "") or "")
+    if active not in names:
+        active = accounts[0]["name"]
+    return accounts, active
+
+
 def settings():
     """Return a complete current-account snapshot from the fresh store."""
     with _SETTINGS_LOCK:
-        accounts = _account_list(PREFERENCES.get("accounts", None))
-        names = {item["name"] for item in accounts}
-        active = str(PREFERENCES.get("active_account", "") or "")
-        if active not in names:
-            active = accounts[0]["name"]
+        accounts, active = _accounts_and_active()
         current = next(item for item in accounts if item["name"] == active)
-        values = {PREFERRED_FORMATS: _copy(PREFERENCES.get(
-            PREFERRED_FORMATS, ["EPUB"]))}
-        values.update({key: _copy(current[key]) for key in ACCOUNT_KEYS})
-        values.update({
-            "name": current["name"],
-            "accounts": [_copy(item) for item in accounts],
+        # Reines Lesen: geschrieben wird nur in save_account/remove_account.
+        return {
+            PREFERRED_FORMATS: copy.deepcopy(
+                PREFERENCES.get(PREFERRED_FORMATS, ["EPUB"])),
+            "partner_id": copy.deepcopy(current["partner_id"]),
+            "hardware_id": copy.deepcopy(current["hardware_id"]),
+            "accounts": accounts,
             "active_account": active,
-        })
-        # Reines Lesen: geschrieben wird nur in save_account/save_settings.
-        return values
+        }
 
 
-def save_account(name, values, active=None):
-    """Persist one account without changing any other account's state."""
+def save_account(name, values, active=None, preferred_formats=None):
+    """Persist one account without changing any other account's state.
+
+    `preferred_formats` schreibt die globalen Formate im selben Commit mit;
+    der Dialog braucht dafür keinen zweiten Schreibaufruf.
+    """
     with _SETTINGS_LOCK:
-        snapshot = settings()
-        accounts = snapshot["accounts"]
+        accounts, current_active = _accounts_and_active()
         existing = next((item for item in accounts if item["name"] == name), {})
         merged = dict(existing)
         merged.update(values)
@@ -103,106 +102,85 @@ def save_account(name, values, active=None):
                 break
         else:
             accounts.append(normalized)
-        chosen = active or snapshot["active_account"]
+        chosen = active or current_active
         if chosen not in {item["name"] for item in accounts}:
             chosen = normalized["name"]
         PREFERENCES["accounts"] = accounts
         PREFERENCES["active_account"] = chosen
+        if preferred_formats is not None:
+            PREFERENCES[PREFERRED_FORMATS] = copy.deepcopy(
+                list(preferred_formats))
         PREFERENCES.commit()
 
 
-def account_by_name(name, accounts=None):
+def account_by_name(name):
     """Return the stored account dict for ``name`` -- never a different one."""
-    items = settings()["accounts"] if accounts is None else accounts
-    for item in items:
-        if isinstance(item, dict) and item.get("name") == name:
-            return item
-    return {}
+    return next((item for item in settings()["accounts"]
+                 if item["name"] == name), {})
 
 
 def set_active_account(name):
     """Switch the active account without touching any stored values."""
-    if name not in {item.get("name") for item in settings()["accounts"]}:
+    if not account_by_name(name):
         return
     save_account(name, {}, active=name)
 
 
 def save_credentials(account_name, refresh_token, hardware):
-    """Persist a rotated refresh token and hardware ID for one account."""
+    """Persist a rotated refresh token and hardware ID for one account.
+
+    Das aktive Konto bleibt unberührt: der Keep-alive rotiert alle Konten,
+    ein Token-Rotationsschritt darf die Auswahl nicht umschalten.
+    """
     if not account_name:
         return
     save_account(account_name, {
         "refresh_token": refresh_token,
         "hardware_id": hardware,
-    }, active=account_name)
+    })
 
 
-class CredentialStore:
-    """Snapshot and persistence adapter for one account's rotating credentials."""
+def save_refresh_token(account_name, token):
+    """Einen rotierten Token im Konto sichern; leer loescht nichts.
 
-    def __init__(self, values, account_name=None):
-        self.values = values if isinstance(values, dict) else {}
-        self.account_name = str(
-            account_name or self.values.get("account_name") or "")
-
-    @property
-    def refresh_token(self):
-        return str(self.values.get("refresh_token") or "")
-
-    @property
-    def hardware_id(self):
-        return str(self.values.get("hardware_id") or "")
-
-    def snapshot(self):
-        return {"refresh_token": self.refresh_token,
-                "hardware_id": self.hardware_id}
-
-    def _save(self):
-        if self.account_name:
-            save_credentials(self.account_name, self.refresh_token,
-                             self.hardware_id)
-
-    def save_refresh(self, refresh):
-        self.values["refresh_token"] = str(refresh or "")
-        self._save()
-
-    def save_hardware(self, hardware):
-        self.values["hardware_id"] = str(hardware or "")
-        self._save()
-
-    def freshest(self):
-        """Adopt the freshest persisted credentials before using a token."""
-        if not self.account_name:
-            return self.snapshot()
-        try:
-            stored = account_by_name(self.account_name) or {}
-        except Exception:
-            return self.snapshot()
-        token = str(stored.get("refresh_token") or "").strip()
-        if token and token != self.refresh_token:
-            self.values["refresh_token"] = token
-        hardware = str(stored.get("hardware_id") or "").strip()
-        if hardware and hardware != self.hardware_id:
-            self.values["hardware_id"] = hardware
-        return self.snapshot()
+    Der Client meldet jede Token-Antwort hier; eine Antwort ohne
+    `refresh_token` darf den gespeicherten Zugang nicht ausleeren.
+    """
+    token = str(token or "").strip()
+    if account_name and token:
+        save_account(account_name, {"refresh_token": token})
 
 
-def save_settings(values):
-    """Persist global options and the selected account."""
+def clear_refresh_token(account_name):
+    """Einen eindeutig abgelehnten Refresh-Token aus dem Konto loeschen."""
+    if not account_name or not account_by_name(account_name):
+        return False
+    save_account(account_name, {"refresh_token": ""})
+    return True
+
+
+def save_hardware_id(account_name, hardware):
+    """Die Geraete-ID im Konto sichern -- die Config ist ihre einzige Quelle."""
+    if account_name:
+        save_account(account_name, {"hardware_id": str(hardware or "")})
+
+
+def account_secrets(account_name):
+    """Bekannte Geheimnisse eines Kontos fuer die Log-Redaktion."""
+    account = account_by_name(account_name) or {}
+    token = str(account.get("refresh_token") or "").strip()
+    return (token,) if token else ()
+
+
+def remove_account(name):
+    """Remove one saved account and select a remaining account."""
     with _SETTINGS_LOCK:
-        current = settings()
-        if PREFERRED_FORMATS in values:
-            PREFERENCES[PREFERRED_FORMATS] = values[PREFERRED_FORMATS]
-        accounts = values.get("accounts", current["accounts"])
-        active = values.get("active_account", current["active_account"])
-        if not isinstance(accounts, list):
-            accounts = current["accounts"]
-        active_values = {key: values[key] for key in ACCOUNT_KEYS if key in values}
-        if active_values:
-            save_account(active, dict(active_values, name=active), active=active)
-        else:
-            PREFERENCES["accounts"] = [
-                _account(item, item.get("name", DEFAULT_ACCOUNT_NAME))
-                for item in accounts]
-            PREFERENCES["active_account"] = active
-            PREFERENCES.commit()
+        accounts, active = _accounts_and_active()
+        remaining = [item for item in accounts if item["name"] != name]
+        if not remaining or len(remaining) == len(accounts):
+            return False
+        PREFERENCES["accounts"] = remaining
+        PREFERENCES["active_account"] = (
+            active if active != name else remaining[0]["name"])
+        PREFERENCES.commit()
+        return True

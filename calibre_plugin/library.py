@@ -54,42 +54,14 @@ def metadata_tolino_id(metadata, account_name=None):
     return str(value or "").strip()
 
 
-def _field_info(database, column):
-    """(vorhanden, Feldinfo) aus Calibres oeffentlichen Feldmetadaten."""
-    fields = getattr(database, "field_metadata", None)
-    if callable(fields):
-        fields = fields()
-    if fields is None:
-        return False, None
-    try:
-        if column not in fields:
-            return False, None
-    except (TypeError, AttributeError):
-        return False, None
-    # Ein Test-Stub oder eine aeltere Calibre-Fassung liefert moeglicherweise
-    # keine Feldinfo: dann gilt die Spalte als vorhanden, aber unbekannt.
-    try:
-        return True, fields[column]
-    except (TypeError, AttributeError, KeyError, IndexError):
-        return True, None
-
-
-def custom_column_available(database):
-    """Check Calibre's public field metadata for the configured custom column."""
-    return _field_info(database, TOLINO_COLUMN)[0]
-
-
 def bool_column_available(database, column):
     """True, wenn Calibre ``column`` als Ja/Nein-Feld kennt.
 
     Ein Text- oder Zahlenfeld gilt nicht: dort stuenden fremde Werte, die
     wie ein versehentliches «ignoriert» aussehen koennten.
     """
-    present, info = _field_info(database, column)
-    if not present:
-        return False
-    datatype = info.get("datatype") if isinstance(info, dict) else None
-    return datatype in (None, "bool")
+    fields = database.field_metadata
+    return column in fields and fields[column].get("datatype") == "bool"
 
 
 def bool_column_value(metadata, column):
@@ -104,11 +76,6 @@ def bool_column_value(metadata, column):
     if text in _FALSE_VALUES:
         return False
     return None
-
-
-def ignore_column_available(database):
-    """True, wenn Calibre die Spalte ``#tolino_ignore`` kennt."""
-    return bool_column_available(database, TOLINO_IGNORE_COLUMN)
 
 
 def metadata_ignored(metadata):
@@ -139,7 +106,7 @@ CREATED_COLUMNS = set()
 
 def _column_present(database, label):
     """True, wenn die Spalte in der Bibliothek (oder in dieser Sitzung) da ist."""
-    return label in CREATED_COLUMNS or _field_info(database, "#" + label)[0]
+    return label in CREATED_COLUMNS or ("#" + label) in database.field_metadata
 
 
 def create_custom_columns(database, labels=None):
@@ -176,11 +143,7 @@ def create_custom_columns(database, labels=None):
                         in missing))
     created = []
     for label, name, datatype in missing:
-        try:
-            create(label, name, datatype, False, editable=True, display={})
-        except TypeError:
-            # Aeltere Fassungen kennen die Schluesselwoerter nicht.
-            create(label, name, datatype, False)
+        create(label, name, datatype, False, editable=True, display={})
         CREATED_COLUMNS.add(label)
         created.append(label)
     return created
@@ -193,27 +156,18 @@ def column_state(database):
     Lauf reicht es an den Worker weiter und schreibt nur in vorhandene
     Spalten.
     """
-    return {"id": custom_column_available(database),
-            "read": read_column_available(database),
-            "ignore": ignore_column_available(database)}
+    return {"id": TOLINO_COLUMN in database.field_metadata,
+            "read": bool_column_available(database, TOLINO_READ_COLUMN)}
 
 
-def read_column_available(database):
-    """True, wenn Calibre die Ja/Nein-Spalte ``#tolino_read`` kennt.
-
-    Eine Spalte mit anderem Typ wird nicht beschrieben: ein Text- oder
-    Zahlenfeld würde ``True``/``False`` als fremden Wert speichern.
-    """
-    return bool_column_available(database, TOLINO_READ_COLUMN)
-
-
-def update_read_status(database, updates, enabled=True):
+def update_read_status(database, updates):
     """Bestätigten Cloud-Lesestatus in ``#tolino_read`` spiegeln.
 
     Die Spalte bleibt informativ: geschrieben wird nur, was tolino nach einem
     Lauf bestätigt hat -- sie ist nie Quelle für eine Übertragung.
     """
-    if not enabled or not updates or not read_column_available(database):
+    if not updates or not bool_column_available(
+            database, TOLINO_READ_COLUMN):
         return 0
     api = database.new_api
     values = {}
@@ -227,9 +181,9 @@ def update_read_status(database, updates, enabled=True):
     return len(values)
 
 
-def update_tolino_ids(database, updates, enabled=True, account_name=None):
+def update_tolino_ids(database, updates, account_name=None):
     """Merge this account's IDs into the shared Calibre custom column."""
-    if not enabled or not updates or not custom_column_available(database):
+    if not updates or TOLINO_COLUMN not in database.field_metadata:
         return 0
     api = database.new_api
     account_name = str(account_name or "").strip()
@@ -241,8 +195,7 @@ def update_tolino_ids(database, updates, enabled=True, account_name=None):
         if not account_name:
             values[book_id] = new_id
             continue
-        metadata = api.get_metadata(book_id)
-        raw = _column_value(metadata)
+        raw = api.field_for(TOLINO_COLUMN, book_id)
         account_ids = _decode_tolino_ids(raw)
         if account_ids is None:
             # Migrate a legacy single ID when this account first writes the
@@ -283,8 +236,6 @@ def normalize_formats(value):
 
 def safe_format_path(database, book_id, format_name):
     """Resolve a real Calibre id without falling back to view-index semantics."""
-    if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
-        raise ValueError("Invalid Calibre book id: %r" % (book_id,))
     if not isinstance(format_name, str):
         raise ValueError("Invalid format name: %r" % (format_name,))
     format_name = format_name.strip().lstrip(".").upper()
@@ -295,10 +246,7 @@ def safe_format_path(database, book_id, format_name):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
     try:
         path = api.format_abspath(book_id, format_name)
-    except ValueError as exc:
-        raise ValueError("Calibre returned no path for book %r format %s" %
-                         (book_id, format_name)) from exc
-    except (IndexError, KeyError, OSError) as exc:
+    except (ValueError, IndexError, KeyError, OSError) as exc:
         raise ValueError("Calibre returned no path for book %r format %s" %
                          (book_id, format_name)) from exc
     if not isinstance(path, str) or not path:
@@ -308,45 +256,24 @@ def safe_format_path(database, book_id, format_name):
 
 
 def cover_bytes(database, book_id):
-    """Normalize cover() results from bytes, paths, or wrapped Calibre values."""
-    if isinstance(book_id, bool) or not isinstance(book_id, int) or book_id <= 0:
-        raise ValueError("Invalid Calibre book id: %r" % (book_id,))
+    """Return the cover image bytes from Calibre, or None when unavailable."""
     api = database.new_api
     if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
-    cover = api.cover(book_id, as_file=False)
-    return cover
+    return api.cover(book_id, as_file=False)
 
 
 def image_suffix(data):
     """Return a recognized image suffix, or '' for unknown cover bytes."""
     if not isinstance(data, bytes) or not data:
         return ""
-    raw = data
-    if raw.startswith(b"\xff\xd8\xff"):
+    if data.startswith(b"\xff\xd8\xff"):
         return ".jpg"
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return ".png"
-    if raw.startswith((b"GIF87a", b"GIF89a")):
+    if data.startswith((b"GIF87a", b"GIF89a")):
         return ".gif"
-    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return ".webp"
     return ""
 
-
-def selected_table_rows(table):
-    """Return valid selected Qt row numbers without assuming QModelIndex shape."""
-    if table is None:
-        return []
-    try:
-        selection_model = table.selectionModel()
-        selected = selection_model.selectedRows() if selection_model else ()
-    except RuntimeError:
-        return []
-    rows = []
-    for index in selected or ():
-        row_value = getattr(index, "row", None)
-        row = row_value() if callable(row_value) else row_value
-        if isinstance(row, int) and row >= 0:
-            rows.append(row)
-    return rows

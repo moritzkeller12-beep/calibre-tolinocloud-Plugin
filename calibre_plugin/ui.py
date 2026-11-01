@@ -2,8 +2,6 @@
 
 from calibre.gui2.actions import InterfaceAction
 
-__all__ = ["TolinoSyncAction"]
-
 
 class TolinoSyncAction(InterfaceAction):
     name = "Tolino Cloud Sync"
@@ -19,36 +17,28 @@ class TolinoSyncAction(InterfaceAction):
         # runs, so an adopted token survives between syncs.
         try:
             from .token_vault import start_token_keepalive
-            start_token_keepalive(self._keepalive_credentials)
+            start_token_keepalive()
         except Exception:
             pass  # keep-alive must never break plugin loading
 
-    def shutdown(self):
-        """Calibre beendet sich: Keep-alive anhalten, bevor nach Threads gesucht wird.
+    def shutting_down(self):
+        """Calibre beendet sich -- der dokumentierte Rückruf der Action.
 
-        Calibre prüft beim Herunterfahren auf laufende Threads (Phase
-        «Actions shutdown»); ein atexit-Haken käme dafür zu spät.
+        Calibre prüft beim Herunterfahren auf laufende Threads, deshalb muss
+        der Keep-alive hier enden und nicht erst in einem atexit-Haken.
         """
+        self._finish_session()
+        parent = getattr(super(), "shutting_down", None)
+        if callable(parent):
+            parent()
+
+    def _finish_session(self):
+        """Keep-alive anhalten; Calibre ruft `shutting_down` genau einmal."""
         try:
             from .token_vault import stop_token_keepalive
             stop_token_keepalive()
         except Exception:
             pass  # der Shutdown darf nie an der Aufräumung scheitern
-        parent = getattr(super(), "shutdown", None)
-        if callable(parent):
-            parent()
-
-    def _keepalive_credentials(self):
-        try:
-            from .config import settings
-            cfg = settings()
-        except Exception:
-            return {}
-        return {"accounts": [
-            dict(item, account_name=item.get("name"))
-            for item in cfg.get("accounts", ())
-            if item.get("refresh_token")
-        ]}
 
     def show_dashboard(self):
         from .ui_dashboard import SyncDashboard

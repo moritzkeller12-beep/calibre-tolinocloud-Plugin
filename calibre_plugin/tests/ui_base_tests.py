@@ -1,17 +1,20 @@
 """Gemeinsame UI-Basis: Qt-Stubs, Toolbar und Vergleichsfenster."""
 
+from ..comparison import ReadState
 import os
 import unittest
-from ._support import load_ui_module, start_cdp_stubs, stop_cdp_stubs
+from ._support import (FakeTableItem, load_ui_module, start_cdp_stubs,
+                       stop_cdp_stubs)
 
 
-# Modul-Hooks für den Einzellauf; die Gesamtsuite ruft sie zentral auf.
+# Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
 
 
 class ToolbarIconTests(unittest.TestCase):
     """Shared UI module loader for tests without a live Calibre install."""
+
 
     @staticmethod
     def _load_ui_module(get_icons_result, qt_stub=None):
@@ -39,7 +42,6 @@ class ToolbarIconTests(unittest.TestCase):
             plugin.qaction = Action()
             plugin.show_dashboard = lambda: None
             plugin.load_resources = lambda _names: icon_module._test_resources
-            plugin._keepalive_credentials = lambda: {}
             icon = icon_module.TolinoSyncAction._toolbar_icon(plugin)
             self.assertIsNotNone(icon)
             self.assertFalse(icon.isNull())
@@ -89,6 +91,10 @@ class InventoryDialogBuildTests(unittest.TestCase):
 
             def setToolTip(self, text):
                 self.tooltip = text
+
+            def setAttribute(self, attribute, value):
+                self.attributes = getattr(self, "attributes", {})
+                self.attributes[attribute] = value
 
             def setEnabled(self, value):
                 self.enabled = value
@@ -141,13 +147,18 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def setRowCount(self, count):
                 self.row_count = count
 
-            def setCellWidget(self, row, column, widget):
-                self.cell_widgets = getattr(self, "cell_widgets", [])
-                self.cell_widgets.append((row, column, widget))
-
             def setItem(self, row, column, item):
                 self.items = getattr(self, "items", {})
                 self.items[(row, column)] = item.text
+                self.raw_items = getattr(self, "raw_items", {})
+                self.raw_items[(row, column)] = item
+                # Wie QTableWidget: Zustandsaenderungen melden itemChanged.
+                item._table = self
+                item._row = row
+                item._column = column
+
+            def item(self, row, column):
+                return getattr(self, "raw_items", {}).get((row, column))
 
             def resizeColumnsToContents(self):
                 self.resized = True
@@ -155,6 +166,10 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def setColumnHidden(self, column, hidden):
                 self.hidden = getattr(self, "hidden", {})
                 self.hidden[column] = hidden
+
+            def setItemDelegateForColumn(self, column, delegate):
+                self.delegates = getattr(self, "delegates", {})
+                self.delegates[column] = delegate
 
         class Layout:
             def __init__(self, *args, **_kwargs):
@@ -175,6 +190,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
         class Header:
             def __init__(self):
                 self.sectionClicked = Signal()
+                self.widths = {}
 
             def setSortIndicatorShown(self, shown):
                 self.shown = shown
@@ -186,10 +202,10 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.section_modes = getattr(self, "section_modes", {})
                 self.section_modes[column] = mode
 
-        class Table(Widget):
-            SelectRows = "SelectRows"
-            ExtendedSelection = "ExtendedSelection"
+            def resizeSection(self, column, width):
+                self.widths[column] = width
 
+        class Table(Widget):
             def setSelectionMode(self, mode):
                 self.selection_mode = mode
 
@@ -204,25 +220,28 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 Widget.__init__(self)
                 self.columns = columns
                 self.header_items = {}
+                self.itemChanged = Signal()
 
             def setHorizontalHeaderLabels(self, labels):
                 self.headers = list(labels)
 
             def horizontalHeader(self):
-                self.header = Header()
+                if not hasattr(self, "header"):
+                    self.header = Header()
                 return self.header
 
             def horizontalHeaderItem(self, index):
                 return self.header_items.setdefault(index, Widget())
 
-        class Item:
-            def __init__(self, text):
-                self.text = text
-
         class Dialog(Widget):
+            DialogCode = type("DialogCode", (), {"Accepted": 1})
+
             def __init__(self, parent=None):
                 Widget.__init__(self)
                 self.parent = parent
+
+            def resize(self, *_args):
+                pass
 
             def exec(self):
                 return 0
@@ -272,8 +291,11 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def currentData(self):
                 return self.items[self.index][1] if self.items else None
 
-        class SelectRows:
-            pass
+        # Qt6-Form: nur die skopierten Enums, keine unskopierten Aliase.
+        Table.SelectionBehavior = type(
+            "SelectionBehavior", (), {"SelectRows": "SelectRows"})
+        Table.SelectionMode = type(
+            "SelectionMode", (), {"ExtendedSelection": "ExtendedSelection"})
 
         class Object:
             def __init__(self, *args, **_kwargs):
@@ -328,8 +350,17 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 store = instance.__dict__.setdefault("_signals", {})
                 return store.setdefault(self.name, Signal())
 
-        qt = type("Qt", (), {"AscendingOrder": 0, "DescendingOrder": 1,
-                             "SelectRows": SelectRows})
+        qt = type("Qt", (), {
+            "SortOrder": type("SortOrder", (),
+                              {"AscendingOrder": 0, "DescendingOrder": 1}),
+            "ItemFlag": type("ItemFlag", (), {
+                "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
+            "CheckState": type("CheckState", (),
+                               {"Checked": 2, "Unchecked": 0}),
+            "AlignmentFlag": type("AlignmentFlag", (), {"AlignCenter": 132}),
+            "WidgetAttribute": type("WidgetAttribute", (),
+                                     {"WA_QuitOnClose": 55}),
+        })
         return {
             "Qt": qt,
             "QDialog": Dialog,
@@ -339,11 +370,18 @@ class InventoryDialogBuildTests(unittest.TestCase):
             "QPushButton": Button,
             "QCheckBox": CheckBox,
             "QComboBox": ComboBox,
-            "QHeaderView": type("QHeaderView", (),
-                               {"Stretch": 1, "ResizeToContents": 2}),
+            "QHeaderView": type("QHeaderView", (), {
+                "ResizeMode": type(
+                    "ResizeMode", (), {"Interactive": 0, "Stretch": 1,
+                                       "ResizeToContents": 2})}),
+            "QStyledItemDelegate": type(
+                "QStyledItemDelegate", (),
+                {"__init__": lambda self, *args, **kwargs: None}),
+            "QStyleOptionViewItem": type("QStyleOptionViewItem", (), {}),
+            "QEvent": type("QEvent", (), {}),
             "QGroupBox": Widget,
             "QTableWidget": Table,
-            "QTableWidgetItem": Item,
+            "QTableWidgetItem": FakeTableItem,
             "QMenu": type("Menu", (), {
                 "__init__": lambda self, parent=None: setattr(self, "actions", []),
                 "addAction": lambda self, label: self.actions.append(label) or label,
@@ -360,31 +398,28 @@ class InventoryDialogBuildTests(unittest.TestCase):
         rows = [
             {"title": "Zulu", "authors": "Z", "status": "identical",
              "book_id": 1, "tolino_id": "c1", "isbn": "111",
+             "read": ReadState(), "group": "unchanged",
              "explanation": "Titel stimmt mit der Cloud überein."},
             {"title": "Alpha", "authors": "A", "status": "new_in_calibre",
              "book_id": 2, "tolino_id": "", "isbn": "222",
-             "has_preferred_format": True,
+             "has_preferred_format": True, "read": ReadState(),
+             "group": "action",
              "explanation": "Noch nicht in der Cloud – kann hochgeladen "
              "werden."},
         ]
         return ui_module, ui_module.dialogs.InventoryDialog(rows, options=options)
 
     def test_constructor_writes_every_column_in_the_right_order(self):
-        ui_module, dialog = self._build({"collections": True, "automatic": 1})
+        ui_module, dialog = self._build({"automatic": 1})
         try:
             self.assertEqual(list(ui_module.dialogs.InventoryDialog.HEADERS),
                              dialog.table.headers)
             # Tooltips versprechen Strg-/Shift-Mehrfachauswahl.
             self.assertEqual("ExtendedSelection",
                              dialog.table.selection_mode)
-            cells = {(row, column): widget
-                     for row, column, widget in dialog.table.cell_widgets}
             for index, row in enumerate(dialog.rows):
                 in_cloud = bool(row["tolino_id"])
                 # Drei Auswahlfelder je Buch ...
-                self.assertIs(cells[(index, 0)], dialog.checks[index])
-                self.assertIs(cells[(index, 1)], dialog.meta_checks[index])
-                self.assertIs(cells[(index, 2)], dialog.read_checks[index])
                 # ... die zwei Orts-Spalten mit je einem Häkchen ...
                 self.assertEqual("✓" if row["book_id"] is not None else "",
                                  dialog.table.items[(index, 3)])
@@ -402,17 +437,43 @@ class InventoryDialogBuildTests(unittest.TestCase):
                                  dialog.table.items[(index, 10)])
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
-                upload = dialog.checks[index]
-                metadata = dialog.meta_checks[index]
-                mark_read = dialog.read_checks[index]
-                self.assertTrue(upload.enabled)
-                self.assertEqual(in_cloud, metadata.enabled)
-                self.assertEqual(in_cloud, mark_read.enabled)
+                upload = dialog._check(index, 0)
+                metadata = dialog._check(index, 1)
+                mark_read = dialog._check(index, 2)
+                self.assertTrue(upload.item.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
+                self.assertEqual(in_cloud, bool(metadata.item.flags() &
+                                                ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
+                self.assertEqual(in_cloud, bool(mark_read.item.flags() &
+                                                ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
                 # Vorbelegt ist, was der Vergleich vorschlägt; die Lese-Marke
                 # bleibt unangetastet.
                 self.assertEqual(bool(row["upload"]), upload.isChecked())
                 self.assertEqual(bool(row["metadata"]), metadata.isChecked())
                 self.assertFalse(mark_read.isChecked())
+            self.assertIsInstance(dialog._check_delegate,
+                                  ui_module.dialogs._CenteredCheckDelegate)
+            self.assertEqual({0: dialog._check_delegate,
+                              1: dialog._check_delegate,
+                              2: dialog._check_delegate},
+                             dialog.table.delegates)
+            self.assertEqual({0: 60, 1: 60, 2: 60, 3: 60, 4: 60},
+                             {column: dialog.table.header.widths[column]
+                              for column in (0, 1, 2, 3, 4)})
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[0])
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[3])
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[5])
+            self.assertEqual(160, dialog.table.header.widths[5])
+            self.assertEqual(
+                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
+                dialog.table.header.section_modes[6])
+            self.assertEqual(90, dialog.table.header.widths[6])
+            self.assertFalse(dialog.attributes[55])
             # Nur die technischen Spalten sind zunächst verborgen.
             self.assertEqual({8: True, 9: True, 10: True}, dialog.table.hidden)
             self.assertIn("Sammlungen in tolino übernommen",
@@ -430,7 +491,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
     def test_toggle_switches_the_technical_columns(self):
-        ui_module, dialog = self._build({"collections": True, "automatic": 1})
+        ui_module, dialog = self._build({"automatic": 1})
         try:
             dialog._toggle_technical_columns(True)
             self.assertEqual({8: False, 9: False, 10: False}, dialog.table.hidden)
@@ -494,7 +555,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
             lambda *args, **kwargs: None, qt_stub=self._qt_stub())
         row = {"title": "Zulu", "authors": "Z", "status": "identical",
                "book_id": 1, "tolino_id": "c1", "isbn": "111",
-               "explanation": "Gleich."}
+               "read": ReadState(), "explanation": "Gleich."}
         try:
             dialog = ui_module.dialogs.InventoryDialog([dict(row)], options={})
             self.assertFalse(dialog.confirm.enabled)

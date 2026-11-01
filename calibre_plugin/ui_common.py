@@ -3,139 +3,79 @@
 Alle UI-Module beziehen Qt-Namen und geteilte Helfer von hier, damit ein
 Qt-Stub in den Tests nur an einer Stelle greift.
 """
-import os
+import functools
 import re
 
-try:
-    from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QHeaderView, QLabel,
-                         QLineEdit, QMessageBox, QMenu,
-                         QProgressBar, QPushButton, QThread,
-                         QVBoxLayout, QHBoxLayout, QTableWidget,
-                         QTableWidgetItem, QObject, QInputDialog,
-                         QFileDialog, Qt, pyqtSignal)
-except ImportError:
-    # Some Calibre Qt builds expose the signal type as Signal.
-    from qt.core import (QCheckBox, QComboBox, QDialog,
-                         QFormLayout, QGroupBox, QHeaderView, QLabel,
-                         QLineEdit, QMessageBox, QMenu,
-                         QProgressBar, QPushButton, QThread,
-                         QVBoxLayout, QHBoxLayout, QTableWidget,
-                         QTableWidgetItem, QObject, QInputDialog,
-                         QFileDialog, Qt, Signal as pyqtSignal)
+from qt.core import (QCheckBox, QComboBox, QDialog,
+                     QFormLayout, QGroupBox, QHeaderView, QLabel,
+                     QLineEdit, QMessageBox, QMenu,
+                     QProgressBar, QPushButton, QThread,
+                     QVBoxLayout, QHBoxLayout, QTableWidget,
+                     QTableWidgetItem, QObject, QInputDialog,
+                     QFileDialog, QStyledItemDelegate, QStyle,
+                     QStyleOptionViewItem, QEvent, Qt, pyqtSignal)
+from .tolino import TolinoError
 
-# Weitergegeben an die anderen UI-Module (und teilweise nur dort benutzt):
-# die Liste ist absichtlich kurz. Fruehere Fassungen importierten hier das
-# halbe sync-/tolino-Modul, ohne es zu benutzen.
-from .identifiers import display_title
-from .library import safe_format_path
-
-# Namen, die andere UI-Module und die Tests ueber dieses Modul beziehen.
+# Namen, die andere UI-Module ueber dieses Modul beziehen.
 __all__ = [
     "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
     "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog",
     "QFileDialog", "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView",
     "QMenu", "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QThread", "QVBoxLayout", "Qt", "SyncJob",
+    "QThread", "QVBoxLayout", "QStyledItemDelegate", "QStyle",
+    "QStyleOptionViewItem", "QEvent", "Qt",
     "_THREADS", "_apply_busy", "_dialog_busy",
-    "_display_value", "_format_signatures", "_login_failure_guidance",
-    "button", "dialog_code", "header_mode", "start_worker",
-    "_metadata_value", "_stop_thread", "plural",
-    "_worker_account_name", "_worker_outcome", "_set_enabled",
-    "_keep_thread_alive", "_thread_running",
-    "pyqtSignal", "safe_format_path",
+    "LOGIN_NEXT_STEP", "_login_failure_guidance",
+    "gui_guard",
+    "start_worker", "_stop_thread",
+    "_set_enabled",
+    "_keep_thread_alive",
+    "pyqtSignal",
     "sync_result_detail",
     "sync_result_text",
 ]
 
 
-def _qt_value(owner, name, scope):
-    """Qt-Konstante in alter und skopierter Schreibweise.
+def _widget_deleted(widget):
+    """True nur fuer ein von Qt bereits zerstoertes Widget.
 
-    Qt6 (Calibre 9) kennt nur ``QHeaderView.ResizeMode.Stretch``; die alte
-    Form ``QHeaderView.Stretch`` fehlt dort und wirft AttributeError. Die
-    Test-Stubs kennen wiederum keine Enums. Der Helfer nimmt, was da ist.
+    `sip` ist in Calibre vorhanden; ausserhalb (Tests, andere Qt-Bindings)
+    bleibt die Pruefung aus, statt einen Importfehler zu riskieren.
     """
-    holder = getattr(owner, scope, None)
-    return getattr(holder, name) if holder is not None else getattr(owner, name)
-
-
-def header_mode(name):
-    """Resize-Modus einer Tabellenspalte, unabhängig von der Qt-Version."""
-    return _qt_value(QHeaderView, name, "ResizeMode")
-
-
-def button(name):
-    """Standardknopf eines Meldungsfensters, unabhängig von der Qt-Version."""
-    return _qt_value(QMessageBox, name, "StandardButton")
-
-
-def dialog_code(name):
-    """Ergebniscode eines Dialogs, unabhängig von der Qt-Version."""
-    return _qt_value(QDialog, name, "DialogCode")
-
-
-def _metadata_value(item, name, default=""):
     try:
-        return getattr(item, name)
-    except AttributeError:
+        import sip
+    except ImportError:
         try:
-            return item.get(name, default)
-        except AttributeError:
-            return default
+            from PyQt6 import sip
+        except ImportError:
+            return False
+    try:
+        return bool(sip.isdeleted(widget))
+    except (TypeError, RuntimeError):
+        return False
 
 
-def plural(n, singular, plural_form):
-    """Return the requested German noun form for a count."""
-    return singular if int(n) == 1 else plural_form
+def gui_guard(function):
+    """GUI-Slot ausführen; ein bereits zerstörtes Fenster ist kein Fehler.
 
-
-def _display_value(value):
-    if isinstance(value, (list, tuple, set)):
-        return ", ".join(str(x) for x in value)
-    if isinstance(value, dict):
-        return ", ".join("%s: %s" % (key, val) for key, val in sorted(value.items()))
-    return str(value or "")
-
-
-def _format_signatures(database, book_id, formats):
-    """size:mtime je Format-Datei – das billige Content-Signal.
-
-    Ersetzt eine Datei, ändern sich Grösse und mtime; eine reine
-    Metadatenänderung in Calibre berührt die Datei nicht.
+    Qt wirft RuntimeError, wenn ein Slot nach dem Schliessen des Fensters
+    noch ein Widget anfasst. Das ist während des Calibre-Shutdowns normal.
+    Ein echter RuntimeError aus dem Slot darf aber nicht verschluckt werden:
+    deshalb wird nur bei nachweislich gelöschtem Widget geschluckt.
     """
-    signatures = {}
-    for fmt in formats:
+    @functools.wraps(function)
+    def guarded(*args, **kwargs):
+        target = args[0] if args else None
+        if target is not None and _widget_deleted(target):
+            return None
         try:
-            stat = os.stat(safe_format_path(database, book_id, fmt))
-        except (ValueError, OSError):
-            continue
-        signatures[fmt] = "%d:%d" % (stat.st_size, int(stat.st_mtime * 1000))
-    return signatures
-
-
-class SyncJob:
-    # `title` gehoert dazu: Fortschritt und Bericht nennen den
-    # Titel, nicht die Kennung. Der Standardwert haelt aeltere Aufrufer
-    # (und Tests) unveraendert am Laufen.
-    __slots__ = ("book_id", "book_uuid", "format_name", "old_id", "path",
-                 "cover", "title")
-
-    def __init__(self, book_id, book_uuid, format_name, old_id, path,
-                 cover, title=""):
-        self.book_id = book_id
-        self.book_uuid = book_uuid
-        self.format_name = format_name
-        self.old_id = old_id
-        self.path = path
-        # Cover-Bytes statt einer Temp-Datei: kein Aufraeumen noetig.
-        self.cover = cover
-        self.title = title
-
-    def label(self):
-        """Sichtbarer Name des Buchs: Titel, sonst «Buch <Nummer>»."""
-        return display_title(self.title, self.book_id)
+            return function(*args, **kwargs)
+        except RuntimeError:
+            if target is not None and _widget_deleted(target):
+                return None
+            raise
+    return guarded
 
 
 CANCEL_MESSAGE = "Abgebrochen."
@@ -171,6 +111,23 @@ class CallWorker(QObject):
         self.done.emit(result)
 
 
+def start_worker(dialog, worker, thread, thread_name, worker_name,
+                 stop_on=(), extra_slots=()):
+    """Worker mit Thread verdrahten, Referenzen halten und starten."""
+    worker.moveToThread(thread)
+    thread.started.connect(worker.run)
+    for signal in stop_on:
+        signal.connect(thread.quit)
+    for signal, slot in extra_slots:
+        signal.connect(slot)
+    thread.finished.connect(thread.deleteLater)
+    _keep_thread_alive(thread)
+    setattr(dialog, thread_name, thread)
+    setattr(dialog, worker_name, worker)
+    thread.start()
+    return thread
+
+
 def start_call(dialog, call, on_done, on_failed):
     """Einen Netzaufruf in einem eigenen QThread ausfuehren.
 
@@ -181,37 +138,12 @@ def start_call(dialog, call, on_done, on_failed):
     """
     thread = QThread()
     worker = CallWorker(call)
-    worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-    worker.done.connect(thread.quit)
-    worker.failed.connect(thread.quit)
-    worker.done.connect(on_done)
-    worker.failed.connect(on_failed)
-    thread.finished.connect(thread.deleteLater)
-    _keep_thread_alive(thread)
-    dialog._call_thread = thread
-    thread.start()
-    return thread
-
-
-def start_worker(dialog, worker, thread, thread_name, worker_name, stop_on=()):
-    """Run ``worker.run`` in ``thread`` and remember both on the dialog.
-
-    ``stop_on`` sind die Signale, nach denen der Worker fertig ist; sie
-    beenden die Thread-Schleife. Ohne sie beendet der Aufrufer den Thread
-    selbst (``_stop_thread``). Der Dialog haelt die Referenzen, damit ein
-    geschlossenes Fenster den laufenden Thread nicht zerstoert.
-    """
-    worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-    for signal in stop_on:
-        signal.connect(thread.quit)
-    thread.finished.connect(thread.deleteLater)
-    _keep_thread_alive(thread)
-    setattr(dialog, thread_name, thread)
-    setattr(dialog, worker_name, worker)
-    thread.start()
-    return thread
+    # Der Worker muss den Dialog ueberleben: ohne die Referenz kann Qt ihn
+    # vor dem Thread-Start einsammeln, und der Dialog bleibt gesperrt.
+    return start_worker(
+        dialog, worker, thread, "_call_thread", "_call_worker",
+        (worker.done, worker.failed),
+        ((worker.done, on_done), (worker.failed, on_failed)))
 
 
 def _discard_item(collection, item):
@@ -257,30 +189,14 @@ def _stop_thread(thread, timeout_ms=3000):
     return finished
 
 
-def _worker_account_name(dialog):
-    """Account of the running/finished worker -- never the visible one."""
-    worker = getattr(dialog, "worker", None)
-    name = getattr(worker, "account_name", None)
-    return str(name or getattr(dialog, "account_name", "") or "")
-
-
-def _worker_outcome(dialog):
-    worker = getattr(dialog, "worker", None)
-    return dict(getattr(worker, "outcome", None) or {})
-
-
-def _thread_running(thread):
-    """Läuft dieser Thread noch?"""
-    return thread is not None and thread.isRunning()
-
-
 def _dialog_busy(dialog):
     """Läuft Sync, Vorbereitung oder Anmeldung? (ohne Qt-Abhängigkeit)"""
     if getattr(dialog, "thread", None) is not None:
         return True
     if getattr(dialog, "prepare_thread", None) is not None:
         return True
-    return _thread_running(getattr(dialog, "login_thread", None))
+    login = getattr(dialog, "login_thread", None)
+    return login is not None and login.isRunning()
 
 
 def _set_enabled(owner, names, enabled):
@@ -305,61 +221,23 @@ def _apply_busy(dialog, busy):
                  not busy)
 
 
-# Titel + naechster Schritt je Anmelde-Fehlercode. Kurz, einzeilig und
-# ohne technische Antworten -- Details stehen nur im Log (report_error).
-_LOGIN_GUIDANCE = {
-    "A01": ("Anmeldung beendet",
-            "Bitte neu bei tolino anmelden."),
-    "A02": ("Zugang verbraucht",
-            "Der gespeicherte Zugang ist verbraucht. Bitte neu anmelden."),
-    "A03": ("Nicht angemeldet",
-            "Bitte zuerst bei tolino anmelden."),
-    "A07": ("Anmelde-Antwort ungültig",
-            "Bitte erneut bei tolino anmelden."),
-    "B01": ("Nicht angemeldet",
-            "Im Browserfenster anmelden, bis die Bücherliste lädt."),
-    "B02": ("Zugang verbraucht",
-            "Bitte neu anmelden. Das Anmeldefenster wurde geschlossen."),
-    "S91": ("Anmeldung wird erneuert",
-            "Kurz warten und erneut versuchen."),
-    "B05": ("Kein unterstützter Browser gefunden",
-            "Chrome, Chromium, Brave oder Edge installieren und Calibre "
-            "neu starten."),
-    "B06": ("Flatpak: Hilfsprogramm fehlt",
-            "«flatpak update» ausführen, Calibre neu starten."),
-    "B08": ("Flatpak: Freigabe fehlt",
-            "Den angezeigten flatpak override-Befehl ausführen und Calibre neu starten."),
-    "B07": ("Anmeldefenster konnte nicht starten",
-            "Alle Chrome-/Chromium-Fenster schließen und erneut versuchen."),
-    "N01": ("Verbindung fehlgeschlagen",
-            "Netzwerk prüfen. Nach einer Zeitüberschreitung ggf. neu anmelden."),
-    "B03": ("Anmeldung abgebrochen",
-            "Anmeldefenster offen lassen, bis die Bücherliste lädt, und "
-            "erneut starten."),
-    "B04": ("Zeitüberschreitung bei der Anmeldung",
-            "Im Fenster anmelden, bis die Bücherliste erscheint, und dann "
-            "erneut versuchen."),
-    "A06": ("Anmeldung abgelehnt",
-            "Details im Calibre-Log; Buchhändler und Zugang prüfen."),
-}
-
-_LOGIN_DEFAULT_GUIDANCE = (
-    "Anmeldung nicht abgeschlossen",
-    "Verbindung prüfen und die Anmeldung erneut starten.")
+LOGIN_NEXT_STEP = "Anmeldung erneut starten; Details stehen im Calibre-Log."
 
 
 def _login_failure_guidance(error):
-    """(Titel, nächster Schritt) für einen fehlgeschlagenen Browser-Login.
+    """Titel für einen fehlgeschlagenen Browser-Login.
 
-    Akzeptiert die Exception (mit ``.code``) oder die bereits formatierte
-    Meldung («… (Code B04)»). Unbekannte Ursachen bekommen einen neutralen,
-    aber umsetzbaren Hinweis; sensible Daten werden nie angezeigt.
+    Der Titel ist der Kurztext der Exception -- die einzige Quelle für
+    Fehlertexte; der nächste Schritt ist für alle Ursachen derselbe.
     """
-    code = str(getattr(error, "code", "") or "")
-    if not code:
-        match = re.search(r"\(Code ([A-Z][0-9]{2})\)", str(error or ""))
-        code = match.group(1) if match else ""
-    return _LOGIN_GUIDANCE.get(code, _LOGIN_DEFAULT_GUIDANCE)
+    title = error.short if isinstance(error, TolinoError) else ""
+    return str(title or "").strip() or "Anmeldung nicht abgeschlossen"
+
+
+def _failed_operations(outcome):
+    """Alle gescheiterten Schritte eines Laufs in ihrer Reihenfolge."""
+    return [item for item in (outcome.get("operations") or ())
+            if isinstance(item, dict) and item.get("status") == OP_FAILED]
 
 
 def sync_result_text(outcome, prefix="Fertig"):
@@ -375,15 +253,12 @@ def sync_result_text(outcome, prefix="Fertig"):
         count = int(outcome.get(key) or 0)
         if count:
             parts.append("%d %s" % (count, label))
-    if not parts and prefix == "":
-        text = ""
-    else:
-        text = (("%s: %s" % (prefix, ", ".join(parts)) if parts else prefix)
-                if prefix else ", ".join(parts))
+    text = ", ".join(parts)
+    if prefix:
+        text = ("%s: %s" % (prefix, text)) if text else prefix
     # Ein einzelner Fehler haelt den Lauf nicht mehr auf -- dann
     # muss der Bericht sagen, WELCHE Schritte es getroffen hat.
-    failed = [item for item in (outcome.get("operations") or ())
-              if isinstance(item, dict) and item.get("status") == OP_FAILED]
+    failed = _failed_operations(outcome)
     if failed:
         lines = [_operation_line(item) for item in failed[:5]]
         if len(failed) > 5:
@@ -412,8 +287,7 @@ def sync_result_detail(outcome):
     mit Titel und Grund. Leer heisst: kein Detailtext noetig.
     """
     outcome = outcome if isinstance(outcome, dict) else {}
-    failed = [item for item in (outcome.get("operations") or ())
-              if isinstance(item, dict) and item.get("status") == OP_FAILED]
+    failed = _failed_operations(outcome)
     if len(failed) <= 5:
         return ""
     return "\n".join(_operation_line(item) for item in failed)
