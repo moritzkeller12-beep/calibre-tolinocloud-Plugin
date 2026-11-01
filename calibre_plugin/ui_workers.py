@@ -132,8 +132,6 @@ class SyncWorker(QObject):
         """
         detail = sanitize_error(exc, account_secrets(self.account_name)
                                 + (getattr(client, "access", None),))
-        if operation is not None:
-            operation["exception"] = exc
         self._finish_operation(operation, OP_FAILED, error=detail)
         log_warning("Schritt gescheitert (%s): %s"
                     % ((operation or {}).get("label") or "?", detail))
@@ -235,7 +233,6 @@ class SyncWorker(QObject):
         total = (len(meta_ops) + len(upload_ops) + len(delete_ops)
                  + (1 if read_op else 0)
                  + (1 if unread_op else 0))
-        self._refresh_counts()
         return meta_ops, upload_ops, delete_ops, read_op, unread_op, total
 
     def _remove_replaced_copy(self, client, job):
@@ -554,10 +551,10 @@ class PrepareWorker(QObject):
     def _load_comparison_state(self):
         """Load the state and snapshot it before migration/comparison.
 
-        `load_state` may return the preferences mapping unchanged; both the
-        working state and the original snapshot must be independent copies.
+        `load_state` may return the preferences mapping unchanged. Only the
+        working state is copied; the original snapshot stays untouched.
         """
-        original = copy.deepcopy(load_state(self.state))
+        original = load_state(self.state)
         state = copy.deepcopy(original)
         # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
         # wenn Calibre spaeter eine echte UUID liefert.

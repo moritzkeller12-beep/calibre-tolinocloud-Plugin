@@ -14,8 +14,9 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
 from .run_context import RunContext
 from .identifiers import valid_book_uuid
 from .library import (TOLINO_IGNORE_COLUMN, column_state,
-                      bool_column_available, update_progress_status,
-                      update_read_status, update_tolino_ids)
+                      bool_column_available, normalize_formats,
+                      update_progress_status, update_read_status,
+                      update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
 from .tolino import (RELOGIN, TolinoError, hardware_id, log_warning,
@@ -56,9 +57,9 @@ def _mirror_account_reading(dashboard, account_name=None):
             return 0
         # Erst alle Bücher auf unbekannt setzen, dann die Werte des Kontos
         # darüberlegen: kein Wert eines anderen Kontos bleibt stehen.
-        read_updates = {book_id: None
-                        for book_id in book_ids_by_uuid.values()}
-        progress_updates = dict(read_updates)
+        book_ids = list(book_ids_by_uuid.values())
+        read_updates = dict.fromkeys(book_ids)
+        progress_updates = dict.fromkeys(book_ids)
         for key, entry in state.items():
             if not isinstance(entry, dict):
                 continue
@@ -77,10 +78,7 @@ def _mirror_account_reading(dashboard, account_name=None):
         written = (update_read_status(database, read_updates)
                    + update_progress_status(database, progress_updates))
         if written:
-            _refresh_library_view(
-                dashboard,
-                [book_id for book_id, _value
-                 in read_updates + progress_updates])
+            _refresh_library_view(dashboard, book_ids)
         return written
     except Exception as exc:
         log_warning("Lese-Spalten konnten nicht aktualisiert werden: %s"
@@ -440,17 +438,14 @@ class SyncDashboard(DashboardParts, QDialog):
         if not isinstance(account, dict):
             account = {}
         hardware = self.hardware.text().strip() or hardware_id()
-        values = {
+        formats = [fmt for fmt in normalize_formats(self.formats.text())
+                   if fmt in ("EPUB", "PDF")]
+        return {
             "account_name": str(account.get("name") or ""),
             "partner_id": self.partner.currentData(),
             "hardware_id": hardware,
-            "preferred_formats": ([
-                value for value in dict.fromkeys(
-                    x.strip().upper() for x in self.formats.text().split(",")
-                    if x.strip()) if value in ("EPUB", "PDF")
-            ] or ["EPUB"]),
+            "preferred_formats": formats or ["EPUB"],
         }
-        return values
 
     def _login_running(self):
         """Läuft gerade eine Anmeldeprüfung oder ein Anmeldefenster?"""
@@ -466,13 +461,14 @@ class SyncDashboard(DashboardParts, QDialog):
         """
         if self._login_running():
             return  # eine Prüfung oder Anmeldung läuft bereits
+        typed = self._typed_refresh()
         values = self.values()
-        if self._typed_refresh():
+        if typed:
             # Von Hand eingetippt: erst ins Konto speichern, dann pruefen.
-            self.store_refresh(self._typed_refresh())
+            self.store_refresh(typed)
             values = self.values()
         context = RunContext.from_values(values)
-        if self._effective_refresh():
+        if typed or self._stored_refresh():
             self._check_stored_login(context)
             return
         self._start_login_window(context)
@@ -679,17 +675,19 @@ class SyncDashboard(DashboardParts, QDialog):
                 "Vergleich für Konto «%s» abgeschlossen. Angezeigt wird «%s»."
                 % (account_name, active_name))
             return
+        series_map = _dashboard_plan.series_map_from_metadata(
+            _dashboard_plan.syncable_metadata(metadata))
         try:
             selection = self._confirm_comparison(
                 payload["comparison"], context,
                 client_factory=lambda: self._worker_client(context),
                 automatic=len(_dashboard_plan.plan_collection_updates(
-                    _dashboard_plan.series_map_from_metadata(
-                        _dashboard_plan.syncable_metadata(metadata)), state)))
+                    series_map, state)))
             if selection is None:
                 return
             preparation = _dashboard_plan.plan_actions(
-                self, context, metadata, state, selection)
+                self, context, metadata, state, selection,
+                series_map=series_map)
             if preparation["removals"] and not confirm_deletions(
                     self, preparation["removals"], state,
                     preparation.get("removal_titles")):

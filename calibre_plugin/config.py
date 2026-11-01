@@ -88,8 +88,8 @@ def settings():
         active = _active_name(accounts)
         current = next(item for item in accounts if item["name"] == active)
         return {
-            PREFERRED_FORMATS: copy.deepcopy(
-                PREFERENCES.get(PREFERRED_FORMATS, ["EPUB"])),
+            PREFERRED_FORMATS: list(PREFERENCES.get(PREFERRED_FORMATS,
+                                                    ["EPUB"])),
             "partner_id": current["partner_id"],
             "hardware_id": current["hardware_id"],
             "accounts": accounts,
@@ -129,8 +129,7 @@ def _write_account(name, values, active=None, set_active=False,
     elif not PREFERENCES.get("active_account"):
         PREFERENCES["active_account"] = name
     if preferred_formats is not None:
-        PREFERENCES[PREFERRED_FORMATS] = copy.deepcopy(
-            list(preferred_formats))
+        PREFERENCES[PREFERRED_FORMATS] = list(preferred_formats)
     PREFERENCES.commit()
     return True
 

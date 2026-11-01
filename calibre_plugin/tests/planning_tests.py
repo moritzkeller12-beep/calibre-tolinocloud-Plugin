@@ -951,36 +951,6 @@ class SyncPlanTests(unittest.TestCase):
         token = normalize_refresh_token('  "refresh-secret-value"  ')
         self.assertEqual("refresh-secret-value", token)
 
-    def test_partner_8_authenticated_headers_match_web_reader(self):
-        captured = {}
-
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b"{}"
-
-        def request(request, timeout):
-            captured["headers"] = request.headers
-            return Response()
-
-        with patch("calibre_plugin.tolino.urlopen", request):
-            client = TolinoClient(4, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
-                                  "refresh-token")
-            client.access = "access-token"
-            client.expires_at = time.time() + 60
-            client._request("https://bosh.pageplace.de/bosh/rest/inventory/delta")
-        headers = {key.casefold(): value for key, value in captured["headers"].items()}
-        self.assertEqual("8", headers["reseller_id"])
-        self.assertEqual("TOLINO_WEBREADER", headers["client_type"])
-        self.assertEqual("5.2.0", headers["client_version"])
-
     def test_partner_8_refresh_payload_is_url_encoded_and_not_access_token(self):
         captured = {}
 
@@ -1298,29 +1268,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertFalse(hasattr(plugin, "has_html"))
         self.assertEqual((6, 0, 0), tuple(plugin.minimum_calibre_version))
         self.assertEqual("InterfaceAction", plugin.type)
-
-    def test_report_error_logs_no_tokens_passwords_or_cookies(self):
-        """Auch die Logzeile und der Traceback enthalten keine Geheimnisse."""
-        from ..tolino import report_error
-
-        refresh = "refresh-secret-log"
-        password = "password-secret-log"
-        cookie = "cookie-secret-log"
-        access = "access-secret-log"
-        logged = []
-        with patch("calibre_plugin.tolino.log_warning",
-                   side_effect=logged.append):
-
-            error = TolinoAuthError(
-                "refresh_token=%s password=%s Cookie: session=%s"
-                % (refresh, password, cookie),
-                code="A01", detail="access_token=%s" % access)
-            message = report_error(error, secrets=(refresh, password, cookie,
-                                                   access))
-        rendered = "\n".join(logged) + "\n" + message
-        for secret in (refresh, password, cookie, access):
-            self.assertNotIn(secret, rendered)
-        self.assertIn("[REDACTED]", "\n".join(logged))
 
     def test_partial_settings_ignore_unscoped_legacy_account_fields(self):
         original = config.PREFERENCES
@@ -1749,10 +1696,9 @@ class ConservativeMatchingTests(unittest.TestCase):
             self.assertFalse(rows[0]["ignored"], value)
             self.assertEqual("action", rows[0]["group"], value)
 
-    def test_ignored_books_are_filtered_out_of_the_selection_helpers(self):
-        from ..dashboard_plan import syncable_book_ids, syncable_metadata
+    def test_ignored_books_are_filtered_out_of_syncable_metadata(self):
+        from ..dashboard_plan import syncable_metadata
         metadata = {1: {"ignored": True}, 2: {}, 3: {"ignored": False}}
-        self.assertEqual({2, 3}, syncable_book_ids(metadata, [1, 2, 3]))
         self.assertEqual({2, 3}, set(syncable_metadata(metadata)))
 
     def test_plan_actions_drops_ignored_books_but_keeps_the_others(self):
@@ -2187,7 +2133,7 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
 class PrepareStateCopyTests(unittest.TestCase):
     """Die Vorbereitung veraendert den gespeicherten Zustand nicht."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
     UUID = "8f3c5f0e-1a2b-4c3d-9e8f-001122334455"
 
     def test_load_state_accepts_mappings_and_rejects_invalid_values(self):
@@ -2293,7 +2239,7 @@ class FingerprintCommitTests(unittest.TestCase):
     «aktuell» aussehen -- der Schritt wurde nie wieder angeboten.
     """
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})

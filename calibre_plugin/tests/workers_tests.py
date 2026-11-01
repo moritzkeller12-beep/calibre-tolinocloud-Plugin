@@ -49,7 +49,7 @@ def _changes(read_marks=(), read_unmarks=()):
 class CloudDeletionWorkerTests(unittest.TestCase):
     """Der Worker führt ausdrücklich markierte Cloud-Löschungen direkt aus."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def test_explicitly_marked_deletion_is_executed(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -99,7 +99,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
 class SyncWorkerPartialResultTests(unittest.TestCase):
     """Teilresultate, Abbruch und Kontobindung im SyncWorker (P1/C/E/H)."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -865,7 +865,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 class PrepareWorkerTests(unittest.TestCase):
     """Netz-Vorbereitung im Hintergrund, gebunden an das Konto (P2/G)."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1264,7 +1264,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]})
+                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
         seen = []
 
         class FakeClient(object):
@@ -1297,7 +1297,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]})
+                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
         completed = []
 
         class FakeClient(object):
@@ -1421,7 +1421,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
 class BackgroundCallTokenTests(unittest.TestCase):
     """Einzelaufrufe laufen ohne globalen Refresh-Token-Zähler."""
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1443,7 +1443,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
     Zustandsbereinigung unterbleibt und steht als Fehler im Bericht.
     """
 
-    Signal = worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1762,7 +1762,7 @@ class ReadStatusUnknownTests(unittest.TestCase):
     def test_prepare_worker_reports_an_unknown_read_state(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
-            qt_stub={"pyqtSignal": worker_base_tests.CollectionReconcileWorkerTests
+            qt_stub={"pyqtSignal": worker_base_tests.SyncWorkerCollectionTests
                      ._signal_descriptor()[0]})
         captured, payloads, logged = [], [], []
 
@@ -1886,7 +1886,7 @@ class MultiAccountReadingStateTests(unittest.TestCase):
         return ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal": worker_base_tests
-                     .CollectionReconcileWorkerTests
+                     .SyncWorkerCollectionTests
                      ._signal_descriptor()[0]})
 
     @classmethod

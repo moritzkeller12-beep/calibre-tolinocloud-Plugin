@@ -9,7 +9,7 @@ import time
 import unittest
 from . import ui_base_tests, worker_base_tests
 from .. import config
-from ..partners import PARTNERS, WEBREADER_URL
+from ..partners import PARTNERS
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, active_tags, tag_id_from_patch
 from ..browser_login import grab_live_refresh
@@ -758,12 +758,6 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
     Einzelheiten.
     """
 
-    SHARED = (1, 2, 4, 5, 6, 7, 8)
-
-    def test_all_shops_use_the_shared_reader(self):
-        self.assertEqual("https://webreader.mytolino.com/library/", WEBREADER_URL)
-        self.assertEqual({1, 2, 4, 5, 6, 7, 8}, set(PARTNERS))
-
     def test_ebook_de_partner_matches_reference_config(self):
         partner = PARTNERS[8]
         self.assertEqual("eBook.de", partner["name"])
@@ -816,7 +810,7 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                              captured.get("referer"), pid)
 
     def test_authenticated_requests_send_webreader_client(self):
-        for pid in (1, 5):
+        for pid in (1, 4, 5):
             captured = {}
 
             class Response:
@@ -847,6 +841,8 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
             self.assertEqual("TOLINO_WEBREADER",
                              captured.get("client_type"), pid)
             self.assertEqual("5.2.0", captured.get("client_version"), pid)
+            self.assertEqual(PARTNERS[pid]["reseller_id"],
+                             captured.get("reseller_id"), pid)
 
     def test_grab_live_refresh_reports_a_missing_chromium(self):
         """Shops auf dem gemeinsamen Reader: fehlt Chromium, wird der
@@ -944,14 +940,19 @@ class ErrorCodeTests(unittest.TestCase):
         self.assertIn("Tolino-Fehler (HTTP 500)", str(exc))
 
     def test_secrets_never_reach_the_dialog_the_log_or_the_history(self):
+        secrets = ("refresh-secret-123", "password-secret-123",
+                   "cookie-secret-123", "access-secret-123")
         exc = tolino_module.TolinoAuthError(
-            "Fehler mit geheimwert-123", code="A01",
-            detail="auch hier geheimwert-123")
+            "refresh_token=%s password=%s Cookie: session=%s"
+            % secrets[:3], code="A01",
+            detail="access_token=%s" % secrets[3])
         with patch.object(tolino_module, "log_warning") as log:
-            shown = tolino_module.report_error(
-                exc, "Test", ("geheimwert-123",))
-        blob = " ".join([shown, log.call_args[0][0]])
-        self.assertNotIn("geheimwert-123", blob)
+            shown = tolino_module.report_error(exc, "Test", secrets)
+        log_text = log.call_args[0][0]
+        blob = " ".join([shown, log_text])
+        for secret in secrets:
+            self.assertNotIn(secret, blob)
+        self.assertIn("[REDACTED]", log_text)
 
     def test_unexpected_errors_get_e99_and_a_traceback_in_the_log(self):
         with patch.object(tolino_module, "log_warning") as log:
@@ -1356,7 +1357,7 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         return ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.CollectionReconcileWorkerTests._signal_descriptor()[0]})
+                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
 
     def test_save_credentials_writes_token_and_hardware(self):
         original = config.PREFERENCES

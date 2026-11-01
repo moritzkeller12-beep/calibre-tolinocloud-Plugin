@@ -23,6 +23,7 @@ def local_metadata(dialog, context, state=None):
     state_keys = state_keys_by_book_id(state)
     database = dialog.gui.current_db
     api = database.new_api
+    preferred_formats = normalize_formats(context.preferred_formats)
     for book_id in api.all_book_ids():
         item = api.get_metadata(book_id)
         identifier = book_uuid(item)
@@ -33,6 +34,8 @@ def local_metadata(dialog, context, state=None):
         isbn = (metadata_value(item, "isbn", "")
                 or (identifiers.get("isbn", "")
                     if isinstance(identifiers, dict) else ""))
+        formats = normalize_formats(metadata_value(item, "formats"))
+        preferred = [fmt for fmt in preferred_formats if fmt in formats]
         metadata[book_id] = {
             "uuid": identifier,
             "title": metadata_value(item, "title"),
@@ -42,20 +45,16 @@ def local_metadata(dialog, context, state=None):
             "authors": display_value(metadata_value(
                 item, "authors", metadata_value(item, "author"))),
             "isbn": display_value(isbn),
-            "formats": metadata_value(item, "formats"),
+            "formats": formats,
             "tolino_id": (metadata_tolino_id(item, context.account_name)
                           if context.columns.get("id") else ""),
             "series": str(metadata_value(item, "series") or "").strip(),
+            "format_signatures": format_signatures(
+                database, book_id, preferred),
         }
         if context.columns.get("read"):
             metadata[book_id]["calibre_read"] = bool_column_value(
                 item, TOLINO_READ_COLUMN)
-    preferred_formats = normalize_formats(context.preferred_formats)
-    for book_id, item in metadata.items():
-        item["formats"] = normalize_formats(item["formats"])
-        preferred = [fmt for fmt in preferred_formats if fmt in item["formats"]]
-        item["format_signatures"] = format_signatures(
-            database, book_id, preferred)
     return metadata
 
 
@@ -65,17 +64,14 @@ def syncable_metadata(metadata):
             if not (isinstance(item, dict) and item.get("ignored"))}
 
 
-def syncable_book_ids(metadata, book_ids):
-    """Ausgewählte Calibre-Nummern ohne die ignorierten Bücher."""
-    return set(book_ids or ()) & set(syncable_metadata(metadata))
-
-
-def plan_actions(dialog, context, metadata, state, selection):
+def plan_actions(dialog, context, metadata, state, selection, series_map=None):
     """Turn the confirmed selection into concrete jobs and next state."""
     preferred = normalize_formats(context.preferred_formats)
     # Ignorierte Bücher fallen hier endgültig heraus -- unabhängig davon,
     # was die Auswahl enthält.
-    requested_uploads = syncable_book_ids(metadata, selection["uploads"])
+    syncable = syncable_metadata(metadata)
+    syncable_ids = set(syncable)
+    requested_uploads = set(selection["uploads"]) & syncable_ids
     uploads = plan_sync(
         metadata, state, preferred, upload_book_ids=requested_uploads)
     planned_book_ids = {record[0] for record in uploads}
@@ -94,14 +90,14 @@ def plan_actions(dialog, context, metadata, state, selection):
     titles = titles_for(metadata, removal_titles)
     meta_updates = plan_metadata_updates(
         metadata, state, uploads,
-        only_book_ids=syncable_book_ids(metadata, selection["metadata"]))
-    series_map = series_map_from_metadata(syncable_metadata(metadata))
+        only_book_ids=set(selection["metadata"]) & syncable_ids)
+    if series_map is None:
+        series_map = series_map_from_metadata(syncable)
     jobs, skipped_uploads = upload_jobs(dialog, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
-    planned_uploads = {item.book_id for item in uploads}
     planned_meta = {record[0] for record in meta_updates}
     gaps = {
-        "uploads": len(set(selection["uploads"]) - planned_uploads),
+        "uploads": len(set(selection["uploads"]) - planned_book_ids),
         "metadata": len(set(selection["metadata"]) - planned_meta),
     }
     return {

@@ -377,7 +377,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 lambda given, prep, state=None, comparison=None:
                 started.append(given))
 
-            def plan(_dashboard, given, _metadata, _state, _selection):
+            def plan(_dashboard, given, _metadata, _state, _selection,
+                     series_map=None):
                 self.assertFalse(hasattr(given, "refresh_token"))
                 return _preparation()
 
