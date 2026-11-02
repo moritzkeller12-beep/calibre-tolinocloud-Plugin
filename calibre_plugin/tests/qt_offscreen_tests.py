@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                              QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                              QHeaderView, QInputDialog, QLabel, QLineEdit,
                              QMenu, QMessageBox, QProgressBar, QPushButton,
-                             QStyle, QStyledItemDelegate,
+                             QProxyStyle, QStyle, QStyledItemDelegate,
                              QStyleOptionViewItem, QTableWidget,
                              QTableWidgetItem, QVBoxLayout)
 
@@ -60,7 +60,8 @@ def _install_calibre_qt_shim():
 
 
 _install_calibre_qt_shim()
-from calibre_plugin.ui_dialogs import InventoryDialog  # noqa: E402
+from calibre_plugin.ui_dialogs import (  # noqa: E402
+    InventoryDialog, _CenteredCheckDelegate)
 
 
 class InventoryDialogQtTests(unittest.TestCase):
@@ -133,6 +134,37 @@ class InventoryDialogQtTests(unittest.TestCase):
                          dialog.table.item(0, 2).checkState())
         self.assertEqual(["cloud-4"], _read_ids(dialog, True))
         dialog.close()
+
+    def test_check_indicator_is_drawn_once_and_centered(self):
+        class RecordingStyle(QProxyStyle):
+            def __init__(self):
+                super().__init__()
+                self.check_rects = []
+
+            def drawPrimitive(self, element, option, painter, widget=None):
+                if element == QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck:
+                    self.check_rects.append(option.rect)
+                return super().drawPrimitive(element, option, painter, widget)
+
+        table = QTableWidget(1, 1)
+        self.addCleanup(table.close)
+        style = RecordingStyle()
+        table.setStyle(style)
+        table.setItemDelegate(_CenteredCheckDelegate(table))
+        item = QTableWidgetItem()
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled |
+                      Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        table.setItem(0, 0, item)
+        table.resize(120, 50)
+        table.show()
+        self.app.processEvents()
+        style.check_rects.clear()
+        table.viewport().grab()
+        self.assertEqual(1, len(style.check_rects))
+        cell = table.visualRect(table.model().index(0, 0))
+        self.assertLessEqual(
+            abs(style.check_rects[0].center().x() - cell.center().x()), 1)
 
     def test_title_column_stays_wider_than_author_column(self):
         dialog = InventoryDialog([{

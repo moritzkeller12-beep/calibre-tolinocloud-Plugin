@@ -794,8 +794,7 @@ class TolinoClient:
                 "Gelesen-Markierung ohne Buch.", code="E99",
                 short="Es wurde kein Buch ausgewählt.")
         revision, patches = self.sync_snapshot()
-        active = _sync_data.active_tags(
-            patches, "system", _sync_data.READ_TAG)
+        active = _sync_data.active_read_tags(patches)
         updates = []
         for book_id in ids:
             existing = active.get((str(book_id), _sync_data.READ_TAG))
@@ -804,8 +803,10 @@ class TolinoClient:
                     updates.append(_sync_data.tag_patch(
                         "add", book_id, _sync_data.READ_TAG, "system"))
             elif existing is not None:
+                category = str(
+                    (existing.get("value") or {}).get("category") or "system")
                 updates.append(_sync_data.tag_patch(
-                    "remove", book_id, _sync_data.READ_TAG, "system",
+                    "remove", book_id, _sync_data.READ_TAG, category,
                     revision=existing["value"].get("revision"),
                     tag_id=_sync_data.tag_id_from_patch(existing)))
         if not updates:

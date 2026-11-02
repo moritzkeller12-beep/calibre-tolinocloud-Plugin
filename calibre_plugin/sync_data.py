@@ -5,6 +5,9 @@ import time
 from .errors import TolinoApiError
 
 READ_TAG = "collection_finished_readings_name"
+# Der Reader legt die Gelesen-Marke je nach Quelle als System- oder
+# Sammlungs-Tag ab. Beide Formen bezeichnen denselben Zustand.
+READ_TAG_CATEGORIES = ("system", "collection")
 
 
 def tag_patch(op, book_id, name, category, revision=None, tag_id=None):
@@ -63,9 +66,17 @@ def active_tags(patches, category, name=None):
     return active
 
 
+def active_read_tags(patches):
+    """Aktive Gelesen-Marken in beiden Cloud-Schreibweisen."""
+    active = {}
+    for category in READ_TAG_CATEGORIES:
+        for key, item in active_tags(patches, category, READ_TAG).items():
+            active.setdefault(key, item)
+    return active
+
+
 def read_ids(patches):
-    return {book_id for book_id, _name in active_tags(
-        patches, "system", READ_TAG)}
+    return {book_id for book_id, _name in active_read_tags(patches)}
 
 
 def bookmark_path_parts(path):

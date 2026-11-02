@@ -111,12 +111,17 @@ class _CenteredCheckDelegate(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         show_check = bool(
             opt.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator)
-        # Der native Delegate zeichnet alles ausser dem Indikator; der wird
-        # anschliessend mittig statt links gesetzt.
-        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
-        QStyledItemDelegate.paint(self, painter, opt, index)
         style = opt.widget.style() if opt.widget is not None else None
-        if not show_check or style is None:
+        if style is None:
+            QStyledItemDelegate.paint(self, painter, option, index)
+            return
+        # QStyledItemDelegate.paint() initialisiert die Option erneut und
+        # zeichnet den Indikator dadurch wieder links. Deshalb den Zellinhalt
+        # direkt ueber den Style zeichnen und den Indikator einmal mittig setzen.
+        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem,
+                          opt, painter, opt.widget)
+        if not show_check:
             return
         check = QStyleOptionViewItem(opt)
         check.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator

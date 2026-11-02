@@ -184,6 +184,46 @@ def reading_state(entry):
     return reading
 
 
+def comparison_read_updates(comparison):
+    """(Calibre-Nummer, gelesen?) für eindeutig zugeordnete Zeilen.
+
+    Die Werte sind die bestätigte Cloud-Sicht. Unbekannte Abrufe und nicht
+    zugeordnete Zeilen liefern keinen Schreibauftrag.
+    """
+    updates = []
+    for row in comparison or ():
+        if (not isinstance(row, dict)
+                or row.get("status") not in _READING_STATUSES):
+            continue
+        book_id = row.get("book_id")
+        read = row.get("read")
+        if (book_id is None or not str(row.get("tolino_id") or "").strip()
+                or read is None or not getattr(read, "known", False)):
+            continue
+        updates.append((book_id, bool(read.cloud)))
+    return updates
+
+
+def comparison_progress_updates(comparison):
+    """(Calibre-Nummer, Prozent) für eindeutig zugeordnete Zeilen.
+
+    Ein bekannter Stand ohne Bookmark liefert ``None`` und leert die
+    informative Fortschrittsspalte; unbekannte Abrufe liefern nichts.
+    """
+    updates = []
+    for row in comparison or ():
+        if (not isinstance(row, dict)
+                or row.get("status") not in _READING_STATUSES):
+            continue
+        book_id = row.get("book_id")
+        progress = row.get("progress")
+        if (book_id is None or not str(row.get("tolino_id") or "").strip()
+                or progress is None or not getattr(progress, "known", False)):
+            continue
+        updates.append((book_id, progress.percent))
+    return updates
+
+
 def store_reading_state(state, comparison):
     """Bekannte Cloud-Lesewerte in den State des abgefragten Kontos übernehmen.
 

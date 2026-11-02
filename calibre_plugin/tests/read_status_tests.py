@@ -1,6 +1,7 @@
 """Tolino-Lesestatus im Vergleichsdialog; #tolino_read bleibt informativ."""
 
-from ..comparison import ProgressState, ReadState
+from ..comparison import (ProgressState, ReadState, comparison_progress_updates,
+                          comparison_read_updates)
 import unittest
 from ._support import _read_ids, compare_inventory
 from .dialogs_tests import _QtDialogTest
@@ -109,6 +110,36 @@ class ReadColumnComparisonTests(unittest.TestCase):
                                  ["EPUB"], read_ids=set(), read_column=False)
         self.assertFalse(rows[0]["read"])
         self.assertNotIn("read_local", rows[0])
+
+    def test_existing_cloud_read_state_becomes_a_column_update(self):
+        metadata = self._metadata((False, None))
+        state = {"22222222-2222-2222-2222-222222222222": {
+            "tolino_id": "t-2"}}
+        rows = compare_inventory(metadata, state, self.INVENTORY,
+                                 ["EPUB"], read_ids={"t-2"}, read_column=True)
+        self.assertEqual([(1, False), (2, True)],
+                         comparison_read_updates(rows))
+
+        unknown = compare_inventory(metadata, state, self.INVENTORY,
+                                    ["EPUB"], read_ids=None,
+                                    read_column=True)
+        self.assertEqual([], comparison_read_updates(unknown))
+
+    def test_existing_cloud_progress_becomes_a_column_update(self):
+        metadata = self._metadata((False, None))
+        state = {"22222222-2222-2222-2222-222222222222": {
+            "tolino_id": "t-2"}}
+        rows = compare_inventory(
+            metadata, state, self.INVENTORY, ["EPUB"], read_ids=set(),
+            read_column=True, progress_by_id={
+                "t-2": {"percent": 37, "current": "130", "last": "350"}})
+        self.assertEqual([(1, None), (2, 37)],
+                         comparison_progress_updates(rows))
+
+        unknown = compare_inventory(metadata, state, self.INVENTORY,
+                                    ["EPUB"], read_ids=None,
+                                    read_column=True, progress_by_id=None)
+        self.assertEqual([], comparison_progress_updates(unknown))
 
     def test_cloud_status_is_still_used_for_dialog_defaults(self):
         metadata = self._metadata((False, None))

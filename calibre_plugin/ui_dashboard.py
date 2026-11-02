@@ -12,6 +12,8 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
                      save_account, save_credentials,
                      set_active_account, settings)
 from .run_context import RunContext
+from .comparison import (comparison_progress_updates,
+                         comparison_read_updates)
 from .identifiers import valid_book_uuid
 from .library import (TOLINO_IGNORE_COLUMN, column_state,
                       bool_column_available, normalize_formats,
@@ -82,6 +84,32 @@ def _mirror_account_reading(dashboard, account_name=None):
         return written
     except Exception as exc:
         log_warning("Lese-Spalten konnten nicht aktualisiert werden: %s"
+                    % sanitize_error(exc))
+        return 0
+
+
+def _mirror_comparison_reading(dashboard, comparison):
+    """Bekannte Cloud-Lesewerte direkt nach dem Vergleich spiegeln.
+
+    Der Konto-State bleibt die Quelle für den Konto-Wechsel; dieser direkte
+    Weg stellt sicher, dass auch ein bereits vor dem Vergleich vorhandener
+    Cloud-Stand in den Spalten ankommt.
+    """
+    read_updates = comparison_read_updates(comparison)
+    progress_updates = comparison_progress_updates(comparison)
+    if not (read_updates or progress_updates):
+        return 0
+    try:
+        database = dashboard.gui.current_db
+        written = update_read_status(database, read_updates)
+        written += update_progress_status(database, progress_updates)
+        if written:
+            book_ids = {book_id for book_id, _value
+                        in read_updates + progress_updates}
+            _refresh_library_view(dashboard, book_ids)
+        return written
+    except Exception as exc:
+        log_warning("Lesewerte konnten nicht nach Calibre gespiegelt werden: %s"
                     % sanitize_error(exc))
         return 0
 
@@ -658,6 +686,7 @@ class SyncDashboard(DashboardParts, QDialog):
         is_active = active_name == account_name
         if is_active:
             _mirror_account_reading(self, account_name)
+            _mirror_comparison_reading(self, payload.get("comparison"))
 
         # Den rotierten Token speichert bereits der Client-Callback.
         hardware = getattr(self, "hardware", None)

@@ -7,6 +7,8 @@
 - Der Vergleich extrahiert ISBNs aus tolino-Produktkennungen, ordnet unsichere Treffer konservativ zu und entfernt veraltete Cloud-IDs samt altem Lesestand.
 - Der Prepare-Zustand wird vor der Migration gesichert und nur bei Änderung einmal geschrieben. Parallele Konto-Wechsel bleiben getrennt; Token-Rotation und Keep-alive sind abgesichert.
 - Der Release-Build entfernt Kommentare und Docstrings; Download-, Browser- und Qt6-Randfälle sind gehärtet.
+- Behebt doppelt gezeichnete Auswahlkästchen im Vergleichsfenster; der Indikator wird einmal mittig gezeichnet.
+- Bereits in der Cloud gesetzte Lesestände erscheinen nach dem Vergleich in `#tolino_read` und `#tolino_progress`; die Gelesen-Marke wird auch als Sammlungs-Tag erkannt.
 
 ## 0.1.05
 

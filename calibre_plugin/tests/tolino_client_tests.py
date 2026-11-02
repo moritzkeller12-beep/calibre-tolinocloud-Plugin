@@ -1335,6 +1335,29 @@ class TagStateReducerTests(unittest.TestCase):
         client.mark_read_many([self.BOOK])
         self.assertEqual([], calls)  # effektiv gelesen: kein Schreibvorgang
 
+    def test_read_ids_accepts_the_collection_form(self):
+        client = TolinoClient(4, "hardware", "refresh-token")
+        patches = [self._patch("add", READ_TAG, category="collection"),
+                   self._patch("add", "SciFi", category="collection",
+                               tag_id="2")]
+        client.sync_snapshot = lambda: ("rev", patches)
+        self.assertEqual({self.BOOK}, client.read_ids())
+
+    def test_unmark_removes_a_collection_mark_with_its_category(self):
+        client = TolinoClient(4, "hardware", "refresh-token")
+        client.sync_snapshot = lambda: (
+            "rev", [self._patch("add", READ_TAG, category="collection",
+                                tag_id="9")])
+        calls = []
+        client._sync_patch = lambda payload: calls.append(payload) or {
+            "revision": "new"}
+        client.mark_read_many([self.BOOK], finished=False)
+        patch = calls[0]["patches"][0]
+        self.assertEqual("remove", patch["op"])
+        self.assertEqual("collection", patch["value"]["category"])
+        self.assertEqual("/publications/%s/tags/9" % self.BOOK,
+                         patch["path"])
+
     def test_unmark_removes_only_the_active_tag_id(self):
         client = TolinoClient(4, "hardware", "refresh-token")
         patches = [self._patch("add", READ_TAG, tag_id="1"),
