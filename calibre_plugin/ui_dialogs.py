@@ -5,9 +5,8 @@ from typing import NamedTuple
 from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QHBoxLayout, QHeaderView, QLabel, QMessageBox,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, QStyledItemDelegate, QStyle,
-                        QStyleOptionViewItem, QEvent, Qt, _set_enabled,
-                        gui_guard, start_call)
+                        QVBoxLayout, QStyledItemDelegate, QEvent, Qt,
+                        _set_enabled, gui_guard, start_call)
 from .planning_values import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import comparison_sort_key, sort_comparison_rows
@@ -103,43 +102,12 @@ def row_capabilities(row):
     }
 
 
-class _CenteredCheckDelegate(QStyledItemDelegate):
-    """Zeichnet Check-Indikatoren mittig; die ganze Zelle schaltet um."""
+class _CellCheckDelegate(QStyledItemDelegate):
+    """Schaltet eine Auswahlzelle beim Klick auf die ganze Zelle um.
 
-    def paint(self, painter, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        show_check = bool(
-            opt.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator)
-        style = opt.widget.style() if opt.widget is not None else None
-        if style is None:
-            QStyledItemDelegate.paint(self, painter, option, index)
-            return
-        # QStyledItemDelegate.paint() initialisiert die Option erneut und
-        # zeichnet den Indikator dadurch wieder links. Deshalb den Zellinhalt
-        # direkt ueber den Style zeichnen und den Indikator einmal mittig setzen.
-        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem,
-                          opt, painter, opt.widget)
-        if not show_check:
-            return
-        check = QStyleOptionViewItem(opt)
-        check.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
-        rect = style.subElementRect(
-            QStyle.SubElement.SE_ItemViewItemCheckIndicator,
-            check, opt.widget)
-        check.rect = QStyle.alignedRect(
-            opt.direction, Qt.AlignmentFlag.AlignCenter, rect.size(), opt.rect)
-        if check.checkState == Qt.CheckState.PartiallyChecked:
-            check.state |= QStyle.StateFlag.State_NoChange
-        elif check.checkState == Qt.CheckState.Checked:
-            check.state |= QStyle.StateFlag.State_On
-        else:
-            check.state |= QStyle.StateFlag.State_Off
-        check.state &= ~QStyle.StateFlag.State_HasFocus
-        style.drawPrimitive(
-            QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
-            check, painter, opt.widget)
+    Gezeichnet wird der normale, linksbündige Qt-Indikator; ein eigener
+    Paint-Pfad ist weder nötig noch erwünscht.
+    """
 
     def editorEvent(self, event, model, option, index):
         if event.type() in (QEvent.Type.MouseButtonRelease,
@@ -380,7 +348,7 @@ class InventoryDialog(QDialog):
     def _build_table(self, layout):
         """Tabelle samt Kopfzeilen-Tooltips und Sortierung aufbauen."""
         self.table = QTableWidget(0, len(self.HEADERS))
-        self._check_delegate = _CenteredCheckDelegate(self.table)
+        self._check_delegate = _CellCheckDelegate(self.table)
         for column in range(len(self.ACTION_COLUMNS)):
             self.table.setItemDelegateForColumn(column, self._check_delegate)
         self.table.setHorizontalHeaderLabels(self.HEADERS)

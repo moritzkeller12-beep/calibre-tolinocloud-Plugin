@@ -440,7 +440,7 @@ class LiveGrabTests(unittest.TestCase):
         """Nach einer Ablehnung uebernimmt das Plugin die NEU geschriebene
         Kopie des Readers – und die Hardware-ID der aktuellen Sitzung
         gewinnt gegen die konfigurierte (Nutzerfall: gespeichert
-        da284d4b..., Reader-Sitzung lief mit eb22e4cf...)."""
+        abcdef01-2345-4678-9abc-def012345678..., Reader-Sitzung lief mit 12345678-1234-4abc-8def-1234567890ab...)."""
         from ..browser_login import grab_live_refresh
         spent = self._jwt(time.time() - 10, "sess-live")
         fresh = self._jwt(time.time() - 5, "sess-live")
@@ -469,7 +469,7 @@ class LiveGrabTests(unittest.TestCase):
         def fake_client(partner_id, hw):
             return clients.pop(0)(partner_id, hw)
 
-        reader_hw = "eb22e4cf-bb01-4550-bff7-334446bb20b1"
+        reader_hw = "12345678-1234-4abc-8def-1234567890ab"
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
              patch("calibre_plugin.browser_login.TolinoClient", fake_client), \
@@ -487,7 +487,7 @@ class LiveGrabTests(unittest.TestCase):
     def test_exchange_uses_grabbed_hardware_over_configured(self):
         """Die aus dem Reader mitgelesene Hardware-ID wird beim Tausch
         verwendet – nicht die alte konfigurierte (Nutzerfall: Plugin
-        speicherte da284d4b..., Reader-Sitzung lief mit eb22e4cf...)."""
+        speicherte abcdef01-2345-4678-9abc-def012345678..., Reader-Sitzung lief mit 12345678-1234-4abc-8def-1234567890ab...)."""
         from ..browser_login import _exchange_grabbed_token
         fresh = self._jwt(time.time() - 5, "sess-live")
         seen_hw = []
@@ -503,12 +503,12 @@ class LiveGrabTests(unittest.TestCase):
 
         with patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
             _exchange_grabbed_token(
-                4, "da284d4b-6348-43c8-b0ab-17edcddfb25d",
+                4, "abcdef01-2345-4678-9abc-def012345678",
                 {"refresh": [fresh],
-                 "hardware": ["eb22e4cf-bb01-4550-bff7-334446bb20b1"]},
+                 "hardware": ["12345678-1234-4abc-8def-1234567890ab"]},
                 [fresh])
         self.assertEqual(
-            ["eb22e4cf-bb01-4550-bff7-334446bb20b1"], seen_hw)
+            ["12345678-1234-4abc-8def-1234567890ab"], seen_hw)
 
     def test_grab_live_refresh_waits_while_window_is_on_partner_login_page(self):
         """Der Partner-Login-Tab ist kein geschlossenes Fenster.
@@ -696,7 +696,7 @@ class LiveGrabTests(unittest.TestCase):
         Token-Set oft genau dort ab, und ohne den Merge ist er
         fuer den Grab unsichtbar."""
         from .. import cdp as cdp_module
-        reader_hw = "eb22e4cf-bb01-4550-bff7-334446bb20b1"
+        reader_hw = "12345678-1234-4abc-8def-1234567890ab"
 
         def handler(message, send_raw):
             expr = str((message.get("params") or {}).get("expression", ""))
@@ -936,11 +936,11 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         Ciphertext weitergereicht."""
         from ..token_candidates import _normalize_live_grab
         blob = self._encrypt(json.dumps({
-            "userId": "54389718", "devKey": "dk",
-            "hardwareId": "eb22e4cf-bb01-4550-bff7-334446bb20b1"}))
+            "userId": "12345678", "devKey": "dk",
+            "hardwareId": "12345678-1234-4abc-8def-1234567890ab"}))
         normalized = _normalize_live_grab({"refresh": [],
                                            "hardware": [blob]})
-        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"],
+        self.assertEqual(["12345678-1234-4abc-8def-1234567890ab"],
                          normalized["hardware"])
         # Undurchdringbarer Ciphertext verschwindet stillschweigend,
         # statt als Hardware-Id gespeichert oder getauscht zu werden.

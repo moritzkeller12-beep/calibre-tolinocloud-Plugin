@@ -418,6 +418,61 @@ class TolinoClient:
                 headers["Content-Type"] = content_type or "application/json"
         return Request(url, data=body, headers=headers, method=method)
 
+    def _retry_http_auth(self, exc, authenticated, retry):
+        """Retry once after a 401 with a stale access token."""
+        if not (exc.code == 401 and authenticated and self.refresh
+                and retry["auth"]):
+            return False
+        detail = self.last_error_text.casefold()
+        if "invalid_grant" in detail or "reuse exceeded" in detail:
+            return False
+        retry["auth"] = False
+        self.access = None
+        self.login()
+        return True
+
+    def _retry_http_hardware(self, exc, url, authenticated, retry):
+        """Retry a BOSH 400 after renewing the device registration."""
+        if not (exc.code == 400 and authenticated
+                and url != self.partner.get("token_url")):
+            return False
+        if retry["hardware"]:
+            self._hw_registered_now = False
+            if self._recover_device_registration():
+                retry["hardware"] = False
+                if self._hw_registered_now:
+                    time.sleep(_REGISTER_SETTLE_SECONDS)
+                return True
+        elif self._hw_registered_now:
+            self._hw_registered_now = False
+            time.sleep(_REGISTER_SETTLE_SECONDS)
+            return True
+        return False
+
+    def _retry_http_waf(self, exc, url, retry):
+        """Wait and retry a token-endpoint 403 that looks like a bot check."""
+        if not (exc.code == 403
+                and url == self.partner.get("token_url")
+                and retry["waf"] < len(_WAF_RETRY_SECONDS)):
+            return False
+        if not any(marker in self.last_error_text.casefold()
+                   for marker in _BOT_CHECK_MARKERS):
+            return False
+        time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
+        retry["waf"] += 1
+        return True
+
+    def _raise_http_auth_error(self, exc):
+        """Raise the cleaned A01 error for a 401/403 response."""
+        self.access = None
+        message = re.sub(r"<[^>]+>", " ", self.last_error_text or "")
+        message = re.sub(r"\s+", " ", message).strip()
+        message = message or "no response detail"
+        raise TolinoAuthError(
+            "tolino hat die Anmeldung abgelehnt (%s): %s"
+            % (exc.code, message), code="A01",
+            short="tolino hat die Anmeldung abgelehnt.")
+
     def _handle_http_error(self, exc, raw_detail, url, authenticated, retry):
         """Fehlerdetail merken und entweder wiederholen lassen oder werfen.
 
@@ -428,28 +483,10 @@ class TolinoClient:
             _http_error_detail(raw_detail),
             (self.refresh, self.access))[:500]
 
-        if (exc.code == 401 and authenticated and self.refresh
-                and retry["auth"]
-                and "invalid_grant" not in self.last_error_text.casefold()
-                and "reuse exceeded" not in self.last_error_text.casefold()):
-            retry["auth"] = False
-            self.access = None
-            self.login()
+        if self._retry_http_auth(exc, authenticated, retry):
             return
-
-        if (exc.code == 400 and authenticated
-                and url != self.partner.get("token_url")):
-            if retry["hardware"]:
-                self._hw_registered_now = False
-                if self._recover_device_registration():
-                    retry["hardware"] = False
-                    if self._hw_registered_now:
-                        time.sleep(_REGISTER_SETTLE_SECONDS)
-                    return
-            elif self._hw_registered_now:
-                self._hw_registered_now = False
-                time.sleep(_REGISTER_SETTLE_SECONDS)
-                return
+        if self._retry_http_hardware(exc, url, authenticated, retry):
+            return
 
         # Ein 403 ausserhalb des Token-Endpunkts ist meist eine Rechte- oder
         # Quotabeschränkung. Nur der Token-Endpunkt spricht von Anmeldung;
@@ -461,25 +498,9 @@ class TolinoClient:
                 short="tolino meldet einen Fehler (HTTP 403).")
 
         if exc.code in (401, 403):
-            if (exc.code == 403
-                    and url == self.partner.get("token_url")
-                    and retry["waf"] < len(_WAF_RETRY_SECONDS)
-                    and any(marker in self.last_error_text.casefold()
-                            for marker in _BOT_CHECK_MARKERS)):
-                time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
-                retry["waf"] += 1
+            if self._retry_http_waf(exc, url, retry):
                 return
-
-            self.access = None
-
-            message = re.sub(
-                r"\s+", " ", re.sub(
-                    r"<[^>]+>", " ", self.last_error_text or "")).strip()
-            message = message or "no response detail"
-            raise TolinoAuthError(
-                "tolino hat die Anmeldung abgelehnt (%s): %s"
-                % (exc.code, message), code="A01",
-                short="tolino hat die Anmeldung abgelehnt.")
+            self._raise_http_auth_error(exc)
         raise TolinoApiError(
             "tolino-Fehler (HTTP %s): %s"
             % (exc.code, self.last_error_text), code="N03",

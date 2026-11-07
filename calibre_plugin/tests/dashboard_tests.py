@@ -230,6 +230,29 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
         self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
 
+    def test_reading_columns_follow_books_without_real_uuid(self):
+        title = "Der Schwarm"
+        other = "Ein anderes Buch"
+        ui_module, dashboard, _calls = self._run(2)
+        config.save_account("erstes", {"state": {title: {
+            "tolino_id": "t1", "calibre_id": 1,
+            "reading": {"read": True, "progress": {"percent": 100}}}}},
+            active="erstes")
+        config.save_account("zweites", {"state": {}}, active="zweites")
+
+        db = _ReadingDb({1: title, 2: other},
+                        read={1: True, 2: False}, progress={1: 100, 2: 42})
+        dashboard.gui = type("Gui", (), {"current_db": db})()
+        self.assertTrue(dashboard.switch_account("zweites"))
+        self.assertIsNone(db.values[TOLINO_READ_COLUMN][1])
+        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
+        self.assertIsNone(db.values[TOLINO_READ_COLUMN][2])
+        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][2])
+        self.assertTrue(dashboard.switch_account("erstes"))
+        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
+        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
+        self.assertIsNone(db.values[TOLINO_READ_COLUMN][2])
+
     def test_account_switch_stays_available_while_a_comparison_runs(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None)

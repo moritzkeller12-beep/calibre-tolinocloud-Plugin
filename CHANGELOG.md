@@ -1,14 +1,17 @@
 # Änderungen
 
+## 0.1.07
+
+- Beim Konto-Wechsel bleiben Lesestatus und Fortschritt auch für Bücher ohne echte Calibre-UUID erhalten; die Zuordnung nutzt die Calibre-Nummer als Fallback.
+- Die Auswahlkästchen im Vergleichsfenster werden linksbündig statt mittig gezeichnet.
+
 ## 0.1.06
 
-- Lesestatus und Lesefortschritt werden kontobezogen gespeichert. `#tolino_read` und `#tolino_progress` zeigen nur den Stand des aktiven Kontos; beim Wechsel werden fehlende Werte geleert, nie als `0` oder `False`.
-- Neue informative Spalte `#tolino_progress` (0–100, optional mit Position). Unbekannte Abrufe lassen gespeicherte Werte unverändert; ein erfolgreicher Abruf ohne Bookmark leert die Spalte.
+- Lesestatus und Lesefortschritt werden kontobezogen gespeichert; `#tolino_read` und `#tolino_progress` zeigen nur den Stand des aktiven Kontos, fehlende Werte bleiben leer. Die neue Spalte `#tolino_progress` (0–100, optional mit Position) zeigt auch Cloud-Lesestände und Gelesen-Marken; unbekannte Abrufe lassen sie unverändert, ein erfolgreicher Abruf ohne Bookmark leert sie.
 - Der Vergleich extrahiert ISBNs aus tolino-Produktkennungen, ordnet unsichere Treffer konservativ zu und entfernt veraltete Cloud-IDs samt altem Lesestand.
 - Der Prepare-Zustand wird vor der Migration gesichert und nur bei Änderung einmal geschrieben. Parallele Konto-Wechsel bleiben getrennt; Token-Rotation und Keep-alive sind abgesichert.
 - Der Release-Build entfernt Kommentare und Docstrings; Download-, Browser- und Qt6-Randfälle sind gehärtet.
 - Behebt doppelt gezeichnete Auswahlkästchen im Vergleichsfenster; der Indikator wird einmal mittig gezeichnet.
-- Bereits in der Cloud gesetzte Lesestände erscheinen nach dem Vergleich in `#tolino_read` und `#tolino_progress`; die Gelesen-Marke wird auch als Sammlungs-Tag erkannt.
 
 ## 0.1.05
 

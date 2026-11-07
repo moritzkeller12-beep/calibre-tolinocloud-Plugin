@@ -652,7 +652,7 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_inventory_shape_uses_nested_metadata_and_keeps_id_technical(self):
         item = {
-            "deliverableId": "bosh_8_543897186788677497438396920",
+            "deliverableId": "bosh_8_000000000000000000000000000001",
             "epubMetaData": {
                 "title": "Der echte Tolino-Titel",
                 "author": [{"name": "Eine Autorin"}],
@@ -665,7 +665,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("Der echte Tolino-Titel", record["title"])
         self.assertEqual("Eine Autorin", record["authors"])
         self.assertEqual("978-3-1234-5678-9", record["isbn"])
-        self.assertEqual("bosh_8_543897186788677497438396920",
+        self.assertEqual("bosh_8_000000000000000000000000000001",
                          record["tolino_id"])
         rows = compare_inventory(
             {1: {"uuid": "u1", "title": "Der echte Tolino-Titel",
@@ -675,13 +675,13 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual("identical", rows[0]["status"])
         self.assertEqual("Der echte Tolino-Titel", rows[0]["title"])
-        self.assertEqual("bosh_8_543897186788677497438396920", rows[0]["tolino_id"])
+        self.assertEqual("bosh_8_000000000000000000000000000001", rows[0]["tolino_id"])
         self.assertNotEqual("new_in_calibre", rows[0]["status"])
 
     def test_inventory_without_title_is_not_matchable_and_does_not_show_id_as_title(self):
         rows = compare_inventory(
             {1: {"uuid": "u1", "title": "Local title", "formats": ["EPUB"]}},
-            {}, [{"deliverableId": "bosh_8_543897186788677497438396920",
+            {}, [{"deliverableId": "bosh_8_000000000000000000000000000001",
                   "epubMetaData": {"author": [{"name": "Author"}]}}],
             ["EPUB"],
         )
@@ -689,7 +689,7 @@ class SyncPlanTests(unittest.TestCase):
         remote = rows[1]
         self.assertEqual("not_matchable", remote["status"])
         self.assertEqual("", remote["title"])
-        self.assertEqual("bosh_8_543897186788677497438396920", remote["tolino_id"])
+        self.assertEqual("bosh_8_000000000000000000000000000001", remote["tolino_id"])
         self.assertIn("ohne Titel", remote["explanation"])
 
     def test_inventory_normalization_accepts_ebook_and_deliverable_shapes(self):

@@ -454,7 +454,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertEqual(bool(row["metadata"]), metadata.isChecked())
                 self.assertFalse(mark_read.isChecked())
             self.assertIsInstance(dialog._check_delegate,
-                                  ui_module.dialogs._CenteredCheckDelegate)
+                                  ui_module.dialogs._CellCheckDelegate)
             self.assertEqual({0: dialog._check_delegate,
                               1: dialog._check_delegate,
                               2: dialog._check_delegate},

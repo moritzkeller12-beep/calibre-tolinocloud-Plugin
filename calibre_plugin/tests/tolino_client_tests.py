@@ -599,16 +599,16 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client.hardware_callback = adopted.append
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="eb22e4cf-bb01-4550-bff7-334446bb20b1"), \
+                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
              patch("calibre_plugin.tolino.TolinoClient._register_hardware",
                    side_effect=AssertionError("register must not run")):
             data = client.inventory()
         self.assertEqual([], data)
         self.assertEqual(2, len(seen))
         self.assertEqual(seen[0], seen[1])
-        self.assertEqual("eb22e4cf-bb01-4550-bff7-334446bb20b1",
+        self.assertEqual("12345678-1234-4abc-8def-1234567890ab",
                          client.hardware)
-        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"], adopted)
+        self.assertEqual(["12345678-1234-4abc-8def-1234567890ab"], adopted)
 
     def test_inventory_registers_hardware_when_device_list_unavailable(self):
         """Ohne Geraeteliste wird die eigene Hardware-ID per registerhw
@@ -741,7 +741,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client = self._client("stale-hw-000")
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="eb22e4cf-bb01-4550-bff7-334446bb20b1"), \
+                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
              patch("calibre_plugin.tolino.TolinoClient._register_hardware",
                    side_effect=AssertionError("register must not run")), \
              patch("calibre_plugin.tolino.time.sleep",
@@ -1166,7 +1166,7 @@ class SyncDataResponseShapeTests(unittest.TestCase):
     fehlen.
     """
 
-    PUB = "bosh_8_543897185873248682836029182"
+    PUB = "bosh_8_000000000000000000000000000001"
     READ = {"op": "replace",
             "path": "/publications/%s/tags/6438286" % PUB,
             "value": {"revision": "1-abc", "modified": 17,

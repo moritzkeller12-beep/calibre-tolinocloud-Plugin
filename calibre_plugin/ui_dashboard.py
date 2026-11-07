@@ -14,7 +14,7 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
 from .run_context import RunContext
 from .comparison import (comparison_progress_updates,
                          comparison_read_updates)
-from .identifiers import valid_book_uuid
+from .identifiers import is_real_uuid, valid_book_uuid
 from .library import (TOLINO_IGNORE_COLUMN, column_state,
                       bool_column_available, normalize_formats,
                       update_progress_status, update_read_status,
@@ -31,21 +31,42 @@ from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
 
 
-def _book_ids_by_uuid(dashboard):
-    """Aktuelle Calibre-Nummer je UUID -- nie die gespeicherte Nummer raten."""
+def _book_key_index(dashboard, state=None):
+    """Return all book ids and every key that maps to one of them.
+
+    Calibre UUIDs are authoritative when present. Legacy state keys and the
+    ``calibre-<id>`` fallback are used for books whose UUID field contains a
+    title or another non-UUID value.
+    """
     api = getattr(
         getattr(getattr(dashboard, "gui", None), "current_db", None),
         "new_api", None)
     if api is None:
-        return {}
+        return [], {}
     book_ids = list(api.all_book_ids())
     uuids = api.all_field_for("uuid", book_ids) or {}
+    known_ids = set(book_ids)
     mapping = {}
     for book_id in book_ids:
         key = valid_book_uuid(uuids.get(book_id))
         if key:
             mapping[key] = book_id
-    return mapping
+        mapping.setdefault("calibre-%d" % book_id, book_id)
+    if isinstance(state, dict):
+        for key, entry in state.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                book_id = int(entry.get("calibre_id"))
+            except (TypeError, ValueError):
+                continue
+            state_key = str(key)
+            if book_id not in known_ids:
+                continue
+            if state_key in mapping and is_real_uuid(state_key):
+                continue
+            mapping[state_key] = book_id
+    return book_ids, mapping
 
 
 def _mirror_account_reading(dashboard, account_name=None):
@@ -54,18 +75,17 @@ def _mirror_account_reading(dashboard, account_name=None):
         account = account_by_name(
             account_name or getattr(dashboard, "account_name", "")) or {}
         state = load_state(account.get("state"))
-        book_ids_by_uuid = _book_ids_by_uuid(dashboard)
-        if not book_ids_by_uuid:
+        book_ids, book_ids_by_key = _book_key_index(dashboard, state)
+        if not book_ids:
             return 0
         # Erst alle Bücher auf unbekannt setzen, dann die Werte des Kontos
         # darüberlegen: kein Wert eines anderen Kontos bleibt stehen.
-        book_ids = list(book_ids_by_uuid.values())
         read_updates = dict.fromkeys(book_ids)
         progress_updates = dict.fromkeys(book_ids)
         for key, entry in state.items():
             if not isinstance(entry, dict):
                 continue
-            book_id = book_ids_by_uuid.get(str(key))
+            book_id = book_ids_by_key.get(str(key))
             reading = entry.get("reading")
             if book_id is None or not isinstance(reading, dict):
                 continue

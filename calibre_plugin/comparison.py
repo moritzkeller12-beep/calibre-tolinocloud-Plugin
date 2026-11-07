@@ -184,64 +184,49 @@ def reading_state(entry):
     return reading
 
 
-def comparison_read_updates(comparison):
-    """(Calibre-Nummer, gelesen?) für eindeutig zugeordnete Zeilen.
-
-    Die Werte sind die bestätigte Cloud-Sicht. Unbekannte Abrufe und nicht
-    zugeordnete Zeilen liefern keinen Schreibauftrag.
-    """
-    updates = []
+def _matched_reading_rows(comparison):
+    """Yield confirmed rows with both a Calibre and a tolino mapping."""
     for row in comparison or ():
         if (not isinstance(row, dict)
                 or row.get("status") not in _READING_STATUSES):
             continue
         book_id = row.get("book_id")
+        tolino_id = str(row.get("tolino_id") or "").strip()
+        if book_id is None or not tolino_id:
+            continue
+        yield row, book_id, tolino_id
+
+
+def comparison_read_updates(comparison):
+    """Return confirmed (Calibre id, read?) updates for mapped rows."""
+    updates = []
+    for row, book_id, _tolino_id in _matched_reading_rows(comparison):
         read = row.get("read")
-        if (book_id is None or not str(row.get("tolino_id") or "").strip()
-                or read is None or not getattr(read, "known", False)):
+        if read is None or not getattr(read, "known", False):
             continue
         updates.append((book_id, bool(read.cloud)))
     return updates
 
 
 def comparison_progress_updates(comparison):
-    """(Calibre-Nummer, Prozent) für eindeutig zugeordnete Zeilen.
-
-    Ein bekannter Stand ohne Bookmark liefert ``None`` und leert die
-    informative Fortschrittsspalte; unbekannte Abrufe liefern nichts.
-    """
+    """Return confirmed (Calibre id, percent) updates for mapped rows."""
     updates = []
-    for row in comparison or ():
-        if (not isinstance(row, dict)
-                or row.get("status") not in _READING_STATUSES):
-            continue
-        book_id = row.get("book_id")
+    for row, book_id, _tolino_id in _matched_reading_rows(comparison):
         progress = row.get("progress")
-        if (book_id is None or not str(row.get("tolino_id") or "").strip()
-                or progress is None or not getattr(progress, "known", False)):
+        if progress is None or not getattr(progress, "known", False):
             continue
         updates.append((book_id, progress.percent))
     return updates
 
 
 def store_reading_state(state, comparison):
-    """Bekannte Cloud-Lesewerte in den State des abgefragten Kontos übernehmen.
-
-    Nur eindeutig zugeordnete Zeilen dürfen schreiben. Unbekannte Abrufe
-    lassen den gespeicherten Wert unverändert; ein erfolgreicher Abruf ohne
-    Bookmark speichert dagegen ausdrücklich ``percent=None``.
-    """
+    """Store confirmed cloud reading values in the queried account state."""
     if not isinstance(state, dict):
         return 0
     changed = 0
-    for row in comparison or ():
-        if (not isinstance(row, dict)
-                or row.get("status") not in _READING_STATUSES):
-            continue
+    for row, book_id, tolino_id in _matched_reading_rows(comparison):
         key = valid_book_uuid(row.get("uuid"))
-        tolino_id = str(row.get("tolino_id") or "").strip()
-        book_id = row.get("book_id")
-        if not key or not tolino_id or book_id is None:
+        if not key:
             continue
         read = row.get("read")
         progress = row.get("progress")
@@ -412,6 +397,22 @@ def _title_only_match(remote, title_key, matched, disputed):
     return ("review", "ambiguous" if len(free_titles) > 1 else "title_only")
 
 
+def _stored_tolino_id(metadata, old, use_metadata_ids):
+    """Stored cloud ID from state, else the optional #tolino_id column."""
+    column_id = metadata_tolino_id(metadata) if use_metadata_ids else ""
+    return str(old.get("tolino_id") or column_id or "").strip()
+
+
+def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
+    """Persist a confirmed assignment under the Calibre UUID."""
+    entry = state.get(book_uuid)
+    if not isinstance(entry, dict):
+        entry = {}
+        state[book_uuid] = entry
+    entry["tolino_id"] = tolino_id
+    entry.setdefault("calibre_id", book_id)
+
+
 def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                           use_metadata_ids, matched, disputed, read_known,
                           read_ids, progress_known, progress_by_id,
@@ -424,9 +425,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     authors = _metadata_text(metadata, "authors")
     isbn = _metadata_text(metadata, "isbn")
     old = state_entry(state, book_uuid)
-    stored_id = str(old.get("tolino_id") or
-                    (metadata_tolino_id(metadata) if use_metadata_ids else "")
-                    or "").strip()
+    stored_id = _stored_tolino_id(metadata, old, use_metadata_ids)
     title_key = normalize_title(title)
     author_key = normalized_authors(authors)
     local_formats = normalize_formats(metadata.get("formats"))
@@ -448,16 +447,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
         if override:
             match_reason = override
         if book_uuid and tolino_id and status != "review":
-            # Nur bestaetigte Zuordnungen bleiben kleben: ein Prueffall
-            # (etwa widersprechende ISBN) darf die Serie nicht automatisch
-            # dem falschen Cloud-Buch zuordnen.
-            # Calibre-ID erhält die Zuordnung, falls die UUID später fehlt.
-            entry = state.get(book_uuid)
-            if not isinstance(entry, dict):
-                entry = {}
-                state[book_uuid] = entry
-            entry["tolino_id"] = tolino_id
-            entry.setdefault("calibre_id", book_id)
+            _remember_tolino_match(state, book_uuid, book_id, tolino_id)
     elif ambiguous:
         status = "review"
         disputed.update(candidates)

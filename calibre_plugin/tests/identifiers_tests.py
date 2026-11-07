@@ -71,7 +71,7 @@ class BookIdentifierSourceTests(unittest.TestCase):
                 self.assertFalse(is_real_uuid(value))
 
     def test_a_title_is_never_accepted_as_an_identifier(self):
-        """Feldbefund: In Moritz' Bibliothek steht im `uuid`-Feld
+        """Feldbefund: In einer Bibliothek steht im `uuid`-Feld
         der Titel, teils mit, teils ohne Leerzeichen. Ein Titel ist keine
         Kennung -- er ist nicht eindeutig und aendert sich mit dem Titel.
         `valid_book_uuid` bleibt tolerant, die QUELLEN aber nicht.
