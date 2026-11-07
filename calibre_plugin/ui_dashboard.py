@@ -36,7 +36,7 @@ def _book_key_index(dashboard):
 
     Calibre UUIDs are authoritative when present; the ``calibre-<id>``
     fallback is used for books whose UUID field contains a title or another
-    non-UUID value. Legacy state keys are not consulted here.
+    non-UUID value.
     """
     api = getattr(
         getattr(getattr(dashboard, "gui", None), "current_db", None),
@@ -630,7 +630,7 @@ class SyncDashboard(DashboardParts, QDialog):
         state = load_state(account.get("state"))
         try:
             # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
-            metadata = _dashboard_plan.local_metadata(self, context, state)
+            metadata = _dashboard_plan.local_metadata(self, context)
         except Exception as exc:
             self._show_prepare_error(exc, context)
             return

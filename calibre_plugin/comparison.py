@@ -2,7 +2,7 @@
 import hashlib
 
 from .identifiers import state_entry, valid_book_uuid
-from .library import metadata_tolino_id, normalize_formats
+from .library import normalize_formats
 from .matching import (author_tokens, authors_match, is_valid_isbn,
                        normalize_isbn, normalize_match_text, normalize_title,
                        normalized_authors)
@@ -397,10 +397,9 @@ def _title_only_match(remote, title_key, matched, disputed):
     return ("review", "ambiguous" if len(free_titles) > 1 else "title_only")
 
 
-def _stored_tolino_id(metadata, old, use_metadata_ids):
-    """Stored cloud ID from state, else the optional #tolino_id column."""
-    column_id = metadata_tolino_id(metadata) if use_metadata_ids else ""
-    return str(old.get("tolino_id") or column_id or "").strip()
+def _stored_tolino_id(old):
+    """Stored cloud ID from the sync state."""
+    return str(old.get("tolino_id") or "").strip()
 
 
 def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
@@ -414,9 +413,8 @@ def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
 
 
 def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
-                          use_metadata_ids, matched, disputed, read_known,
-                          read_ids, progress_known, progress_by_id,
-                          read_column=False):
+                          matched, disputed, read_known, read_ids,
+                          progress_known, progress_by_id, read_column=False):
     """Eine lokale Vergleichszeile -- inklusive einer bestaetigten Zuordnung."""
     # Ignorierte Bücher bleiben zugeordnet, erhalten aber keine Aktion.
     ignored = bool(metadata.get("ignored"))
@@ -425,7 +423,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     authors = _metadata_text(metadata, "authors")
     isbn = _metadata_text(metadata, "isbn")
     old = state_entry(state, book_uuid)
-    stored_id = _stored_tolino_id(metadata, old, use_metadata_ids)
+    stored_id = _stored_tolino_id(old)
     title_key = normalize_title(title)
     author_key = normalized_authors(authors)
     local_formats = normalize_formats(metadata.get("formats"))
@@ -507,13 +505,12 @@ def _leftover_remote_row(row, disputed, title_counts, row_index):
 
 
 def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
-                      use_metadata_ids=True, read_ids=(), read_column=False,
-                      progress_by_id=None):
+                      read_ids=(), read_column=False, progress_by_id=None):
     """Return deterministic local/remote rows for the pre-sync confirmation view.
 
     Matching is deliberately conservative and ordered:
 
-    1. the stored tolino ID (state or ``#tolino_id`` column),
+    1. the stored tolino ID (sync state),
     2. one unique *valid* ISBN,
     3. one unique normalized title+author pair.
 
@@ -558,7 +555,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     for book_id, metadata in metadata_by_id.items():
         local_rows.append(_local_comparison_row(
             book_id, metadata, remote, state, preferred_formats,
-            use_metadata_ids, matched, disputed, read_known, read_ids,
+            matched, disputed, read_known, read_ids,
             progress_known, progress_by_id, read_column))
     for index, row in enumerate(remote.rows):
         if index not in matched:

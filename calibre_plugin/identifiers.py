@@ -1,4 +1,4 @@
-"""Book identifier normalization and sync-state key migration."""
+"""Book identifier normalization."""
 import re
 
 _UUID_TEXT = re.compile(
@@ -45,53 +45,7 @@ def book_uuid(item):
     return value if value and is_real_uuid(value) else ""
 
 
-def migrate_state_keys(metadata_by_id, state):
-    """Migrate fallback state keys to real UUIDs when the UUID becomes known."""
-    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
-        return 0
-    # Der Index wird EINMAL gebaut; eine Suche je Buch waere quadratisch.
-    keys = state_keys_by_book_id(state)
-    migrated = 0
-    for book_id, metadata in metadata_by_id.items():
-        if not isinstance(metadata, dict):
-            continue
-        key = valid_book_uuid(metadata.get("uuid"))
-        if not key or key in state:
-            continue
-        try:
-            old_key = keys.get(int(book_id), "")
-        except (TypeError, ValueError):
-            continue
-        if not old_key or old_key == key or old_key not in state:
-            continue
-        entry = state.pop(old_key)
-        if isinstance(entry, dict):
-            entry["calibre_id"] = book_id
-        state[key] = entry
-        migrated += 1
-    return migrated
-
-
 def state_entry(state, key):
     """Zustandseintrag eines Buchs -- fremde Formen zählen als leer."""
     entry = state.get(key) if key and isinstance(state, dict) else None
     return entry if isinstance(entry, dict) else {}
-
-
-def state_keys_by_book_id(state):
-    """Calibre-Nummer → gespeicherter Zustandsschlüssel in EINEM Durchlauf.
-
-    Wer mehrere Bücher prüft, baut den Index einmal.
-    """
-    keys = {}
-    if not isinstance(state, dict):
-        return keys
-    for key, entry in state.items():
-        if not isinstance(entry, dict):
-            continue
-        recorded = entry.get("calibre_id")
-        try:
-            keys[int(recorded)] = str(key)
-        except (TypeError, ValueError):
-            continue
-    return keys

@@ -1075,9 +1075,9 @@ class PrepareWorkerTests(unittest.TestCase):
         return saved, payloads
 
     def test_all_state_changes_without_reading_are_saved_once(self):
-        """Migration und veraltete Kopien dürfen nicht am Lese-Update hängen."""
+        """Stale copies must not depend on a reading update."""
         uuid = "55555555-5555-5555-5555-555555555555"
-        saved, payloads = self._run_state({"calibre-1": {
+        saved, payloads = self._run_state({uuid: {
             "tolino_id": "gone", "calibre_id": 1,
             "reading": {"read": True, "progress": {"percent": 100}}}},
             uuid)
@@ -1088,14 +1088,6 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertEqual({uuid}, set(state))
         self.assertNotIn("tolino_id", state[uuid])
         self.assertNotIn("reading", state[uuid])
-
-    def test_key_migration_alone_is_saved_once(self):
-        """Auch ein reiner Key-Umzug muss im Konto ankommen."""
-        uuid = "66666666-6666-6666-6666-666666666666"
-        saved, payloads = self._run_state(
-            {"calibre-1": {"calibre_id": 1}}, uuid)
-        self.assertEqual(1, len(saved))
-        self.assertEqual({uuid}, set(payloads[0]["state"]))
 
     def test_a_partly_readable_inventory_still_compares(self):
         """Einzelne nicht zuordenbare Cloud-Datensätze verhindern den Vergleich nicht."""

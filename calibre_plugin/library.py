@@ -20,23 +20,23 @@ def _column_value(metadata):
     """Read the raw Calibre custom-column value."""
     getter = getattr(metadata, "get", None)
     if callable(getter):
-        return getter(TOLINO_COLUMN, "") or getter("tolino_id", "") or ""
+        return getter(TOLINO_COLUMN, "") or ""
     return ""
 
 
 def _decode_tolino_ids(value):
-    """Return the account map, or None when value is a legacy single ID."""
+    """Return the account map; malformed or plain values are empty."""
     if isinstance(value, dict):
         decoded = value
     elif isinstance(value, str) and value.strip().startswith("{"):
         try:
             decoded = json.loads(value)
         except (TypeError, ValueError):
-            return None
+            return {}
     else:
-        return None
+        return {}
     if not isinstance(decoded, dict):
-        return None
+        return {}
     return {str(name): str(book_id).strip()
             for name, book_id in decoded.items()
             if name and isinstance(book_id, (str, int)) and str(book_id).strip()}
@@ -49,11 +49,8 @@ def _encode_tolino_ids(ids):
 
 def metadata_tolino_id(metadata, account_name=None):
     """Read this account's ID from its account-map column."""
-    value = _column_value(metadata)
-    account_ids = _decode_tolino_ids(value)
-    if account_ids is not None:
-        return str(account_ids.get(str(account_name), "") or "").strip()
-    return str(value or "").strip()
+    account_ids = _decode_tolino_ids(_column_value(metadata))
+    return str(account_ids.get(str(account_name), "") or "").strip()
 
 
 def _column_available(database, column, datatypes):
@@ -127,7 +124,7 @@ def create_custom_columns(database, labels=None):
 
     Calibre kennt dafuer ``create_custom_column(label, name, datatype,
     is_multiple, editable, display)`` -- auf ``new_api`` wie auf dem
-    Legacy-Objekt. Vorhandene Spalten werden nie angefasst: es wird weder
+    Datenbankobjekt. Vorhandene Spalten werden nie angefasst: es wird weder
     etwas geloescht noch ein Typ geaendert.
 
     ``labels`` grenzt das auf einzelne Spalten ein -- in den Einstellungen
@@ -237,25 +234,17 @@ def update_tolino_ids(database, updates, account_name=None):
     """Merge this account's IDs into the shared Calibre custom column."""
     if not updates or TOLINO_COLUMN not in database.field_metadata:
         return 0
-    api = database.new_api
     account_name = str(account_name or "").strip()
+    if not account_name:
+        return 0
+    api = database.new_api
     values = {}
     for book_id, tolino_id in updates:
         if book_id is None or not api.has_id(book_id):
             continue
         new_id = str(tolino_id or "").strip()
-        if not account_name:
-            values[book_id] = new_id
-            continue
-        raw = api.field_for(TOLINO_COLUMN, book_id)
-        account_ids = _decode_tolino_ids(raw)
-        if account_ids is None:
-            # Migrate a legacy single ID when this account first writes the
-            # account-scoped column value.
-            legacy = str(raw or "").strip()
-            account_ids = {}
-            if legacy:
-                account_ids[account_name] = legacy
+        account_ids = _decode_tolino_ids(
+            api.field_for(TOLINO_COLUMN, book_id))
         if new_id:
             account_ids[account_name] = new_id
         else:

@@ -3,6 +3,7 @@
 ## 0.1.07
 
 - Beim Konto-Wechsel bleiben Lesestatus und Fortschritt auch für Bücher ohne echte Calibre-UUID erhalten; die Zuordnung nutzt die Calibre-Nummer als Fallback.
+- Alte State-Schlüssel, die frühere Einzel-ID in `#tolino_id` und der alte `/registerhw`-Fallback entfallen; Zuordnungen laufen ausschließlich über echte UUIDs bzw. `calibre-<id>`.
 - Die Auswahlkästchen im Vergleichsfenster werden linksbündig statt mittig gezeichnet.
 
 ## 0.1.06

@@ -4,15 +4,13 @@ from collections import Counter
 
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
-from .planning_values import plural
 from .token_vault import TOKEN_VAULT
 from .config import account_secrets, load_state, save_account
 from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint, reading_state,
                          store_reading_state)
-from .identifiers import (display_title, migrate_state_keys, state_entry,
-                          valid_book_uuid)
+from .identifiers import display_title, state_entry, valid_book_uuid
 from .library import image_suffix
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
@@ -549,20 +547,13 @@ class PrepareWorker(QObject):
         return True
 
     def _load_comparison_state(self):
-        """Load the state and snapshot it before migration/comparison.
+        """Load the state and snapshot it before comparison.
 
         `load_state` may return the preferences mapping unchanged. Only the
         working state is copied; the original snapshot stays untouched.
         """
         original = load_state(self.state)
-        state = copy.deepcopy(original)
-        # Bestehende Cloud-Zuordnungen unter Fallback-Kennungen behalten,
-        # wenn Calibre spaeter eine echte UUID liefert.
-        migrated = migrate_state_keys(self.metadata, state)
-        if migrated:
-            log_warning("Zustand auf die echte Kennung umgestellt: %d %s."
-                        % (migrated, plural(migrated, "Buch", "Bücher")))
-        return state, original
+        return copy.deepcopy(original), original
 
     def _load_optional(self, label, loader):
         """Optionale Cloud-Daten laden; ein Fehler bleibt «unbekannt»."""
@@ -591,7 +582,6 @@ class PrepareWorker(QObject):
         columns = self.context.columns
         comparison = compare_inventory(
             self.metadata, state, inventory, self.context.preferred_formats,
-            use_metadata_ids=columns.get("id", True),
             read_ids=read_ids,
             read_column=bool(columns.get("read")),
             progress_by_id=progress_by_id)
@@ -631,7 +621,7 @@ class PrepareWorker(QObject):
                 return
             store_reading_state(state, comparison)
             if state != original_state:
-                # Alle Änderungen des Vergleichs (Migration, bestätigte IDs,
+                # Alle Änderungen des Vergleichs (bestätigte IDs,
                 # veraltete Kopien, Lesewerte) in EINEM Schreibvorgang sichern.
                 # Nur bestehende Konten aktualisieren: ein während des
                 # Vergleichs entferntes Konto darf nicht wieder erscheinen.

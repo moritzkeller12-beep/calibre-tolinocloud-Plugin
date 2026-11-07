@@ -269,7 +269,7 @@ class SyncPlanTests(unittest.TestCase):
 
         Dialog.gui.current_db.new_api = Api()
         context = RunContext.from_values(Dialog.values(), Dialog.columns)
-        result = local_metadata(Dialog(), context, {})
+        result = local_metadata(Dialog(), context)
         self.assertEqual("9783161484100", result[1]["isbn"])
 
     def test_upload_job_skips_cover_when_cover_read_raises_os_error(self):
@@ -351,17 +351,6 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual(["identical", "identical"], [row["status"] for row in rows])
         self.assertTrue(all(row["status"] == "identical" for row in rows))
-
-    def test_custom_column_value_is_a_matching_fallback(self):
-        metadata = {1: {"uuid": "u1", "title": "Changed title",
-                        "formats": ["EPUB"], "#tolino_id": "bosh_8_saved"}}
-        rows = compare_inventory(
-            metadata, {}, [{"deliverableId": "bosh_8_saved", "title": "Remote title"}],
-            ["EPUB"],
-        )
-        self.assertEqual("changed", rows[0]["status"])
-        self.assertEqual("bosh_8_saved", rows[0]["tolino_id"])
-        self.assertEqual("stored_id", rows[0]["match_reason"])
 
     def test_missing_columns_are_created_once_with_calibre_types(self):
         """Der Knopf legt nur fehlende Spalten an -- mit passendem Typ."""
@@ -483,13 +472,13 @@ class SyncPlanTests(unittest.TestCase):
                 self.writes.append((field, values))
                 self.current.update(values)
 
-        class LegacyDatabase:
+        class Database:
             field_metadata = {TOLINO_COLUMN: {"datatype": "text"}}
 
             def __init__(self):
                 self.new_api = DatabaseAPI()
 
-        database = LegacyDatabase()
+        database = Database()
         self.assertEqual(1, update_tolino_ids(
             database, [(7, "bosh_8_new")], account_name="Konto A"))
         self.assertEqual([(TOLINO_COLUMN,
@@ -510,6 +499,9 @@ class SyncPlanTests(unittest.TestCase):
             def has_id(self, _book_id):
                 return True
 
+            def field_for(self, _field, _book_id):
+                return ""
+
             def set_field(self, field, values):
                 self.writes.append((field, values))
 
@@ -521,11 +513,14 @@ class SyncPlanTests(unittest.TestCase):
 
         database = Database()
         self.assertTrue(column_state(database)["id"])
-        self.assertEqual(1, update_tolino_ids(database, [(7, "bosh_8_new")]))
-        self.assertEqual([(TOLINO_COLUMN, {7: "bosh_8_new"})],
-                         database.new_api.writes)
+        self.assertEqual(1, update_tolino_ids(
+            database, [(7, "bosh_8_new")], account_name="Konto A"))
+        self.assertEqual(
+            [(TOLINO_COLUMN, {7: '{"Konto A":"bosh_8_new"}'})],
+            database.new_api.writes)
         # Nach dem Löschen einer Cloud-Kopie wird die Spalte geleert.
-        self.assertEqual(1, update_tolino_ids(database, [(7, "")]))
+        self.assertEqual(1, update_tolino_ids(
+            database, [(7, "")], account_name="Konto A"))
         self.assertEqual((TOLINO_COLUMN, {7: ""}), database.new_api.writes[-1])
 
         class Gone(Database):
@@ -535,13 +530,15 @@ class SyncPlanTests(unittest.TestCase):
                 self.new_api.set_field = lambda *_args: (_ for _ in ()).throw(
                     AssertionError("deleted books must not be written"))
 
-        self.assertEqual(0, update_tolino_ids(Gone(), [(7, "")]))
+        self.assertEqual(0, update_tolino_ids(
+            Gone(), [(7, "")], account_name="Konto A"))
 
         class Missing:
             field_metadata = {}
 
         self.assertFalse(column_state(Missing())["id"])
-        self.assertEqual(0, update_tolino_ids(Missing(), [(7, "bosh_8_new")]))
+        self.assertEqual(0, update_tolino_ids(
+            Missing(), [(7, "bosh_8_new")], account_name="Konto A"))
 
     def test_account_column_update_preserves_and_clears_only_selected_account(self):
         class DatabaseAPI:
@@ -579,35 +576,9 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("id-b", metadata_tolino_id(
             {TOLINO_COLUMN: database.new_api.value}, "Konto B"))
 
-    def test_legacy_column_id_is_adopted_by_active_account(self):
-        class DatabaseAPI:
-            value = "legacy-id"
-
-            @staticmethod
-            def has_id(book_id):
-                return book_id == 7
-
-            def field_for(self, field, book_id):
-                assert field == TOLINO_COLUMN and book_id == 7
-                return self.value
-
-            def set_field(self, _field, values):
-                self.value = values[7]
-
-        class Database:
-            field_metadata = {TOLINO_COLUMN: {"datatype": "text"}}
-
-            def __init__(self):
-                self.new_api = DatabaseAPI()
-
-        database = Database()
-        self.assertEqual("legacy-id", metadata_tolino_id(
-            {TOLINO_COLUMN: "legacy-id"}, "Konto A"))
-        update_tolino_ids(database, [(7, "new-id")], account_name="Konto A")
-        self.assertEqual('{"Konto A":"new-id"}', database.new_api.value)
-
-    def test_metadata_tolino_id_accepts_calibre_style_mapping(self):
-        self.assertEqual("bosh_8_id", metadata_tolino_id({"#tolino_id": " bosh_8_id "}))
+    def test_plain_column_id_is_ignored(self):
+        self.assertEqual("", metadata_tolino_id(
+            {TOLINO_COLUMN: " bosh_8_id "}, "Konto A"))
 
     def test_inventory_comparison_uses_isbn_and_reports_remote_only(self):
         metadata = {
@@ -1237,10 +1208,10 @@ class SyncPlanTests(unittest.TestCase):
             config.PREFERENCES.update(before)
     def test_configuration_contract_keeps_supported_preference_keys(self):
         """Gespeicherte UI-Optionen und Konten haben feste Schluessel."""
-        legacy_global = ("preferred_formats",)
+        global_keys = ("preferred_formats",)
         supported_accounts = ("partner_id", "hardware_id", "refresh_token",
                               "state")
-        self.assertEqual((config.PREFERRED_FORMATS,), legacy_global)
+        self.assertEqual((config.PREFERRED_FORMATS,), global_keys)
         self.assertEqual(supported_accounts, config.ACCOUNT_KEYS)
         original = config.PREFERENCES
         try:
@@ -1249,7 +1220,7 @@ class SyncPlanTests(unittest.TestCase):
             config.save_account(config.DEFAULT_ACCOUNT_NAME, {},
                                 preferred_formats=["PDF"])
             values = config.settings()
-            for key in legacy_global:
+            for key in global_keys:
                 self.assertIn(key, values)
         finally:
             config.PREFERENCES = original
@@ -1269,7 +1240,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual((6, 0, 0), tuple(plugin.minimum_calibre_version))
         self.assertEqual("InterfaceAction", plugin.type)
 
-    def test_partial_settings_ignore_unscoped_legacy_account_fields(self):
+    def test_partial_settings_ignore_unscoped_account_fields(self):
         original = config.PREFERENCES
         try:
             config.PREFERENCES = config.JSONConfig("test")
@@ -1473,7 +1444,7 @@ class MetadataUpdatePlanTests(unittest.TestCase):
                 self.assertEqual(1, len(updates))
                 self.assertEqual("d1", updates[0][2])
 
-    def test_legacy_state_without_fingerprints_is_updated_when_selected(self):
+    def test_state_without_fingerprints_is_updated_when_selected(self):
         """Ohne gespeicherte Fingerabdrücke ist der Cloud-Stand unbekannt --
         wer auswählt, bekommt den Abgleich."""
         book = self._book()
@@ -1820,7 +1791,7 @@ class ConservativeMatchingTests(unittest.TestCase):
             self._metadata(title="Neuer Titel", authors="Neu"), state,
             [{"deliverableId": "t-other", "title": "Anderes"},
              {"deliverableId": "t-known", "title": "Alter Titel", "authors": "Alt"}],
-            ["EPUB"], use_metadata_ids=False)
+            ["EPUB"])
         self.assertEqual("t-known", rows[0]["tolino_id"])
         self.assertEqual("conflict", rows[0]["match_reason"])
         self.assertEqual("review", rows[0]["status"])
@@ -2190,14 +2161,8 @@ class PrepareStateCopyTests(unittest.TestCase):
         # nach dem bestaetigten Lauf in den Einstellungen.
         self.assertNotIn("tolino_id", stored[self.UUID])
 
-class StateKeyMigrationTests(unittest.TestCase):
-    """«calibre-<Nummer>» und die echte UUID sind derselbe Zustand.
-
-    Liefert Calibre bei einem Lauf keine Kennung, liegt der Zustand unter
-    der Ersatzkennung. Kommt später die echte UUID, fand der Vergleich
-    nichts mehr: die Tolino-ID galt als verloren (doppelter Upload) und
-    der alte Schlüssel als «Buch verschwunden» (Löschkandidat).
-    """
+class FallbackKeyPlanTests(unittest.TestCase):
+    """Fallback keys remain isolated; missing books are never deleted blindly."""
 
     UUID = "8f3c5f0e-1a2b-4c3d-9e8f-001122334455"
 
@@ -2212,7 +2177,7 @@ class StateKeyMigrationTests(unittest.TestCase):
                               "fingerprint": "1:1",
                               "collections": [["Serie", "S1"]]}}
 
-    def test_fallback_key_is_not_migrated_by_the_sync_planner(self):
+    def test_fallback_key_stays_untouched_by_the_sync_planner(self):
         state = self._state()
         uploads = plan_sync(
             self._metadata(), state, ["EPUB"], upload_book_ids={7})

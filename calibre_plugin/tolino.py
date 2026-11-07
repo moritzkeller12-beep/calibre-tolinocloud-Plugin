@@ -653,15 +653,13 @@ class TolinoClient:
             "client_type": WEBREADER_CLIENT_TYPE,
             "client_version": WEBREADER_CLIENT_VERSION,
         }
-        for url in (BASE_URL + "/v2/registerhw", BASE_URL + "/registerhw"):
-            try:
-                self._request(url, "POST", payload,
-                              content_type="application/json",
-                              _extra_headers=extra)
-                return True
-            except TolinoError:
-                continue
-        return False
+        try:
+            self._request(BASE_URL + "/v2/registerhw", "POST", payload,
+                          content_type="application/json",
+                          _extra_headers=extra)
+            return True
+        except TolinoError:
+            return False
 
     def _recover_device_registration(self):
         """Adopt or register a hardware id the BOSH service accepts."""
