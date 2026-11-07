@@ -14,7 +14,7 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
 from .run_context import RunContext
 from .comparison import (comparison_progress_updates,
                          comparison_read_updates)
-from .identifiers import is_real_uuid, valid_book_uuid
+from .identifiers import valid_book_uuid
 from .library import (TOLINO_IGNORE_COLUMN, column_state,
                       bool_column_available, normalize_formats,
                       update_progress_status, update_read_status,
@@ -31,12 +31,12 @@ from .ui_dialogs import InventoryDialog
 from .ui_workers import PrepareWorker, SyncWorker
 
 
-def _book_key_index(dashboard, state=None):
+def _book_key_index(dashboard):
     """Return all book ids and every key that maps to one of them.
 
-    Calibre UUIDs are authoritative when present. Legacy state keys and the
-    ``calibre-<id>`` fallback are used for books whose UUID field contains a
-    title or another non-UUID value.
+    Calibre UUIDs are authoritative when present; the ``calibre-<id>``
+    fallback is used for books whose UUID field contains a title or another
+    non-UUID value. Legacy state keys are not consulted here.
     """
     api = getattr(
         getattr(getattr(dashboard, "gui", None), "current_db", None),
@@ -45,28 +45,32 @@ def _book_key_index(dashboard, state=None):
         return [], {}
     book_ids = list(api.all_book_ids())
     uuids = api.all_field_for("uuid", book_ids) or {}
-    known_ids = set(book_ids)
     mapping = {}
     for book_id in book_ids:
         key = valid_book_uuid(uuids.get(book_id))
         if key:
             mapping[key] = book_id
         mapping.setdefault("calibre-%d" % book_id, book_id)
-    if isinstance(state, dict):
-        for key, entry in state.items():
-            if not isinstance(entry, dict):
-                continue
-            try:
-                book_id = int(entry.get("calibre_id"))
-            except (TypeError, ValueError):
-                continue
-            state_key = str(key)
-            if book_id not in known_ids:
-                continue
-            if state_key in mapping and is_real_uuid(state_key):
-                continue
-            mapping[state_key] = book_id
     return book_ids, mapping
+
+
+def _write_reading_updates(dashboard, read_updates, progress_updates,
+                           error_label):
+    """Write confirmed values and refresh the affected rows once."""
+    if not (read_updates or progress_updates):
+        return 0
+    try:
+        database = dashboard.gui.current_db
+        written = (update_read_status(database, read_updates)
+                   + update_progress_status(database, progress_updates))
+        if written:
+            book_ids = {book_id for book_id, _value
+                        in read_updates + progress_updates}
+            _refresh_library_view(dashboard, book_ids)
+        return written
+    except Exception as exc:
+        log_warning("%s: %s" % (error_label, sanitize_error(exc)))
+        return 0
 
 
 def _mirror_account_reading(dashboard, account_name=None):
@@ -75,7 +79,7 @@ def _mirror_account_reading(dashboard, account_name=None):
         account = account_by_name(
             account_name or getattr(dashboard, "account_name", "")) or {}
         state = load_state(account.get("state"))
-        book_ids, book_ids_by_key = _book_key_index(dashboard, state)
+        book_ids, book_ids_by_key = _book_key_index(dashboard)
         if not book_ids:
             return 0
         # Erst alle Bücher auf unbekannt setzen, dann die Werte des Kontos
@@ -94,14 +98,10 @@ def _mirror_account_reading(dashboard, account_name=None):
             progress = reading.get("progress")
             if isinstance(progress, dict) and "percent" in progress:
                 progress_updates[book_id] = progress.get("percent")
-        read_updates = list(read_updates.items())
-        progress_updates = list(progress_updates.items())
-        database = dashboard.gui.current_db
-        written = (update_read_status(database, read_updates)
-                   + update_progress_status(database, progress_updates))
-        if written:
-            _refresh_library_view(dashboard, book_ids)
-        return written
+        return _write_reading_updates(
+            dashboard, list(read_updates.items()),
+            list(progress_updates.items()),
+            "Lese-Spalten konnten nicht aktualisiert werden")
     except Exception as exc:
         log_warning("Lese-Spalten konnten nicht aktualisiert werden: %s"
                     % sanitize_error(exc))
@@ -115,23 +115,10 @@ def _mirror_comparison_reading(dashboard, comparison):
     Weg stellt sicher, dass auch ein bereits vor dem Vergleich vorhandener
     Cloud-Stand in den Spalten ankommt.
     """
-    read_updates = comparison_read_updates(comparison)
-    progress_updates = comparison_progress_updates(comparison)
-    if not (read_updates or progress_updates):
-        return 0
-    try:
-        database = dashboard.gui.current_db
-        written = update_read_status(database, read_updates)
-        written += update_progress_status(database, progress_updates)
-        if written:
-            book_ids = {book_id for book_id, _value
-                        in read_updates + progress_updates}
-            _refresh_library_view(dashboard, book_ids)
-        return written
-    except Exception as exc:
-        log_warning("Lesewerte konnten nicht nach Calibre gespiegelt werden: %s"
-                    % sanitize_error(exc))
-        return 0
+    return _write_reading_updates(
+        dashboard, comparison_read_updates(comparison),
+        comparison_progress_updates(comparison),
+        "Lesewerte konnten nicht nach Calibre gespiegelt werden")
 
 
 def _persist_sync_result(dialog, state, updates):

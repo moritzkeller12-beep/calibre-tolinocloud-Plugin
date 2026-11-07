@@ -234,7 +234,9 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         title = "Der Schwarm"
         other = "Ein anderes Buch"
         ui_module, dashboard, _calls = self._run(2)
-        config.save_account("erstes", {"state": {title: {
+        # Ohne echte UUID greift der Calibre-ID-Fallback; ein alter
+        # Titel-Schlüssel wird beim Konto-Wechsel nicht mehr ausgewertet.
+        config.save_account("erstes", {"state": {"calibre-1": {
             "tolino_id": "t1", "calibre_id": 1,
             "reading": {"read": True, "progress": {"percent": 100}}}}},
             active="erstes")
