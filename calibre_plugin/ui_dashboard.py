@@ -657,17 +657,21 @@ class SyncDashboard(DashboardParts, QDialog):
                      "snapshot_worker", (worker.ready, worker.failed))
         self.update_status()
 
-    def _finish_snapshot(self):
-        """Snapshot-Thread abräumen, bevor der Netz-Worker startet."""
-        thread = getattr(self, "snapshot_thread", None)
-        self.snapshot_thread = None
-        self.snapshot_worker = None
+    def _finish_progress_thread(self, thread_name, worker_name):
+        """Thread-Referenzen und Fortschrittsanzeige gemeinsam abräumen."""
+        thread = getattr(self, thread_name, None)
+        setattr(self, thread_name, None)
+        setattr(self, worker_name, None)
         self.progress.setRange(0, 1)
         self.progress.setVisible(False)
         self.progress_label.setText("Bereit")
         self.progress_label.setVisible(False)
         _stop_thread(thread, timeout_ms=2000)
         self.update_status()
+
+    def _finish_snapshot(self):
+        """Snapshot-Thread abräumen, bevor der Netz-Worker startet."""
+        self._finish_progress_thread("snapshot_thread", "snapshot_worker")
 
     @gui_guard
     def _snapshot_ready(self, payload):
@@ -708,15 +712,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _finish_prepare(self):
         """Vorbereitungs-Thread sauber abräumen (ohne unbegrenzt zu warten)."""
-        thread = self.prepare_thread
-        self.prepare_thread = None
-        self.prepare_worker = None
-        self.progress.setRange(0, 1)
-        self.progress.setVisible(False)
-        self.progress_label.setText("Bereit")
-        self.progress_label.setVisible(False)
-        _stop_thread(thread, timeout_ms=2000)
-        self.update_status()
+        self._finish_progress_thread("prepare_thread", "prepare_worker")
 
     @gui_guard
     def _prepare_failed(self, message):

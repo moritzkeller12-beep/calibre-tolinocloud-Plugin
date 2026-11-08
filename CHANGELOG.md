@@ -3,9 +3,8 @@
 ## 0.1.07
 
 - Beim Konto-Wechsel bleiben Lesestatus und Fortschritt auch für Bücher ohne echte Calibre-UUID erhalten; die Zuordnung nutzt einen bibliotheksbezogenen Fallback aus Bibliothekskennung und Calibre-Nummer. Eine echte UUID hat Vorrang; alte Einträge werden nicht mehr fälschlich darübergelegt.
-- Alte `calibre-<id>`-Einträge ohne Bibliothekszuordnung werden nicht mehr übernommen. Ungescopte Schlüssel werden für neue Einträge nicht erzeugt.
+- Alte ungescopte `calibre-<id>`-Einträge werden nicht mehr übernommen und nicht neu erzeugt; Zuordnungen laufen über echte UUIDs bzw. den bibliotheksbezogenen Fallback.
 - Fehlt PyCryptodome für verschlüsselte Web-Reader-Tokens, meldet die Anmeldung einen klaren Fehler mit Code A01 statt eines stillen Fehlschlags.
-- Alte State-Schlüssel werden nicht neu erzeugt; Zuordnungen laufen über echte UUIDs bzw. den neuen bibliotheksbezogenen Fallback.
 - Kontobezogene `#tolino_id`-Zuordnungen werden beim ersten Vergleich in den State übernommen; danach ist der State maßgeblich.
 - Die frühere Einzel-ID in `#tolino_id` wird beim ersten kontobezogenen Schreiben ersetzt.
 - Der alte `/registerhw`-Fallback entfällt.
