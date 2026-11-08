@@ -1,8 +1,6 @@
 """Ablauf vom Vergleichsfenster bis zum Sync-Start."""
 
 from ..comparison import ReadState
-from ..identifiers import LEGACY_MIGRATION_KEY
-from ..library import library_scope
 import os
 import tempfile
 import unittest
@@ -139,57 +137,15 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.gui.current_db = database
             seen = []
             dashboard._start_local_snapshot = (
-                lambda db, context, state, migrate:
-                seen.append(("snapshot", db, context, state, migrate)))
+                lambda db, context, state:
+                seen.append(("snapshot", db, context, state)))
             dashboard.start_sync()
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual(["snapshot"], [item[0] for item in seen])
-        _name, given_database, context, _state, _migrate = seen[0]
+        _name, given_database, context, _state = seen[0]
         self.assertIs(database, given_database)
         self.assertTrue(context.columns["id"])
-
-    def test_legacy_state_is_not_adopted_without_confirmation(self):
-        """Ohne Zustimmung bleibt der alte Fallback unberuecksichtigt."""
-        ui_module = self._ui_module()
-        try:
-            settings = dict(self._settings(), account_name="konto",
-                            state={"calibre-7": {"calibre_id": 7,
-                                                 "tolino_id": "t1"}})
-            dashboard = self._dashboard(ui_module, settings)
-            dashboard.gui.current_db = type(
-                "Database", (), {"library_id": "library-a",
-                                 "field_metadata": {}})()
-            dashboard._save_visible_account = lambda *args: None
-            expected_scope = library_scope(dashboard.gui.current_db)
-            asked, snapshots, saved = [], [], []
-
-            class Box:
-                StandardButton = type("Buttons", (), {"Yes": 1, "No": 0})
-
-                @staticmethod
-                def question(*args):
-                    asked.append(args)
-                    return 0
-
-            with patch.object(ui_module.dashboard, "QMessageBox", Box), \
-                 patch.object(ui_module.dashboard, "account_by_name",
-                              lambda _name: {"state": settings["state"]}), \
-                 patch.object(ui_module.dashboard, "save_account",
-                              lambda *args, **kwargs:
-                              saved.append((args, kwargs))):
-                dashboard._start_local_snapshot = (
-                    lambda _db, _context, _state, migrate:
-                    snapshots.append(migrate))
-                dashboard.start_sync()
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(asked))
-        self.assertEqual([False], snapshots)
-        self.assertEqual(1, len(saved))
-        marker = settings["state"][LEGACY_MIGRATION_KEY]
-        self.assertTrue(marker["declined"])
-        self.assertEqual(expected_scope, marker["scope"])
 
     def test_sync_column_availability_accepts_calibre_field_metadata(self):
         ui_module = self._ui_module()
@@ -217,7 +173,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard._save_visible_account = lambda _values: None
             contexts = []
             dashboard._start_local_snapshot = (
-                lambda _db, context, _state, _migrate:
+                lambda _db, context, _state:
                 contexts.append(context))
             dashboard.start_sync()
             self.assertTrue(contexts[0].columns.get("id"))
@@ -255,7 +211,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                     dashboard._save_visible_account = lambda _values: None
                     contexts = []
                     dashboard._start_local_snapshot = (
-                        lambda _db, context, _state, _migrate:
+                        lambda _db, context, _state:
                         contexts.append(context))
                     dashboard.start_sync()
                     self.assertIs(expected, contexts[0].columns.get("id"))
@@ -271,7 +227,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             settings = dict(self._settings(), refresh_token="")
             dashboard = self._dashboard(ui_module, settings)
             prepared = []
-            dashboard._start_prepare_worker = lambda given, meta: prepared.append(given)
+            dashboard._start_prepare_worker = lambda *args: prepared.append(args)
             dashboard.start_sync()
         finally:
             ui_module._restore_stubs_for_tests()
@@ -317,7 +273,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard._prepare_ready({
                 "context": RunContext.from_values(settings),
                 "metadata": {}, "state": {}, "comparison": [],
-                "refresh": "tok", "hardware": "hw",
+                "hardware": "hw",
             })
         finally:
             ui_module._restore_stubs_for_tests()
@@ -390,8 +346,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         self.assertIn("1 Löschung", labels[0])
         self.assertEqual([True], status_updates)
 
-    def test_prepare_ready_ignores_a_token_in_the_payload(self):
-        """A token snapshot may be stale; only the client callback persists it."""
+    def test_prepare_ready_uses_the_frozen_context(self):
+        """Der Payload liefert Kontext und Plan, keinen zweiten Zugang."""
         ui_module = self._ui_module()
         original_preferences = config.PREFERENCES
         try:
@@ -424,7 +380,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 dashboard._prepare_ready({
                     "context": RunContext.from_values(settings),
                     "metadata": {}, "state": {}, "comparison": [],
-                    "refresh": "tok-rotated", "hardware": "hw-rotated",
+                    "hardware": "hw-rotated",
                 })
         finally:
             config.PREFERENCES = original_preferences
@@ -729,7 +685,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
             "context": RunContext.from_values(
                 dashboard.values(), dashboard.columns),
             "metadata": {}, "state": {}, "comparison": [],
-            "refresh": "tok", "hardware": "hw",
+            "hardware": "hw",
         })
         self.assertEqual(1, len(errors))
         self.assertIn("Fenster kaputt", str(errors[0]))
@@ -756,7 +712,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
                     dict(StartSyncOrchestrationTests._settings(),
                          account_name="A")),
                 "metadata": {}, "state": {}, "comparison": [],
-                "refresh": "tok", "hardware": "hw",
+                "hardware": "hw",
             })
         self.assertEqual([], mirrored)
         self.assertEqual([], confirmed)
@@ -782,7 +738,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         worker.account = {"hardware_id": "hw"}
         worker.state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
-        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
+        worker.outcome = {"uploaded": 1, "skipped": 0, "failed": 0}
         dashboard.worker = worker
 
         def boom(*_args, **_kwargs):
@@ -821,7 +777,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
             "columns": {"id": True, "read": False}})()
         worker.state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
-        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
+        worker.outcome = {"uploaded": 1, "skipped": 0, "failed": 0}
         dashboard.worker = worker
 
         def boom(*_args, **_kwargs):
@@ -1022,7 +978,7 @@ class VisibleResultTests(unittest.TestCase):
         dashboard = NoSilentDeadEndTests._dashboard(
             ui_module, StartSyncOrchestrationTests._settings())
         dashboard.worker = type("Worker", (), {
-            "outcome": {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0, "cancelled": False,
+            "outcome": {"uploaded": 1, "skipped": 0, "failed": 0, "cancelled": False,
                         "operations": []},
             "account": {}, "account_name": "konto"})()
         dashboard.finish_thread = lambda: None

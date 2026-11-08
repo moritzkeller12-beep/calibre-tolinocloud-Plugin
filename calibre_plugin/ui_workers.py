@@ -11,8 +11,8 @@ from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint, reading_state,
                          store_reading_state)
 from .dashboard_plan import local_metadata
-from .identifiers import (display_title, migrate_legacy_calibre_keys,
-                          state_entry, valid_book_uuid)
+from .identifiers import (adopt_column_tolino_ids, display_title, state_entry,
+                          valid_book_uuid)
 from .library import image_suffix
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
@@ -68,7 +68,7 @@ class SyncWorker(QObject):
         self.read_updates = []
         self.operations = []
         self.outcome = {
-            "uploaded": 0, "updated": 0, "deleted": 0,
+            "uploaded": 0, "deleted": 0,
             "metadata": 0, "read_marked": 0, "read_unmarked": 0,
             "collections": 0, "skipped": 0, "failed": 0,
             "cancelled": False, "operations": self.operations,
@@ -110,8 +110,6 @@ class SyncWorker(QObject):
                 kinds[operation["kind"]] += int(operation.get("count") or 1)
         self.outcome.update(
             uploaded=kinds["upload"],
-            updated=(kinds["metadata"] + kinds["read"] + kinds["unread"]
-                     + kinds["collection"]),
             deleted=kinds["delete"],
             metadata=kinds["metadata"],
             read_marked=kinds["read"],
@@ -526,12 +524,11 @@ class LocalMetadataWorker(QObject):
     ready = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, database, context, state=None, migrate_legacy=True):
+    def __init__(self, database, context, state=None):
         QObject.__init__(self)
         self.database = database
         self.context = context
         self.state = state
-        self.migrate_legacy = bool(migrate_legacy)
         self.cancelled = False
 
     def cancel(self):
@@ -551,8 +548,7 @@ class LocalMetadataWorker(QObject):
             self.failed.emit(CANCEL_MESSAGE)
             return
         self.ready.emit({"context": self.context, "metadata": metadata,
-                         "state": self.state,
-                         "migrate_legacy": self.migrate_legacy})
+                         "state": self.state})
 
 
 class PrepareWorker(QObject):
@@ -566,12 +562,10 @@ class PrepareWorker(QObject):
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, context, metadata, state=None, lock_timeout=5,
-                 migrate_legacy=True):
+    def __init__(self, context, metadata, state=None, lock_timeout=5):
         QObject.__init__(self)
         self.context = context
         self.metadata = metadata
-        self.migrate_legacy = bool(migrate_legacy)
         # Ausgangszustand des Kontos; der Worker kopiert ihn vor dem
         # Vergleich, damit nichts Unbestaetigtes in den Einstellungen landet.
         self.state = state
@@ -597,9 +591,7 @@ class PrepareWorker(QObject):
         """
         original = load_state(self.state)
         working = copy.deepcopy(original)
-        migrate_legacy_calibre_keys(
-            working, self.metadata, self.context.library_scope,
-            allow_legacy=self.migrate_legacy)
+        adopt_column_tolino_ids(self.metadata, working)
         return working, original
 
     def _load_optional(self, label, loader):

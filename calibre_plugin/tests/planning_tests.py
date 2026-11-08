@@ -18,6 +18,7 @@ from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
+from ..identifiers import adopt_column_tolino_ids
 from ..plan import (metadata_update_fields, plan_collection_updates,
                     plan_metadata_updates, plan_sync,
                     remember_collection, series_map_from_metadata)
@@ -1791,15 +1792,30 @@ class ConservativeMatchingTests(unittest.TestCase):
         self.assertEqual("review", rows[0]["status"])
         self.assertEqual("t-known", state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
 
-    def test_account_column_is_a_fallback_when_state_is_missing(self):
-        metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111", "title": "A", "authors": "B",
+    def test_account_column_is_adopted_before_comparison(self):
+        uuid = "11111111-1111-4111-8111-111111111111"
+        metadata = {1: {"uuid": uuid, "title": "A", "authors": "B",
                         "formats": ["EPUB"], "tolino_id": "t-column"}}
+        state = {}
+        self.assertTrue(adopt_column_tolino_ids(metadata, state))
         rows = compare_inventory(
-            metadata, {},
+            metadata, state,
             [{"deliverableId": "t-column", "title": "A", "authors": "B"}],
             ["EPUB"])
         self.assertEqual("t-column", rows[0]["tolino_id"])
         self.assertEqual("stored_id", rows[0]["match_reason"])
+        self.assertEqual("t-column", state[uuid]["tolino_id"])
+
+    def test_an_existing_state_entry_is_not_overwritten_by_the_column(self):
+        uuid = "11111111-1111-4111-8111-111111111111"
+        metadata = {1: {"uuid": uuid, "title": "A", "authors": "B",
+                        "formats": ["EPUB"], "tolino_id": "t-column"}}
+        state = {uuid: {"calibre_id": 1}}
+        self.assertFalse(adopt_column_tolino_ids(metadata, state))
+        rows = compare_inventory(metadata, state, [], ["EPUB"])
+        self.assertEqual("new_in_calibre", rows[0]["status"])
+        self.assertEqual("", rows[0]["tolino_id"])
+        self.assertNotIn("tolino_id", state[uuid])
 
     def test_identifier_embedded_isbn_matches_despite_a_different_title(self):
         """Die ISBN aus ``DT0400.<ISBN>_…`` ist ein echter Abgleichsschlüssel."""
@@ -2107,6 +2123,21 @@ class PrepareStateCopyTests(unittest.TestCase):
         for raw in (None, "", "not-json", "[]", "null", "1", [], 7):
             with self.subTest(raw=raw):
                 self.assertEqual({}, load_state(raw))
+
+    def test_column_mapping_is_adopted_only_into_the_working_state(self):
+        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
+            lambda *args, **kwargs: None, qt_stub={"pyqtSignal": self.Signal})
+        metadata = {7: {"uuid": self.UUID, "tolino_id": "t-column"}}
+        stored = {}
+        try:
+            worker = ui_module.workers.PrepareWorker(
+                RunContext.from_values({"account_name": "A", "partner_id": 4}),
+                metadata, state=stored)
+            working, original = worker._load_comparison_state()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual("t-column", working[self.UUID]["tolino_id"])
+        self.assertEqual({}, original)
 
     def test_the_comparison_does_not_mutate_the_stored_state(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(

@@ -500,7 +500,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
         self.assertIsNotNone(emitted["completed"])
         self.assertEqual(0, worker.outcome["collections"])
-        self.assertEqual(0, worker.outcome["updated"])
         self.assertEqual(1, worker.outcome["failed"])
         self.assertNotIn("collections", worker.state["11111111-1111-4111-8111-111111111111"])
 
@@ -620,14 +619,14 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         operations = [{"kind": "upload", "label": "Hochladen: Buch %d" % index,
                        "status": "failed", "error": "Netz weg"}
                       for index in range(1, 8)]
-        outcome = {"uploaded": 0, "updated": 0, "failed": 7,
+        outcome = {"uploaded": 0, "failed": 7,
                    "operations": operations}
         text = ui_module.common.sync_result_text(outcome)
         detail = ui_module.common.sync_result_detail(outcome)
         self.assertIn("… und 2 weitere", text)
         for index in range(1, 8):
             self.assertIn("Hochladen: Buch %d: Netz weg" % index, detail)
-        no_detail = {"uploaded": 1, "updated": 0, "failed": 0,
+        no_detail = {"uploaded": 1, "failed": 0,
                      "operations": []}
         self.assertEqual("", ui_module.common.sync_result_detail(no_detail))
         self.assertEqual("", ui_module.common.sync_result_text({}, ""))
@@ -648,7 +647,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_failure_summary_appends_error_code_to_safe_error_text(self):
         ui_module = self._ui()
-        outcome = {"uploaded": 0, "updated": 0, "failed": 1,
+        outcome = {"uploaded": 0, "failed": 1,
                    "operations": [{"kind": "upload", "label": "Upload: Buch A",
                                    "status": "failed",
                                    "error": "Netz nicht erreichbar (Code N01)"}]}
@@ -657,7 +656,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_the_result_line_names_the_failed_step(self):
         ui_module = self._ui()
-        outcome = {"uploaded": 2, "updated": 0, "failed": 1,
+        outcome = {"uploaded": 2, "failed": 1,
                    "operations": [
                        {"kind": "upload", "label": "Hochladen: u2",
                         "status": "failed", "error": "Netz weg"}]}
@@ -801,7 +800,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker.account_name = "A"
         worker.context = type("Context", (), {
             "columns": {"id": True, "read": False}})()
-        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
+        worker.outcome = {"uploaded": 1, "skipped": 0, "failed": 0}
         worker.state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         dashboard.worker = worker
@@ -839,7 +838,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker.cancelled = True
         worker.state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
-        worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0, "cancelled": True}
+        worker.outcome = {"uploaded": 1, "skipped": 0, "failed": 0, "cancelled": True}
         dashboard.worker = worker
         with patch("calibre_plugin.ui_dashboard.save_account", lambda *a, **k: None), \
              patch("calibre_plugin.ui_dashboard.save_credentials", lambda *a, **k: None), \
@@ -913,27 +912,6 @@ class PrepareWorkerTests(unittest.TestCase):
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
-
-    def test_legacy_fallback_key_is_adopted_before_comparison(self):
-        from ..identifiers import calibre_key
-
-        ui_module = self._ui()
-        scope = "abcdef123456"
-        scoped = calibre_key(7, scope)
-        context = RunContext.from_values({
-            "account_name": "A", "partner_id": 4,
-            "preferred_formats": ["EPUB"]}, library_scope=scope)
-        metadata = {7: {"uuid": scoped, "title": "A", "formats": ["EPUB"]}}
-        state = {"calibre-7": {"calibre_id": 7, "tolino_id": "t1"}}
-        try:
-            worker = ui_module.workers.PrepareWorker(
-                context, metadata, state=state)
-            working, original = worker._load_comparison_state()
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual("t1", working[scoped]["tolino_id"])
-        self.assertIn("calibre-7", working)
-        self.assertNotIn(scoped, original)
 
     def test_ready_payload_carries_comparison_and_captured_account(self):
         ui_module = self._ui()

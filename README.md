@@ -42,7 +42,8 @@ Für den Abgleich liest das Plugin die ISBN auch aus tolino-Produktkennungen. Di
 
 - Das Plugin nutzt eine inoffizielle tolino-Schnittstelle. Sie kann sich jederzeit ändern.
 - Zugangsdaten und Lesewerte werden pro Konto in den Calibre-Einstellungen gespeichert. Der Refresh-Token steht dort im Klartext in der JSON-Datei.
-- Ältere Zustandseinträge ohne Bibliothekszuordnung (`calibre-<id>`) werden nur nach ausdrücklicher Bestätigung und nur von einer Bibliothek übernommen. Die Entscheidung wird kontobezogen gespeichert, auch wenn aktuell kein Buch dazu passt; eine andere Bibliothek kann später erneut gefragt werden. Neue Fallback-Schlüssel tragen immer eine Bibliothekszuordnung.
+- Ältere Zustandseinträge ohne Bibliothekszuordnung (`calibre-<id>`) werden nicht übernommen. Neue Fallback-Schlüssel tragen immer eine Bibliothekszuordnung.
+- Kontobezogene `#tolino_id`-Zuordnungen werden beim ersten Vergleich einmalig in den State übernommen; danach ist der State maßgeblich.
 - Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste](docs/fehlercodes.md).
 
 Lizenz: [GPL-3.0-or-later](LICENSE). Änderungen: [CHANGELOG](CHANGELOG.md).

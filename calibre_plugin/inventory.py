@@ -15,7 +15,7 @@ _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
 def _nested_inventory_value(value, names, depth=0):
     """Wert in einem Bestands-Datensatz -- auch verschachtelt und in Listen.
 
-    EINE Suche fuer Kennung, Titel, Autor, ISBN und UUID. ``epubMetaData.
+    EINE Suche fuer Kennung, Titel, Autor und ISBN. ``epubMetaData.
     deliverable`` ist in der Cloud eine Liste; ohne diesen Abstieg blieben
     solche Kopien ohne Kennung. Die Tiefe ist begrenzt, damit eine
     ungewoehnlich verschachtelte Antwort nicht teuer wird.

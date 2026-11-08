@@ -1549,3 +1549,16 @@ class BackgroundCallTests(unittest.TestCase):
         self.assertIsNot(threading.main_thread(), seen[0])
         self.assertTrue(os.path.exists(path))
 
+
+class DeletionConfirmationTests(unittest.TestCase):
+    def test_missing_title_falls_back_to_book_label_not_uuid(self):
+        ui_module = ui_module_for(
+            self, qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
+        uuid = "11111111-1111-4111-8111-111111111111"
+        with patch.object(ui_module.dashboard_parts, "_ask",
+                          return_value=True) as ask:
+            ui_module.dashboard_parts.confirm_deletions(None, [(uuid, "t-1")])
+        text = ask.call_args[0][2]
+        self.assertIn("Buch ohne Titel", text)
+        self.assertNotIn(uuid, text)
+

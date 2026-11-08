@@ -402,16 +402,6 @@ def _title_only_match(remote, title_key, matched, disputed):
     return ("review", "ambiguous" if len(free_titles) > 1 else "title_only")
 
 
-def _stored_tolino_id(metadata, old):
-    """Stored cloud ID from state, or the account-specific column fallback.
-
-    The column is read as a migration bridge for older plugin versions. New
-    assignments are written to the state under the Calibre UUID first, so the
-    column never overrides a confirmed state entry.
-    """
-    return str(old.get("tolino_id") or metadata.get("tolino_id") or "").strip()
-
-
 def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
     """Persist a confirmed assignment under the Calibre UUID."""
     entry = state.get(book_uuid)
@@ -433,7 +423,7 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
     authors = _metadata_text(metadata, "authors")
     isbn = _metadata_text(metadata, "isbn")
     old = state_entry(state, book_uuid)
-    stored_id = _stored_tolino_id(metadata, old)
+    stored_id = str(old.get("tolino_id") or "").strip()
     title_key = normalize_title(title)
     author_key = normalized_authors(authors)
     local_formats = normalize_formats(metadata.get("formats"))

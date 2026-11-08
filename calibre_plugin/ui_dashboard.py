@@ -1,7 +1,7 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
 from .ui_common import (CANCEL_MESSAGE, QDialog, QInputDialog,
-                        QMessageBox, QThread, _apply_busy, _dialog_busy,
-                        gui_guard, start_worker,
+                        QMessageBox, QThread, _active_work_thread, _apply_busy,
+                        _dialog_busy, gui_guard, start_worker,
                         LOGIN_NEXT_STEP, _login_failure_guidance,
                         _stop_thread, sync_result_detail,
                         sync_result_text, Qt)
@@ -14,15 +14,14 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
 from .run_context import RunContext
 from .comparison import (comparison_progress_updates,
                          comparison_read_updates)
-from .identifiers import (calibre_key, decline_legacy_migration, is_real_uuid,
-                          needs_legacy_migration, normalize_uuid_text)
+from .identifiers import calibre_key, is_real_uuid, normalize_uuid_text
 from .library import (TOLINO_IGNORE_COLUMN, column_state, library_scope,
                       bool_column_available, normalize_formats,
                       update_progress_status, update_read_status,
                       update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
-from .tolino import (RELOGIN, TolinoError, hardware_id, log_warning,
+from .tolino import (RELOGIN, TolinoError, hardware_id, log_info, log_warning,
                      normalize_refresh_token, report_error, sanitize_error)
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
 from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
@@ -207,9 +206,9 @@ def _sync_failure_heading(outcome):
     übertragen. Der Unterschied gehört in Titel und Text; die beiden Handler
     bleiben getrennt, weil sich ihre Ergebnisfälle unterscheiden.
     """
-    succeeded = (int(outcome.get("uploaded") or 0)
-                 + int(outcome.get("updated") or 0)
-                 + int(outcome.get("deleted") or 0))
+    succeeded = sum(int(outcome.get(key) or 0) for key in (
+        "uploaded", "metadata", "read_marked", "read_unmarked",
+        "collections", "deleted"))
     if succeeded:
         return "Teilweise fehlgeschlagen", "Teilweise abgeschlossen: "
     return "Fehlgeschlagen", "Fehlgeschlagen: "
@@ -375,8 +374,7 @@ class SyncDashboard(DashboardParts, QDialog):
         Das Anmelden hat wieder seinen eigenen Knopf darüber,
         damit es auch bei abgelaufenem Zugang sofort erreichbar ist.
         """
-        if (self.thread is not None or self.prepare_thread is not None
-                or getattr(self, "snapshot_thread", None) is not None):
+        if _active_work_thread(self):
             self.cancel_sync()
         else:
             self.start_sync()
@@ -624,8 +622,7 @@ class SyncDashboard(DashboardParts, QDialog):
         threadsafe. Danach übernimmt `PrepareWorker` Login und Cloud-Inventar.
         Nur der GUI-Thread fasst Widgets an.
         """
-        if (self.thread is not None or self.prepare_thread is not None
-                or getattr(self, "snapshot_thread", None) is not None):
+        if _active_work_thread(self):
             return
         values = self.values()
         if not self._effective_refresh():
@@ -638,33 +635,7 @@ class SyncDashboard(DashboardParts, QDialog):
             library_scope=library_scope(database))
         account = account_by_name(context.account_name) or {}
         state = load_state(account.get("state"))
-        migrate_legacy = True
-        if needs_legacy_migration(state, context.library_scope):
-            migrate_legacy = self._confirm_legacy_migration(context, state)
-        self._start_local_snapshot(database, context, state, migrate_legacy)
-
-    def _confirm_legacy_migration(self, context, state):
-        """Ask once before old unscoped fallback state is assigned."""
-        yes = QMessageBox.StandardButton.Yes
-        no = QMessageBox.StandardButton.No
-        answer = QMessageBox.question(
-            self, "Ältere Fallback-Zustände",
-            "Ältere Zustandseinträge ohne Bibliothekszuordnung gefunden. "
-            "Sie können nur einer Bibliothek zugeordnet werden.\n\n"
-            "Diesem Bibliotheksstand zuordnen? Bei «Nein» bleiben die alten "
-            "Werte unberücksichtigt; in einer anderen Bibliothek wird erneut "
-            "gefragt.",
-            yes | no, no)
-        if answer == yes:
-            return True
-        if decline_legacy_migration(state, context.library_scope):
-            try:
-                save_account(context.account_name, {"state": state},
-                             create=False)
-            except Exception as exc:
-                log_warning("Legacy-Entscheidung konnte nicht gespeichert "
-                            "werden: %s" % sanitize_error(exc))
-        return False
+        self._start_local_snapshot(database, context, state)
 
     def _begin_progress(self, status, label):
         """Sperren und den unbestimmten Fortschritt fuer einen Lauf zeigen."""
@@ -675,13 +646,11 @@ class SyncDashboard(DashboardParts, QDialog):
         self.progress_label.setVisible(True)
         self.progress_label.setText(label)
 
-    def _start_local_snapshot(self, database, context, state,
-                              migrate_legacy=True):
+    def _start_local_snapshot(self, database, context, state):
         """Calibre-Metadaten in einem eigenen Thread lesen."""
         self._begin_progress("Bibliothek wird gelesen …",
                              "Lese Calibre-Bibliothek …")
-        worker = LocalMetadataWorker(database, context, state,
-                                     migrate_legacy)
+        worker = LocalMetadataWorker(database, context, state)
         worker.ready.connect(self._snapshot_ready)
         worker.failed.connect(self._snapshot_failed)
         start_worker(self, worker, QThread(self), "snapshot_thread",
@@ -705,8 +674,7 @@ class SyncDashboard(DashboardParts, QDialog):
         """Lokalen Snapshot übernehmen und die Netz-Vorbereitung starten."""
         self._finish_snapshot()
         self._start_prepare_worker(payload["context"], payload["metadata"],
-                                   payload["state"],
-                                   payload.get("migrate_legacy", True))
+                                   payload["state"])
 
     @gui_guard
     def _snapshot_failed(self, message):
@@ -722,13 +690,11 @@ class SyncDashboard(DashboardParts, QDialog):
                     + sanitize_error(message))
         error_dialog(self, "Vergleich fehlgeschlagen", str(message), show=True)
 
-    def _start_prepare_worker(self, context, metadata, state,
-                              migrate_legacy=True):
+    def _start_prepare_worker(self, context, metadata, state):
         """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
         self._begin_progress("Vergleich läuft …",
                              "Verbinde mit tolino …")
-        worker = PrepareWorker(context, metadata, state,
-                               migrate_legacy=migrate_legacy)
+        worker = PrepareWorker(context, metadata, state)
         worker.progress.connect(self._prepare_progress)
         worker.ready.connect(self._prepare_ready)
         worker.failed.connect(self._prepare_failed)
@@ -867,7 +833,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 self, skipped_uploads, nothing_else=not total):
             return
         plan = _dashboard_plan.plan_text(preparation, len(jobs))
-        log_warning("Sync geplant: %s" % plan)
+        log_info("Sync geplant: %s" % plan)
         _apply_busy(self, True)
         self.progress.setRange(0, total)
         self.progress.setValue(0)
@@ -976,8 +942,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def closeEvent(self, event):
         """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
-        if (self.thread is not None or self.prepare_thread is not None
-                or getattr(self, "snapshot_thread", None) is not None):
+        if _active_work_thread(self):
             self.cancel_sync()
         _stop_thread(self.thread)
         _stop_thread(self.prepare_thread)
