@@ -76,6 +76,21 @@ class _Column(NamedTuple):
     technical: bool = False
 
 
+_READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
+_READ_COLUMN_TOOLTIP = ("Auswahl = gelesen; keine Auswahl = ungelesen. Die "
+                        "Calibre-Spalte #tolino_read ist nur informativ.")
+# EINE Quelle fuer Spalten, Auswahlschluessel und Rueckmeldungstexte.
+_ACTION_SPECS = (
+    ("upload", "Upload", "Buchdatei in die Cloud hochladen.",
+     comparison_sort_key, ("Upload aktiviert", "Upload deaktiviert")),
+    ("metadata", "Metadaten",
+     "Titel, Autor und ISBN ohne Upload aktualisieren.",
+     _metadata_first, ("Metadaten aktiviert", "Metadaten deaktiviert")),
+    ("read", "Gelesen", _READ_COLUMN_TOOLTIP, _read_first,
+     ("Als gelesen markiert", "Als ungelesen markiert")),
+)
+
+
 def row_capabilities(row):
     """Was darf diese Vergleichszeile? -- EINE Quelle für alle vier Stellen.
 
@@ -136,17 +151,16 @@ class InventoryDialog(QDialog):
     Sammelaktionen sind getrennt erreichbar.
     """
 
-    ACTION_COLUMNS = (
-        _Column("Upload", "Buchdatei in die Cloud hochladen.",
-                comparison_sort_key),
-        _Column("Metadaten",
-                "Titel, Autor und ISBN ohne Upload aktualisieren.",
-                _metadata_first),
-        _Column("Gelesen",
-                "Auswahl = gelesen; keine Auswahl = ungelesen. Die "
-                "Calibre-Spalte #tolino_read ist nur informativ.",
-                _read_first),
-    )
+    ACTION_KEYS = tuple(spec[0] for spec in _ACTION_SPECS)
+    ACTION_COLUMNS = tuple(
+        _Column(spec[1], spec[2], spec[3]) for spec in _ACTION_SPECS)
+    ACTION_LABELS = {
+        (spec[0], enabled): spec[4][0 if enabled else 1]
+        for spec in _ACTION_SPECS for enabled in (True, False)
+    }
+    ACTION_TOOLTIPS = {spec[0]: spec[2] for spec in _ACTION_SPECS}
+    ACTION_TOOLTIPS["read"] = (_READ_TOOLTIP
+                               + " Im ausgewählten tolino-Konto änderbar.")
     DATA_COLUMNS = (
         _Column("Calibre", "Buch in Calibre vorhanden.", _by_calibre),
         _Column("tolino",
@@ -167,7 +181,6 @@ class InventoryDialog(QDialog):
     )
     COLUMNS = ACTION_COLUMNS + DATA_COLUMNS
     HEADERS = tuple(column.label for column in COLUMNS)
-    ACTION_KEYS = ("upload", "metadata", "read")
     TECHNICAL_COLUMNS = tuple(index for index, column in enumerate(COLUMNS)
                               if column.technical)
     TITLE_COLUMN = HEADERS.index("Buchtitel")
@@ -182,7 +195,7 @@ class InventoryDialog(QDialog):
         ("Ignoriert", "ignored"),
     )
 
-    READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
+    READ_TOOLTIP = _READ_TOOLTIP
     IGNORED_TOOLTIP = ("In Calibre ignoriert (%s) – wird nicht "
                        "abgeglichen." % TOLINO_IGNORE_COLUMN)
     DELETE_TOOLTIP = ("Zum Löschen aus tolino markiert – zuerst "
@@ -455,30 +468,29 @@ class InventoryDialog(QDialog):
         if column in range(len(self.ACTION_COLUMNS)):
             self._choice_changed(item.row(), column)
 
-    def _set_selection(self, chooser, clear_deletions=False):
+    def _clear_selection(self):
+        """Auswahl und Löschmarkierungen in einem Schritt zurücksetzen."""
+        for row in self.rows:
+            row.pop("delete_cloud", None)
+            row["upload"] = row["metadata"] = False
+            state = row["read"]
+            state.chosen = state.cloud
+        self._rebuild_table(self.rows)
+
+    def _set_selection(self, chooser):
         """Auswahl in einem Schritt setzen (Zeilen und Zellen synchron).
 
         Der Lesestatus bleibt bei Empfehlungen unverändert. Zum Löschen
-        markierte Zeilen bleiben unberührt; «Auswahl zurücksetzen» hebt auch
-        die Löschmarkierung auf.
+        markierte Zeilen bleiben unberührt.
         """
-        if clear_deletions:
-            for row in self.rows:
-                row.pop("delete_cloud", None)
-                row["upload"] = row["metadata"] = False
-                state = row["read"]
-                state.chosen = state.cloud
-            self._rebuild_table(self.rows)
-            return
         for index, row in enumerate(self.rows):
             caps = row_capabilities(row)
             if not caps["usable"]:
                 continue
             wanted = tuple(chooser(row))
-            upload = bool(wanted[0]) and caps["upload"]
-            metadata = bool(wanted[1]) and caps["metadata"]
-            row.update(upload=upload, metadata=metadata)
-            for column, checked in ((0, upload), (1, metadata)):
+            for column, key in enumerate(self.ACTION_KEYS[:2]):
+                checked = bool(wanted[column]) and caps[key]
+                row[key] = checked
                 self._set_check_quietly(index, column, checked)
         self._update_summary()
 
@@ -487,8 +499,7 @@ class InventoryDialog(QDialog):
         self._set_selection(self.default_actions)
 
     def clear_all_selection(self):
-        self._set_selection(lambda _row: (False, False),
-                            clear_deletions=True)
+        self._clear_selection()
 
     def automatic_actions_enabled(self):
         """Tun Automatiken ohne Auswahl WIRKLICH etwas?
@@ -590,7 +601,7 @@ class InventoryDialog(QDialog):
                 skipped += 1
         self._update_summary()
         if not changed:
-            self._show_action_feedback("")
+            self.action_feedback.setText("")
             count = skipped or len(marked)
             QMessageBox.information(
                 self, "Nichts geändert",
@@ -602,24 +613,7 @@ class InventoryDialog(QDialog):
             changed, len(marked))
         if skipped:
             feedback += "; %d übersprungen" % skipped
-        self._show_action_feedback(feedback + ".")
-
-    ACTION_LABELS = {
-        ("upload", True): "Upload aktiviert",
-        ("upload", False): "Upload deaktiviert",
-        ("metadata", True): "Metadaten aktiviert",
-        ("metadata", False): "Metadaten deaktiviert",
-        ("read", True): "Als gelesen markiert",
-        ("read", False): "Als ungelesen markiert",
-    }
-
-    def _show_action_feedback(self, text):
-        """Bilanz unter der Tabelle setzen; leerer Text entfernt sie wieder.
-
-        Bewusst nicht modal: eine erfolgreiche Auswahlaktion soll den
-        Ablauf nicht mit einem weiteren Dialog anhalten.
-        """
-        self.action_feedback.setText(text)
+        self.action_feedback.setText(feedback + ".")
 
     def _set_row_choice(self, index, key, value, caps=None):
         """Zeile und Check-Zelle setzen; False = war schon so.
@@ -666,24 +660,21 @@ class InventoryDialog(QDialog):
         caps = row_capabilities(row)
         ignored = bool(row.get("ignored"))
         delete_cloud = bool(row.get("delete_cloud"))
-        specs = (
-            ("upload", caps["upload"],
-             "Buchdatei in die Cloud hochladen.",
-             "Nur in tolino – es gibt keine Calibre-Datei zum Hochladen."
-             if not has_book else
-             "Kein Buchformat aus den Upload-Formaten vorhanden."),
-            ("metadata", caps["metadata"],
-             "Titel, Autor und ISBN in der Cloud aktualisieren, ohne Upload.",
-             "Nur in Calibre – es gibt in tolino nichts zu aktualisieren."
-             if has_book else "Kein Calibre-Buch – nichts zu aktualisieren."),
-            ("read", caps["read"],
-             self.READ_TOOLTIP + " Im ausgewählten tolino-Konto änderbar.",
-             "Lesestatus unbekannt – nicht geladen." if in_cloud else
-             "Geht erst, wenn das Buch in tolino liegt."),
-        )
-        for column, (key, enabled, tooltip, disabled_tooltip) in enumerate(specs):
+        disabled_tooltips = {
+            "upload": ("Nur in tolino – es gibt keine Calibre-Datei zum "
+                       "Hochladen." if not has_book else
+                       "Kein Buchformat aus den Upload-Formaten vorhanden."),
+            "metadata": ("Nur in Calibre – es gibt in tolino nichts zu "
+                         "aktualisieren." if has_book else
+                         "Kein Calibre-Buch – nichts zu aktualisieren."),
+            "read": ("Lesestatus unbekannt – nicht geladen." if in_cloud else
+                     "Geht erst, wenn das Buch in tolino liegt."),
+        }
+        for column, key in enumerate(self.ACTION_KEYS):
+            enabled = caps[key]
+            tooltip = self.ACTION_TOOLTIPS[key]
+            disabled_tooltip = disabled_tooltips[key]
             item = QTableWidgetItem("")
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             # Checkbar bleibt das Feld auch deaktiviert: Qt zeichnet das
             # Kästchen dann grau, statt es ganz zu verstecken.
             flags = item.flags() | Qt.ItemFlag.ItemIsUserCheckable
@@ -887,9 +878,9 @@ class InventoryDialog(QDialog):
     def _selected_row(self):
         """The comparison row for the selection, or None with a hint.
 
-        Download und Sammlungen arbeiten mit genau einem Buch; mehrere
-        markierte Zeilen werden deshalb abgelehnt statt still nur die erste
-        zu verarbeiten.
+        Einzelbuch-Aktionen arbeiten mit genau einem Buch; mehrere markierte
+        Zeilen werden deshalb abgelehnt statt still nur die erste zu
+        verarbeiten.
         """
         selected = _selected_rows(self.table)
         if not selected:

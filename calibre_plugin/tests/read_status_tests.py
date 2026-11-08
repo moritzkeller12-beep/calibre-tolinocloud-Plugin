@@ -281,9 +281,9 @@ class ProgressComparisonTests(unittest.TestCase):
     ]}}
 
     def _rows(self, progress_by_id):
-        metadata = {1: {"uuid": "u1", "title": "Eins", "authors": "A",
+        metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111", "title": "Eins", "authors": "A",
                         "formats": ["EPUB"]}}
-        state = {"u1": {"tolino_id": "t-1"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t-1"}}
         return compare_inventory(
             metadata, state, self.INVENTORY, ["EPUB"], read_ids=set(),
             progress_by_id=progress_by_id)
@@ -310,10 +310,10 @@ class ReadColumnDialogTests(_QtDialogTest):
         base = {"status": "identical", "read_column": True}
         return [
             dict(base, title="Calibre only", authors="A", book_id=1,
-                 uuid="u1", tolino_id="t-1",
+                 uuid="11111111-1111-4111-8111-111111111111", tolino_id="t-1",
                  read=ReadState(cloud=False, local=True)),
             dict(base, title="Cloud read", authors="B", book_id=2,
-                 uuid="u2", tolino_id="t-2",
+                 uuid="22222222-2222-4222-8222-222222222222", tolino_id="t-2",
                  read=ReadState(cloud=True, local=None)),
         ]
 

@@ -12,9 +12,9 @@ from ..plan import MetaUpdateRecord, plan_sync
 from ..planning_values import SyncJob
 from ..run_context import RunContext
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
-from ._support import (_ReadingDb, _read_ids, compare_inventory,
-                       parsed_inventory, start_cdp_stubs, stop_cdp_stubs,
-                       ui_module_for)
+from ._support import (dashboard_stub, _ReadingDb, _read_ids,
+                       compare_inventory, parsed_inventory, start_cdp_stubs,
+                       stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -71,7 +71,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
 
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw", "refresh_token": "tok",
-                    "state": {"u-1": {"tolino_id": "t-1",
+                    "state": {"a1111111-1111-4111-8111-111111111111": {"tolino_id": "t-1",
                                       "calibre_id": 7,
                                       "title": "Titel"}}}
         try:
@@ -79,7 +79,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
                  patch("calibre_plugin.ui_workers.save_account",
                        lambda *args, **kwargs: None):
                 worker = ui_module.workers.SyncWorker(
-                    RunContext.from_values(settings), [], [("u-1", "t-1")],
+                    RunContext.from_values(settings), [], [("a1111111-1111-4111-8111-111111111111", "t-1")],
                     [], {}, state=settings.get("state"))
                 worker.completed.connect(
                     lambda *args: emitted.update(completed=args))
@@ -89,7 +89,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertEqual([("delete", "t-1")], calls)
-        self.assertNotIn("u-1", worker.state)
+        self.assertNotIn("a1111111-1111-4111-8111-111111111111", worker.state)
         # Die Calibre-Spalte zeigt danach nicht mehr auf die tote Kopie.
         self.assertEqual([(7, "")], worker.updates)
         self.assertEqual(1, worker.outcome["deleted"])
@@ -141,7 +141,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             worker.run()
         return worker, emitted, saved, credentials
 
-    def _metadata(self, uuid="u1", title="A"):
+    def _metadata(self, uuid="11111111-1111-4111-8111-111111111111", title="A"):
         return {"uuid": uuid, "title": title, "formats": ["EPUB"],
                 "last_modified": "1"}
 
@@ -163,13 +163,13 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             def delete(self, tolino_id):
                 deletes.append(tolino_id)
 
-        state = {"u1": {"tolino_id": "same-id", "calibre_id": 1}}
-        job = SyncJob(1, "u1", "EPUB", "same-id", "/book", None, "A")
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "same-id", "calibre_id": 1}}
+        job = SyncJob(1, "11111111-1111-4111-8111-111111111111", "EPUB", "same-id", "/book", None, "A")
         worker, emitted, _saved, _credentials = self._run(
             ui_module, self._settings(state), [job], FakeClient)
         ui_module._restore_stubs_for_tests()
         self.assertEqual([], deletes)
-        self.assertEqual("same-id", worker.state["u1"]["tolino_id"])
+        self.assertEqual("same-id", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertIsNone(emitted["failed"])
 
@@ -185,42 +185,42 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                 return self.refresh
 
             def upload(self, path):
-                if "u2" in path:
+                if "22222222-2222-4222-8222-222222222222" in path:
                     raise RuntimeError("Netz weg")
                 return "new-1"
 
-        metadata = {1: self._metadata("u1"), 2: self._metadata("u2", "B")}
+        metadata = {1: self._metadata("11111111-1111-4111-8111-111111111111"), 2: self._metadata("22222222-2222-4222-8222-222222222222", "B")}
         # Der Worker setzt den bestätigten Zustand nach erfolgreichem Upload.
-        settings = self._settings({"u2": {"tolino_id": None}})
+        settings = self._settings({"22222222-2222-4222-8222-222222222222": {"tolino_id": None}})
         settings["metadata"] = metadata
         try:
             worker, emitted, saved, _credentials = self._run(
                 ui_module, settings,
-                [self._job(ui_module, 1, "u1"), self._job(ui_module, 2, "u2")],
+                [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111"), self._job(ui_module, 2, "22222222-2222-4222-8222-222222222222")],
                 FakeClient)
         finally:
             ui_module._restore_stubs_for_tests()
         # endet der Lauf regulaer: u2 ist gezaehlt, nicht fatal.
         self.assertIsNotNone(emitted["completed"])
         self.assertIsNone(emitted["failed"])
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertIsNone(worker.state["u2"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
+        self.assertIsNone(worker.state["22222222-2222-4222-8222-222222222222"]["tolino_id"])
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
         self.assertEqual([(1, "new-1")], worker.updates)
         # Der geprüfte Teilstand wurde sofort unter Konto A gespeichert.
-        self.assertTrue(any(name == "A" and "u1" in values.get("state", {})
+        self.assertTrue(any(name == "A" and "11111111-1111-4111-8111-111111111111" in values.get("state", {})
                             for name, values in saved))
         # Folgelauf: u1 ist erledigt, u2 bleibt offen -> kein Duplikat.
         uploads = plan_sync(
             metadata, worker.state, ["EPUB"], upload_book_ids={2})
-        self.assertEqual([(2, "u2", "EPUB", None)], uploads)
-        self.assertIsNone(worker.state["u2"]["tolino_id"])
+        self.assertEqual([(2, "22222222-2222-4222-8222-222222222222", "EPUB", None)], uploads)
+        self.assertIsNone(worker.state["22222222-2222-4222-8222-222222222222"]["tolino_id"])
 
     def test_successful_deletion_is_persisted_before_next_cloud_change(self):
         ui_module = self._ui()
         calls = []
-        state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": "t2"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}, "22222222-2222-4222-8222-222222222222": {"tolino_id": "t2"}}
 
         class FakeClient:
             def delete(self, tolino_id):
@@ -228,19 +228,19 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
         worker = ui_module.workers.SyncWorker(
             RunContext.from_values(self._settings(state)), [],
-            [("u1", "t1"), ("u2", "t2")], state=state)
+            [("11111111-1111-4111-8111-111111111111", "t1"), ("22222222-2222-4222-8222-222222222222", "t2")], state=state)
         with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
                    return_value=FakeClient()), \
              patch("calibre_plugin.ui_workers.save_account",
                    side_effect=lambda _name, values, **_kw: calls.append(
                        ("save", tuple(sorted(values["state"]))))):
             worker.run()
-        self.assertEqual([("delete", "t1"), ("save", ("u2",)),
+        self.assertEqual([("delete", "t1"), ("save", ("22222222-2222-4222-8222-222222222222",)),
                           ("delete", "t2"), ("save", ())], calls)
 
     def test_a_broken_state_entry_does_not_lose_a_confirmed_upload(self):
         ui_module = self._ui()
-        state = {"u1": "kaputt"}
+        state = {"11111111-1111-4111-8111-111111111111": "kaputt"}
         saved = []
 
         class FakeClient:
@@ -249,15 +249,15 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
         worker = ui_module.workers.SyncWorker(
             RunContext.from_values(self._settings(state)),
-            [SyncJob(1, "u1", "EPUB", None, "/book", None, "A")], [],
+            [SyncJob(1, "11111111-1111-4111-8111-111111111111", "EPUB", None, "/book", None, "A")], [],
             state=state)
         with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
                    return_value=FakeClient()), \
              patch("calibre_plugin.ui_workers.save_account",
                    lambda _name, values, **_kw: saved.append(values["state"])):
             worker.run()
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertEqual({"u1": {"tolino_id": "new-1", "calibre_id": 1}},
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
+        self.assertEqual({"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1", "calibre_id": 1}},
                          saved[0])
 
     def test_persistence_failure_stops_after_confirmed_cloud_change(self):
@@ -276,14 +276,14 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 calls.clear()
                 emitted.clear()
-                jobs = ([SyncJob(1, "u1", "EPUB", "old-1", "/book", None, "A"),
-                         SyncJob(2, "u2", "EPUB", None, "/next", None, "B")]
+                jobs = ([SyncJob(1, "11111111-1111-4111-8111-111111111111", "EPUB", "old-1", "/book", None, "A"),
+                         SyncJob(2, "22222222-2222-4222-8222-222222222222", "EPUB", None, "/next", None, "B")]
                         if mode == "upload" else [])
-                removals = [] if jobs else [("u1", "old-1"), ("u2", "old-2")]
+                removals = [] if jobs else [("11111111-1111-4111-8111-111111111111", "old-1"), ("22222222-2222-4222-8222-222222222222", "old-2")]
                 worker = ui_module.workers.SyncWorker(
                     RunContext.from_values(self._settings({})), jobs, removals,
-                    state={"u1": {"tolino_id": "old-1", "calibre_id": 1},
-                           "u2": {"tolino_id": "old-2", "calibre_id": 2}})
+                    state={"11111111-1111-4111-8111-111111111111": {"tolino_id": "old-1", "calibre_id": 1},
+                           "22222222-2222-4222-8222-222222222222": {"tolino_id": "old-2", "calibre_id": 2}})
                 worker.failed.connect(lambda message: emitted.update(failed=message))
                 worker.completed.connect(lambda *args: emitted.update(completed=args))
                 with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
@@ -300,10 +300,10 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                 self.assertEqual(1, sum(op["status"] == "not_started"
                                         for op in worker.operations))
                 if mode == "upload":
-                    self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+                    self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
                     self.assertEqual([(1, "new-1")], worker.updates)
                 else:
-                    self.assertNotIn("u1", worker.state)
+                    self.assertNotIn("11111111-1111-4111-8111-111111111111", worker.state)
                     self.assertEqual([(1, "")], worker.updates)
 
     def test_failed_cover_keeps_the_uploaded_id(self):
@@ -326,14 +326,14 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, saved, _credentials = self._run(
                 ui_module, self._settings(state),
-                [self._job(ui_module, 1, "u1", cover="/tmp/c.jpg")],
+                [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111", cover="/tmp/c.jpg")],
                 FakeClient)
         finally:
             ui_module._restore_stubs_for_tests()
         # Das Cover ist gezaehlt, der Lauf bleibt erfolgreich.
         self.assertIsNotNone(emitted["completed"])
         self.assertIsNone(emitted["failed"])
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
         self.assertTrue(any(name == "A" for name, _values in saved))
@@ -341,9 +341,9 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
     def test_a_failed_upload_does_not_stop_the_next_one(self):
         """Ein einzelner Fehler beendet den Lauf nicht mehr."""
         ui_module = self._ui()
-        metadata = {1: self._metadata("u1"), 2: self._metadata("u2", "B"),
-                    3: self._metadata("u3", "C")}
-        state = {"u2": {"tolino_id": None}}
+        metadata = {1: self._metadata("11111111-1111-4111-8111-111111111111"), 2: self._metadata("22222222-2222-4222-8222-222222222222", "B"),
+                    3: self._metadata("33333333-3333-4333-8333-333333333333", "C")}
+        state = {"22222222-2222-4222-8222-222222222222": {"tolino_id": None}}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -355,7 +355,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                 return self.refresh
 
             def upload(self, path):
-                if "u2" in path:
+                if "22222222-2222-4222-8222-222222222222" in path:
                     raise RuntimeError("Netz weg")
                 self.sent.append(path)
                 return "new-%d" % len(self.sent)
@@ -365,17 +365,17 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, settings,
-                [self._job(ui_module, 1, "u1"), self._job(ui_module, 2, "u2"),
-                 self._job(ui_module, 3, "u3")], FakeClient)
+                [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111"), self._job(ui_module, 2, "22222222-2222-4222-8222-222222222222"),
+                 self._job(ui_module, 3, "33333333-3333-4333-8333-333333333333")], FakeClient)
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertIsNone(emitted["failed"])
         self.assertIsNotNone(emitted["completed"])
         self.assertEqual(2, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertIsNone(worker.state["u2"]["tolino_id"])
-        self.assertEqual("new-2", worker.state["u3"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
+        self.assertIsNone(worker.state["22222222-2222-4222-8222-222222222222"]["tolino_id"])
+        self.assertEqual("new-2", worker.state["33333333-3333-4333-8333-333333333333"]["tolino_id"])
 
     def test_a_failed_cover_does_not_stop_the_next_book(self):
         ui_module = self._ui()
@@ -400,21 +400,21 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state),
-                [self._job(ui_module, 1, "u1", cover="/tmp/c.jpg"),
-                 self._job(ui_module, 2, "u2")], FakeClient)
+                [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111", cover="/tmp/c.jpg"),
+                 self._job(ui_module, 2, "22222222-2222-4222-8222-222222222222")], FakeClient)
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertIsNone(emitted["failed"])
         self.assertIsNotNone(emitted["completed"])
         self.assertEqual(2, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
-        self.assertEqual("new-2", worker.state["u2"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
+        self.assertEqual("new-2", worker.state["22222222-2222-4222-8222-222222222222"]["tolino_id"])
 
     def test_a_failed_delete_keeps_its_entry_and_the_run_continues(self):
         ui_module = self._ui()
-        state = {"u-1": {"tolino_id": "t-1", "calibre_id": 1},
-                 "u-2": {"tolino_id": "t-2", "calibre_id": 2}}
+        state = {"a1111111-1111-4111-8111-111111111111": {"tolino_id": "t-1", "calibre_id": 1},
+                 "a2222222-2222-4222-8222-222222222222": {"tolino_id": "t-2", "calibre_id": 2}}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -431,7 +431,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state), [],
-                FakeClient, removals=[("u-1", "t-1"), ("u-2", "t-2")])
+                FakeClient, removals=[("a1111111-1111-4111-8111-111111111111", "t-1"), ("a2222222-2222-4222-8222-222222222222", "t-2")])
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertIsNone(emitted["failed"])
@@ -440,8 +440,8 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual(1, worker.outcome["failed"])
         # Die gescheiterte Löschung bleibt im Zustand -- der nächste Lauf
         # versucht sie erneut.
-        self.assertIn("u-1", worker.state)
-        self.assertNotIn("u-2", worker.state)
+        self.assertIn("a1111111-1111-4111-8111-111111111111", worker.state)
+        self.assertNotIn("a2222222-2222-4222-8222-222222222222", worker.state)
 
     def test_a_failed_metadata_update_does_not_stop_the_uploads(self):
         ui_module = self._ui()
@@ -464,8 +464,8 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state),
-                [self._job(ui_module, 2, "u2")], FakeClient,
-                meta_updates=[MetaUpdateRecord(1, "u1", "t-1", {"title": "Neu"})])
+                [self._job(ui_module, 2, "22222222-2222-4222-8222-222222222222")], FakeClient,
+                meta_updates=[MetaUpdateRecord(1, "11111111-1111-4111-8111-111111111111", "t-1", {"title": "Neu"})])
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertIsNotNone(emitted["completed"])
@@ -474,7 +474,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
     def test_a_failed_collection_is_not_recorded_as_success_and_retries(self):
         ui_module = self._ui()
-        state = {"u1": {"tolino_id": "t-1", "calibre_id": 1}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t-1", "calibre_id": 1}}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -495,19 +495,19 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state), [], FakeClient,
-                series_map={"u1": "S1"})
+                series_map={"11111111-1111-4111-8111-111111111111": "S1"})
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertIsNotNone(emitted["completed"])
         self.assertEqual(0, worker.outcome["collections"])
         self.assertEqual(0, worker.outcome["updated"])
         self.assertEqual(1, worker.outcome["failed"])
-        self.assertNotIn("collections", worker.state["u1"])
+        self.assertNotIn("collections", worker.state["11111111-1111-4111-8111-111111111111"])
 
     def test_a_failed_series_does_not_stop_the_other_series(self):
         ui_module = self._ui()
-        state = {"u1": {"tolino_id": "t-1", "calibre_id": 1},
-                 "u2": {"tolino_id": "t-2", "calibre_id": 2}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t-1", "calibre_id": 1},
+                 "22222222-2222-4222-8222-222222222222": {"tolino_id": "t-2", "calibre_id": 2}}
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -530,14 +530,14 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state), [], FakeClient,
-                series_map={"u1": "S1", "u2": "S2"})
+                series_map={"11111111-1111-4111-8111-111111111111": "S1", "22222222-2222-4222-8222-222222222222": "S2"})
         finally:
             ui_module._restore_stubs_for_tests()
         self.assertIsNotNone(emitted["completed"])
         self.assertEqual(1, worker.outcome["failed"])
         self.assertEqual(1, worker.outcome["collections"])
-        self.assertEqual(["S2"], worker.state["u2"].get("collections"))
-        self.assertNotIn("collections", worker.state["u1"])
+        self.assertEqual(["S2"], worker.state["22222222-2222-4222-8222-222222222222"].get("collections"))
+        self.assertNotIn("collections", worker.state["11111111-1111-4111-8111-111111111111"])
 
     def test_an_auth_error_still_stops_the_run(self):
         """Anmeldeprobleme bleiben fatal -- jeder weitere Aufruf scheiterte."""
@@ -560,7 +560,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state),
-                [self._job(ui_module, 1, "u1"), self._job(ui_module, 2, "u2")],
+                [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111"), self._job(ui_module, 2, "22222222-2222-4222-8222-222222222222")],
                 FakeClient)
         finally:
             ui_module._restore_stubs_for_tests()
@@ -589,16 +589,16 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
         worker, emitted, _saved, _credentials = self._run(
             ui_module, self._settings(state),
-            [self._job(ui_module, 1, "u1", title="Der Schwarm")], FakeClient)
+            [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111", title="Der Schwarm")], FakeClient)
 
         texts = [text for _done, _total, text in emitted["progress"]]
         labels = [item["label"] for item in worker.operations]
         for text in texts + labels:
-            self.assertNotIn("u1", text)
+            self.assertNotIn("11111111-1111-4111-8111-111111111111", text)
         self.assertIn("Der Schwarm", "\n".join(texts))
         self.assertIn("Hochladen: Der Schwarm (EPUB)", labels)
         # Die Kennung bleibt fuer Technik und Log erhalten.
-        self.assertEqual("u1", worker.operations[0]["book_uuid"])
+        self.assertEqual("11111111-1111-4111-8111-111111111111", worker.operations[0]["book_uuid"])
 
     def test_a_book_without_title_is_named_by_its_number(self):
         """Ohne Titel steht die Calibre-Nummer da -- nie eine UUID."""
@@ -609,9 +609,9 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual("Titel", display_title(" Titel "))
         worker = ui_module.workers.SyncWorker(
             RunContext.from_values(self._settings({})),
-            [self._job(ui_module, 7, "u7")], [], state={})
-        self.assertEqual("Buch 7", worker._label("u7", 7))
-        self.assertEqual("Buch ohne Titel", worker._label("u7"))
+            [self._job(ui_module, 7, "77777777-7777-4777-8777-777777777777")], [], state={})
+        self.assertEqual("Buch 7", worker._label("77777777-7777-4777-8777-777777777777", 7))
+        self.assertEqual("Buch ohne Titel", worker._label("77777777-7777-4777-8777-777777777777"))
         self.assertEqual("Buch 7", worker.jobs[0].label())
 
     def test_the_detail_text_lists_every_failed_step(self):
@@ -693,7 +693,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
                        (name, values))):
             worker = ui_module.workers.SyncWorker(
                 RunContext.from_values(self._settings(state)),
-                [self._job(ui_module, 1, "u1"), self._job(ui_module, 2, "u2")],
+                [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111"), self._job(ui_module, 2, "22222222-2222-4222-8222-222222222222")],
                 [], state=state)
             holder["worker"] = worker
             worker.completed.connect(
@@ -705,7 +705,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertIsNotNone(emitted["completed"])
         self.assertTrue(worker.outcome["cancelled"])
         self.assertEqual(1, worker.outcome["uploaded"])
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
         self.assertEqual(1, fake.calls)  # u2 wurde nicht begonnen
 
     def test_later_read_failure_keeps_the_upload_and_counts_both(self):
@@ -728,14 +728,14 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             worker, emitted, _saved, _credentials = self._run(
                 ui_module, self._settings(state),
-                [self._job(ui_module, 1, "u1")], FakeClient,
+                [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111")], FakeClient,
                 read_marks=["new-1"])
         finally:
             ui_module._restore_stubs_for_tests()
         # wird der Fehler gezaehlt; der Upload bleibt bestehen.
         self.assertIsNotNone(emitted["completed"])
         self.assertIsNone(emitted["failed"])
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])
         self.assertFalse(any(operation["status"] == "not_started"
@@ -769,7 +769,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         settings = self._settings(state, name="A")
         try:
             worker, _emitted, saved, credentials = self._run(
-                ui_module, settings, [self._job(ui_module, 1, "u1")],
+                ui_module, settings, [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111")],
                 FakeClient, read_marks=["new-1"])
         finally:
             ui_module._restore_stubs_for_tests()
@@ -792,10 +792,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             def setText(self, value):
                 self.value = value
 
-        dashboard = type("Dashboard", (), {
-            "thread": None, "worker": None, "prepare_thread": None,
-            "prepare_worker": None, "login_thread": None,
-            "login_worker": None})()
+        dashboard = dashboard_stub()
         dashboard.account_name = "B"
         dashboard.refresh = FakeField("tok-B")
         dashboard.gui = type("Gui", (), {"current_db": object()})()
@@ -805,7 +802,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker.context = type("Context", (), {
             "columns": {"id": True, "read": False}})()
         worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0}
-        worker.state = {"u1": {"tolino_id": "new-1"}}
+        worker.state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         dashboard.worker = worker
         with patch("calibre_plugin.ui_dashboard.save_account",
@@ -817,7 +814,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: boxes.append(args)):
             ui_module.dashboard.SyncDashboard.sync_completed(
-                dashboard, {"u1": {"tolino_id": "new-1"}}, [(1, "new-1")])
+                dashboard, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}, [(1, "new-1")])
         ui_module._restore_stubs_for_tests()
         self.assertEqual({"A"}, {name for name, _values in saved})
         self.assertEqual([], credentials)
@@ -830,10 +827,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
     def test_cancel_is_shown_as_cancelled_not_as_a_failure(self):
         ui_module = self._ui()
         infos, errors = [], []
-        dashboard = type("Dashboard", (), {
-            "thread": None, "worker": None, "prepare_thread": None,
-            "prepare_worker": None, "login_thread": None,
-            "login_worker": None})()
+        dashboard = dashboard_stub()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
                                            "setText": lambda self, v: None})()
@@ -843,7 +837,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker = type("Worker", (), {})()
         worker.account_name = "A"
         worker.cancelled = True
-        worker.state = {"u1": {"tolino_id": "new-1"}}
+        worker.state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         worker.outcome = {"uploaded": 1, "updated": 0, "skipped": 0, "failed": 0, "cancelled": True}
         dashboard.worker = worker
@@ -862,6 +856,56 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual("Abgebrochen", infos[0][1])
         self.assertIn("hochgeladen", infos[0][2])
 
+class LocalMetadataWorkerTests(unittest.TestCase):
+    """The Calibre snapshot is read outside the GUI thread."""
+
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+
+    def _ui(self):
+        return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
+
+    def test_snapshot_payload_carries_context_metadata_and_state(self):
+        ui_module = self._ui()
+        context = RunContext.from_values({
+            "account_name": "A", "partner_id": 4,
+            "preferred_formats": ["EPUB"]})
+        state = {"11111111-1111-4111-8111-111111111111": {
+            "tolino_id": "t1"}}
+        metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111"}}
+        ready, failed = [], []
+        try:
+            with patch("calibre_plugin.ui_workers.local_metadata",
+                       lambda _db, _context: metadata):
+                worker = ui_module.workers.LocalMetadataWorker(
+                    object(), context, state)
+                worker.ready.connect(ready.append)
+                worker.failed.connect(failed.append)
+                worker.run()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], failed)
+        self.assertEqual(1, len(ready))
+        self.assertIs(context, ready[0]["context"])
+        self.assertIs(metadata, ready[0]["metadata"])
+        self.assertIs(state, ready[0]["state"])
+
+    def test_cancelled_snapshot_never_emits_ready(self):
+        ui_module = self._ui()
+        ready, failed = [], []
+        context = RunContext.from_values({"account_name": "A"})
+        try:
+            worker = ui_module.workers.LocalMetadataWorker(
+                object(), context, {})
+            worker.cancel()
+            worker.ready.connect(ready.append)
+            worker.failed.connect(failed.append)
+            worker.run()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], ready)
+        self.assertEqual([ui_module.common.CANCEL_MESSAGE], failed)
+
+
 class PrepareWorkerTests(unittest.TestCase):
     """Netz-Vorbereitung im Hintergrund, gebunden an das Konto (P2/G)."""
 
@@ -869,6 +913,27 @@ class PrepareWorkerTests(unittest.TestCase):
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
+
+    def test_legacy_fallback_key_is_adopted_before_comparison(self):
+        from ..identifiers import calibre_key
+
+        ui_module = self._ui()
+        scope = "abcdef123456"
+        scoped = calibre_key(7, scope)
+        context = RunContext.from_values({
+            "account_name": "A", "partner_id": 4,
+            "preferred_formats": ["EPUB"]}, library_scope=scope)
+        metadata = {7: {"uuid": scoped, "title": "A", "formats": ["EPUB"]}}
+        state = {"calibre-7": {"calibre_id": 7, "tolino_id": "t1"}}
+        try:
+            worker = ui_module.workers.PrepareWorker(
+                context, metadata, state=state)
+            working, original = worker._load_comparison_state()
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual("t1", working[scoped]["tolino_id"])
+        self.assertIn("calibre-7", working)
+        self.assertNotIn(scoped, original)
 
     def test_ready_payload_carries_comparison_and_captured_account(self):
         ui_module = self._ui()
@@ -1011,11 +1076,11 @@ class PrepareWorkerTests(unittest.TestCase):
             def read_ids(self):
                 return set()
 
-        metadata = {1: {"uuid": "u-stale", "title": "A",
+        metadata = {1: {"uuid": "a6666666-6666-4666-8666-666666666666", "title": "A",
                         "formats": ["EPUB"]}}
         settings = {"account_name": "A", "partner_id": 4,
                     "hardware_id": "hw", "refresh_token": "tok",
-                    "state": {"u-stale": {"tolino_id": "gone"}},
+                    "state": {"a6666666-6666-4666-8666-666666666666": {"tolino_id": "gone"}},
                     "preferred_formats": ["EPUB"]}
         for inventory in ([], parsed_inventory([{}])):
             with self.subTest(inventory=inventory):
@@ -1029,7 +1094,7 @@ class PrepareWorkerTests(unittest.TestCase):
                         worker.ready.connect(payloads.append)
                         worker.run()
                     self.assertEqual(1, len(payloads))
-                    self.assertNotIn("tolino_id", payloads[0]["state"]["u-stale"])
+                    self.assertNotIn("tolino_id", payloads[0]["state"]["a6666666-6666-4666-8666-666666666666"])
                 finally:
                     ui_module._restore_stubs_for_tests()
 
@@ -1307,7 +1372,7 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
             with patch("calibre_plugin.token_vault.TolinoClient", FakeClient):
                 worker = ui_module.workers.SyncWorker(
                     RunContext.from_values(settings), [], [],
-                    meta_updates=[MetaUpdateRecord(1, "u1", "t1", {"title": "A"})],
+                    meta_updates=[MetaUpdateRecord(1, "11111111-1111-4111-8111-111111111111", "t1", {"title": "A"})],
                     state=settings.get("state"))
                 worker.completed.connect(lambda *args: completed.append(True))
                 worker.cancel()
@@ -1474,7 +1539,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
              patch("calibre_plugin.config.save_credentials",
                    lambda *args, **kwargs: None):
             worker = ui_module.workers.SyncWorker(
-                RunContext.from_values(settings), jobs, [("u1", "t1")],
+                RunContext.from_values(settings), jobs, [("11111111-1111-4111-8111-111111111111", "t1")],
                 state=settings.get("state"))
             worker.completed.connect(
                 lambda *args: emitted.update(completed=args))
@@ -1482,10 +1547,10 @@ class InventoryFailureDeletionTests(unittest.TestCase):
             worker.run()
         return worker, emitted, saved
 
-    def test_an_inventory_error_deletes_nothing_and_keeps_the_state(self):
+    def test_a_delete_error_leaves_state_unchanged(self):
         ui_module = self._ui()
         deleted = []
-        state = {"u1": {"tolino_id": "t1", "calibre_id": 1, "title": "T"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "calibre_id": 1, "title": "T"}}
         client = self._client(deleted)
         client.fail_delete = True
         worker, emitted, _saved = self._run(
@@ -1500,19 +1565,18 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         self.assertEqual(1, len(reasons))
         self.assertIn("kaputt", reasons[0]["error"])
 
-    def test_a_replacement_upload_still_runs_without_deleting_the_old_copy(
-            self):
+    def test_a_replacement_upload_deletes_the_old_copy(self):
         ui_module = self._ui()
         deleted = []
-        job = SyncJob(1, "u1", "EPUB", "t-alt",
+        job = SyncJob(1, "11111111-1111-4111-8111-111111111111", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
-        state = {"u1": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
         worker, emitted, _saved = self._run(
             ui_module, self._settings(state), [job], self._client(deleted))
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
         # Ersatz und markierte Löschung werden explizit direkt ausgeführt.
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
         self.assertEqual(["t-alt", "t1"], deleted)
         kinds = {item["kind"]: item["status"] for item in worker.operations}
         self.assertEqual("succeeded", kinds["upload"])
@@ -1521,9 +1585,9 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         """HTTP 404 beim Aufräumen ist ein übersprungener, kein fehlgeschlagener Schritt."""
         ui_module = self._ui()
         deleted = []
-        job = SyncJob(1, "u1", "EPUB", "t-alt",
+        job = SyncJob(1, "11111111-1111-4111-8111-111111111111", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
-        state = {"u1": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
         client = self._client(deleted)
         def delete_old_only(tolino_id):
             if tolino_id == "t-alt":
@@ -1536,7 +1600,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         self.assertEqual(0, worker.outcome["failed"])
         self.assertEqual(1, worker.outcome["skipped"])
         self.assertEqual(["t1"], deleted)
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
 
 
     def test_a_marked_deletion_already_missing_is_skipped_and_state_cleared(self):
@@ -1546,13 +1610,13 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         client = self._client(deleted)
         client.delete = lambda _tolino_id: (_ for _ in ()).throw(
             TolinoApiError("tolino-Fehler (HTTP 404)", code="N03"))
-        state = {"u1": {"tolino_id": "t1", "calibre_id": 1, "title": "T"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "calibre_id": 1, "title": "T"}}
         worker, emitted, _saved = self._run(
             ui_module, self._settings(state), [], client)
         self.assertEqual([], deleted)
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
-        self.assertNotIn("u1", worker.state)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", worker.state)
         self.assertEqual([(1, "")], worker.updates)
         self.assertEqual(1, worker.outcome["skipped"])
         delete_ops = [item for item in worker.operations
@@ -1564,7 +1628,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
         """Ein Fehler beim direkten Löschaufruf wird im Bericht gezählt."""
         ui_module = self._ui()
         deleted = []
-        job = SyncJob(1, "u1", "EPUB", "t-alt",
+        job = SyncJob(1, "11111111-1111-4111-8111-111111111111", "EPUB", "t-alt",
                                        "/library/u1.epub", None, "Titel")
         client = self._client(deleted)
         def fail_old_delete(tolino_id):
@@ -1572,11 +1636,11 @@ class InventoryFailureDeletionTests(unittest.TestCase):
                 raise TolinoApiError("Netzfehler beim Löschen", code="N01")
             deleted.append(tolino_id)
         client.delete = fail_old_delete
-        state = {"u1": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t-alt", "calibre_id": 1, "title": "T"}}
         worker, emitted, _saved = self._run(
             ui_module, self._settings(state), [job], client)
         self.assertIsNone(emitted.get("failed"))
-        self.assertEqual("new-1", worker.state["u1"]["tolino_id"])
+        self.assertEqual("new-1", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
         self.assertEqual(["t1"], deleted)
         kinds = {item["kind"]: item["status"] for item in worker.operations}
         self.assertEqual("succeeded", kinds["upload"])
@@ -1702,12 +1766,12 @@ class InventorySchemaTests(unittest.TestCase):
         self.assertEqual("", records[0]["tolino_id"])
         self.assertEqual("9783832170141", records[0]["isbn"])
 
-    def test_an_identifier_only_record_makes_the_ids_incomplete(self):
+    def test_an_identifier_only_record_has_no_tolino_id(self):
         """Keine Deliverable-Kennung heisst: kein Beweis fuer Loeschungen.
 
-        ``inventory_ids()`` gibt die ISBN bewusst NICHT zurueck -- sonst
-        gaelte eine nicht gefundene Zuordnung als geloescht, obwohl die
-        Kopie (nur unter ``identifier`` lesbar) weiter existiert.
+        Die ISBN unter ``identifier`` ist keine Deliverable-ID; sonst gaelte
+        eine nicht gefundene Zuordnung als geloescht, obwohl die Kopie
+        weiter existiert.
         """
         client = self._client({"PublicationInventory": {"ebook": [
             {"epubMetaData": {"identifier": "978-3-16-148410-0",
@@ -1720,7 +1784,7 @@ class ReadStatusUnknownTests(unittest.TestCase):
 
     @staticmethod
     def _metadata():
-        return {1: {"uuid": "u1", "title": "Buch", "authors": "Autor",
+        return {1: {"uuid": "11111111-1111-4111-8111-111111111111", "title": "Buch", "authors": "Autor",
                     "formats": ["EPUB"], "last_modified": "1"}}
 
     def _rows(self, read_ids):
@@ -1729,21 +1793,16 @@ class ReadStatusUnknownTests(unittest.TestCase):
             [{"deliverableId": "t1", "title": "Buch", "authors": "Autor"}],
             ["EPUB"], read_ids=read_ids)
 
-    def test_failed_fetch_marks_the_status_unknown(self):
-        row = self._rows(None)[0]
-        self.assertFalse(row["read"].known)
-        self.assertFalse(row["read"].cloud)
-        self.assertFalse(row["read"])
-
-    def test_unknown_is_not_the_same_as_nothing_read(self):
-        row = self._rows(()) [0]
-        self.assertTrue(row["read"].known)
-        self.assertFalse(row["read"].cloud)
-
-    def test_a_known_read_state_still_prechecks(self):
-        row = self._rows({"t1"})[0]
-        self.assertTrue(row["read"].known)
-        self.assertTrue(row["read"].cloud)
+    def test_read_status_knownness_table(self):
+        """Ein Tabellenfall je Antwortzustand statt drei fast gleicher Tests."""
+        cases = ((None, False, False), ((), True, False),
+                 ({"t1"}, True, True))
+        for read_ids, known, cloud in cases:
+            with self.subTest(read_ids=read_ids):
+                row = self._rows(read_ids)[0]
+                self.assertIs(known, row["read"].known)
+                self.assertIs(cloud, row["read"].cloud)
+                self.assertIs(cloud, bool(row["read"]))
 
     def test_cloud_only_rows_are_unknown_too(self):
         rows = compare_inventory(
@@ -1996,7 +2055,6 @@ class MultiAccountReadingStateTests(unittest.TestCase):
         old = {self.UUID: {
             "tolino_id": "t1", "calibre_id": 1,
             "content_fp": "content-fingerprint",
-            "meta_fp": "metadata-fingerprint",
             "collections": ["Serie"],
         }}
         self._accounts({"A": old})
@@ -2005,7 +2063,6 @@ class MultiAccountReadingStateTests(unittest.TestCase):
                    "position": "Ops/A.html"}})
         entry = config.account_by_name("A")["state"][self.UUID]
         self.assertEqual("content-fingerprint", entry["content_fp"])
-        self.assertEqual("metadata-fingerprint", entry["meta_fp"])
         self.assertEqual(["Serie"], entry["collections"])
         self.assertEqual("t1", entry["tolino_id"])
         self.assertEqual(1, entry["calibre_id"])
@@ -2037,8 +2094,8 @@ class MultiAccountReadingStateTests(unittest.TestCase):
 
         from ..ui_dashboard import _mirror_account_reading
         db = _ReadingDb({1: self.UUID}, read={1: True}, progress={1: 100})
-        dashboard = type("Dashboard", (), {
-            "gui": type("Gui", (), {"current_db": db})()})()
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": db})())
         _mirror_account_reading(dashboard, "A")
         self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
         self.assertIs(False, db.values[TOLINO_READ_COLUMN][1])
@@ -2050,8 +2107,8 @@ class MultiAccountReadingStateTests(unittest.TestCase):
             "reading": {"read": None, "progress": {"current": "192"}}}}
         self._accounts({"A": state})
         db = _ReadingDb({1: self.UUID}, read={1: True}, progress={1: 100})
-        dashboard = type("Dashboard", (), {
-            "gui": type("Gui", (), {"current_db": db})()})()
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": db})())
         _mirror_account_reading(dashboard, "A")
         self.assertEqual([(TOLINO_READ_COLUMN, {1: None}),
                           (TOLINO_PROGRESS_COLUMN, {1: None})], db.writes)
@@ -2074,8 +2131,8 @@ class MultiAccountReadingStateTests(unittest.TestCase):
             return {book_id: self.UUID for book_id in book_ids}
 
         db.all_field_for = all_field_for
-        dashboard = type("Dashboard", (), {
-            "gui": type("Gui", (), {"current_db": db})()})()
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": db})())
         _mirror_account_reading(dashboard, "A")
         self.assertEqual([("uuid", (42,))], calls)
         self.assertIs(True, db.values[TOLINO_READ_COLUMN][42])
@@ -2088,8 +2145,8 @@ class MultiAccountReadingStateTests(unittest.TestCase):
             "reading": self._reading(True, 100)}}
         self._accounts({"A": state})
         db = _ReadingDb({42: self.UUID, 7: self.OTHER_UUID})
-        dashboard = type("Dashboard", (), {
-            "gui": type("Gui", (), {"current_db": db})()})()
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": db})())
         _mirror_account_reading(dashboard, "A")
         self.assertIs(True, db.values[TOLINO_READ_COLUMN][42])
         self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][42])

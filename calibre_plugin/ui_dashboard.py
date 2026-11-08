@@ -14,8 +14,9 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
 from .run_context import RunContext
 from .comparison import (comparison_progress_updates,
                          comparison_read_updates)
-from .identifiers import valid_book_uuid
-from .library import (TOLINO_IGNORE_COLUMN, column_state,
+from .identifiers import (calibre_key, decline_legacy_migration, is_real_uuid,
+                          needs_legacy_migration, normalize_uuid_text)
+from .library import (TOLINO_IGNORE_COLUMN, column_state, library_scope,
                       bool_column_available, normalize_formats,
                       update_progress_status, update_read_status,
                       update_tolino_ids)
@@ -28,29 +29,30 @@ from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
                                  confirm_replacements, offer_next_step,
                                  report_skipped_uploads)
 from .ui_dialogs import InventoryDialog
-from .ui_workers import PrepareWorker, SyncWorker
+from .ui_workers import LocalMetadataWorker, PrepareWorker, SyncWorker
 
 
 def _book_key_index(dashboard):
     """Return all book ids and every key that maps to one of them.
 
-    Calibre UUIDs are authoritative when present; the ``calibre-<id>``
-    fallback is used for books whose UUID field contains a title or another
-    non-UUID value.
+    Calibre UUIDs are authoritative when present. The library-scoped
+    fallback is only mapped for books whose UUID field contains a title or
+    another non-UUID value; it never shadows a real UUID.
     """
-    api = getattr(
-        getattr(getattr(dashboard, "gui", None), "current_db", None),
-        "new_api", None)
+    database = getattr(getattr(dashboard, "gui", None), "current_db", None)
+    api = getattr(database, "new_api", None)
     if api is None:
         return [], {}
     book_ids = list(api.all_book_ids())
     uuids = api.all_field_for("uuid", book_ids) or {}
+    scope = library_scope(database)
     mapping = {}
     for book_id in book_ids:
-        key = valid_book_uuid(uuids.get(book_id))
-        if key:
+        key = normalize_uuid_text(uuids.get(book_id))
+        if is_real_uuid(key):
             mapping[key] = book_id
-        mapping.setdefault("calibre-%d" % book_id, book_id)
+        else:
+            mapping.setdefault(calibre_key(book_id, scope), book_id)
     return book_ids, mapping
 
 
@@ -225,6 +227,8 @@ class SyncDashboard(DashboardParts, QDialog):
         self.login_worker = None
         self.prepare_thread = None
         self.prepare_worker = None
+        self.snapshot_thread = None
+        self.snapshot_worker = None
         self.account_name = ""
         self.setWindowTitle("tolino Cloud Sync")
         self.setMinimumWidth(560)
@@ -371,7 +375,8 @@ class SyncDashboard(DashboardParts, QDialog):
         Das Anmelden hat wieder seinen eigenen Knopf darüber,
         damit es auch bei abgelaufenem Zugang sofort erreichbar ist.
         """
-        if self.thread is not None or self.prepare_thread is not None:
+        if (self.thread is not None or self.prepare_thread is not None
+                or getattr(self, "snapshot_thread", None) is not None):
             self.cancel_sync()
         else:
             self.start_sync()
@@ -385,6 +390,8 @@ class SyncDashboard(DashboardParts, QDialog):
                 running_text = "Synchronisierung läuft …"
             elif self.prepare_thread is not None:
                 running_text = "Vergleich läuft …"
+            elif getattr(self, "snapshot_thread", None) is not None:
+                running_text = "Bibliothek wird gelesen …"
             else:
                 running_text = "Anmeldung wird geprüft …"
             self.status.setText(running_text)
@@ -564,7 +571,7 @@ class SyncDashboard(DashboardParts, QDialog):
                      (worker.completed, worker.failed))
 
     @gui_guard
-    def login_completed(self, refresh, hardware):
+    def login_completed(self, hardware):
         """Der Worker hat den Token bereits im richtigen Konto gespeichert."""
         self._login_cleanup()
         if hardware:
@@ -611,40 +618,117 @@ class SyncDashboard(DashboardParts, QDialog):
                      message + " Es wurde nichts geändert.", show=True)
 
     def start_sync(self):
-        """Bibliothek vergleichen: lokaler Snapshot im GUI, Netz im Worker.
+        """Bibliothek vergleichen: lokaler Snapshot und Netz im Hintergrund.
 
-        Der Calibre-Datenbankzugriff (Metadaten + Format-Signaturen) bleibt
-        im GUI-Thread. Login und Cloud-Inventar laufen in `PrepareWorker`;
-        der Vergleich und die Auswahl kommen über Qt-Signale zurück.
+        Der Snapshot läuft in `LocalMetadataWorker`; Calibres `new_api` ist
+        threadsafe. Danach übernimmt `PrepareWorker` Login und Cloud-Inventar.
+        Nur der GUI-Thread fasst Widgets an.
         """
-        if self.thread is not None or self.prepare_thread is not None:
+        if (self.thread is not None or self.prepare_thread is not None
+                or getattr(self, "snapshot_thread", None) is not None):
             return
         values = self.values()
         if not self._effective_refresh():
             self.status.setText("Nicht angemeldet.")
             return
         self._save_visible_account(values)
+        database = self.gui.current_db
         context = RunContext.from_values(
-            values, column_state(self.gui.current_db))
+            values, column_state(database),
+            library_scope=library_scope(database))
         account = account_by_name(context.account_name) or {}
         state = load_state(account.get("state"))
-        try:
-            # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
-            metadata = _dashboard_plan.local_metadata(self, context)
-        except Exception as exc:
-            self._show_prepare_error(exc, context)
-            return
-        self._start_prepare_worker(context, metadata, state)
+        migrate_legacy = True
+        if needs_legacy_migration(state, context.library_scope):
+            migrate_legacy = self._confirm_legacy_migration(context, state)
+        self._start_local_snapshot(database, context, state, migrate_legacy)
 
-    def _start_prepare_worker(self, context, metadata, state):
-        """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
+    def _confirm_legacy_migration(self, context, state):
+        """Ask once before old unscoped fallback state is assigned."""
+        yes = QMessageBox.StandardButton.Yes
+        no = QMessageBox.StandardButton.No
+        answer = QMessageBox.question(
+            self, "Ältere Fallback-Zustände",
+            "Ältere Zustandseinträge ohne Bibliothekszuordnung gefunden. "
+            "Sie können nur einer Bibliothek zugeordnet werden.\n\n"
+            "Diesem Bibliotheksstand zuordnen? Bei «Nein» bleiben die alten "
+            "Werte unberücksichtigt; in einer anderen Bibliothek wird erneut "
+            "gefragt.",
+            yes | no, no)
+        if answer == yes:
+            return True
+        if decline_legacy_migration(state, context.library_scope):
+            try:
+                save_account(context.account_name, {"state": state},
+                             create=False)
+            except Exception as exc:
+                log_warning("Legacy-Entscheidung konnte nicht gespeichert "
+                            "werden: %s" % sanitize_error(exc))
+        return False
+
+    def _begin_progress(self, status, label):
+        """Sperren und den unbestimmten Fortschritt fuer einen Lauf zeigen."""
         _apply_busy(self, True)
-        self.status.setText("Vergleich läuft …")
+        self.status.setText(status)
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
         self.progress_label.setVisible(True)
-        self.progress_label.setText("Verbinde mit tolino …")
-        worker = PrepareWorker(context, metadata, state)
+        self.progress_label.setText(label)
+
+    def _start_local_snapshot(self, database, context, state,
+                              migrate_legacy=True):
+        """Calibre-Metadaten in einem eigenen Thread lesen."""
+        self._begin_progress("Bibliothek wird gelesen …",
+                             "Lese Calibre-Bibliothek …")
+        worker = LocalMetadataWorker(database, context, state,
+                                     migrate_legacy)
+        worker.ready.connect(self._snapshot_ready)
+        worker.failed.connect(self._snapshot_failed)
+        start_worker(self, worker, QThread(self), "snapshot_thread",
+                     "snapshot_worker", (worker.ready, worker.failed))
+        self.update_status()
+
+    def _finish_snapshot(self):
+        """Snapshot-Thread abräumen, bevor der Netz-Worker startet."""
+        thread = getattr(self, "snapshot_thread", None)
+        self.snapshot_thread = None
+        self.snapshot_worker = None
+        self.progress.setRange(0, 1)
+        self.progress.setVisible(False)
+        self.progress_label.setText("Bereit")
+        self.progress_label.setVisible(False)
+        _stop_thread(thread, timeout_ms=2000)
+        self.update_status()
+
+    @gui_guard
+    def _snapshot_ready(self, payload):
+        """Lokalen Snapshot übernehmen und die Netz-Vorbereitung starten."""
+        self._finish_snapshot()
+        self._start_prepare_worker(payload["context"], payload["metadata"],
+                                   payload["state"],
+                                   payload.get("migrate_legacy", True))
+
+    @gui_guard
+    def _snapshot_failed(self, message):
+        worker = getattr(self, "snapshot_worker", None)
+        cancelled = bool(getattr(worker, "cancelled", False))
+        self._finish_snapshot()
+        if cancelled or str(message) == CANCEL_MESSAGE:
+            info_dialog(
+                self, "Abgebrochen", "Abgebrochen. Es wurde nichts geändert.",
+                show=True, show_copy_button=False)
+            return
+        log_warning("Bibliothek konnte nicht gelesen werden: "
+                    + sanitize_error(message))
+        error_dialog(self, "Vergleich fehlgeschlagen", str(message), show=True)
+
+    def _start_prepare_worker(self, context, metadata, state,
+                              migrate_legacy=True):
+        """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
+        self._begin_progress("Vergleich läuft …",
+                             "Verbinde mit tolino …")
+        worker = PrepareWorker(context, metadata, state,
+                               migrate_legacy=migrate_legacy)
         worker.progress.connect(self._prepare_progress)
         worker.ready.connect(self._prepare_ready)
         worker.failed.connect(self._prepare_failed)
@@ -725,7 +809,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 self, context, metadata, state, selection,
                 series_map=series_map)
             if preparation["removals"] and not confirm_deletions(
-                    self, preparation["removals"], state,
+                    self, preparation["removals"],
                     preparation.get("removal_titles")):
                 return
             # Erst nach allen Bestätigungen schreiben: ein Abbruch im Dialog
@@ -816,6 +900,9 @@ class SyncDashboard(DashboardParts, QDialog):
             self.progress_label.setText("Synchronisierung läuft …")
 
     def cancel_sync(self):
+        snapshot = getattr(self, "snapshot_worker", None)
+        if snapshot is not None:
+            snapshot.cancel()
         prepare = getattr(self, "prepare_worker", None)
         if prepare is not None:
             prepare.cancel()
@@ -889,14 +976,18 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def closeEvent(self, event):
         """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
-        if self.thread is not None or self.prepare_thread is not None:
+        if (self.thread is not None or self.prepare_thread is not None
+                or getattr(self, "snapshot_thread", None) is not None):
             self.cancel_sync()
         _stop_thread(self.thread)
         _stop_thread(self.prepare_thread)
+        _stop_thread(getattr(self, "snapshot_thread", None))
         self.thread = None
         self.worker = None
         self.prepare_thread = None
         self.prepare_worker = None
+        self.snapshot_thread = None
+        self.snapshot_worker = None
         # A running browser sign-in is left alone on purpose: its thread is
         # unparented and self-terminates after its timeout, and joining it
         # here could freeze the close for minutes.

@@ -10,7 +10,9 @@ from .plan import plan_collection_updates, remember_collection
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint, reading_state,
                          store_reading_state)
-from .identifiers import display_title, state_entry, valid_book_uuid
+from .dashboard_plan import local_metadata
+from .identifiers import (display_title, migrate_legacy_calibre_keys,
+                          state_entry, valid_book_uuid)
 from .library import image_suffix
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
@@ -514,10 +516,49 @@ class _SyncCancelled(Exception):
     """Internes Abbruchsignal: kein Fehler, sondern ein regulaerer Halt."""
 
 
+class LocalMetadataWorker(QObject):
+    """Read the Calibre snapshot outside the GUI thread.
+
+    Calibre's ``new_api`` is documented as thread-safe (multiple readers,
+    one writer). Only the database object and plain run values cross the
+    thread boundary; widgets never do.
+    """
+    ready = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, database, context, state=None, migrate_legacy=True):
+        QObject.__init__(self)
+        self.database = database
+        self.context = context
+        self.state = state
+        self.migrate_legacy = bool(migrate_legacy)
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def run(self):
+        try:
+            metadata = local_metadata(self.database, self.context)
+        except Exception as exc:
+            if self.cancelled:
+                self.failed.emit(CANCEL_MESSAGE)
+                return
+            self.failed.emit(report_error(
+                exc, "Bibliothek", self.context.secrets()))
+            return
+        if self.cancelled:
+            self.failed.emit(CANCEL_MESSAGE)
+            return
+        self.ready.emit({"context": self.context, "metadata": metadata,
+                         "state": self.state,
+                         "migrate_legacy": self.migrate_legacy})
+
+
 class PrepareWorker(QObject):
     """Netz-Teil der Vorbereitung -- bewusst NICHT im GUI-Thread.
 
-    Der lokale Metadaten-Snapshot entsteht im GUI-Thread (Calibre-DB), hier
+    Der lokale Metadaten-Snapshot kommt aus `LocalMetadataWorker`; hier
     laufen nur Login, Cloud-Inventar, Lese-Status und der Vergleich. Alles
     wird unter dem beim Start erfassten Konto gespeichert.
     """
@@ -525,10 +566,12 @@ class PrepareWorker(QObject):
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, context, metadata, state=None, lock_timeout=5):
+    def __init__(self, context, metadata, state=None, lock_timeout=5,
+                 migrate_legacy=True):
         QObject.__init__(self)
         self.context = context
         self.metadata = metadata
+        self.migrate_legacy = bool(migrate_legacy)
         # Ausgangszustand des Kontos; der Worker kopiert ihn vor dem
         # Vergleich, damit nichts Unbestaetigtes in den Einstellungen landet.
         self.state = state
@@ -553,7 +596,11 @@ class PrepareWorker(QObject):
         working state is copied; the original snapshot stays untouched.
         """
         original = load_state(self.state)
-        return copy.deepcopy(original), original
+        working = copy.deepcopy(original)
+        migrate_legacy_calibre_keys(
+            working, self.metadata, self.context.library_scope,
+            allow_legacy=self.migrate_legacy)
+        return working, original
 
     def _load_optional(self, label, loader):
         """Optionale Cloud-Daten laden; ein Fehler bleibt «unbekannt»."""

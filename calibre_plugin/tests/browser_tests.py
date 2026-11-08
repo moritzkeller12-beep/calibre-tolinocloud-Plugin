@@ -867,14 +867,19 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         ct = AES.new(key, AES.MODE_CBC, iv).encrypt(data)
         return base64.b64encode(b"Salted__" + salt + ct).decode()
 
-    def test_decrypt_without_pycryptodome_returns_empty(self):
-        """Ohne das optionale Paket bleibt der Import des Plugins heil."""
+    def test_decrypt_without_pycryptodome_reports_dependency(self):
+        """Ohne Decoder gibt es einen klaren Hinweis statt eines Leerwerts."""
         from ..browser_crypto import cryptojs_decrypt
+        from ..errors import TolinoAuthError
         blob = base64.b64encode(
             b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
         with patch.dict("sys.modules", {"Crypto": None,
                                        "Crypto.Cipher": None}):
-            self.assertEqual("", cryptojs_decrypt(blob))
+            with self.assertRaises(TolinoAuthError) as caught:
+                cryptojs_decrypt(blob)
+        self.assertEqual("A01", caught.exception.code)
+        self.assertIn("PyCryptodome", str(caught.exception.short))
+        self.assertNotIn(blob, str(caught.exception.detail))
 
     def test_invalid_blobs_and_jwt_payloads_are_rejected(self):
         from ..browser_crypto import _pkcs7_unpad, cryptojs_decrypt

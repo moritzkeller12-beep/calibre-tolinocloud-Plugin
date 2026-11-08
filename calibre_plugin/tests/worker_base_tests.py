@@ -4,7 +4,7 @@ from . import ui_base_tests
 import unittest
 from unittest.mock import patch
 from ..run_context import RunContext
-from ._support import start_cdp_stubs, stop_cdp_stubs
+from ._support import FakeSignal, start_cdp_stubs, stop_cdp_stubs
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -38,16 +38,7 @@ class SyncWorkerCollectionTests(unittest.TestCase):
 
     @staticmethod
     def _signal_descriptor():
-        class Signal:
-            def __init__(self):
-                self.slots = []
-
-            def connect(self, slot):
-                self.slots.append(slot)
-
-            def emit(self, *args):
-                for slot in self.slots:
-                    slot(*args)
+        Signal = FakeSignal
 
         class Descriptor:
             def __init__(self, *_types):
@@ -111,9 +102,9 @@ class SyncWorkerCollectionTests(unittest.TestCase):
         return calls
 
     def test_switched_on_creates_only_missing_collections(self):
-        state = {"u1": {"tolino_id": "t1"}, "u2": {"tolino_id": "t2"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}, "22222222-2222-4222-8222-222222222222": {"tolino_id": "t2"}}
         calls = self._run_worker(
-            {"u1": "Adamsberg", "u2": "Neu"}, state,
+            {"11111111-1111-4111-8111-111111111111": "Adamsberg", "22222222-2222-4222-8222-222222222222": "Neu"}, state,
             {("t1", "Adamsberg")})
         # t1/Adamsberg ist schon da, nur t2/Neu fehlt.
         self.assertEqual([("t2", "Neu")], calls["added"])
@@ -127,8 +118,8 @@ class SyncWorkerCollectionTests(unittest.TestCase):
         # Der Worker arbeitet auf einer eigenen Kopie; der Lauf liefert den
         # fortgeschriebenen Zustand über `completed` zurück.
         emitted = calls["completed"][0]
-        self.assertEqual(["Adamsberg"], emitted["u1"]["collections"])
-        self.assertEqual(["Neu"], emitted["u2"]["collections"])
+        self.assertEqual(["Adamsberg"], emitted["11111111-1111-4111-8111-111111111111"]["collections"])
+        self.assertEqual(["Neu"], emitted["22222222-2222-4222-8222-222222222222"]["collections"])
         # Nur die neu geschriebene Sammlung zählt im Abschlussbericht;
         # die bestehende Zuordnung wird als übersprungen ausgewiesen.
         self.assertEqual(1, calls["worker"].outcome["collections"])
@@ -137,15 +128,15 @@ class SyncWorkerCollectionTests(unittest.TestCase):
     def test_remembered_collections_skip_the_cloud_entirely(self):
         """Zweiter Sync mit denselben Serien: nichts zu tun, also auch
         keine Cloud-Anfrage und keine Zuordnung mehr."""
-        state = {"u1": {"tolino_id": "t1", "collections": ["Adamsberg"]}}
-        calls = self._run_worker({"u1": "Adamsberg"}, state, set())
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "collections": ["Adamsberg"]}}
+        calls = self._run_worker({"11111111-1111-4111-8111-111111111111": "Adamsberg"}, state, set())
         self.assertEqual([], calls["added"])
         self.assertEqual(0, calls["pairs_reads"])
         self.assertIsNotNone(calls["completed"])
 
     def test_switched_off_leaves_the_cloud_untouched(self):
         calls = self._run_worker(
-            {}, {"u1": {"tolino_id": "t1"}},
+            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}},
             {("t1", "Adamsberg")})
         self.assertEqual([], calls["added"])
         self.assertEqual(0, calls["pairs_reads"])
@@ -153,13 +144,13 @@ class SyncWorkerCollectionTests(unittest.TestCase):
 
     def test_books_without_cloud_copy_get_no_collection(self):
         calls = self._run_worker(
-            {"u2": "Neu"}, {"u1": {"tolino_id": "t1"}}, set())
+            {"22222222-2222-4222-8222-222222222222": "Neu"}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, set())
         self.assertEqual([], calls["added"])
         self.assertEqual(0, calls["pairs_reads"])
 
     def test_read_marks_are_one_bulk_call(self):
         calls = self._run_worker(
-            {}, {"u1": {"tolino_id": "t1"}}, set(),
+            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, set(),
             read_changes=[("t1", None, True), ("t2", None, True)])
         self.assertEqual([(["t1", "t2"], True)], calls["read_marks"])
         self.assertIsNotNone(calls["completed"])
@@ -169,7 +160,7 @@ class SyncWorkerCollectionTests(unittest.TestCase):
     def test_read_unmarks_are_one_bulk_call_with_finished_false(self):
         """Häkchen weggeklickt: EIN Aufruf, der die Marke entfernt."""
         calls = self._run_worker(
-            {}, {"u1": {"tolino_id": "t1"}}, set(),
+            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, set(),
             read_changes=[("t1", None, False), ("t2", None, False)])
         self.assertEqual([(["t1", "t2"], False)], calls["read_marks"])
         self.assertTrue(any("Als ungelesen markieren" in text
@@ -180,19 +171,19 @@ class SyncWorkerCollectionTests(unittest.TestCase):
     def test_confirmed_unmark_reaches_the_calibre_column(self):
         """Gelesen -> ungelesen muss die Spalte auf Nein setzen."""
         calls = self._run_worker(
-            {}, {"u1": {"tolino_id": "t1", "calibre_id": 7}}, set(),
+            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "calibre_id": 7}}, set(),
             read_changes=[("t1", 7, False)])
         self.assertEqual([(7, False)], calls["worker"].read_updates)
 
     def test_confirmed_mark_reaches_the_calibre_column(self):
         calls = self._run_worker(
-            {}, {"u1": {"tolino_id": "t1", "calibre_id": 7}}, set(),
+            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "calibre_id": 7}}, set(),
             read_changes=[("t1", 7, True)])
         self.assertEqual([(7, True)], calls["worker"].read_updates)
 
     def test_marking_and_unmarking_are_two_separate_calls(self):
         calls = self._run_worker(
-            {}, {"u1": {"tolino_id": "t1"}}, set(),
+            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, set(),
             read_changes=[("t1", None, True), ("t2", None, False)])
         self.assertEqual([(["t1"], True), (["t2"], False)], calls["read_marks"])
         # Beide Schritte zählen im Fortschritt mit.
@@ -200,7 +191,7 @@ class SyncWorkerCollectionTests(unittest.TestCase):
                                 in calls["progress"]))
 
     def test_without_read_marks_the_cloud_status_is_untouched(self):
-        calls = self._run_worker({}, {"u1": {"tolino_id": "t1"}}, set())
+        calls = self._run_worker({}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, set())
         self.assertEqual([], calls["read_marks"])
 
 

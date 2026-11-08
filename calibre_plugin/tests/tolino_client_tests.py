@@ -1268,13 +1268,13 @@ class SyncDataResponseShapeTests(unittest.TestCase):
         """Von der Server-Antwort bis zur angehakten Spalte – der Fall aus
         dem Feldbericht."""
         client, _ = self._client([self.READ])
-        book = {"uuid": "u1", "title": "Feuerprobe", "authors": "Donna Leon",
+        book = {"uuid": "11111111-1111-4111-8111-111111111111", "title": "Feuerprobe", "authors": "Donna Leon",
                 "isbn": "", "formats": ["EPUB"], "last_modified": "1",
                 "format_signatures": {"EPUB": "1:1"}}
         inventory = [{"deliverableId": self.PUB,
                       "epubMetaData": {"title": "Feuerprobe",
                                        "author": [{"name": "Donna Leon"}]}}]
-        rows = compare_inventory({1: book}, {"u1": {"tolino_id": self.PUB}},
+        rows = compare_inventory({1: book}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": self.PUB}},
                                  inventory, ["EPUB"],
                                  read_ids=client.read_ids())
         row = rows[0]
@@ -1443,13 +1443,13 @@ class PersistCredentialsDedupTests(unittest.TestCase):
             config.PREFERENCES = config.JSONConfig("test")
             config.save_account("konto", {
                 "refresh_token": "alt", "hardware_id": "hw",
-                "state": {"u1": {"tolino_id": "t1"}},
+                "state": {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}},
             }, active="konto")
             self.assertTrue(config.clear_refresh_token("konto"))
             account = config.account_by_name("konto")
             self.assertEqual("", account["refresh_token"])
             self.assertEqual("hw", account["hardware_id"])
-            self.assertEqual({"u1": {"tolino_id": "t1"}}, account["state"])
+            self.assertEqual({"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, account["state"])
             self.assertFalse(config.clear_refresh_token("fehlt"))
         finally:
             config.PREFERENCES = original

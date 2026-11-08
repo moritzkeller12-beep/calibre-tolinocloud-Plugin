@@ -21,7 +21,7 @@ def tag_patch(op, book_id, name, category, revision=None, tag_id=None):
         if not str(tag_id or "").strip():
             raise TolinoApiError(
                 "Marken-ID fehlt (%s / %s)." % (book_id, name),
-                code="N02", short="Die Sammlung ist in der Cloud nicht auffindbar.")
+                code="N02", short="Die Marke ist in der Cloud nicht auffindbar.")
         path = "%s/%s" % (path, tag_id)
     return {"op": op, "value": value, "path": path}
 

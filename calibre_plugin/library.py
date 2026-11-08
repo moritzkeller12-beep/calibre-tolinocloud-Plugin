@@ -1,4 +1,5 @@
 """Adapters for Calibre library and Qt APIs used by the plugin."""
+import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -14,6 +15,27 @@ TOLINO_PROGRESS_COLUMN = "#tolino_progress"
 # Calibre liefert ein Ja/Nein-Feld je nach Weg als Bool, Text oder Zahl.
 _TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
 _FALSE_VALUES = frozenset(("false", "no", "nein", "0"))
+# Ohne Bibliothekskennung gibt es keinen echten Scope. Ein fester Ersatz
+# verhindert, dass der alte ungescopte Schluessel stillschweigend entsteht.
+DEFAULT_LIBRARY_SCOPE = hashlib.sha256(
+    b"tolino-cloud-sync-default-library").hexdigest()[:12]
+
+
+def library_scope(database):
+    """Return a stable short namespace for one Calibre library.
+
+    `library_id` is preferred; `dbpath` is the fallback for older Calibre
+    versions. Hashing keeps the state key short and avoids embedding a
+    filesystem path in preferences. If both are unavailable, a fixed
+    placeholder scope keeps fallback keys namespaced instead of recreating
+    the old unscoped ``calibre-<id>`` form.
+    """
+    raw = (getattr(database, "library_id", "")
+           or getattr(database, "dbpath", ""))
+    text = str(raw or "").strip()
+    if not text:
+        return DEFAULT_LIBRARY_SCOPE
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 def _column_value(metadata):
@@ -231,7 +253,12 @@ def update_progress_status(database, updates):
 
 
 def update_tolino_ids(database, updates, account_name=None):
-    """Merge this account's IDs into the shared Calibre custom column."""
+    """Merge this account's IDs into the shared Calibre custom column.
+
+    A historic plain value is replaced by the account map after a warning;
+    it cannot be assigned to an account safely and would otherwise block
+    the per-account updates.
+    """
     if not updates or TOLINO_COLUMN not in database.field_metadata:
         return 0
     account_name = str(account_name or "").strip()
@@ -239,12 +266,15 @@ def update_tolino_ids(database, updates, account_name=None):
         return 0
     api = database.new_api
     values = {}
+    legacy_replaced = False
     for book_id, tolino_id in updates:
         if book_id is None or not api.has_id(book_id):
             continue
         new_id = str(tolino_id or "").strip()
-        account_ids = _decode_tolino_ids(
-            api.field_for(TOLINO_COLUMN, book_id))
+        raw = api.field_for(TOLINO_COLUMN, book_id)
+        if raw and not str(raw).strip().startswith("{"):
+            legacy_replaced = True
+        account_ids = _decode_tolino_ids(raw)
         if new_id:
             account_ids[account_name] = new_id
         else:
@@ -253,6 +283,10 @@ def update_tolino_ids(database, updates, account_name=None):
     if not values:
         return 0
     api.set_field(TOLINO_COLUMN, values)
+    if legacy_replaced:
+        from .tolino import log_warning
+        log_warning("Alte Einzel-ID in #tolino_id wurde durch die "
+                    "kontobezogene Zuordnung ersetzt.")
     return len(values)
 
 

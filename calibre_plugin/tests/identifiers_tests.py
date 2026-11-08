@@ -4,8 +4,11 @@ import unittest
 from unittest.mock import patch
 from . import orchestration_tests
 from ..plan import plan_metadata_updates, plan_sync
+from ..identifiers import calibre_key
+from ..library import DEFAULT_LIBRARY_SCOPE, library_scope
 from ..run_context import RunContext
-from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
+from ._support import (compare_inventory, dashboard_stub, start_cdp_stubs,
+                       stop_cdp_stubs)
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -82,10 +85,12 @@ class BookIdentifierSourceTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertEqual("", book_uuid(CalibreLikeMetadata(uuid=title)))
 
-    def test_a_tolerant_calibre_key_stays_valid(self):
-        """`calibre-<id>` is a stable fallback; source UUIDs stay strict."""
+    def test_only_library_scoped_calibre_keys_are_valid(self):
+        """The unscoped fallback belongs to migration, not to new state."""
         from ..identifiers import valid_book_uuid
-        self.assertEqual("calibre-7", valid_book_uuid("calibre-7"))
+        self.assertEqual("", valid_book_uuid("calibre-7"))
+        self.assertEqual("calibre-abcdef123456-7",
+                         valid_book_uuid("calibre-abcdef123456-7"))
 
     def test_the_comparison_remembers_the_calibre_id(self):
         metadata = {7: {"uuid": self.UUID, "title": "A", "authors": "B",
@@ -108,8 +113,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
 
     def _dashboard(self, books, settings=None):
         settings = settings or {"state": "", "preferred_formats": ["EPUB"]}
-        dashboard = self.dashboard_module.SyncDashboard.__new__(
-            self.dashboard_module.SyncDashboard)
+        dashboard = dashboard_stub()
         api = books["library"].new_api
         metadata = books["metadata"]
         attrs = {name: staticmethod(getattr(api, name)) for name in
@@ -124,7 +128,9 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
 
     @staticmethod
     def _context(dashboard):
-        return RunContext.from_values(dashboard.values(), dashboard.columns)
+        return RunContext.from_values(
+            dashboard.values(), dashboard.columns,
+            library_scope=library_scope(dashboard.gui.current_db))
 
     def _books(self, library=None):
         if library is None:
@@ -147,7 +153,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             last_modified="2026-01-01")
         dashboard = self._dashboard(books)
         metadata = self.dashboard_plan.local_metadata(
-            dashboard, self._context(dashboard))
+            dashboard.gui.current_db, self._context(dashboard))
         self.assertEqual(BookIdentifierSourceTests.UUID, metadata[7]["uuid"])
         uploads = plan_sync(metadata, {}, ["EPUB"],
                             upload_book_ids={7})
@@ -183,25 +189,26 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
                    return_value=type("Stat", (), {
                        "st_size": 1, "st_mtime": 1.0})()):
             metadata = self.dashboard_plan.local_metadata(
-                dashboard, self._context(dashboard))
+                dashboard.gui.current_db, self._context(dashboard))
         self.assertEqual(["EPUB"], database.stat_formats)
         self.assertEqual({"EPUB": "1:1000"}, metadata[7]["format_signatures"])
 
     def test_a_blank_uuid_still_gets_a_stable_key_and_the_upload_runs(self):
         dashboard = self._dashboard(self._books())
         metadata = self.dashboard_plan.local_metadata(
-            dashboard, self._context(dashboard))
-        self.assertEqual("calibre-7", metadata[7]["uuid"])
+            dashboard.gui.current_db, self._context(dashboard))
+        key = calibre_key(7, library_scope(dashboard.gui.current_db))
+        self.assertEqual(key, metadata[7]["uuid"])
         # Der Vergleich merkt sich die Cloud-Kopie unter der Ersatzkennung.
         state = {}
         compare_inventory(metadata, state, [{
             "deliverableId": "t1", "title": "Der Schwarm",
             "authors": "Frank Schatzing"}], ["EPUB"])
-        self.assertEqual("t1", state.get("calibre-7", {}).get("tolino_id"))
+        self.assertEqual("t1", state.get(key, {}).get("tolino_id"))
         uploads = plan_sync(metadata, state, ["EPUB"],
                             upload_book_ids={7})
         self.assertEqual(1, len(uploads))
-        self.assertEqual("calibre-7", uploads[0][1])
+        self.assertEqual(key, uploads[0][1])
         meta_updates = plan_metadata_updates(
             metadata, state, [], {7})
         self.assertEqual(1, len(meta_updates))
@@ -212,8 +219,10 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         dashboard = self._dashboard(self._books(), {
             "state": state, "preferred_formats": ["EPUB"]})
         metadata = self.dashboard_plan.local_metadata(
-            dashboard, self._context(dashboard))
-        self.assertEqual("calibre-7", metadata[7]["uuid"])
+            dashboard.gui.current_db, self._context(dashboard))
+        self.assertEqual(
+            calibre_key(7, library_scope(dashboard.gui.current_db)),
+            metadata[7]["uuid"])
         self.assertIn("frueher", state)
 
     def test_a_title_as_uuid_uses_the_stable_calibre_key(self):
@@ -227,8 +236,10 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         dashboard = self._dashboard(books, {
             "state": state, "preferred_formats": ["EPUB"]})
         metadata = self.dashboard_plan.local_metadata(
-            dashboard, self._context(dashboard))
-        self.assertEqual("calibre-7", metadata[7]["uuid"])
+            dashboard.gui.current_db, self._context(dashboard))
+        self.assertEqual(
+            calibre_key(7, library_scope(dashboard.gui.current_db)),
+            metadata[7]["uuid"])
         uploads = plan_sync(metadata, state, ["EPUB"], upload_book_ids={7})
         self.assertEqual(1, len(uploads))
         self.assertEqual("t1", state[title]["tolino_id"])
@@ -241,7 +252,8 @@ class UuidValueTests(unittest.TestCase):
  verlangte dagegen ausdrücklich einen `str` und gab für alles
     andere "" zurück – damit übersprang `plan_sync` **jedes** Buch, der
     Zustand merkte keine Tolino-ID, und alle ausgewählten Uploads und
-    Metadatensätze fielen aus dem Plan. 0.15 hatte den Wert immer mit `str()`
+    Metadatensätze fielen aus dem Plan. Eine frühere Version hatte den Wert
+    immer mit `str()`
     gelesen und war davon nicht betroffen.
     """
 
@@ -260,6 +272,12 @@ class UuidValueTests(unittest.TestCase):
         self.assertEqual("", valid_book_uuid("none"))
         self.assertEqual("", valid_book_uuid("x" * 200))
         self.assertEqual("", valid_book_uuid("mit leerzeichen"))
+        self.assertEqual("", valid_book_uuid("u1"))
+        self.assertEqual("", valid_book_uuid("book"))
+        self.assertEqual("", valid_book_uuid("calibre-7"))
+        self.assertEqual("calibre-abcdef123456-7",
+                         valid_book_uuid("calibre-abcdef123456-7"))
+
 
     @staticmethod
     def _metadata(kind):
@@ -300,3 +318,110 @@ class UuidValueTests(unittest.TestCase):
         compare_inventory(self._metadata("obj"), object_state,
                           self._inventory(), ["EPUB"])
         self.assertEqual(string_state, object_state)
+
+
+class LibraryScopedKeyTests(unittest.TestCase):
+    """Fallback keys name their library; old keys are adopted only once."""
+
+    class Api:
+        def all_book_ids(self):
+            return (7,)
+
+        def get_metadata(self, _book_id):
+            return CalibreLikeMetadata(title="Der Schwarm",
+                                       authors=["Frank Schatzing"],
+                                       formats=[])
+
+    class Database:
+        def __init__(self, library_id):
+            self.library_id = library_id
+            self.new_api = LibraryScopedKeyTests.Api()
+
+    def test_scope_is_stable_and_distinct_between_libraries(self):
+        first = library_scope(type("Db", (), {"library_id": "a"})())
+        second = library_scope(type("Db", (), {"library_id": "b"})())
+        self.assertEqual(first, library_scope(
+            type("Db", (), {"library_id": "a"})()))
+        self.assertNotEqual(first, second)
+        self.assertEqual(first, library_scope(
+            type("Db", (), {"dbpath": "a"})()))
+        self.assertEqual(DEFAULT_LIBRARY_SCOPE, library_scope(object()))
+
+    def test_a_key_requires_a_scope(self):
+        self.assertEqual("", calibre_key(7))
+        self.assertEqual("calibre-abcdef123456-7", calibre_key(7, "ABCDEF123456"))
+
+    def test_fallback_key_uses_the_library_scope(self):
+        from ..dashboard_plan import local_metadata
+        from ..identifiers import calibre_key
+        first = self.Database("library-a")
+        second = self.Database("library-b")
+        first_metadata = local_metadata(
+            first, RunContext(preferred_formats=("EPUB",),
+                              library_scope=library_scope(first)))
+        second_metadata = local_metadata(
+            second, RunContext(preferred_formats=("EPUB",),
+                               library_scope=library_scope(second)))
+        self.assertEqual(calibre_key(7, library_scope(first)),
+                         first_metadata[7]["uuid"])
+        self.assertNotEqual(first_metadata[7]["uuid"],
+                            second_metadata[7]["uuid"])
+
+    def test_legacy_fallback_is_adopted_only_for_the_same_book(self):
+        from ..identifiers import (LEGACY_MIGRATION_KEY, calibre_key,
+                                   migrate_legacy_calibre_keys)
+        scope = "abcdef123456"
+        scoped = calibre_key(7, scope)
+        state = {"calibre-7": {"calibre_id": 7, "tolino_id": "t1"}}
+        self.assertTrue(migrate_legacy_calibre_keys(
+            state, {7: {"uuid": scoped}}, scope))
+        self.assertEqual("t1", state[scoped]["tolino_id"])
+        self.assertIn("calibre-7", state)
+        self.assertEqual(scope, state[LEGACY_MIGRATION_KEY]["scope"])
+
+        state = {"calibre-7": {"calibre_id": 8, "tolino_id": "t-other"}}
+        self.assertFalse(migrate_legacy_calibre_keys(
+            state, {7: {"uuid": scoped}}, scope))
+        self.assertNotIn(scoped, state)
+        # Die Zustimmung bleibt auch ohne passendes Buch gespeichert.
+        self.assertEqual(scope, state[LEGACY_MIGRATION_KEY]["scope"])
+        self.assertFalse(state[LEGACY_MIGRATION_KEY]["declined"])
+
+    def test_legacy_fallback_is_claimed_by_only_one_library(self):
+        from ..identifiers import (LEGACY_MIGRATION_KEY, calibre_key,
+                                   migrate_legacy_calibre_keys,
+                                   needs_legacy_migration)
+        first, second = "abcdef123456", "123456abcdef"
+        state = {"calibre-7": {"calibre_id": 7, "tolino_id": "t1"}}
+        self.assertTrue(migrate_legacy_calibre_keys(
+            state, {7: {"uuid": calibre_key(7, first)}}, first))
+        self.assertFalse(migrate_legacy_calibre_keys(
+            state, {7: {"uuid": calibre_key(7, second)}}, second))
+        self.assertNotIn(calibre_key(7, second), state)
+        self.assertEqual(first, state[LEGACY_MIGRATION_KEY]["scope"])
+        self.assertFalse(needs_legacy_migration(state, second))
+
+    def test_legacy_state_is_not_resurrected_after_removal(self):
+        from ..identifiers import calibre_key, migrate_legacy_calibre_keys
+        scope = "abcdef123456"
+        scoped = calibre_key(7, scope)
+        state = {"calibre-7": {"calibre_id": 7, "tolino_id": "t1"}}
+        self.assertTrue(migrate_legacy_calibre_keys(
+            state, {7: {"uuid": scoped}}, scope))
+        state.pop(scoped)
+        self.assertFalse(migrate_legacy_calibre_keys(
+            state, {7: {"uuid": scoped}}, scope))
+        self.assertNotIn(scoped, state)
+
+    def test_declined_legacy_state_can_be_claimed_by_another_library(self):
+        from ..identifiers import (calibre_key, decline_legacy_migration,
+                                   migrate_legacy_calibre_keys,
+                                   needs_legacy_migration)
+        first, second = "abcdef123456", "123456abcdef"
+        state = {"calibre-7": {"calibre_id": 7, "tolino_id": "t1"}}
+        self.assertTrue(decline_legacy_migration(state, first))
+        self.assertFalse(needs_legacy_migration(state, first))
+        self.assertTrue(needs_legacy_migration(state, second))
+        self.assertTrue(migrate_legacy_calibre_keys(
+            state, {7: {"uuid": calibre_key(7, second)}}, second))
+        self.assertIn(calibre_key(7, second), state)

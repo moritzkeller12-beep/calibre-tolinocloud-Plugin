@@ -18,6 +18,7 @@ DEFAULT_ACCOUNT = {
     "state": {},
 }
 _SETTINGS_LOCK = threading.RLock()
+_UNSET = object()
 
 
 def load_state(raw):
@@ -97,35 +98,66 @@ def settings():
         }
 
 
-def _write_account(name, values, active=None, set_active=False,
-                   preferred_formats=None, create=True, allow_default=False):
-    """Der gemeinsame Schreibweg für einen einzelnen Account (unter Lock)."""
-    name = str(name or "").strip()
-    if not name:
-        return False
-    values = values if isinstance(values, dict) else {}
+def _account_records():
+    """Return a mutable copy of the stored account list."""
     raw = PREFERENCES.get("accounts", None)
-    records = list(raw) if isinstance(raw, list) else []
-    named = list(_named_accounts(records))
-    target = next((index for index, (stored, _source) in enumerate(named)
-                   if records and stored == name), None)
-    if target is not None:
-        record = dict(named[target][1])
-        record.update({key: values[key] for key in ACCOUNT_KEYS
-                       if key in values})
-        records[target] = _account(record, name,
-                                   copy_state="state" in values)
-    else:
-        virtual_default = not records and name == DEFAULT_ACCOUNT_NAME
-        if not (create or (allow_default and virtual_default)):
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _named_index(records, name):
+    """Index of a normalized account name, or None for a new account."""
+    if not records:
+        return None
+    for index, (stored, _source) in enumerate(_named_accounts(records)):
+        if stored == name:
+            return index
+    return None
+
+
+def _can_create(records, name, create, allow_virtual_default):
+    """May this write add ``name`` to the stored account list?"""
+    if create:
+        return True
+    return (allow_virtual_default and not records
+            and name == DEFAULT_ACCOUNT_NAME)
+
+
+def _activate(records, requested, previous, fallback):
+    """Select a valid active account after the records changed."""
+    names = {stored for stored, _source in _named_accounts(records)}
+    chosen = str(requested or previous or "").strip()
+    PREFERENCES["active_account"] = chosen if chosen in names else fallback
+
+
+def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
+                   create=True, allow_virtual_default=False):
+    """Persist one account and optionally the active/format settings.
+
+    ``active`` ist ein Sentinel: Wird es übergeben (auch als ``None``), wird
+    das aktive Konto neu bestimmt. Fehlt es, bleibt die Auswahl unberührt.
+    """
+    name = str(name or "").strip()
+    if not name or not isinstance(values, dict):
+        return False
+    records = _account_records()
+    index = _named_index(records, name)
+    previous_active = ""
+    if active is not _UNSET:
+        previous_active = _active_name(
+            [{"name": stored} for stored, _source in _named_accounts(records)])
+    if index is None:
+        if not _can_create(records, name, create, allow_virtual_default):
             return False
         records.append(_account(dict(values, name=name), name))
+    else:
+        record = dict(records[index])
+        record.update({key: values[key] for key in ACCOUNT_KEYS
+                       if key in values})
+        records[index] = _account(record, name,
+                                  copy_state="state" in values)
     PREFERENCES["accounts"] = records
-    if set_active:
-        current = _active_name([{"name": stored} for stored, _ in named])
-        chosen = str(active or current or "")
-        names = {stored for stored, _ in _named_accounts(records)}
-        PREFERENCES["active_account"] = chosen if chosen in names else name
+    if active is not _UNSET:
+        _activate(records, active, previous_active, name)
     elif not PREFERENCES.get("active_account"):
         PREFERENCES["active_account"] = name
     if preferred_formats is not None:
@@ -146,9 +178,9 @@ def save_account(name, values, active=None, preferred_formats=None,
     """
     with _SETTINGS_LOCK:
         return _write_account(
-            name, values, active=active, set_active=True,
+            name, values, active=active,
             preferred_formats=preferred_formats, create=create,
-            allow_default=True)
+            allow_virtual_default=True)
 
 
 def account_by_name(name):
@@ -161,11 +193,12 @@ def account_by_name(name):
     return {}
 
 
-def _update_account(name, values, allow_default=False):
+def _update_account(name, values, allow_virtual_default=False):
     """Update one existing account; callbacks never recreate deleted accounts."""
     with _SETTINGS_LOCK:
         return _write_account(
-            name, values, create=False, allow_default=allow_default)
+            name, values, create=False,
+            allow_virtual_default=allow_virtual_default)
 
 
 def set_active_account(name):
@@ -189,7 +222,7 @@ def save_credentials(account_name, refresh_token, hardware):
     return _update_account(account_name, {
         "refresh_token": refresh_token,
         "hardware_id": hardware,
-    }, allow_default=True)
+    }, allow_virtual_default=True)
 
 
 def save_refresh_token(account_name, token):
@@ -203,7 +236,7 @@ def save_refresh_token(account_name, token):
     token = str(token or "").strip()
     if token:
         return _update_account(account_name, {"refresh_token": token},
-                               allow_default=True)
+                               allow_virtual_default=True)
     return False
 
 
@@ -216,7 +249,7 @@ def save_hardware_id(account_name, hardware):
     """Die Geraete-ID im Konto sichern -- die Config ist ihre einzige Quelle."""
     return _update_account(account_name,
                            {"hardware_id": str(hardware or "")},
-                           allow_default=True)
+                           allow_virtual_default=True)
 
 
 def account_secrets(account_name):

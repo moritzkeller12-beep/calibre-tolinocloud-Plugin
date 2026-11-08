@@ -13,7 +13,7 @@ Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino
 2. In Calibre: **Einstellungen → Plugins → Plugin aus Datei laden** und ZIP auswählen.
 3. Calibre neu starten.
 
-Voraussetzung: Calibre 6 oder neuer. Für automatische Anmeldung wird Chrome, Chromium, Brave oder Edge benötigt.
+Voraussetzung: Calibre 6 oder neuer. Für die automatische Anmeldung wird Chrome, Chromium, Brave oder Edge benötigt; verschlüsselte Web-Reader-Tokens benötigen zusätzlich PyCryptodome.
 
 ## Benutzung
 
@@ -21,7 +21,7 @@ Plugin öffnen, Buchhändler wählen und **Bei tolino anmelden**. Danach **Bibli
 
 ## Mehrere Konten
 
-Jedes Konto hat eigene Lesewerte. Die Spalten `#tolino_read` und `#tolino_progress` zeigen immer den Stand des aktiven Kontos. Beim Wechsel ordnet das Plugin die Werte zuerst über die Calibre-UUID zu. Fehlt eine echte UUID, nutzt es die Calibre-Buch-ID. So bleiben die Werte auch dann erhalten, wenn das UUID-Feld keinen gültigen Wert enthält. Beim Zurückwechseln erscheinen wieder die Werte des vorherigen Kontos.
+Jedes Konto hat eigene Lesewerte. Die Spalten `#tolino_read` und `#tolino_progress` zeigen immer den Stand des aktiven Kontos. Beim Wechsel ordnet das Plugin die Werte zuerst über die Calibre-UUID zu. Fehlt eine echte UUID, nutzt es einen bibliotheksbezogenen Fallback aus Bibliothekskennung und Buchnummer. So bleiben die Werte auch dann erhalten, wenn das UUID-Feld keinen gültigen Wert enthält, und zwei Bibliotheken mit derselben Buchnummer überschreiben sich nicht. Beim Zurückwechseln erscheinen wieder die Werte des vorherigen Kontos.
 
 Ein laufender Vergleich oder Sync bleibt beim Startkonto und überschreibt die Anzeige eines anderen Kontos nicht. Während einer Anmeldeprüfung ist der Konto-Wechsel gesperrt.
 
@@ -42,7 +42,7 @@ Für den Abgleich liest das Plugin die ISBN auch aus tolino-Produktkennungen. Di
 
 - Das Plugin nutzt eine inoffizielle tolino-Schnittstelle. Sie kann sich jederzeit ändern.
 - Zugangsdaten und Lesewerte werden pro Konto in den Calibre-Einstellungen gespeichert. Der Refresh-Token steht dort im Klartext in der JSON-Datei.
-- Alte gemeinsame Lesewerte werden keinem Konto automatisch zugeordnet. Beim ersten erfolgreichen Vergleich je Konto werden die Werte neu ermittelt.
+- Ältere Zustandseinträge ohne Bibliothekszuordnung (`calibre-<id>`) werden nur nach ausdrücklicher Bestätigung und nur von einer Bibliothek übernommen. Die Entscheidung wird kontobezogen gespeichert, auch wenn aktuell kein Buch dazu passt; eine andere Bibliothek kann später erneut gefragt werden. Neue Fallback-Schlüssel tragen immer eine Bibliothekszuordnung.
 - Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste](docs/fehlercodes.md).
 
 Lizenz: [GPL-3.0-or-later](LICENSE). Änderungen: [CHANGELOG](CHANGELOG.md).

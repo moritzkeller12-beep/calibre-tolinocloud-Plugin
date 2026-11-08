@@ -18,8 +18,12 @@ class TolinoSyncAction(InterfaceAction):
         try:
             from .token_vault import start_token_keepalive
             start_token_keepalive()
-        except Exception:
-            pass  # keep-alive must never break plugin loading
+        except Exception as exc:
+            # Keep-alive must never break plugin loading, but a silent failure
+            # makes a missing token rotation impossible to diagnose.
+            from .tolino import log_warning
+            log_warning("Tolino-Keep-alive konnte nicht gestartet werden: %s"
+                        % exc)
 
     def shutting_down(self):
         """Calibre beendet sich -- der dokumentierte Rückruf der Action.
@@ -37,8 +41,11 @@ class TolinoSyncAction(InterfaceAction):
         try:
             from .token_vault import stop_token_keepalive
             stop_token_keepalive()
-        except Exception:
-            pass  # der Shutdown darf nie an der Aufräumung scheitern
+        except Exception as exc:
+            # Der Shutdown darf nie an der Aufräumung scheitern.
+            from .tolino import log_warning
+            log_warning("Tolino-Keep-alive konnte nicht beendet werden: %s"
+                        % exc)
 
     def show_dashboard(self):
         from .ui_dashboard import SyncDashboard

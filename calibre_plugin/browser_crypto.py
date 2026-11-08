@@ -2,6 +2,8 @@
 import base64
 import hashlib
 
+from .errors import TolinoAuthError
+
 
 # CryptoJS.AES.encrypt(value, VERSION.PHRASE) -> Base64 in IndexedDB
 # (userToken/userInfos): OpenSSL-"Salted__"-KDF, AES-256-CBC mit der
@@ -27,15 +29,32 @@ def _pkcs7_unpad(data):
     return data[:-pad]
 
 
-def cryptojs_decrypt(b64_text):
-    """Decrypt a CryptoJS.AES.encrypt Base64 blob; return "" on any mismatch."""
-    # PyCryptodome ist eine optionale Abhaengigkeit: ohne sie bleibt der
-    # Web-Reader-Pfad einfach leer, statt das ganze Plugin beim Import zu
-    # blockieren. Calibre bringt das Paket nicht in jeder Installation mit.
+def _aes():
+    """Load AES lazily; a missing optional dependency is a user-facing error.
+
+    PyCryptodome ist nicht in jeder Calibre-Installation vorhanden. Der
+    Import darf das Plugin nicht blockieren, aber ein verschlüsselter
+    Web-Reader-Token ohne Decoder ist kein «ungültiger Token»: der Nutzer
+    braucht einen klaren Hinweis statt eines stillen Login-Fehlschlags.
+    """
     try:
         from Crypto.Cipher import AES
     except ImportError:
-        return ""
+        try:
+            from Cryptodome.Cipher import AES
+        except ImportError as exc:
+            raise TolinoAuthError(
+                "Der Web-Reader-Zugang ist verschlüsselt, aber PyCryptodome "
+                "fehlt. Bitte PyCryptodome installieren und die Anmeldung "
+                "erneut starten.",
+                code="A01",
+                short="Verschlüsselter Web-Reader-Zugang: PyCryptodome fehlt.",
+                detail=str(exc)) from exc
+    return AES
+
+
+def cryptojs_decrypt(b64_text):
+    """Decrypt a CryptoJS blob; return "" on mismatch, raise without AES."""
     try:
         raw = base64.b64decode("".join(str(b64_text or "").split()), validate=False)
     except ValueError:
@@ -46,6 +65,7 @@ def cryptojs_decrypt(b64_text):
     ciphertext = raw[16:]
     if not ciphertext or len(ciphertext) % 16:
         return ""
+    AES = _aes()
     key, iv = _evp_bytes_to_key(b"", salt)
     try:
         plain = AES.new(key, AES.MODE_CBC, iv).decrypt(ciphertext)
