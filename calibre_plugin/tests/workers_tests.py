@@ -2033,6 +2033,15 @@ class MultiAccountReadingStateTests(unittest.TestCase):
         # Das Speichern des Vergleichs schaltet das Konto nicht um.
         self.assertEqual("B", config.settings()["active_account"])
 
+    def test_only_percent_is_persisted_from_cloud_progress(self):
+        """Position und current/last sind Anzeige-Fakten des frischen Grabs."""
+        state = {self.UUID: {"tolino_id": "t1", "calibre_id": 1}}
+        self._accounts({"A": state})
+        self._prepare("A", state, {"t1"},
+                      {"t1": self._reading(True, 33)["progress"]})
+        entry = config.account_by_name("A")["state"][self.UUID]
+        self.assertEqual({"percent": 33}, entry["reading"]["progress"])
+
     def test_comparison_result_stays_with_its_account_after_a_switch(self):
         a_state = {self.UUID: {
             "tolino_id": "t1", "calibre_id": 1,

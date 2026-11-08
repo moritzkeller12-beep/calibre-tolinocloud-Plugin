@@ -71,6 +71,15 @@ def _close_window_after_grab(progress=None):
     return False
 
 
+def _close_window_after_error():
+    """Das eigene Anmeldefenster nach einem unerwarteten Fehler aufräumen."""
+    try:
+        cdp_module.close_grabber_window()
+    except Exception as exc:
+        log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
+                    % sanitize_error(exc))
+
+
 def _raise_grab_failure(last_error, grabbed, rejected):
     """Raise the final B02 error with age/error context."""
     details = []
@@ -155,8 +164,14 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        more = _normalize_live_grab(cdp_module.grab_once_from_grabber(
-            timeout=max(0.1, min(12, remaining))))
+        try:
+            more = _normalize_live_grab(cdp_module.grab_once_from_grabber(
+                timeout=max(0.1, min(12, remaining))))
+        except Exception:
+            # Auch ein fehlender Decoder darf Chromium und das Temp-Profil
+            # nicht bis zum nächsten Calibre-Start offen lassen.
+            _close_window_after_error()
+            raise
         if more and more.get("refresh"):
             grabbed = more
             saw_reader = True

@@ -873,13 +873,32 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         from ..errors import TolinoAuthError
         blob = base64.b64encode(
             b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
-        with patch.dict("sys.modules", {"Crypto": None,
-                                       "Crypto.Cipher": None}):
+        with patch.dict("sys.modules", {
+                "Crypto": None, "Crypto.Cipher": None,
+                "Cryptodome": None, "Cryptodome.Cipher": None}):
             with self.assertRaises(TolinoAuthError) as caught:
                 cryptojs_decrypt(blob)
         self.assertEqual("A01", caught.exception.code)
         self.assertIn("PyCryptodome", str(caught.exception.short))
         self.assertNotIn(blob, str(caught.exception.detail))
+
+    def test_grab_live_refresh_closes_window_when_decoder_fails(self):
+        """A01 beim Entpacken darf Chromium und Temp-Profil nicht offen lassen."""
+        from ..browser_login import grab_live_refresh
+        blob = base64.b64encode(
+            b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
+        with patch("calibre_plugin.cdp.launch_reader_window",
+                   return_value=9223), \
+             patch("calibre_plugin.cdp.grab_once_from_grabber",
+                   return_value={"refresh": [blob], "hardware": []}), \
+             patch("calibre_plugin.token_candidates.cryptojs_decrypt",
+                   side_effect=TolinoAuthError(
+                       "PyCryptodome fehlt.", code="A01")), \
+             patch("calibre_plugin.cdp.close_grabber_window") as closer:
+            with self.assertRaises(TolinoAuthError) as caught:
+                grab_live_refresh(4, "cfg-hw", timeout=1)
+        self.assertEqual("A01", caught.exception.code)
+        closer.assert_called_once_with()
 
     def test_invalid_blobs_and_jwt_payloads_are_rejected(self):
         from ..browser_crypto import _pkcs7_unpad, cryptojs_decrypt
@@ -957,6 +976,48 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         plain_hw = "a0b2c3d4-e5f6-7788-99aa-bbccddeeff00"
         holder = {"refresh": [], "hardware": [plain_hw]}
         self.assertIs(holder, _normalize_live_grab(holder))
+
+    def test_missing_decoder_keeps_plain_refresh_and_skips_hardware_blob(self):
+        """Die optionale Hardware-ID darf einen Klartext-Token nicht kippen."""
+        from ..token_candidates import _normalize_live_grab
+        plain = self._refresh_jwt(time.time() - 5)
+        blob = base64.b64encode(
+            b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
+        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
+                   side_effect=TolinoAuthError(
+                       "PyCryptodome fehlt.", code="A01")):
+            normalized = _normalize_live_grab(
+                {"refresh": [plain], "hardware": [blob]})
+            hardware_only = _normalize_live_grab(
+                {"refresh": [], "hardware": [blob]})
+        self.assertEqual([plain], normalized["refresh"])
+        self.assertEqual([], normalized["hardware"])
+        self.assertEqual([], hardware_only["hardware"])
+
+    def test_missing_decoder_keeps_plain_sibling_of_encrypted_refresh(self):
+        """Ein unlesbarer Kandidat beendet die Suche nicht vor dem Klartext."""
+        from ..token_candidates import _normalize_live_grab
+        plain = self._refresh_jwt(time.time() - 5)
+        blob = base64.b64encode(
+            b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
+        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
+                   side_effect=TolinoAuthError(
+                       "PyCryptodome fehlt.", code="A01")):
+            normalized = _normalize_live_grab(
+                {"refresh": [blob, plain], "hardware": []})
+        self.assertEqual([plain], normalized["refresh"])
+
+    def test_missing_decoder_only_fails_without_readable_refresh(self):
+        """A01 bleibt die richtige Meldung, wenn kein Kandidat lesbar ist."""
+        from ..token_candidates import _normalize_live_grab
+        blob = base64.b64encode(
+            b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
+        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
+                   side_effect=TolinoAuthError(
+                       "PyCryptodome fehlt.", code="A01")):
+            with self.assertRaises(TolinoAuthError) as caught:
+                _normalize_live_grab({"refresh": [blob], "hardware": []})
+        self.assertEqual("A01", caught.exception.code)
 
     def test_grab_live_refresh_exchanges_the_decrypted_blob(self):
         """End-to-end: verschluesselter Kandidat -> Entschluesselung ->

@@ -249,12 +249,9 @@ def store_reading_state(state, comparison):
         if read_known:
             reading["read"] = bool(read.cloud)
         if progress_known:
-            reading["progress"] = {
-                "percent": progress.percent,
-                "current": progress.current,
-                "last": progress.last,
-                "position": progress.position,
-            }
+            # Beim Kontowechsel wird nur der Prozentwert gebraucht;
+            # Position und current/last liefert der frische Cloud-Stand.
+            reading["progress"] = {"percent": progress.percent}
 
 
 class _RemoteIndex:
