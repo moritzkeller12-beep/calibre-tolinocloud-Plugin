@@ -24,7 +24,8 @@ jobs:
           git config user.email "329108308+moritzkeller12-beep@users.noreply.github.com"
           base64 -d changes.patch.gz.b64 | gzip -d > changes.patch
           git apply --index changes.patch
-          git rm -q changes.patch changes.patch.gz.b64 .github/workflows/apply-patch.yml
+          rm -f changes.patch
+          git rm -q changes.patch.gz.b64 .github/workflows/apply-patch.yml
           git commit -m "Vereinfache Login und stabilisiere den Cloud-Sync
 
           Entferne redundante Login-Wrapper, straffe Sync- und UI-Pfade und
