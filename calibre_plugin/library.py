@@ -201,7 +201,7 @@ def _progress_value(value):
     if value is None:
         return None
     try:
-        value = int(round(float(value)))
+        value = round(float(value))
     except (TypeError, ValueError, OverflowError):
         return _SKIP
     return value if 0 <= value <= 100 else _SKIP

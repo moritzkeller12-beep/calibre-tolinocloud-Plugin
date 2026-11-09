@@ -2447,7 +2447,7 @@ class FingerprintCommitTests(unittest.TestCase):
                 raise RuntimeError("Netz weg")
             return "new-1"
 
-        worker, emitted = self._run_worker(
+        worker, _emitted = self._run_worker(
             ui_module, settings, preparation, self._client(upload=failing))
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertEqual(1, worker.outcome["failed"])

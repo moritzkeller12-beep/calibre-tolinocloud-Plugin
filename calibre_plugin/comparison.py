@@ -141,7 +141,7 @@ class ProgressState:
         self.last = str(last or "").strip()
         self.position = str(position or "").strip()
         try:
-            value = int(round(float(percent)))
+            value = round(float(percent))
         except (TypeError, ValueError, OverflowError):
             value = None
         self.percent = value if value is not None and 0 <= value <= 100 else None

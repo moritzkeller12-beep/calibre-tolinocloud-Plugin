@@ -38,6 +38,10 @@ Nach einem erfolgreichen Vergleich und nach bestätigten manuellen Änderungen s
 
 Für den Abgleich liest das Plugin die ISBN auch aus tolino-Produktkennungen. Die Produktkennung selbst ist keine Deliverable-ID.
 
+## Entwicklung
+
+Tests: `python3 -X dev -m unittest calibre_plugin.test_sync`. Release-ZIP: `python3 build_plugin.py`.
+
 ## Hinweise
 
 - Das Plugin nutzt eine inoffizielle tolino-Schnittstelle. Sie kann sich jederzeit ändern.

@@ -149,13 +149,13 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         return ui_module, dashboard, calls
 
     def test_one_account_hides_the_row(self):
-        ui_module, dashboard, _calls = self._run(1)
+        _ui_module, dashboard, _calls = self._run(1)
         self.assertFalse(dashboard.account_quick.visible)
         self.assertFalse(dashboard.account_quick_label.visible)
         self.assertEqual([("erstes", "erstes")], dashboard.account_quick.items)
 
     def test_two_accounts_show_the_row_on_the_first_page(self):
-        ui_module, dashboard, _calls = self._run(2)
+        _ui_module, dashboard, _calls = self._run(2)
         self.assertTrue(dashboard.account_quick.visible)
         self.assertTrue(dashboard.account_quick_label.visible)
         self.assertEqual([("erstes", "erstes"), ("zweites", "zweites")],
@@ -164,7 +164,7 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         self.assertEqual(0, dashboard.account_select.current_index)
 
     def test_switching_on_the_first_page_moves_the_active_account(self):
-        ui_module, dashboard, calls = self._run(2)
+        _ui_module, dashboard, calls = self._run(2)
         self.assertTrue(dashboard.switch_account("zweites"))
         # Erst sichern, dann umschalten.
         self.assertEqual([("save", None), ("active", "zweites")], calls)
@@ -224,7 +224,7 @@ class DashboardAccountSwitchTests(unittest.TestCase):
         self.assertNotIn(calibre_key(1, library_scope(database)), mapping)
 
     def test_switching_to_the_same_or_unknown_account_does_nothing(self):
-        ui_module, dashboard, calls = self._run(2)
+        _ui_module, dashboard, calls = self._run(2)
         self.assertFalse(dashboard.switch_account("erstes"))
         self.assertFalse(dashboard.switch_account("gibt-es-nicht"))
         self.assertFalse(dashboard.switch_account(""))
@@ -232,7 +232,7 @@ class DashboardAccountSwitchTests(unittest.TestCase):
 
     def test_reading_columns_follow_the_selected_account(self):
         uuid = "33333333-3333-3333-3333-333333333333"
-        ui_module, dashboard, _calls = self._run(2)
+        _ui_module, dashboard, _calls = self._run(2)
         config.save_account("erstes", {"state": {uuid: {
             "tolino_id": "t1", "calibre_id": 1,
             "reading": {"read": True, "progress": {
@@ -255,7 +255,7 @@ class DashboardAccountSwitchTests(unittest.TestCase):
 
     def test_switching_to_an_account_without_values_clears_the_old_ones(self):
         uuid = "44444444-4444-4444-4444-444444444444"
-        ui_module, dashboard, _calls = self._run(2)
+        _ui_module, dashboard, _calls = self._run(2)
         config.save_account("erstes", {"state": {uuid: {
             "tolino_id": "t1", "calibre_id": 1,
             "reading": {"read": True, "progress": {"percent": 100}}}}},
@@ -275,7 +275,7 @@ class DashboardAccountSwitchTests(unittest.TestCase):
     def test_reading_columns_follow_books_without_real_uuid(self):
         title = "Der Schwarm"
         other = "Ein anderes Buch"
-        ui_module, dashboard, _calls = self._run(2)
+        _ui_module, dashboard, _calls = self._run(2)
         # Ohne echte UUID greift der bibliotheksbezogene Calibre-ID-Fallback;
         # ein alter ungescopter Titel-Schlüssel wird nicht mehr ausgewertet.
         fallback = calibre_key(1, DEFAULT_LIBRARY_SCOPE)

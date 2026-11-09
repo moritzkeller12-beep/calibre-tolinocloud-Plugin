@@ -345,7 +345,7 @@ class ReadColumnDialogTests(_QtDialogTest):
         ui_module = self._ui()
         self._messages(ui_module)
         dialog = ui_module.dialogs.InventoryDialog(self._rows())
-        index, cell = self._cell(dialog, "Calibre only")
+        _index, cell = self._cell(dialog, "Calibre only")
         cell.setChecked(True)
         self.assertEqual(["t-1"], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))

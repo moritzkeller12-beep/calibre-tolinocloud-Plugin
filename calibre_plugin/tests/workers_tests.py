@@ -767,7 +767,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
         settings = self._settings(state, name="A")
         try:
-            worker, _emitted, saved, credentials = self._run(
+            worker, _emitted, saved, _credentials = self._run(
                 ui_module, settings, [self._job(ui_module, 1, "11111111-1111-4111-8111-111111111111")],
                 FakeClient, read_marks=["new-1"])
         finally:
@@ -2116,7 +2116,7 @@ class MultiAccountReadingStateTests(unittest.TestCase):
 
         def all_field_for(field, book_ids):
             calls.append((field, tuple(book_ids)))
-            return {book_id: self.UUID for book_id in book_ids}
+            return dict.fromkeys(book_ids, self.UUID)
 
         db.all_field_for = all_field_for
         dashboard = dashboard_stub(

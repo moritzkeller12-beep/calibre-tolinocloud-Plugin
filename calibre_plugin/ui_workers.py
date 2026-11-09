@@ -245,15 +245,16 @@ class SyncWorker(QObject):
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
         for book_uuid, tolino_id, operation in delete_ops:
-            def finish(deleted):
-                self._finish_delete(operation, deleted)
+            def finish(deleted, _operation=operation):
+                self._finish_delete(_operation, deleted)
 
             ok, deleted = self._step(
                 client, checkpoint, operation,
                 "Lösche aus tolino: %s"
                 % self._label(book_uuid, None,
                               self.titles.get(str(tolino_id), "")),
-                lambda: self._delete_or_skip(client, tolino_id),
+                lambda _client=client, _tolino_id=tolino_id:
+                self._delete_or_skip(_client, _tolino_id),
                 done, total, finish=finish)
             if not ok:
                 done += 1
@@ -286,7 +287,9 @@ class SyncWorker(QObject):
                 continue
             ok, _result = self._step(
                 client, checkpoint, operation, start_text,
-                lambda: client.mark_read_many(book_ids, finished=finished),
+                lambda _client=client, _book_ids=book_ids,
+                       _finished=finished:
+                _client.mark_read_many(_book_ids, finished=_finished),
                 done, total)
             if ok:
                 stored = False
@@ -371,8 +374,10 @@ class SyncWorker(QObject):
             ok, new_revision = self._step(
                 client, checkpoint, operation,
                 "Serie in der Cloud: %s" % series,
-                lambda: client.add_to_collection(
-                    tolino_id, series, revision=revision),
+                lambda _client=client, _tolino_id=tolino_id,
+                       _series=series, _revision=revision:
+                _client.add_to_collection(
+                    _tolino_id, _series, revision=_revision),
                 done, total)
             if not ok:
                 # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
@@ -399,7 +404,8 @@ class SyncWorker(QObject):
                 "Metadaten: %s" % self._label(
                     record.book_uuid, record.book_id,
                     (record.fields or {}).get("title")),
-                lambda: client.update_metadata(record.tolino_id, record.fields),
+                lambda _client=client, _record=record:
+                _client.update_metadata(_record.tolino_id, _record.fields),
                 done, total)
             if not ok:
                 done += 1
@@ -422,7 +428,8 @@ class SyncWorker(QObject):
             ok, new_id = self._step(
                 client, checkpoint, operation,
                 "Lade hoch: %s (%s)" % (job.label(), job.format_name),
-                lambda: client.upload(job.path), done, total)
+                lambda _client=client, _job=job: _client.upload(_job.path),
+                done, total)
             if not ok:
                 done += 1
                 self.progress.emit(done, total, "Fehlgeschlagen: %s"

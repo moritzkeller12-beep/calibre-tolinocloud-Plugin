@@ -211,8 +211,8 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                     dashboard._save_visible_account = lambda _values: None
                     contexts = []
                     dashboard._start_local_snapshot = (
-                        lambda _db, context, _state:
-                        contexts.append(context))
+                        lambda _db, context, _state, _contexts=contexts:
+                        _contexts.append(context))
                     dashboard.start_sync()
                     self.assertIs(expected, contexts[0].columns.get("id"))
         finally:

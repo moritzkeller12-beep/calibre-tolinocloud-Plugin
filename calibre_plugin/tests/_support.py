@@ -79,7 +79,7 @@ _WORKER_FIELDS = ("thread", "worker", "prepare_thread", "prepare_worker",
 
 def dashboard_stub(**attrs):
     """Minimales Dashboard mit leeren Worker-Referenzen."""
-    values = {name: None for name in _WORKER_FIELDS}
+    values = dict.fromkeys(_WORKER_FIELDS)
     values.update(attrs)
     return types.SimpleNamespace(**values)
 

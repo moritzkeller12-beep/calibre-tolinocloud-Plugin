@@ -809,8 +809,8 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                 def read(self):
                     return b'{"access_token":"a","expires_in":3600}'
 
-            def request(request, timeout):
-                captured.update(
+            def request(request, timeout, _captured=captured):
+                _captured.update(
                     {key.casefold(): value
                      for key, value in request.headers.items()})
                 return Response()
@@ -839,8 +839,8 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                 def read(self):
                     return b"{}"
 
-            def request(request, timeout):
-                captured.update(
+            def request(request, timeout, _captured=captured):
+                _captured.update(
                     {key.casefold(): value
                      for key, value in request.headers.items()})
                 return Response()
@@ -1485,7 +1485,7 @@ class PersistCredentialsDedupTests(unittest.TestCase):
                     }, active="konto")
                     error = HTTPError("https://example.invalid/token", status,
                                       "Error", {}, None)
-                    error.read = lambda: body
+                    error.read = lambda _body=body: _body
                     with patch("calibre_plugin.tolino.urlopen", side_effect=error):
                         with self.assertRaises(TolinoAuthError):
                             TokenVault().login("konto", 4)
