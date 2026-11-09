@@ -124,11 +124,10 @@ def _collect_inventory(value, records, problems, container=""):
     if isinstance(value, (list, tuple)):
         for entry in value:
             _collect_inventory(entry, records, problems, container)
-        return
-    if value is None:
+    elif value is None:
         problems.append("Container %s ist leer" % (container or "?"))
-        return
-    problems.append("Eintrag vom Typ %s" % type(value).__name__)
+    else:
+        problems.append("Eintrag vom Typ %s" % type(value).__name__)
 
 
 def parse_inventory(data):

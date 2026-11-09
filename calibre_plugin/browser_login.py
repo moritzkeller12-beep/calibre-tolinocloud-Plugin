@@ -71,30 +71,6 @@ def _close_window_after_grab(progress=None):
     return False
 
 
-def _close_window_after_error():
-    """Das eigene Anmeldefenster nach einem unerwarteten Fehler aufräumen."""
-    try:
-        cdp_module.close_grabber_window()
-    except Exception as exc:
-        log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
-                    % sanitize_error(exc))
-
-
-def _raise_grab_failure(last_error, grabbed, rejected):
-    """Raise the final B02 error with age/error context."""
-    details = []
-    if last_error:
-        details.append("Letzter Fehler: " + sanitize_error(last_error))
-    candidates = rejected or grabbed.get("refresh") or ()
-    age_note = _candidate_age_note(candidates)
-    if age_note:
-        details.append(age_note)
-    raise TolinoAuthError(
-        "Das Anmeldefenster wurde geschlossen, weil kein gültiger Zugang "
-        "gelesen werden konnte. " + RELOGIN,
-        code="B02", detail="; ".join(details))
-
-
 def _exchange_live_grab(partner_id, hardware, grabbed, rejected, progress=None):
     """Try the freshest live token; returns (result, error)."""
     fresh = [token for token in _filter_live_candidates(grabbed["refresh"])
@@ -132,7 +108,17 @@ def _raise_grab_end(window, saw_reader, grabbed, rejected, last_error):
     if not login_page_open:
         cdp_module.close_grabber_window()
         if saw_reader:
-            _raise_grab_failure(last_error, grabbed, rejected)
+            details = []
+            if last_error:
+                details.append("Letzter Fehler: " + sanitize_error(last_error))
+            candidates = rejected or grabbed.get("refresh") or ()
+            age_note = _candidate_age_note(candidates)
+            if age_note:
+                details.append(age_note)
+            raise TolinoAuthError(
+                "Das Anmeldefenster wurde geschlossen, weil kein gültiger "
+                "Zugang gelesen werden konnte. " + RELOGIN,
+                code="B02", detail="; ".join(details))
     raise TolinoAuthError(
         "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "
         + RELOGIN, code="B02", detail="kein Web-Reader-Tab")
@@ -170,7 +156,11 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         except Exception:
             # Auch ein fehlender Decoder darf Chromium und das Temp-Profil
             # nicht bis zum nächsten Calibre-Start offen lassen.
-            _close_window_after_error()
+            try:
+                cdp_module.close_grabber_window()
+            except Exception as exc:
+                log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
+                            % sanitize_error(exc))
             raise
         if more and more.get("refresh"):
             grabbed = more

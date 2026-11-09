@@ -183,10 +183,4 @@ def _normalize_live_grab(grabbed):
                 continue
         if value and value not in hardware:
             hardware.append(value)
-    if (refresh == (grabbed.get("refresh") or [])
-            and hardware == (grabbed.get("hardware") or [])):
-        return grabbed
-    updated = dict(grabbed)
-    updated["refresh"] = refresh
-    updated["hardware"] = hardware
-    return updated
+    return dict(grabbed, refresh=refresh, hardware=hardware)

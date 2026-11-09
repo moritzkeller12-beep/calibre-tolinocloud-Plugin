@@ -686,7 +686,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 
         holder = {}
         fake = FakeClient()
-        with patch("calibre_plugin.token_vault.TolinoClient", lambda *a, **k: fake), \
+        with patch("calibre_plugin.token_vault.TolinoClient", lambda *a, **_kwargs: fake), \
              patch("calibre_plugin.ui_workers.save_account",
                    lambda name, values, **_kwargs: saved.append(
                        (name, values))):
@@ -829,7 +829,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard = dashboard_stub()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
-                                           "setText": lambda self, v: None})()
+                                           "setText": lambda self, _v: None})()
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.columns = {"id": False, "read": False}
         dashboard.finish_thread = lambda: None
@@ -840,9 +840,9 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         worker.updates = [(1, "new-1")]
         worker.outcome = {"uploaded": 1, "skipped": 0, "failed": 0, "cancelled": True}
         dashboard.worker = worker
-        with patch("calibre_plugin.ui_dashboard.save_account", lambda *a, **k: None), \
-             patch("calibre_plugin.ui_dashboard.save_credentials", lambda *a, **k: None), \
-             patch("calibre_plugin.ui_dashboard.update_tolino_ids", lambda *a, **k: None), \
+        with patch("calibre_plugin.ui_dashboard.save_account", lambda *a, **_kwargs: None), \
+             patch("calibre_plugin.ui_dashboard.save_credentials", lambda *a, **_kwargs: None), \
+             patch("calibre_plugin.ui_dashboard.update_tolino_ids", lambda *a, **_kwargs: None), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: infos.append(args)), \
              patch("calibre_plugin.ui_dashboard.error_dialog",
@@ -1451,7 +1451,8 @@ class KeepaliveSafetyTests(unittest.TestCase):
 
     def test_log_warning_never_raises_without_calibre(self):
         from ..tolino import log_warning
-        log_warning("nur ein Test -- ohne Calibre muss das still bleiben")
+        self.assertIsNone(log_warning(
+            "nur ein Test -- ohne Calibre muss das still bleiben"))
 
 class BackgroundCallTokenTests(unittest.TestCase):
     """Einzelaufrufe laufen ohne globalen Refresh-Token-Zähler."""

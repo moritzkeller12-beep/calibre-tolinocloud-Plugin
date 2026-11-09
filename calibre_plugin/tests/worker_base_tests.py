@@ -47,7 +47,7 @@ class SyncWorkerCollectionTests(unittest.TestCase):
             def __set_name__(self, owner, name):
                 self.name = name
 
-            def __get__(self, obj, objtype=None):
+            def __get__(self, obj, _objtype=None):
                 if obj is None:
                     return self
                 return obj.__dict__.setdefault(self.name, Signal())

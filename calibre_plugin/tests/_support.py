@@ -231,13 +231,15 @@ def load_ui_module(get_icons_result, qt_stub=None):
         setattr(self, "attributes", getattr(self, "attributes", {})),
         self.attributes.__setitem__(attribute, value),
     )
+    qt_core.QDialog.setWindowTitle = lambda self, title: setattr(
+        self, "window_title", title)
     qt_core.QTableWidget.SelectionBehavior = type(
         "SelectionBehavior", (), {"SelectRows": 1})
     qt_core.QTableWidget.SelectionMode = type(
         "SelectionMode", (), {"ExtendedSelection": 2})
     qt_core.QLineEdit.EchoMode = type("EchoMode", (), {"Password": 2})
-    qt_core.pyqtSignal = lambda *a, **k: None
-    qt_core.Signal = lambda *a, **k: None
+    qt_core.pyqtSignal = lambda *a, **_kwargs: None
+    qt_core.Signal = lambda *a, **_kwargs: None
     qt_core.QTableWidgetItem = FakeTableItem
     if qt_stub:
         # Zuletzt, damit ein Stub auch pyqtSignal/Signal ersetzen darf.

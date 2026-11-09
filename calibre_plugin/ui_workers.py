@@ -37,21 +37,17 @@ class SyncWorker(QObject):
         # (tolino-ID, Calibre-Nummer, gelesen?) je ausdrücklich gewählter
         # Änderung aus dem Vergleichsfenster. Leer heisst: Lesestatus bleibt
         # unangetastet und die Spalte unverändert.
-        self.read_changes = []
-        for change in (read_changes or ()):
-            values = tuple(change) if isinstance(change, (tuple, list)) else ()
-            if len(values) < 3:
-                continue
-            tolino_id = str(values[0] or "").strip()
-            if not tolino_id:
-                continue
-            book_uuid = valid_book_uuid(values[3]) if len(values) > 3 else ""
-            self.read_changes.append(
-                (tolino_id, values[1], bool(values[2]), book_uuid))
-        self.read_marks = [tolino_id for tolino_id, _id, finished, _uuid
-                           in self.read_changes if finished]
-        self.read_unmarks = [tolino_id for tolino_id, _id, finished, _uuid
-                             in self.read_changes if not finished]
+        self.read_changes = [
+            (tolino_id, change[1], bool(change[2]),
+             valid_book_uuid(change[3]) if len(change) > 3 else "")
+            for change in (read_changes or ())
+            if isinstance(change, (tuple, list)) and len(change) >= 3
+            and (tolino_id := str(change[0] or "").strip())
+        ]
+        self.read_marks = [change[0] for change in self.read_changes
+                           if change[2]]
+        self.read_unmarks = [change[0] for change in self.read_changes
+                             if not change[2]]
         self.titles = {str(key): str(value)
                        for key, value in (titles or {}).items()
                        if value}
@@ -228,9 +224,8 @@ class SyncWorker(QObject):
         unread_op = (self._add_operation(
             "unread", "Als ungelesen markieren",
             count=len(self.read_unmarks)) if self.read_unmarks else None)
-        total = (len(meta_ops) + len(upload_ops) + len(delete_ops)
-                 + (1 if read_op else 0)
-                 + (1 if unread_op else 0))
+        total = sum(map(len, (meta_ops, upload_ops, delete_ops)))
+        total += bool(read_op) + bool(unread_op)
         return meta_ops, upload_ops, delete_ops, read_op, unread_op, total
 
     def _remove_replaced_copy(self, client, job):

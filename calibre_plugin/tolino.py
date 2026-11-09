@@ -564,8 +564,14 @@ class TolinoClient:
         return str(deliverable)
 
     def upload_cover(self, deliverable_id, data, suffix=".jpg"):
+        # The cover endpoint requires the same control block as a normal
+        # upload; without it the server answers HTTP 400 without details.
+        control = json.dumps({
+            "filesize": len(data),
+            "transactionId": str(uuid.uuid4()),
+        }, separators=(",", ":"))
         body, content_type = self._multipart(
-            {"deliverableId": deliverable_id}, data,
+            {"control": control, "deliverableId": deliverable_id}, data,
             "cover" + str(suffix or ""))
         self._request(BASE_URL + "/cover", "POST", body,
                       content_type=content_type)

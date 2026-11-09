@@ -940,15 +940,13 @@ class SyncDashboard(DashboardParts, QDialog):
         """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
         if _active_work_thread(self):
             self.cancel_sync()
-        _stop_thread(self.thread)
-        _stop_thread(self.prepare_thread)
-        _stop_thread(getattr(self, "snapshot_thread", None))
-        self.thread = None
-        self.worker = None
-        self.prepare_thread = None
-        self.prepare_worker = None
-        self.snapshot_thread = None
-        self.snapshot_worker = None
+        for thread_name, worker_name in (
+                ("thread", "worker"),
+                ("prepare_thread", "prepare_worker"),
+                ("snapshot_thread", "snapshot_worker")):
+            _stop_thread(getattr(self, thread_name, None))
+            setattr(self, thread_name, None)
+            setattr(self, worker_name, None)
         # A running browser sign-in is left alone on purpose: its thread is
         # unparented and self-terminates after its timeout, and joining it
         # here could freeze the close for minutes.

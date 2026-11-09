@@ -1231,7 +1231,7 @@ class PlatformBrowserPathTests(unittest.TestCase):
                     ("HKLM", app_paths + r"\brave.exe"): {"": missing},
                 }
 
-            def OpenKey(self, root, path, reserved=0, access=0):
+            def OpenKey(self, root, path, _reserved=0, access=0):
                 key = (root, path)
                 if key not in self.values:
                     raise FileNotFoundError(path)
@@ -1576,7 +1576,7 @@ class CdpOwnershipTests(unittest.TestCase):
              patch.object(self.cdp, "_browser_ws_for_record",
                           return_value=(9223, "/devtools/browser/x")), \
              patch.object(self.cdp, "_send_browser_close",
-                          side_effect=lambda *a, **k: state.update(closed=True)
+                          side_effect=lambda *a, **_kwargs: state.update(closed=True)
                           or True), \
              patch.object(self.cdp.time, "sleep"):
             self.assertTrue(_REAL_CLOSE_WINDOW(timeout=0.2))

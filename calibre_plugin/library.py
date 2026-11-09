@@ -298,14 +298,9 @@ def normalize_formats(value):
         values = value
     else:
         return []
-    formats = []
-    for part in values:
-        if part is None:
-            continue
-        text = str(part).strip().lstrip(".").upper()
-        if text and text not in formats:
-            formats.append(text)
-    return formats
+    cleaned = ("" if part is None else str(part).strip().lstrip(".").upper()
+               for part in values)
+    return list(dict.fromkeys(text for text in cleaned if text))
 
 
 

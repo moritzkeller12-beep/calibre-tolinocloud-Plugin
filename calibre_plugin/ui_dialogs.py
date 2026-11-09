@@ -195,7 +195,6 @@ class InventoryDialog(QDialog):
         ("Ignoriert", "ignored"),
     )
 
-    READ_TOOLTIP = _READ_TOOLTIP
     IGNORED_TOOLTIP = ("In Calibre ignoriert (%s) – wird nicht "
                        "abgeglichen." % TOLINO_IGNORE_COLUMN)
     DELETE_TOOLTIP = ("Zum Löschen aus tolino markiert – zuerst "
@@ -270,6 +269,7 @@ class InventoryDialog(QDialog):
 
     def __init__(self, rows, parent=None, client_factory=None, options=None):
         QDialog.__init__(self, parent)
+        self.setWindowTitle("Bibliothek vergleichen")
         self.client_factory = client_factory
         # Eine Anmeldung fuer das ganze Fenster: jede Aktion loggte sonst neu
         # ein und rotierte dabei den Refresh-Token.
@@ -766,12 +766,13 @@ class InventoryDialog(QDialog):
         header.setSectionResizeMode(self.AUTHORS_COLUMN,
                                     QHeaderView.ResizeMode.Interactive)
         header.resizeSection(self.AUTHORS_COLUMN, 90)
-        # Aktions- und Ortsmarkierungen brauchen nur das Kästchen. Lange
-        # Ueberschriften machten den Titel sonst auf wenige Zeichen breit.
+        # Aktions- und Ortsmarkierungen brauchen nur das Kästchen; die
+        # Kopfzeile «Metadaten» braucht etwas mehr Platz.
         for column in range(self.TITLE_COLUMN):
             header.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.Interactive)
-            header.resizeSection(column, 60)
+            header.resizeSection(column, 80)
+        header.resizeSection(self.ACTION_KEYS.index("metadata"), 100)
 
     def _fit_title_column(self):
         """Titelbreite an das Fenster anpassen, ohne den Autor zu ueberholen."""

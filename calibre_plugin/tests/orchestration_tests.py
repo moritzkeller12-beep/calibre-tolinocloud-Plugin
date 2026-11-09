@@ -267,7 +267,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
             dashboard._confirm_comparison = (
-                lambda comp, given, client_factory=None, automatic=0: None)
+                lambda _comp, given, client_factory=None, automatic=0: None)
             started = []
             dashboard._start_sync_worker = lambda *args: started.append(args)
             dashboard._prepare_ready({
@@ -286,7 +286,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard = self._dashboard(ui_module, settings, thread=object())
             calls = []
             dashboard.values = lambda: calls.append("values")
-            dashboard._start_sync_worker = lambda given, prep: calls.append("worker")
+            dashboard._start_sync_worker = lambda given, _prep: calls.append("worker")
             dashboard.start_sync()
         finally:
             ui_module._restore_stubs_for_tests()
@@ -361,13 +361,13 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.prepare_worker = None
             dashboard._finish_prepare = lambda: None
             dashboard._confirm_comparison = (
-                lambda comp, given, client_factory=None, automatic=0: {
+                lambda _comp, given, client_factory=None, automatic=0: {
                     "uploads": [], "metadata": [], "read_changes": [],
                     "cloud_deletions": [],
                 })
             started = []
             dashboard._start_sync_worker = (
-                lambda given, prep, state=None, comparison=None:
+                lambda given, _prep, state=None, comparison=None:
                 started.append(given))
 
             def plan(_dashboard, given, _metadata, _state, _selection,
@@ -725,7 +725,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = dashboard_stub()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
-                                           "setText": lambda self, v: None})()
+                                           "setText": lambda self, _v: None})()
         dashboard.gui = type("Gui", (), {
             "current_db": type(
                 "Db", (), {"field_metadata": {}})()})()

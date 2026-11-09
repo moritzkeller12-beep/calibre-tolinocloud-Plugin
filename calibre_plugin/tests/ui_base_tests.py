@@ -444,7 +444,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                               1: dialog._check_delegate,
                               2: dialog._check_delegate},
                              dialog.table.delegates)
-            self.assertEqual({0: 60, 1: 60, 2: 60, 3: 60, 4: 60},
+            self.assertEqual({0: 80, 1: 100, 2: 80, 3: 80, 4: 80},
                              {column: dialog.table.header.widths[column]
                               for column in (0, 1, 2, 3, 4)})
             self.assertEqual(

@@ -119,6 +119,20 @@ class TolinoClientFeatureTests(unittest.TestCase):
         client._request = fake_request
         return client, calls
 
+    def test_upload_cover_sends_the_required_control_block(self):
+        """Der Cover-Endpunkt verlangt control; ohne ihn antwortet er 400."""
+        client, calls = self._patching_client([{}])
+        client.upload_cover("b-1", b"\x89PNG\r\n\x1a\n", ".png")
+        self.assertEqual("POST", calls[0]["method"])
+        self.assertTrue(calls[0]["url"].endswith("/cover"))
+        body = calls[0]["data"]
+        self.assertIn(b'name="control"', body)
+        self.assertIn(b'"filesize":8', body)
+        self.assertRegex(body, rb'"transactionId":"[0-9a-f-]{36}"')
+        self.assertIn(b'name="deliverableId"', body)
+        self.assertIn(b"b-1", body)
+        self.assertIn(b'filename="cover.png"', body)
+
     def test_add_to_collection_sends_tag_add_patch(self):
         """Die Zuordnung wird mit der aktuellen Revision geschrieben.
 
