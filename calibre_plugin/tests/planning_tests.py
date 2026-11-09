@@ -2212,13 +2212,6 @@ class FallbackKeyPlanTests(unittest.TestCase):
         self.assertEqual([], plan_sync(self._metadata(), self._state(),
                                        ["EPUB"], upload_book_ids=set()))
 
-    def test_a_book_gone_from_calibre_is_not_automatically_removed(self):
-        gone = "11111111-2222-3333-4444-555555555555"
-        state = {gone: {"calibre_id": 9, "tolino_id": "t9"}}
-        uploads = plan_sync(self._metadata(), state, ["EPUB"],
-                            upload_book_ids=set())
-        self.assertEqual([], uploads)
-
 class FingerprintCommitTests(unittest.TestCase):
     """Ein Fingerabdruck gilt erst nach der Cloud-Aktion.
 

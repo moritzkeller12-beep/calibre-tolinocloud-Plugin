@@ -1,6 +1,7 @@
 """Hintergrund-Worker für Vorbereitung, Synchronisierung und Anmeldung."""
 import copy
 from collections import Counter
+from functools import partial
 
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
@@ -16,6 +17,11 @@ from .identifiers import (adopt_column_tolino_ids, display_title, state_entry,
 from .library import image_suffix
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
+
+
+def _deferred(client, name, *args, **kwargs):
+    """Call a client method only when the action runs, after the checkpoint."""
+    return lambda: getattr(client, name)(*args, **kwargs)
 
 
 class SyncWorker(QObject):
@@ -245,17 +251,14 @@ class SyncWorker(QObject):
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
         for book_uuid, tolino_id, operation in delete_ops:
-            def finish(deleted, _operation=operation):
-                self._finish_delete(_operation, deleted)
-
             ok, deleted = self._step(
                 client, checkpoint, operation,
                 "Lösche aus tolino: %s"
                 % self._label(book_uuid, None,
                               self.titles.get(str(tolino_id), "")),
-                lambda _client=client, _tolino_id=tolino_id:
-                self._delete_or_skip(_client, _tolino_id),
-                done, total, finish=finish)
+                _deferred(self, "_delete_or_skip", client, tolino_id),
+                done, total,
+                finish=partial(self._finish_delete, operation))
             if not ok:
                 done += 1
                 continue
@@ -287,9 +290,8 @@ class SyncWorker(QObject):
                 continue
             ok, _result = self._step(
                 client, checkpoint, operation, start_text,
-                lambda _client=client, _book_ids=book_ids,
-                       _finished=finished:
-                _client.mark_read_many(_book_ids, finished=_finished),
+                _deferred(client, "mark_read_many", book_ids,
+                          finished=finished),
                 done, total)
             if ok:
                 stored = False
@@ -374,10 +376,8 @@ class SyncWorker(QObject):
             ok, new_revision = self._step(
                 client, checkpoint, operation,
                 "Serie in der Cloud: %s" % series,
-                lambda _client=client, _tolino_id=tolino_id,
-                       _series=series, _revision=revision:
-                _client.add_to_collection(
-                    _tolino_id, _series, revision=_revision),
+                _deferred(client, "add_to_collection", tolino_id, series,
+                          revision=revision),
                 done, total)
             if not ok:
                 # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
@@ -404,8 +404,8 @@ class SyncWorker(QObject):
                 "Metadaten: %s" % self._label(
                     record.book_uuid, record.book_id,
                     (record.fields or {}).get("title")),
-                lambda _client=client, _record=record:
-                _client.update_metadata(_record.tolino_id, _record.fields),
+                _deferred(client, "update_metadata", record.tolino_id,
+                          record.fields),
                 done, total)
             if not ok:
                 done += 1
@@ -428,8 +428,7 @@ class SyncWorker(QObject):
             ok, new_id = self._step(
                 client, checkpoint, operation,
                 "Lade hoch: %s (%s)" % (job.label(), job.format_name),
-                lambda _client=client, _job=job: _client.upload(_job.path),
-                done, total)
+                _deferred(client, "upload", job.path), done, total)
             if not ok:
                 done += 1
                 self.progress.emit(done, total, "Fehlgeschlagen: %s"

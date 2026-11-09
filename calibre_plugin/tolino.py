@@ -377,9 +377,14 @@ class TolinoClient:
                     self.last_error_text = None
                     raw = response.read()
             except HTTPError as exc:
+                # HTTPError is itself a response wrapper; leaving it open
+                # leaks the socket until the garbage collector runs.
+                try:
+                    raw_detail = exc.read().decode("utf-8", "replace")
+                finally:
+                    exc.close()
                 # Kehrt nur zurück, wenn ein weiterer Versuch erlaubt ist.
-                self._handle_http_error(exc,
-                                        exc.read().decode("utf-8", "replace"),
+                self._handle_http_error(exc, raw_detail,
                                         url, authenticated, retry)
                 continue
             except OSError as exc:
@@ -734,6 +739,8 @@ class TolinoClient:
                         short="tolino hat einen unsicheren Download-Link geliefert.")
                 content = response.read()
         except OSError as exc:
+            if isinstance(exc, HTTPError):
+                exc.close()
             raise TolinoApiError("Download von Tolino fehlgeschlagen: %s" %
                                  sanitize_error(exc, (self.refresh, self.access)),
                                  code="N02", short="Der Download von Tolino ist fehlgeschlagen.")

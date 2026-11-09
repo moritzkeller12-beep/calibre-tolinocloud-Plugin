@@ -5,7 +5,7 @@
 
 Aktuelle Version: **0.1.07** (Quelle: [`__init__.py`](__init__.py)).
 
-Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino Cloud, zeigt den Lesefortschritt aus tolino in Calibre an und hält mehrere Konten getrennt.
+Synchronisiert Bücher, Metadaten, Lesestatus und Fortschritt zwischen Calibre und der tolino Cloud; mehrere Konten bleiben getrennt.
 
 ## Installation
 
@@ -13,30 +13,24 @@ Synchronisiert Bücher, Metadaten und Lesestatus zwischen Calibre und der tolino
 2. In Calibre: **Einstellungen → Plugins → Plugin aus Datei laden** und ZIP auswählen.
 3. Calibre neu starten.
 
-Voraussetzung: Calibre 6 oder neuer. Für die automatische Anmeldung wird Chrome, Chromium, Brave oder Edge benötigt; verschlüsselte Web-Reader-Tokens benötigen zusätzlich PyCryptodome.
+Voraussetzung: Calibre 6 oder neuer. Die automatische Anmeldung benötigt Chrome, Chromium, Brave oder Edge; verschlüsselte Web-Reader-Tokens zusätzlich PyCryptodome.
 
 ## Benutzung
 
-Plugin öffnen, Buchhändler wählen und **Bei tolino anmelden**. Danach **Bibliothek vergleichen …** wählen, gewünschte Aktionen markieren und **Synchronisierung starten**.
+Plugin öffnen, Buchhändler wählen und **Bei tolino anmelden**. Danach **Bibliothek vergleichen …** wählen, gewünschte Aktionen markieren und **Synchronisierung starten**. Ein laufender Vergleich oder Sync bleibt beim Startkonto.
 
-## Mehrere Konten
+## Konten und Spalten
 
-Jedes Konto hat eigene Lesewerte. Die Spalten `#tolino_read` und `#tolino_progress` zeigen immer den Stand des aktiven Kontos. Beim Wechsel ordnet das Plugin die Werte zuerst über die Calibre-UUID zu. Fehlt eine echte UUID, nutzt es einen bibliotheksbezogenen Fallback aus Bibliothekskennung und Buchnummer. So bleiben die Werte auch dann erhalten, wenn das UUID-Feld keinen gültigen Wert enthält, und zwei Bibliotheken mit derselben Buchnummer überschreiben sich nicht. Beim Zurückwechseln erscheinen wieder die Werte des vorherigen Kontos.
+Jedes Konto hat eigene Lesewerte. Beim Wechsel ordnet das Plugin die Werte über die Calibre-UUID zu; ohne gültige UUID über Bibliothekskennung und Buchnummer. So bleiben Konten getrennt und der vorherige Stand kehrt beim Zurückwechseln zurück.
 
-Ein laufender Vergleich oder Sync bleibt beim Startkonto und überschreibt die Anzeige eines anderen Kontos nicht. Während einer Anmeldeprüfung ist der Konto-Wechsel gesperrt.
+Die Spalten lassen sich einzeln unter **Einstellungen …** anlegen; Calibre danach neu starten.
 
-## Calibre-Spalten
+- `#tolino_id` (Text): kontobezogene tolino-Zuordnung.
+- `#tolino_read` (Ja/Nein): bestätigter Lesestatus des aktiven Kontos, nur zur Anzeige.
+- `#tolino_progress` (Zahl 0–100): Lesefortschritt; unbekannte Abrufe lassen sie unverändert, ein erfolgreicher Abruf ohne Bookmark leert sie. Kein Rückschreiben nach tolino.
+- `#tolino_ignore` (Ja/Nein): schließt ein Buch vom Abgleich aus.
 
-Die Spalten lassen sich einzeln unter **Einstellungen …** des Plugins anlegen; Calibre danach neu starten.
-
-- `#tolino_id` (Text): speichert die tolino-Zuordnung kontobezogen in der Bibliothek.
-- `#tolino_read` (Ja/Nein): zeigt den bestätigten Lesestatus des aktiven Kontos. Die Spalte ist nur zur Anzeige; Änderungen werden im Vergleichsfenster ausgewählt.
-- `#tolino_progress` (Anzeigename „tolino gelesen %“, Zahl 0–100): zeigt den Lesefortschritt des aktiven Kontos, im Vergleichsfenster zusätzlich mit Position (z. B. `33 % · 192/590`). Der Wert wird nie nach tolino zurückgeschrieben. Ist der Abruf unbekannt, bleibt die Spalte unverändert. Ein erfolgreicher Abruf ohne Bookmark leert sie ausdrücklich (kein `0 %`). Bei einer bereits angelegten Spalte bleibt der bisherige Anzeigename erhalten und lässt sich in Calibre über den Spaltenkopf ändern.
-- `#tolino_ignore` (Ja/Nein): bei «Ja» wird ein Buch vom Abgleich ausgeschlossen, etwa wenn es bereits gekauft in tolino liegt.
-
-Nach einem erfolgreichen Vergleich und nach bestätigten manuellen Änderungen speichert das Plugin die Lesewerte im jeweiligen Konto.
-
-Für den Abgleich liest das Plugin die ISBN auch aus tolino-Produktkennungen. Die Produktkennung selbst ist keine Deliverable-ID.
+Nach einem erfolgreichen Vergleich und bestätigten Änderungen werden die Lesewerte im aktiven Konto gespeichert. Für den Abgleich liest das Plugin ISBNs auch aus tolino-Produktkennungen; die Produktkennung ist keine Deliverable-ID.
 
 ## Entwicklung
 
@@ -45,9 +39,8 @@ Tests: `python3 -X dev -m unittest calibre_plugin.test_sync`. Release-ZIP: `pyth
 ## Hinweise
 
 - Das Plugin nutzt eine inoffizielle tolino-Schnittstelle. Sie kann sich jederzeit ändern.
-- Zugangsdaten und Lesewerte werden pro Konto in den Calibre-Einstellungen gespeichert. Der Refresh-Token steht dort im Klartext in der JSON-Datei.
-- Ältere Zustandseinträge ohne Bibliothekszuordnung (`calibre-<id>`) werden nicht übernommen. Neue Fallback-Schlüssel tragen immer eine Bibliothekszuordnung.
-- Kontobezogene `#tolino_id`-Zuordnungen werden beim ersten Vergleich einmalig in den State übernommen; danach ist der State maßgeblich.
+- Zugangsdaten und Lesewerte liegen pro Konto in den Calibre-Einstellungen; der Refresh-Token steht dort im Klartext in der JSON-Datei.
+- Alte Zustandseinträge ohne Bibliothekszuordnung (`calibre-<id>`) werden nicht übernommen.
 - Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste](docs/fehlercodes.md).
 
 Lizenz: [GPL-3.0-or-later](LICENSE). Änderungen: [CHANGELOG](CHANGELOG.md).

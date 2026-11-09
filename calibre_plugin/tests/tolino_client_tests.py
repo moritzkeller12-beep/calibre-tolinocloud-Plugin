@@ -887,6 +887,7 @@ class RequestRetryBudgetTests(unittest.TestCase):
 
         error = HTTPError("https://bosh.pageplace.de/bosh/rest/upload", 403,
                           "Forbidden", {}, None)
+        self.addCleanup(error.close)
         error.read = lambda: b"quota exceeded"
         client = TolinoClient(4, "hardware", "refresh-token")
         client.access = "access-token"
@@ -1096,16 +1097,6 @@ class DownloadMetadataTests(unittest.TestCase):
             with self.assertRaises(TolinoApiError) as caught:
                 client.upload(source.name)
         self.assertEqual("N02", caught.exception.code)
-
-    def test_download_returns_content_without_an_inventory_request(self):
-        calls = []
-        client = self._client()
-        client.inventory = lambda: calls.append(1) or []
-        with patch("calibre_plugin.tolino.urlopen",
-                   return_value=self.Response()):
-            content = client.download("d-1")
-        self.assertEqual(b"EPUB-DATA", content)
-        self.assertEqual([], calls)
 
     def test_download_does_not_fetch_inventory(self):
         client = self._client()
