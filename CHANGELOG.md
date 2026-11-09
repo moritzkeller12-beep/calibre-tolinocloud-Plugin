@@ -2,6 +2,10 @@
 
 ## 0.1.07
 
+- Cover-Uploads senden den von tolino erwarteten `control`-Block; ohne ihn antwortet der Cover-Endpunkt mit HTTP 400.
+- Das Vergleichsfenster trägt den Titel „Bibliothek vergleichen“ und breitere Aktionsspalten (80/100 px), damit die Kopfzeilen vollständig sichtbar bleiben.
+- Die Browser-Anmeldung räumt das Chromium-Fenster auch bei Fehlern auf; redundante interne Fehler-Wrapper wurden entfernt.
+
 - Beim Konto-Wechsel bleiben Lesestatus und Fortschritt auch für Bücher ohne echte Calibre-UUID erhalten; die Zuordnung nutzt einen bibliotheksbezogenen Fallback aus Bibliothekskennung und Calibre-Nummer. Eine echte UUID hat Vorrang; alte Einträge werden nicht mehr fälschlich darübergelegt.
 - Alte ungescopte `calibre-<id>`-Einträge werden nicht mehr übernommen und nicht neu erzeugt; Zuordnungen laufen über echte UUIDs bzw. den bibliotheksbezogenen Fallback.
 - Fehlt PyCryptodome für verschlüsselte Web-Reader-Tokens, meldet die Anmeldung einen klaren Fehler mit Code A01 statt eines stillen Fehlschlags.
