@@ -1,0 +1,35 @@
+name: Apply pending source changes
+
+on:
+  push:
+    branches:
+      - "0.1.07"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Apply pending source changes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "moritzkeller12-beep"
+          git config user.email "329108308+moritzkeller12-beep@users.noreply.github.com"
+          base64 -d changes.patch.gz.b64 | gzip -d > changes.patch
+          git apply --index changes.patch
+          git rm -q changes.patch changes.patch.gz.b64 .github/workflows/apply-patch.yml
+          git commit -m "Vereinfache Login und stabilisiere den Cloud-Sync
+
+          Entferne redundante Login-Wrapper, straffe Sync- und UI-Pfade und
+          bereinige ungenutzte Testvariablen. Die Testsuite bleibt gruen.
+
+          🤖 Generated with Codebuff
+          Co-Authored-By: Codebuff <noreply@codebuff.com>"
+          git push
