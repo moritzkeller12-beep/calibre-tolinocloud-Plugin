@@ -8,7 +8,7 @@ from .tolino import report_error
 
 class BrowserLoginWorker(QObject):
     """Runs the browser login off the GUI thread (it polls for minutes)."""
-    completed = pyqtSignal(object, object)
+    completed = pyqtSignal(object)
     failed = pyqtSignal(object)
     progress = pyqtSignal(str)
 
@@ -29,7 +29,7 @@ class BrowserLoginWorker(QObject):
         except Exception as exc:
             self.failed.emit(exc)
             return
-        self.completed.emit(refresh, hardware)
+        self.completed.emit(hardware)
 
 
 class SessionCheckWorker(QObject):

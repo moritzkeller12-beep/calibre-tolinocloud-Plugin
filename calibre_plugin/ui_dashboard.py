@@ -1,7 +1,7 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
 from .ui_common import (CANCEL_MESSAGE, QDialog, QInputDialog,
-                        QMessageBox, QThread, _apply_busy, _dialog_busy,
-                        gui_guard, start_worker,
+                        QMessageBox, QThread, _active_work_thread, _apply_busy,
+                        _dialog_busy, gui_guard, start_worker,
                         LOGIN_NEXT_STEP, _login_failure_guidance,
                         _stop_thread, sync_result_detail,
                         sync_result_text, Qt)
@@ -14,38 +14,64 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
 from .run_context import RunContext
 from .comparison import (comparison_progress_updates,
                          comparison_read_updates)
-from .identifiers import valid_book_uuid
-from .library import (TOLINO_IGNORE_COLUMN, column_state,
+from .identifiers import calibre_key, is_real_uuid, normalize_uuid_text
+from .library import (TOLINO_IGNORE_COLUMN, column_state, library_scope,
                       bool_column_available, normalize_formats,
                       update_progress_status, update_read_status,
                       update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
-from .tolino import (RELOGIN, TolinoError, hardware_id, log_warning,
+from .tolino import (RELOGIN, TolinoError, hardware_id, log_info, log_warning,
                      normalize_refresh_token, report_error, sanitize_error)
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
 from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
                                  confirm_replacements, offer_next_step,
                                  report_skipped_uploads)
 from .ui_dialogs import InventoryDialog
-from .ui_workers import PrepareWorker, SyncWorker
+from .ui_workers import LocalMetadataWorker, PrepareWorker, SyncWorker
 
 
-def _book_ids_by_uuid(dashboard):
-    """Aktuelle Calibre-Nummer je UUID -- nie die gespeicherte Nummer raten."""
-    api = getattr(
-        getattr(getattr(dashboard, "gui", None), "current_db", None),
-        "new_api", None)
+def _book_key_index(dashboard):
+    """Return all book ids and every key that maps to one of them.
+
+    Calibre UUIDs are authoritative when present. The library-scoped
+    fallback is only mapped for books whose UUID field contains a title or
+    another non-UUID value; it never shadows a real UUID.
+    """
+    database = getattr(getattr(dashboard, "gui", None), "current_db", None)
+    api = getattr(database, "new_api", None)
     if api is None:
-        return {}
+        return [], {}
     book_ids = list(api.all_book_ids())
     uuids = api.all_field_for("uuid", book_ids) or {}
+    scope = library_scope(database)
     mapping = {}
     for book_id in book_ids:
-        key = valid_book_uuid(uuids.get(book_id))
-        if key:
+        key = normalize_uuid_text(uuids.get(book_id))
+        if is_real_uuid(key):
             mapping[key] = book_id
-    return mapping
+        else:
+            mapping.setdefault(calibre_key(book_id, scope), book_id)
+    return book_ids, mapping
+
+
+def _write_reading_updates(dashboard, read_updates, progress_updates,
+                           error_label):
+    """Write confirmed values and refresh the affected rows once."""
+    if not (read_updates or progress_updates):
+        return 0
+    try:
+        database = dashboard.gui.current_db
+        written = (update_read_status(database, read_updates)
+                   + update_progress_status(database, progress_updates))
+        if written:
+            book_ids = {book_id for book_id, _value
+                        in read_updates + progress_updates}
+            _refresh_library_view(dashboard, book_ids)
+        return written
+    except Exception as exc:
+        log_warning("%s: %s" % (error_label, sanitize_error(exc)))
+        return 0
 
 
 def _mirror_account_reading(dashboard, account_name=None):
@@ -54,18 +80,17 @@ def _mirror_account_reading(dashboard, account_name=None):
         account = account_by_name(
             account_name or getattr(dashboard, "account_name", "")) or {}
         state = load_state(account.get("state"))
-        book_ids_by_uuid = _book_ids_by_uuid(dashboard)
-        if not book_ids_by_uuid:
+        book_ids, book_ids_by_key = _book_key_index(dashboard)
+        if not book_ids:
             return 0
         # Erst alle Bücher auf unbekannt setzen, dann die Werte des Kontos
         # darüberlegen: kein Wert eines anderen Kontos bleibt stehen.
-        book_ids = list(book_ids_by_uuid.values())
         read_updates = dict.fromkeys(book_ids)
         progress_updates = dict.fromkeys(book_ids)
         for key, entry in state.items():
             if not isinstance(entry, dict):
                 continue
-            book_id = book_ids_by_uuid.get(str(key))
+            book_id = book_ids_by_key.get(str(key))
             reading = entry.get("reading")
             if book_id is None or not isinstance(reading, dict):
                 continue
@@ -74,14 +99,10 @@ def _mirror_account_reading(dashboard, account_name=None):
             progress = reading.get("progress")
             if isinstance(progress, dict) and "percent" in progress:
                 progress_updates[book_id] = progress.get("percent")
-        read_updates = list(read_updates.items())
-        progress_updates = list(progress_updates.items())
-        database = dashboard.gui.current_db
-        written = (update_read_status(database, read_updates)
-                   + update_progress_status(database, progress_updates))
-        if written:
-            _refresh_library_view(dashboard, book_ids)
-        return written
+        return _write_reading_updates(
+            dashboard, list(read_updates.items()),
+            list(progress_updates.items()),
+            "Lese-Spalten konnten nicht aktualisiert werden")
     except Exception as exc:
         log_warning("Lese-Spalten konnten nicht aktualisiert werden: %s"
                     % sanitize_error(exc))
@@ -95,23 +116,10 @@ def _mirror_comparison_reading(dashboard, comparison):
     Weg stellt sicher, dass auch ein bereits vor dem Vergleich vorhandener
     Cloud-Stand in den Spalten ankommt.
     """
-    read_updates = comparison_read_updates(comparison)
-    progress_updates = comparison_progress_updates(comparison)
-    if not (read_updates or progress_updates):
-        return 0
-    try:
-        database = dashboard.gui.current_db
-        written = update_read_status(database, read_updates)
-        written += update_progress_status(database, progress_updates)
-        if written:
-            book_ids = {book_id for book_id, _value
-                        in read_updates + progress_updates}
-            _refresh_library_view(dashboard, book_ids)
-        return written
-    except Exception as exc:
-        log_warning("Lesewerte konnten nicht nach Calibre gespiegelt werden: %s"
-                    % sanitize_error(exc))
-        return 0
+    return _write_reading_updates(
+        dashboard, comparison_read_updates(comparison),
+        comparison_progress_updates(comparison),
+        "Lesewerte konnten nicht nach Calibre gespiegelt werden")
 
 
 def _persist_sync_result(dialog, state, updates):
@@ -198,9 +206,9 @@ def _sync_failure_heading(outcome):
     übertragen. Der Unterschied gehört in Titel und Text; die beiden Handler
     bleiben getrennt, weil sich ihre Ergebnisfälle unterscheiden.
     """
-    succeeded = (int(outcome.get("uploaded") or 0)
-                 + int(outcome.get("updated") or 0)
-                 + int(outcome.get("deleted") or 0))
+    succeeded = sum(int(outcome.get(key) or 0) for key in (
+        "uploaded", "metadata", "read_marked", "read_unmarked",
+        "collections", "deleted"))
     if succeeded:
         return "Teilweise fehlgeschlagen", "Teilweise abgeschlossen: "
     return "Fehlgeschlagen", "Fehlgeschlagen: "
@@ -218,6 +226,8 @@ class SyncDashboard(DashboardParts, QDialog):
         self.login_worker = None
         self.prepare_thread = None
         self.prepare_worker = None
+        self.snapshot_thread = None
+        self.snapshot_worker = None
         self.account_name = ""
         self.setWindowTitle("tolino Cloud Sync")
         self.setMinimumWidth(560)
@@ -364,7 +374,7 @@ class SyncDashboard(DashboardParts, QDialog):
         Das Anmelden hat wieder seinen eigenen Knopf darüber,
         damit es auch bei abgelaufenem Zugang sofort erreichbar ist.
         """
-        if self.thread is not None or self.prepare_thread is not None:
+        if _active_work_thread(self):
             self.cancel_sync()
         else:
             self.start_sync()
@@ -378,6 +388,8 @@ class SyncDashboard(DashboardParts, QDialog):
                 running_text = "Synchronisierung läuft …"
             elif self.prepare_thread is not None:
                 running_text = "Vergleich läuft …"
+            elif getattr(self, "snapshot_thread", None) is not None:
+                running_text = "Bibliothek wird gelesen …"
             else:
                 running_text = "Anmeldung wird geprüft …"
             self.status.setText(running_text)
@@ -557,7 +569,7 @@ class SyncDashboard(DashboardParts, QDialog):
                      (worker.completed, worker.failed))
 
     @gui_guard
-    def login_completed(self, refresh, hardware):
+    def login_completed(self, hardware):
         """Der Worker hat den Token bereits im richtigen Konto gespeichert."""
         self._login_cleanup()
         if hardware:
@@ -604,39 +616,88 @@ class SyncDashboard(DashboardParts, QDialog):
                      message + " Es wurde nichts geändert.", show=True)
 
     def start_sync(self):
-        """Bibliothek vergleichen: lokaler Snapshot im GUI, Netz im Worker.
+        """Bibliothek vergleichen: lokaler Snapshot und Netz im Hintergrund.
 
-        Der Calibre-Datenbankzugriff (Metadaten + Format-Signaturen) bleibt
-        im GUI-Thread. Login und Cloud-Inventar laufen in `PrepareWorker`;
-        der Vergleich und die Auswahl kommen über Qt-Signale zurück.
+        Der Snapshot läuft in `LocalMetadataWorker`; Calibres `new_api` ist
+        threadsafe. Danach übernimmt `PrepareWorker` Login und Cloud-Inventar.
+        Nur der GUI-Thread fasst Widgets an.
         """
-        if self.thread is not None or self.prepare_thread is not None:
+        if _active_work_thread(self):
             return
         values = self.values()
         if not self._effective_refresh():
             self.status.setText("Nicht angemeldet.")
             return
         self._save_visible_account(values)
+        database = self.gui.current_db
         context = RunContext.from_values(
-            values, column_state(self.gui.current_db))
+            values, column_state(database),
+            library_scope=library_scope(database))
         account = account_by_name(context.account_name) or {}
         state = load_state(account.get("state"))
-        try:
-            # Calibre-DB und Qt-Widgets nur hier (GUI-Thread) lesen.
-            metadata = _dashboard_plan.local_metadata(self, context, state)
-        except Exception as exc:
-            self._show_prepare_error(exc, context)
-            return
-        self._start_prepare_worker(context, metadata, state)
+        self._start_local_snapshot(database, context, state)
 
-    def _start_prepare_worker(self, context, metadata, state):
-        """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
+    def _begin_progress(self, status, label):
+        """Sperren und den unbestimmten Fortschritt fuer einen Lauf zeigen."""
         _apply_busy(self, True)
-        self.status.setText("Vergleich läuft …")
+        self.status.setText(status)
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
         self.progress_label.setVisible(True)
-        self.progress_label.setText("Verbinde mit tolino …")
+        self.progress_label.setText(label)
+
+    def _start_local_snapshot(self, database, context, state):
+        """Calibre-Metadaten in einem eigenen Thread lesen."""
+        self._begin_progress("Bibliothek wird gelesen …",
+                             "Lese Calibre-Bibliothek …")
+        worker = LocalMetadataWorker(database, context, state)
+        worker.ready.connect(self._snapshot_ready)
+        worker.failed.connect(self._snapshot_failed)
+        start_worker(self, worker, QThread(self), "snapshot_thread",
+                     "snapshot_worker", (worker.ready, worker.failed))
+        self.update_status()
+
+    def _finish_progress_thread(self, thread_name, worker_name):
+        """Thread-Referenzen und Fortschrittsanzeige gemeinsam abräumen."""
+        thread = getattr(self, thread_name, None)
+        setattr(self, thread_name, None)
+        setattr(self, worker_name, None)
+        self.progress.setRange(0, 1)
+        self.progress.setVisible(False)
+        self.progress_label.setText("Bereit")
+        self.progress_label.setVisible(False)
+        _stop_thread(thread, timeout_ms=2000)
+        self.update_status()
+
+    def _finish_snapshot(self):
+        """Snapshot-Thread abräumen, bevor der Netz-Worker startet."""
+        self._finish_progress_thread("snapshot_thread", "snapshot_worker")
+
+    @gui_guard
+    def _snapshot_ready(self, payload):
+        """Lokalen Snapshot übernehmen und die Netz-Vorbereitung starten."""
+        self._finish_snapshot()
+        self._start_prepare_worker(payload["context"], payload["metadata"],
+                                   payload["state"])
+
+    @gui_guard
+    def _snapshot_failed(self, message):
+        worker = getattr(self, "snapshot_worker", None)
+        cancelled = bool(getattr(worker, "cancelled", False))
+        self._finish_snapshot()
+        if cancelled or str(message) == CANCEL_MESSAGE:
+            info_dialog(
+                self, "Abgebrochen", "Abgebrochen. Es wurde nichts geändert.",
+                show=True, show_copy_button=False)
+            return
+        log_warning("Bibliothek konnte nicht gelesen werden: "
+                    + sanitize_error(message))
+        error_dialog(self, "Vergleich fehlgeschlagen", str(message), show=True)
+
+    def _start_prepare_worker(self, context, metadata, state):
+        """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
+        self._begin_progress("Vergleich läuft …",
+                             "Verbinde mit tolino …")
         worker = PrepareWorker(context, metadata, state)
         worker.progress.connect(self._prepare_progress)
         worker.ready.connect(self._prepare_ready)
@@ -651,15 +712,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _finish_prepare(self):
         """Vorbereitungs-Thread sauber abräumen (ohne unbegrenzt zu warten)."""
-        thread = self.prepare_thread
-        self.prepare_thread = None
-        self.prepare_worker = None
-        self.progress.setRange(0, 1)
-        self.progress.setVisible(False)
-        self.progress_label.setText("Bereit")
-        self.progress_label.setVisible(False)
-        _stop_thread(thread, timeout_ms=2000)
-        self.update_status()
+        self._finish_progress_thread("prepare_thread", "prepare_worker")
 
     @gui_guard
     def _prepare_failed(self, message):
@@ -718,7 +771,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 self, context, metadata, state, selection,
                 series_map=series_map)
             if preparation["removals"] and not confirm_deletions(
-                    self, preparation["removals"], state,
+                    self, preparation["removals"],
                     preparation.get("removal_titles")):
                 return
             # Erst nach allen Bestätigungen schreiben: ein Abbruch im Dialog
@@ -776,7 +829,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 self, skipped_uploads, nothing_else=not total):
             return
         plan = _dashboard_plan.plan_text(preparation, len(jobs))
-        log_warning("Sync geplant: %s" % plan)
+        log_info("Sync geplant: %s" % plan)
         _apply_busy(self, True)
         self.progress.setRange(0, total)
         self.progress.setValue(0)
@@ -809,6 +862,9 @@ class SyncDashboard(DashboardParts, QDialog):
             self.progress_label.setText("Synchronisierung läuft …")
 
     def cancel_sync(self):
+        snapshot = getattr(self, "snapshot_worker", None)
+        if snapshot is not None:
+            snapshot.cancel()
         prepare = getattr(self, "prepare_worker", None)
         if prepare is not None:
             prepare.cancel()
@@ -882,14 +938,15 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def closeEvent(self, event):
         """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
-        if self.thread is not None or self.prepare_thread is not None:
+        if _active_work_thread(self):
             self.cancel_sync()
-        _stop_thread(self.thread)
-        _stop_thread(self.prepare_thread)
-        self.thread = None
-        self.worker = None
-        self.prepare_thread = None
-        self.prepare_worker = None
+        for thread_name, worker_name in (
+                ("thread", "worker"),
+                ("prepare_thread", "prepare_worker"),
+                ("snapshot_thread", "snapshot_worker")):
+            _stop_thread(getattr(self, thread_name, None))
+            setattr(self, thread_name, None)
+            setattr(self, worker_name, None)
         # A running browser sign-in is left alone on purpose: its thread is
         # unparented and self-terminates after its timeout, and joining it
         # here could freeze the close for minutes.

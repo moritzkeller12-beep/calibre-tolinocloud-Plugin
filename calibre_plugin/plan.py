@@ -56,20 +56,18 @@ def normalize_removals(explicit=()):
     seen = set()
     titles = {}
     for entry in tuple(explicit or ()):
-        values = tuple(entry) if isinstance(entry, (tuple, list)) else ()
-        if len(values) < 2:
+        if not isinstance(entry, (tuple, list)) or len(entry) < 2:
             continue
-        book_uuid, tolino_id = values[0], values[1]
-        title = str(values[2] or "") if len(values) > 2 else ""
+        book_uuid, tolino_id = entry[0], entry[1]
+        title = str(entry[2] or "") if len(entry) > 2 else ""
         tolino_id = str(tolino_id or "").strip()
         if not tolino_id:
             continue
         if title:
             titles[tolino_id] = title
-        if tolino_id in seen:
-            continue
-        seen.add(tolino_id)
-        merged.append((str(book_uuid or ""), tolino_id))
+        if tolino_id not in seen:
+            seen.add(tolino_id)
+            merged.append((str(book_uuid or ""), tolino_id))
     return merged, titles
 
 
@@ -78,17 +76,15 @@ def series_map_from_metadata(metadata_by_id):
 
     Reine Zuordnung ohne Cloud-Zugriff.
     """
-    series_map = {}
     if not isinstance(metadata_by_id, dict):
-        return series_map
-    for metadata in metadata_by_id.values():
-        if not isinstance(metadata, dict):
-            continue
-        book_uuid = str(metadata.get("uuid") or "")
-        series = str(metadata.get("series") or "").strip()
-        if book_uuid and series:
-            series_map[book_uuid] = series
-    return series_map
+        return {}
+    return {
+        book_uuid: series
+        for metadata in metadata_by_id.values()
+        if isinstance(metadata, dict)
+        and (book_uuid := str(metadata.get("uuid") or ""))
+        and (series := str(metadata.get("series") or "").strip())
+    }
 
 
 def remember_collection(state, book_uuid, series):
@@ -119,31 +115,28 @@ def plan_collection_updates(series_map, state):
     pending = set()
     for book_uuid, series in series_map.items():
         series = str(series or "").strip()
-        if not book_uuid or not series:
-            continue
         entry = state.get(book_uuid)
-        if not isinstance(entry, dict):
+        if not book_uuid or not series or not isinstance(entry, dict):
             continue
         tolino_id = str(entry.get("tolino_id") or "").strip()
         recorded = entry.get("collections")
-        recorded = (recorded if isinstance(recorded, list) else ())
-        if not tolino_id or series in {
-                str(name).strip() for name in recorded
-                if str(name or "").strip()}:
-            continue
-        pending.add((str(book_uuid), tolino_id, series))
+        recorded = {
+            str(name).strip() for name in recorded
+            if str(name or "").strip()
+        } if isinstance(recorded, list) else set()
+        if tolino_id and series not in recorded:
+            pending.add((str(book_uuid), tolino_id, series))
     return sorted(pending, key=lambda item: (item[1], item[2], item[0]))
 
 
 def metadata_update_fields(metadata):
     """Tolino /meta payload fields for an in-place metadata update."""
-    fields = {}
-    for source, target in (("title", "title"), ("authors", "author"),
-                           ("isbn", "isbn")):
-        value = str(metadata.get(source) or "").strip()
-        if value:
-            fields[target] = value
-    return fields
+    return {
+        target: value
+        for source, target in (("title", "title"), ("authors", "author"),
+                               ("isbn", "isbn"))
+        if (value := str(metadata.get(source) or "").strip())
+    }
 
 
 def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):

@@ -20,6 +20,7 @@ class RunContext:
     partner_id: object = 1
     preferred_formats: tuple = DEFAULT_PREFERRED_FORMATS
     columns: dict = field(default_factory=dict)
+    library_scope: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "account_name", str(self.account_name or ""))
@@ -27,9 +28,11 @@ class RunContext:
         object.__setattr__(self, "preferred_formats", tuple(
             self.preferred_formats or DEFAULT_PREFERRED_FORMATS))
         object.__setattr__(self, "columns", dict(self.columns or {}))
+        object.__setattr__(self, "library_scope",
+                           str(self.library_scope or ""))
 
     @classmethod
-    def from_values(cls, values, columns=None):
+    def from_values(cls, values, columns=None, library_scope=""):
         """Aus dem GUI-Snapshot des Dashboards bauen."""
         values = values if isinstance(values, dict) else {}
         return cls(
@@ -38,6 +41,7 @@ class RunContext:
             preferred_formats=(values.get("preferred_formats")
                                or DEFAULT_PREFERRED_FORMATS),
             columns=columns or {},
+            library_scope=library_scope,
         )
 
     def secrets(self):

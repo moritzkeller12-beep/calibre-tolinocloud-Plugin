@@ -21,7 +21,7 @@ def tag_patch(op, book_id, name, category, revision=None, tag_id=None):
         if not str(tag_id or "").strip():
             raise TolinoApiError(
                 "Marken-ID fehlt (%s / %s)." % (book_id, name),
-                code="N02", short="Die Sammlung ist in der Cloud nicht auffindbar.")
+                code="N02", short="Die Marke ist in der Cloud nicht auffindbar.")
         path = "%s/%s" % (path, tag_id)
     return {"op": op, "value": value, "path": path}
 
@@ -162,12 +162,10 @@ def reading_progress(patches):
         previous = active.get(key)
         if previous is None or entry["modified"] >= previous[0]["modified"]:
             active[key] = (entry, order)
-    for (book_id, _bookmark_id), (entry, sequence) in active.items():
-        previous = newest.get(book_id)
-        if (previous is None or entry["modified"] > previous[0]["modified"]
-                or (entry["modified"] == previous[0]["modified"]
-                    and sequence > previous[1])):
-            newest[book_id] = (entry, sequence)
+    for (book_id, _bookmark_id), candidate in active.items():
+        newest[book_id] = max(
+            newest.get(book_id, candidate), candidate,
+            key=lambda pair: (pair[0]["modified"], pair[1]))
     return {book_id: entry for book_id, (entry, _sequence) in newest.items()}
 
 

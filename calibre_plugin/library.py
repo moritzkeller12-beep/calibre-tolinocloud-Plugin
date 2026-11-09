@@ -1,4 +1,5 @@
 """Adapters for Calibre library and Qt APIs used by the plugin."""
+import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -14,29 +15,50 @@ TOLINO_PROGRESS_COLUMN = "#tolino_progress"
 # Calibre liefert ein Ja/Nein-Feld je nach Weg als Bool, Text oder Zahl.
 _TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
 _FALSE_VALUES = frozenset(("false", "no", "nein", "0"))
+# Ohne Bibliothekskennung gibt es keinen echten Scope. Ein fester Ersatz
+# verhindert, dass der alte ungescopte Schluessel stillschweigend entsteht.
+DEFAULT_LIBRARY_SCOPE = hashlib.sha256(
+    b"tolino-cloud-sync-default-library").hexdigest()[:12]
+
+
+def library_scope(database):
+    """Return a stable short namespace for one Calibre library.
+
+    `library_id` is preferred; `dbpath` is the fallback for older Calibre
+    versions. Hashing keeps the state key short and avoids embedding a
+    filesystem path in preferences. If both are unavailable, a fixed
+    placeholder scope keeps fallback keys namespaced instead of recreating
+    the old unscoped ``calibre-<id>`` form.
+    """
+    raw = (getattr(database, "library_id", "")
+           or getattr(database, "dbpath", ""))
+    text = str(raw or "").strip()
+    if not text:
+        return DEFAULT_LIBRARY_SCOPE
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 def _column_value(metadata):
     """Read the raw Calibre custom-column value."""
     getter = getattr(metadata, "get", None)
     if callable(getter):
-        return getter(TOLINO_COLUMN, "") or getter("tolino_id", "") or ""
+        return getter(TOLINO_COLUMN, "") or ""
     return ""
 
 
 def _decode_tolino_ids(value):
-    """Return the account map, or None when value is a legacy single ID."""
+    """Return the account map; malformed or plain values are empty."""
     if isinstance(value, dict):
         decoded = value
     elif isinstance(value, str) and value.strip().startswith("{"):
         try:
             decoded = json.loads(value)
         except (TypeError, ValueError):
-            return None
+            return {}
     else:
-        return None
+        return {}
     if not isinstance(decoded, dict):
-        return None
+        return {}
     return {str(name): str(book_id).strip()
             for name, book_id in decoded.items()
             if name and isinstance(book_id, (str, int)) and str(book_id).strip()}
@@ -49,11 +71,8 @@ def _encode_tolino_ids(ids):
 
 def metadata_tolino_id(metadata, account_name=None):
     """Read this account's ID from its account-map column."""
-    value = _column_value(metadata)
-    account_ids = _decode_tolino_ids(value)
-    if account_ids is not None:
-        return str(account_ids.get(str(account_name), "") or "").strip()
-    return str(value or "").strip()
+    account_ids = _decode_tolino_ids(_column_value(metadata))
+    return str(account_ids.get(str(account_name), "") or "").strip()
 
 
 def _column_available(database, column, datatypes):
@@ -127,7 +146,7 @@ def create_custom_columns(database, labels=None):
 
     Calibre kennt dafuer ``create_custom_column(label, name, datatype,
     is_multiple, editable, display)`` -- auf ``new_api`` wie auf dem
-    Legacy-Objekt. Vorhandene Spalten werden nie angefasst: es wird weder
+    Datenbankobjekt. Vorhandene Spalten werden nie angefasst: es wird weder
     etwas geloescht noch ein Typ geaendert.
 
     ``labels`` grenzt das auf einzelne Spalten ein -- in den Einstellungen
@@ -182,7 +201,7 @@ def _progress_value(value):
     if value is None:
         return None
     try:
-        value = int(round(float(value)))
+        value = round(float(value))
     except (TypeError, ValueError, OverflowError):
         return _SKIP
     return value if 0 <= value <= 100 else _SKIP
@@ -234,28 +253,28 @@ def update_progress_status(database, updates):
 
 
 def update_tolino_ids(database, updates, account_name=None):
-    """Merge this account's IDs into the shared Calibre custom column."""
+    """Merge this account's IDs into the shared Calibre custom column.
+
+    A historic plain value is replaced by the account map after a warning;
+    it cannot be assigned to an account safely and would otherwise block
+    the per-account updates.
+    """
     if not updates or TOLINO_COLUMN not in database.field_metadata:
         return 0
-    api = database.new_api
     account_name = str(account_name or "").strip()
+    if not account_name:
+        return 0
+    api = database.new_api
     values = {}
+    legacy_replaced = False
     for book_id, tolino_id in updates:
         if book_id is None or not api.has_id(book_id):
             continue
         new_id = str(tolino_id or "").strip()
-        if not account_name:
-            values[book_id] = new_id
-            continue
         raw = api.field_for(TOLINO_COLUMN, book_id)
+        if raw and not str(raw).strip().startswith("{"):
+            legacy_replaced = True
         account_ids = _decode_tolino_ids(raw)
-        if account_ids is None:
-            # Migrate a legacy single ID when this account first writes the
-            # account-scoped column value.
-            legacy = str(raw or "").strip()
-            account_ids = {}
-            if legacy:
-                account_ids[account_name] = legacy
         if new_id:
             account_ids[account_name] = new_id
         else:
@@ -264,6 +283,10 @@ def update_tolino_ids(database, updates, account_name=None):
     if not values:
         return 0
     api.set_field(TOLINO_COLUMN, values)
+    if legacy_replaced:
+        from .tolino import log_warning
+        log_warning("Alte Einzel-ID in #tolino_id wurde durch die "
+                    "kontobezogene Zuordnung ersetzt.")
     return len(values)
 
 
@@ -275,14 +298,9 @@ def normalize_formats(value):
         values = value
     else:
         return []
-    formats = []
-    for part in values:
-        if part is None:
-            continue
-        text = str(part).strip().lstrip(".").upper()
-        if text and text not in formats:
-            formats.append(text)
-    return formats
+    cleaned = ("" if part is None else str(part).strip().lstrip(".").upper()
+               for part in values)
+    return list(dict.fromkeys(text for text in cleaned if text))
 
 
 

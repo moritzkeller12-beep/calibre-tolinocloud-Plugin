@@ -35,11 +35,10 @@ def missing_browser_error(status=""):
         "Edge installieren – oder in den Einstellungen Zugangstoken und "
         "Geräte-ID eintragen.")
     if status == "unavailable" and in_flatpak_sandbox():
-        message = (
+        return (
             "Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt. "
             "Bitte «flatpak update» ausführen und Calibre danach "
             "vollständig neu starten.")
-        return message
     if in_flatpak_sandbox() and status not in ("empty", "unavailable"):
         message += "\n\n" + flatpak_permission_hint()
     return message

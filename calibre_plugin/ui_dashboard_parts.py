@@ -1,5 +1,6 @@
 """Aufbau und Bestätigungen des Sync-Dashboards."""
 from calibre.gui2 import error_dialog, info_dialog
+from .identifiers import display_title
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
                       create_custom_columns)
 from .partners import PARTNERS
@@ -68,15 +69,12 @@ def offer_next_step(dialog):
     primary.setFocus()
 
 
-def confirm_deletions(dialog, removals, state, titles=None):
+def confirm_deletions(dialog, removals, titles=None):
     """Ausdrücklich markierte Cloud-Kopien vor dem Löschen bestätigen."""
     titles = titles if isinstance(titles, dict) else {}
     lines = []
-    for key, tolino_id in removals:
-        entry = state.get(key) if isinstance(state, dict) else {}
-        title = (titles.get(str(tolino_id))
-                 or (entry.get("title") if isinstance(entry, dict) else "")
-                 or key)
+    for _key, tolino_id in removals:
+        title = display_title(titles.get(str(tolino_id)))
         lines.append("- %s" % title)
     if len(removals) == 1:
         text = ("1 Buch wird aus tolino gelöscht (in Calibre bleibt es):"

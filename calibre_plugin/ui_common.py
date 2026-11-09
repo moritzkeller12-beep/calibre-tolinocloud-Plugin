@@ -12,8 +12,7 @@ from qt.core import (QCheckBox, QComboBox, QDialog,
                      QProgressBar, QPushButton, QThread,
                      QVBoxLayout, QHBoxLayout, QTableWidget,
                      QTableWidgetItem, QObject, QInputDialog,
-                     QFileDialog, QStyledItemDelegate, QStyle,
-                     QStyleOptionViewItem, QEvent, Qt, pyqtSignal)
+                     QFileDialog, QStyledItemDelegate, QEvent, Qt, pyqtSignal)
 from .tolino import TolinoError
 
 # Re-export the Qt names other UI modules and the test loader import from here.
@@ -23,8 +22,8 @@ __all__ = [
     "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView", "QMenu",
     "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
     "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QThread", "QVBoxLayout", "QStyledItemDelegate", "QStyle",
-    "QStyleOptionViewItem", "QEvent", "Qt", "_THREADS", "_apply_busy",
+    "QThread", "QVBoxLayout", "QStyledItemDelegate", "QEvent", "Qt",
+    "_THREADS", "_apply_busy",
     "_dialog_busy", "LOGIN_NEXT_STEP", "_login_failure_guidance",
     "gui_guard", "start_worker", "_stop_thread", "_set_enabled",
     "_keep_thread_alive", "pyqtSignal", "sync_result_detail",
@@ -184,14 +183,17 @@ def _stop_thread(thread, timeout_ms=3000):
     return finished
 
 
+def _active_work_thread(dialog):
+    """Gibt es einen laufenden Sync-/Vorbereitungs-Thread?"""
+    return any(getattr(dialog, name, None) is not None
+               for name in ("thread", "prepare_thread", "snapshot_thread"))
+
+
 def _dialog_busy(dialog):
     """Läuft Sync, Vorbereitung oder Anmeldung? (ohne Qt-Abhängigkeit)"""
-    if getattr(dialog, "thread", None) is not None:
-        return True
-    if getattr(dialog, "prepare_thread", None) is not None:
-        return True
     login = getattr(dialog, "login_thread", None)
-    return login is not None and login.isRunning()
+    return (_active_work_thread(dialog)
+            or (login is not None and login.isRunning()))
 
 
 def _set_enabled(owner, names, enabled):
@@ -210,8 +212,7 @@ def _apply_busy(dialog, busy):
     die laufende Aktion bleibt über RunContext an ihr Startkonto gebunden.
     Eine laufende Anmeldeprüfung blockiert den Wechsel dagegen weiterhin.
     """
-    switchable = bool(getattr(dialog, "thread", None)
-                      or getattr(dialog, "prepare_thread", None))
+    switchable = _active_work_thread(dialog)
     _set_enabled(dialog, ("account_new", "account_remove", "partner",
                           "login_button", "settings_button", "hardware",
                           "refresh", "formats"), not busy)

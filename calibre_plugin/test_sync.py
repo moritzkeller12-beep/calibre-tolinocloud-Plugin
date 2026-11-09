@@ -11,6 +11,6 @@ _TESTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests")
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def load_tests(loader, tests, pattern):
+def load_tests(loader, _tests, _pattern):
     """Alle ``*_tests.py`` im Testpaket laden."""
     return loader.discover(_TESTS, pattern="*_tests.py", top_level_dir=_ROOT)

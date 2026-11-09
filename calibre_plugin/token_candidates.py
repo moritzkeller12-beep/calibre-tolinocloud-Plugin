@@ -5,6 +5,7 @@ import re
 import time
 
 from .browser_crypto import cryptojs_decrypt
+from .errors import TolinoAuthError
 
 # Values used by the Web Reader for credentials and device identity.
 TOKEN_VALUE_KEYS = ("refresh_token", "t_auth_token", "refreshToken", "refresh-token")
@@ -150,25 +151,38 @@ def _unwrap_refresh_candidate(token, max_depth=3):
 
 
 def _normalize_live_grab(grabbed):
-    """Unwrap the refresh candidates of ONE grab result."""
+    """Unwrap the refresh candidates of ONE grab result.
+
+    Fehlt PyCryptodome, ist nur ein verschlüsselter Kandidat unlesbar.
+    Ein daneben gefundener Klartext-Token bleibt brauchbar; die
+    Hardware-ID ist ohnehin optional. Der Fehler wird deshalb erst
+    gemeldet, wenn kein lesbarer Refresh-Kandidat übrig bleibt.
+    """
     if not isinstance(grabbed, dict):
         return grabbed
     refresh = []
+    decrypt_error = None
     for token in grabbed.get("refresh") or ():
-        unwrapped = _unwrap_refresh_candidate(token)
+        try:
+            unwrapped = _unwrap_refresh_candidate(token)
+        except TolinoAuthError as exc:
+            decrypt_error = decrypt_error or exc
+            continue
         if unwrapped and unwrapped not in refresh:
             refresh.append(unwrapped)
+    if decrypt_error is not None and not refresh:
+        raise decrypt_error
     hardware = []
     for value in grabbed.get("hardware") or ():
         value = str(value or "").strip()
         if value.startswith("U2FsdGVk"):
-            value = _hardware_from_reader_blob(value)
+            try:
+                value = _hardware_from_reader_blob(value)
+            except TolinoAuthError:
+                # Die Geräte-ID ist optional; ohne Decoder bleibt sie leer.
+                continue
         if value and value not in hardware:
             hardware.append(value)
-    if (refresh == (grabbed.get("refresh") or [])
-            and hardware == (grabbed.get("hardware") or [])):
+    if grabbed.get("refresh") == refresh and grabbed.get("hardware") == hardware:
         return grabbed
-    updated = dict(grabbed)
-    updated["refresh"] = refresh
-    updated["hardware"] = hardware
-    return updated
+    return dict(grabbed, refresh=refresh, hardware=hardware)

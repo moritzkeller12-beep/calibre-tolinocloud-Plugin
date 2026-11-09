@@ -71,19 +71,57 @@ def _close_window_after_grab(progress=None):
     return False
 
 
-def _raise_grab_failure(last_error, grabbed, rejected):
-    """Raise the final B02 error with age/error context."""
-    details = []
-    if last_error:
-        details.append("Letzter Fehler: " + sanitize_error(last_error))
-    candidates = rejected or grabbed.get("refresh") or ()
-    age_note = _candidate_age_note(candidates)
-    if age_note:
-        details.append(age_note)
+def _exchange_live_grab(partner_id, hardware, grabbed, rejected, progress=None):
+    """Try the freshest live token; returns (result, error)."""
+    fresh = [token for token in _filter_live_candidates(grabbed["refresh"])
+             if token not in rejected]
+    if not fresh:
+        return None, ""
+    if progress:
+        progress("Prüfe den gelesenen Zugang bei Tolino …")
+    try:
+        result = _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
+    except TolinoAuthError as exc:
+        # A rejected single-use grant and its session siblings are spent.
+        rejected.update(grabbed["refresh"])
+        if progress:
+            progress("Zugang abgelehnt – warte auf einen frischen "
+                     "Zugang aus dem Web Reader …")
+        return None, str(exc)
+    if progress:
+        progress("Zugang übernommen – das Anmeldefenster "
+                 "wird geschlossen.")
+    _close_window_after_grab(progress)
+    return result, ""
+
+
+def _raise_grab_end(window, saw_reader, grabbed, rejected, last_error):
+    """Raise the matching B02 error after the wait loop."""
+    login_page_open = (window and window.get("window")
+                       and not window.get("reader_tab"))
+    if login_page_open and saw_reader:
+        # Die Partner-Anmeldeseite bleibt offen, damit man sich anmelden kann.
+        raise TolinoAuthError(
+            "Das Anmeldefenster ist offen, aber noch nicht angemeldet. "
+            "Bitte dort anmelden, bis die Bücherliste lädt. " + RELOGIN_THEN,
+            code="B02", detail=last_error)
+    if not login_page_open:
+        cdp_module.close_grabber_window()
+        if saw_reader:
+            details = []
+            if last_error:
+                details.append("Letzter Fehler: " + sanitize_error(last_error))
+            candidates = rejected or grabbed.get("refresh") or ()
+            age_note = _candidate_age_note(candidates)
+            if age_note:
+                details.append(age_note)
+            raise TolinoAuthError(
+                "Das Anmeldefenster wurde geschlossen, weil kein gültiger "
+                "Zugang gelesen werden konnte. " + RELOGIN,
+                code="B02", detail="; ".join(details))
     raise TolinoAuthError(
-        "Das Anmeldefenster wurde geschlossen, weil kein gültiger Zugang "
-        "gelesen werden konnte. " + RELOGIN,
-        code="B02", detail="; ".join(details))
+        "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "
+        + RELOGIN, code="B02", detail="kein Web-Reader-Tab")
 
 
 def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
@@ -112,33 +150,28 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        more = _normalize_live_grab(cdp_module.grab_once_from_grabber(
-            timeout=max(0.1, min(12, remaining))))
+        try:
+            more = _normalize_live_grab(cdp_module.grab_once_from_grabber(
+                timeout=max(0.1, min(12, remaining))))
+        except Exception:
+            # Auch ein fehlender Decoder darf Chromium und das Temp-Profil
+            # nicht bis zum nächsten Calibre-Start offen lassen.
+            try:
+                cdp_module.close_grabber_window()
+            except Exception as exc:
+                log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
+                            % sanitize_error(exc))
+            raise
         if more and more.get("refresh"):
             grabbed = more
             saw_reader = True
             endpoint_misses = 0
-            fresh = [token for token in _filter_live_candidates(grabbed["refresh"])
-                     if token not in rejected]
-            if fresh:
-                if progress:
-                    progress("Prüfe den gelesenen Zugang bei Tolino …")
-                try:
-                    result = _exchange_grabbed_token(partner_id, hardware,
-                                                     grabbed, fresh)
-                except TolinoAuthError as exc:
-                    # A rejected single-use grant and its session siblings are spent.
-                    rejected.update(grabbed["refresh"])
-                    last_error = str(exc)
-                    if progress:
-                        progress("Zugang abgelehnt – warte auf einen frischen "
-                                 "Zugang aus dem Web Reader …")
-                else:
-                    if progress:
-                        progress("Zugang übernommen – das Anmeldefenster "
-                                 "wird geschlossen.")
-                    _close_window_after_grab(progress)
-                    return result
+            result, error = _exchange_live_grab(
+                partner_id, hardware, grabbed, rejected, progress)
+            if result is not None:
+                return result
+            if error:
+                last_error = error
 
         now = time.monotonic()
         if now - last_window_check >= _WINDOW_CHECK_INTERVAL:
@@ -176,18 +209,4 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
 
     if not window:
         window = cdp_module.grabber_window_state()
-    login_page_open = (window and window.get("window")
-                       and not window.get("reader_tab"))
-    if login_page_open and saw_reader:
-        # Die Partner-Anmeldeseite bleibt offen, damit man sich anmelden kann.
-        raise TolinoAuthError(
-            "Das Anmeldefenster ist offen, aber noch nicht angemeldet. "
-            "Bitte dort anmelden, bis die Bücherliste lädt. " + RELOGIN_THEN,
-            code="B02", detail=last_error)
-    if not login_page_open:
-        cdp_module.close_grabber_window()
-        if saw_reader:
-            _raise_grab_failure(last_error, grabbed, rejected)
-    raise TolinoAuthError(
-        "Zeitüberschreitung: Die Anmeldung wurde nicht abgeschlossen. "
-        + RELOGIN, code="B02", detail="kein Web-Reader-Tab")
+    _raise_grab_end(window, saw_reader, grabbed, rejected, last_error)

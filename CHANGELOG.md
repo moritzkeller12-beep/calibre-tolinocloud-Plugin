@@ -1,14 +1,32 @@
 # Änderungen
 
+## 0.1.07
+
+- Cover-Uploads senden den von tolino erwarteten `control`-Block; ohne ihn antwortet der Cover-Endpunkt mit HTTP 400.
+- Das Vergleichsfenster trägt den Titel „Bibliothek vergleichen“ und breitere Aktionsspalten (80/100 px), damit die Kopfzeilen vollständig sichtbar bleiben.
+- Die Browser-Anmeldung räumt das Chromium-Fenster auch bei Fehlern auf; redundante interne Fehler-Wrapper wurden entfernt.
+
+- Beim Konto-Wechsel bleiben Lesestatus und Fortschritt auch für Bücher ohne echte Calibre-UUID erhalten; die Zuordnung nutzt einen bibliotheksbezogenen Fallback aus Bibliothekskennung und Calibre-Nummer. Eine echte UUID hat Vorrang; alte Einträge werden nicht mehr fälschlich darübergelegt.
+- Alte ungescopte `calibre-<id>`-Einträge werden nicht mehr übernommen und nicht neu erzeugt; Zuordnungen laufen über echte UUIDs bzw. den bibliotheksbezogenen Fallback.
+- Fehlt PyCryptodome für verschlüsselte Web-Reader-Tokens, meldet die Anmeldung einen klaren Fehler mit Code A01 statt eines stillen Fehlschlags.
+- Kontobezogene `#tolino_id`-Zuordnungen werden beim ersten Vergleich in den State übernommen; danach ist der State maßgeblich.
+- Die frühere Einzel-ID in `#tolino_id` wird beim ersten kontobezogenen Schreiben ersetzt.
+- Der alte `/registerhw`-Fallback entfällt.
+- Der lokale Metadaten-Snapshot läuft in einem eigenen Thread; Calibres thread-sichere `new_api` wird dabei nur lesend genutzt.
+- Die Auswahlkästchen im Vergleichsfenster werden linksbündig statt mittig gezeichnet.
+- Debug-Durchlauf: Callback-Bindungen im Sync-Worker korrigiert, doppelte Rundungs-Casts und ungenutzte Testreste entfernt. Ein bestehender Abbruchtest sichert die Reihenfolge von Checkpoint und Cloud-Aufruf ab.
+- Die Live-Grab-Normalisierung gibt bereits normalisierte Daten unverändert zurück; damit bleibt der Python-3.11-Testlauf grün.
+- HTTP-Fehlerantworten werden nach dem Auslesen geschlossen; Python 3.14 meldet damit keine offenen `HTTPError`-Ressourcen mehr, auch bei fehlgeschlagenen Downloads.
+- Zwei doppelte Tests entfernt und die README auf Installation, Benutzung und Hinweise gestrafft.
+- Legacy-Prüfung: In diesem Patch wird keine Altlast entfernt; die bewussten Kompatibilitätspfade (historischer Config-Namespace, `adopt_column_tolino_ids`, alte Einzel-`#tolino_id`-Migration, `dbpath`-Fallback) bleiben bestehen.
+
 ## 0.1.06
 
-- Lesestatus und Lesefortschritt werden kontobezogen gespeichert. `#tolino_read` und `#tolino_progress` zeigen nur den Stand des aktiven Kontos; beim Wechsel werden fehlende Werte geleert, nie als `0` oder `False`.
-- Neue informative Spalte `#tolino_progress` (0–100, optional mit Position). Unbekannte Abrufe lassen gespeicherte Werte unverändert; ein erfolgreicher Abruf ohne Bookmark leert die Spalte.
+- Lesestatus und Lesefortschritt werden kontobezogen gespeichert; `#tolino_read` und `#tolino_progress` zeigen nur den Stand des aktiven Kontos, fehlende Werte bleiben leer. Die neue Spalte `#tolino_progress` (0–100, optional mit Position) zeigt auch Cloud-Lesestände und Gelesen-Marken; unbekannte Abrufe lassen sie unverändert, ein erfolgreicher Abruf ohne Bookmark leert sie.
 - Der Vergleich extrahiert ISBNs aus tolino-Produktkennungen, ordnet unsichere Treffer konservativ zu und entfernt veraltete Cloud-IDs samt altem Lesestand.
 - Der Prepare-Zustand wird vor der Migration gesichert und nur bei Änderung einmal geschrieben. Parallele Konto-Wechsel bleiben getrennt; Token-Rotation und Keep-alive sind abgesichert.
 - Der Release-Build entfernt Kommentare und Docstrings; Download-, Browser- und Qt6-Randfälle sind gehärtet.
 - Behebt doppelt gezeichnete Auswahlkästchen im Vergleichsfenster; der Indikator wird einmal mittig gezeichnet.
-- Bereits in der Cloud gesetzte Lesestände erscheinen nach dem Vergleich in `#tolino_read` und `#tolino_progress`; die Gelesen-Marke wird auch als Sammlungs-Tag erkannt.
 
 ## 0.1.05
 

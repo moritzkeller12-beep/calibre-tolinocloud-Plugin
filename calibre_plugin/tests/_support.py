@@ -38,13 +38,11 @@ def parsed_inventory(value):
 
 
 def compare_inventory(metadata, state, inventory, preferred_formats=(),
-                      use_metadata_ids=True, read_ids=(), read_column=False,
-                      progress_by_id=None):
+                      read_ids=(), read_column=False, progress_by_id=None):
     """Comparison test helper: normalize raw Tolino fixtures at the boundary."""
     return _compare_inventory(
         metadata, state, parsed_inventory(inventory), preferred_formats,
-        use_metadata_ids, read_ids, read_column,
-        progress_by_id=progress_by_id)
+        read_ids, read_column, progress_by_id=progress_by_id)
 
 
 def _full(exc):
@@ -56,6 +54,34 @@ def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
     return [tolino_id for tolino_id, _book, state, _uuid
             in dialog.selected_read_changes() if state is finished]
+
+
+class FakeSignal:
+    """Minimales Qt-Signal: Slots verbinden, ausloesen, ``fire``-Alias."""
+
+    def __init__(self):
+        self.slots = []
+
+    def connect(self, slot):
+        self.slots.append(slot)
+
+    def emit(self, *args):
+        for slot in list(self.slots):
+            slot(*args)
+
+    fire = emit
+
+
+_WORKER_FIELDS = ("thread", "worker", "prepare_thread", "prepare_worker",
+                  "snapshot_thread", "snapshot_worker", "login_thread",
+                  "login_worker")
+
+
+def dashboard_stub(**attrs):
+    """Minimales Dashboard mit leeren Worker-Referenzen."""
+    values = dict.fromkeys(_WORKER_FIELDS)
+    values.update(attrs)
+    return types.SimpleNamespace(**values)
 
 
 class _ReadingDb:
@@ -184,13 +210,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     qt_core.QStyledItemDelegate = type(
         "QStyledItemDelegate", (),
         {"__init__": lambda self, *args, **kwargs: None})
-    qt_core.QStyleOptionViewItem = type("QStyleOptionViewItem", (), {})
     qt_core.QEvent = type("QEvent", (), {})
-    qt_core.QStyle = type("QStyle", (), {
-        "SubElement": type("SubElement", (), {
-            "SE_ItemViewItemCheckIndicator": 1}),
-        "alignedRect": staticmethod(lambda *args: None),
-    })
     qt_core.QDialog.Accepted = 1
     qt_core.QDialog.DialogCode = qt_core.QDialog
     qt_core.QMessageBox.Yes = 1
@@ -204,7 +224,6 @@ def load_ui_module(get_icons_result, qt_stub=None):
             "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
         "CheckState": type("CheckState", (),
                            {"Checked": 2, "Unchecked": 0}),
-        "AlignmentFlag": type("AlignmentFlag", (), {"AlignCenter": 132}),
         "WidgetAttribute": type("WidgetAttribute", (),
                                  {"WA_QuitOnClose": 55}),
     })
@@ -212,13 +231,15 @@ def load_ui_module(get_icons_result, qt_stub=None):
         setattr(self, "attributes", getattr(self, "attributes", {})),
         self.attributes.__setitem__(attribute, value),
     )
+    qt_core.QDialog.setWindowTitle = lambda self, title: setattr(
+        self, "window_title", title)
     qt_core.QTableWidget.SelectionBehavior = type(
         "SelectionBehavior", (), {"SelectRows": 1})
     qt_core.QTableWidget.SelectionMode = type(
         "SelectionMode", (), {"ExtendedSelection": 2})
     qt_core.QLineEdit.EchoMode = type("EchoMode", (), {"Password": 2})
-    qt_core.pyqtSignal = lambda *a, **k: None
-    qt_core.Signal = lambda *a, **k: None
+    qt_core.pyqtSignal = lambda *a, **_kwargs: None
+    qt_core.Signal = lambda *a, **_kwargs: None
     qt_core.QTableWidgetItem = FakeTableItem
     if qt_stub:
         # Zuletzt, damit ein Stub auch pyqtSignal/Signal ersetzen darf.

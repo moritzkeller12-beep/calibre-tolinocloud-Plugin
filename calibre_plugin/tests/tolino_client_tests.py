@@ -119,6 +119,20 @@ class TolinoClientFeatureTests(unittest.TestCase):
         client._request = fake_request
         return client, calls
 
+    def test_upload_cover_sends_the_required_control_block(self):
+        """Der Cover-Endpunkt verlangt control; ohne ihn antwortet er 400."""
+        client, calls = self._patching_client([{}])
+        client.upload_cover("b-1", b"\x89PNG\r\n\x1a\n", ".png")
+        self.assertEqual("POST", calls[0]["method"])
+        self.assertTrue(calls[0]["url"].endswith("/cover"))
+        body = calls[0]["data"]
+        self.assertIn(b'name="control"', body)
+        self.assertIn(b'"filesize":8', body)
+        self.assertRegex(body, rb'"transactionId":"[0-9a-f-]{36}"')
+        self.assertIn(b'name="deliverableId"', body)
+        self.assertIn(b"b-1", body)
+        self.assertIn(b'filename="cover.png"', body)
+
     def test_add_to_collection_sends_tag_add_patch(self):
         """Die Zuordnung wird mit der aktuellen Revision geschrieben.
 
@@ -599,16 +613,16 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client.hardware_callback = adopted.append
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="eb22e4cf-bb01-4550-bff7-334446bb20b1"), \
+                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
              patch("calibre_plugin.tolino.TolinoClient._register_hardware",
                    side_effect=AssertionError("register must not run")):
             data = client.inventory()
         self.assertEqual([], data)
         self.assertEqual(2, len(seen))
         self.assertEqual(seen[0], seen[1])
-        self.assertEqual("eb22e4cf-bb01-4550-bff7-334446bb20b1",
+        self.assertEqual("12345678-1234-4abc-8def-1234567890ab",
                          client.hardware)
-        self.assertEqual(["eb22e4cf-bb01-4550-bff7-334446bb20b1"], adopted)
+        self.assertEqual(["12345678-1234-4abc-8def-1234567890ab"], adopted)
 
     def test_inventory_registers_hardware_when_device_list_unavailable(self):
         """Ohne Geraeteliste wird die eigene Hardware-ID per registerhw
@@ -741,7 +755,7 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client = self._client("stale-hw-000")
         with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
              patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="eb22e4cf-bb01-4550-bff7-334446bb20b1"), \
+                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
              patch("calibre_plugin.tolino.TolinoClient._register_hardware",
                    side_effect=AssertionError("register must not run")), \
              patch("calibre_plugin.tolino.time.sleep",
@@ -795,8 +809,8 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                 def read(self):
                     return b'{"access_token":"a","expires_in":3600}'
 
-            def request(request, timeout):
-                captured.update(
+            def request(request, timeout, _captured=captured):
+                _captured.update(
                     {key.casefold(): value
                      for key, value in request.headers.items()})
                 return Response()
@@ -825,8 +839,8 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
                 def read(self):
                     return b"{}"
 
-            def request(request, timeout):
-                captured.update(
+            def request(request, timeout, _captured=captured):
+                _captured.update(
                     {key.casefold(): value
                      for key, value in request.headers.items()})
                 return Response()
@@ -873,6 +887,7 @@ class RequestRetryBudgetTests(unittest.TestCase):
 
         error = HTTPError("https://bosh.pageplace.de/bosh/rest/upload", 403,
                           "Forbidden", {}, None)
+        self.addCleanup(error.close)
         error.read = lambda: b"quota exceeded"
         client = TolinoClient(4, "hardware", "refresh-token")
         client.access = "access-token"
@@ -1083,16 +1098,6 @@ class DownloadMetadataTests(unittest.TestCase):
                 client.upload(source.name)
         self.assertEqual("N02", caught.exception.code)
 
-    def test_download_returns_content_without_an_inventory_request(self):
-        calls = []
-        client = self._client()
-        client.inventory = lambda: calls.append(1) or []
-        with patch("calibre_plugin.tolino.urlopen",
-                   return_value=self.Response()):
-            content = client.download("d-1")
-        self.assertEqual(b"EPUB-DATA", content)
-        self.assertEqual([], calls)
-
     def test_download_does_not_fetch_inventory(self):
         client = self._client()
         client.inventory = lambda: (_ for _ in ()).throw(
@@ -1166,7 +1171,7 @@ class SyncDataResponseShapeTests(unittest.TestCase):
     fehlen.
     """
 
-    PUB = "bosh_8_543897185873248682836029182"
+    PUB = "bosh_8_000000000000000000000000000001"
     READ = {"op": "replace",
             "path": "/publications/%s/tags/6438286" % PUB,
             "value": {"revision": "1-abc", "modified": 17,
@@ -1268,13 +1273,13 @@ class SyncDataResponseShapeTests(unittest.TestCase):
         """Von der Server-Antwort bis zur angehakten Spalte – der Fall aus
         dem Feldbericht."""
         client, _ = self._client([self.READ])
-        book = {"uuid": "u1", "title": "Feuerprobe", "authors": "Donna Leon",
+        book = {"uuid": "11111111-1111-4111-8111-111111111111", "title": "Feuerprobe", "authors": "Donna Leon",
                 "isbn": "", "formats": ["EPUB"], "last_modified": "1",
                 "format_signatures": {"EPUB": "1:1"}}
         inventory = [{"deliverableId": self.PUB,
                       "epubMetaData": {"title": "Feuerprobe",
                                        "author": [{"name": "Donna Leon"}]}}]
-        rows = compare_inventory({1: book}, {"u1": {"tolino_id": self.PUB}},
+        rows = compare_inventory({1: book}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": self.PUB}},
                                  inventory, ["EPUB"],
                                  read_ids=client.read_ids())
         row = rows[0]
@@ -1443,13 +1448,13 @@ class PersistCredentialsDedupTests(unittest.TestCase):
             config.PREFERENCES = config.JSONConfig("test")
             config.save_account("konto", {
                 "refresh_token": "alt", "hardware_id": "hw",
-                "state": {"u1": {"tolino_id": "t1"}},
+                "state": {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}},
             }, active="konto")
             self.assertTrue(config.clear_refresh_token("konto"))
             account = config.account_by_name("konto")
             self.assertEqual("", account["refresh_token"])
             self.assertEqual("hw", account["hardware_id"])
-            self.assertEqual({"u1": {"tolino_id": "t1"}}, account["state"])
+            self.assertEqual({"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, account["state"])
             self.assertFalse(config.clear_refresh_token("fehlt"))
         finally:
             config.PREFERENCES = original
@@ -1471,7 +1476,7 @@ class PersistCredentialsDedupTests(unittest.TestCase):
                     }, active="konto")
                     error = HTTPError("https://example.invalid/token", status,
                                       "Error", {}, None)
-                    error.read = lambda: body
+                    error.read = lambda _body=body: _body
                     with patch("calibre_plugin.tolino.urlopen", side_effect=error):
                         with self.assertRaises(TolinoAuthError):
                             TokenVault().login("konto", 4)

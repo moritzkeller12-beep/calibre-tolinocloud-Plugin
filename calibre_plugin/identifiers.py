@@ -1,9 +1,11 @@
-"""Book identifier normalization and sync-state key migration."""
+"""Book identifier normalization."""
 import re
 
 _UUID_TEXT = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# State keys for books without a real UUID always carry a library scope.
+_SCOPED_CALIBRE_KEY = re.compile(r"calibre-[0-9a-f]{12}-\d+")
 # Calibre's database path may return 'dummy' when the field is absent.
 _UUID_PLACEHOLDERS = frozenset(("none", "null", "undefined", "dummy"))
 def normalize_uuid_text(value):
@@ -12,13 +14,32 @@ def normalize_uuid_text(value):
 
 
 def valid_book_uuid(value):
-    """Return a usable Calibre book key, or empty for junk/incomplete data."""
+    """Return a supported Calibre key, or empty for junk/incomplete data."""
     text = normalize_uuid_text(value)
     if not text or text in _UUID_PLACEHOLDERS:
         return ""
     if len(text) > 128 or any(character.isspace() for character in text):
         return ""
-    return text
+    if _UUID_TEXT.fullmatch(text) or _SCOPED_CALIBRE_KEY.fullmatch(text):
+        return text
+    return ""
+
+
+def _scope_text(scope):
+    return str(scope or "").strip().casefold()
+
+
+def _book_number(book_id):
+    return str(book_id if book_id is not None else "").strip()
+
+
+def calibre_key(book_id, library_scope=""):
+    """Stable scoped state key; empty without a book number or scope."""
+    number = _book_number(book_id)
+    scope = _scope_text(library_scope)
+    if not number or not scope:
+        return ""
+    return "calibre-%s-%s" % (scope, number)
 
 
 def is_real_uuid(value):
@@ -45,53 +66,30 @@ def book_uuid(item):
     return value if value and is_real_uuid(value) else ""
 
 
-def migrate_state_keys(metadata_by_id, state):
-    """Migrate fallback state keys to real UUIDs when the UUID becomes known."""
-    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
-        return 0
-    # Der Index wird EINMAL gebaut; eine Suche je Buch waere quadratisch.
-    keys = state_keys_by_book_id(state)
-    migrated = 0
-    for book_id, metadata in metadata_by_id.items():
-        if not isinstance(metadata, dict):
-            continue
-        key = valid_book_uuid(metadata.get("uuid"))
-        if not key or key in state:
-            continue
-        try:
-            old_key = keys.get(int(book_id), "")
-        except (TypeError, ValueError):
-            continue
-        if not old_key or old_key == key or old_key not in state:
-            continue
-        entry = state.pop(old_key)
-        if isinstance(entry, dict):
-            entry["calibre_id"] = book_id
-        state[key] = entry
-        migrated += 1
-    return migrated
-
-
 def state_entry(state, key):
     """Zustandseintrag eines Buchs -- fremde Formen zählen als leer."""
     entry = state.get(key) if key and isinstance(state, dict) else None
     return entry if isinstance(entry, dict) else {}
 
 
-def state_keys_by_book_id(state):
-    """Calibre-Nummer → gespeicherter Zustandsschlüssel in EINEM Durchlauf.
+def adopt_column_tolino_ids(metadata_by_id, state):
+    """Konto-IDs aus `#tolino_id` einmalig in den State übernehmen.
 
-    Wer mehrere Bücher prüft, baut den Index einmal.
+    Die Spalte ist nur eine Migrationsquelle für ältere Installationen. Ein
+    bereits vorhandener State-Eintrag bleibt unangetastet -- auch wenn er
+    keine `tolino_id` mehr enthält. So kann eine bewusst entfernte, veraltete
+    Cloud-ID nicht aus der Spalte zurückkehren.
     """
-    keys = {}
-    if not isinstance(state, dict):
-        return keys
-    for key, entry in state.items():
-        if not isinstance(entry, dict):
+    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
+        return False
+    changed = False
+    for book_id, item in metadata_by_id.items():
+        if not isinstance(item, dict):
             continue
-        recorded = entry.get("calibre_id")
-        try:
-            keys[int(recorded)] = str(key)
-        except (TypeError, ValueError):
+        key = valid_book_uuid(item.get("uuid"))
+        column_id = str(item.get("tolino_id") or "").strip()
+        if not key or not column_id or key in state:
             continue
-    return keys
+        state[key] = {"tolino_id": column_id, "calibre_id": book_id}
+        changed = True
+    return changed

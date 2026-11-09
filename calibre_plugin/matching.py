@@ -3,9 +3,16 @@ import re
 import unicodedata
 
 
+def _text_value(value):
+    """Join Calibre's list-like metadata explicitly instead of using str(list)."""
+    if isinstance(value, (list, tuple)):
+        return " ".join(_text_value(item) for item in value)
+    return str(value or "")
+
+
 def normalize_match_text(value):
     """Normalize human-readable matching text without dropping Unicode letters."""
-    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    value = unicodedata.normalize("NFKC", _text_value(value)).casefold()
     parts = []
     for character in value:
         category = unicodedata.category(character)
@@ -18,7 +25,7 @@ def normalize_match_text(value):
 
 def normalize_title(value):
     """Normalize a title, ignoring only a clearly technical file extension."""
-    title = unicodedata.normalize("NFKC", str(value or "")).strip()
+    title = unicodedata.normalize("NFKC", _text_value(value)).strip()
     title = re.sub(r"\.(?:epub|pdf|mobi|azw3|azw|fb2|txt|html?)\s*$",
                    "", title, flags=re.IGNORECASE)
     return normalize_match_text(title)
@@ -26,7 +33,7 @@ def normalize_title(value):
 
 def normalize_isbn(value):
     """Remove ISBN separators while preserving its digits and check digit."""
-    return re.sub(r"[^0-9x]+", "", str(value or "").casefold())
+    return re.sub(r"[^0-9x]+", "", _text_value(value).casefold())
 
 
 def is_valid_isbn(value):

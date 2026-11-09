@@ -3,33 +3,31 @@ import os
 
 from .planning_values import (SyncJob, display_value, format_signatures,
                               metadata_value, plural)
-from .identifiers import (book_uuid, state_keys_by_book_id,
-                          valid_book_uuid)
+from .identifiers import book_uuid, calibre_key, valid_book_uuid
 from .library import (TOLINO_READ_COLUMN, bool_column_value, cover_bytes,
                       image_suffix, metadata_ignored, metadata_tolino_id,
                       normalize_formats, safe_format_path)
 from .plan import (normalize_removals, plan_collection_updates,
                    plan_metadata_updates, plan_sync, series_map_from_metadata)
-from .config import load_state
 from .tolino import log_warning
 
 NOTHING_TO_DO_TEXT = "Es war nichts zu übertragen."
 
 
-def local_metadata(dialog, context, state=None):
-    """Calibre-Metadaten und benötigte Format-Signaturen lesen."""
+def local_metadata(database, context):
+    """Calibre-Metadaten und benötigte Format-Signaturen lesen.
+
+    Der Aufrufer übergibt die Datenbank direkt. Die Funktion läuft im
+    `LocalMetadataWorker`; Calibres thread-sichere `new_api` wird nur lesend
+    genutzt, Widgets werden nie übergeben.
+    """
     metadata = {}
-    state = load_state(state)
-    state_keys = state_keys_by_book_id(state)
-    database = dialog.gui.current_db
     api = database.new_api
     preferred_formats = normalize_formats(context.preferred_formats)
     for book_id in api.all_book_ids():
         item = api.get_metadata(book_id)
-        identifier = book_uuid(item)
-        if not identifier:
-            identifier = (state_keys.get(book_id)
-                          or "calibre-%s" % book_id)
+        identifier = (book_uuid(item)
+                      or calibre_key(book_id, context.library_scope))
         identifiers = metadata_value(item, "identifiers", {}) or {}
         isbn = (metadata_value(item, "isbn", "")
                 or (identifiers.get("isbn", "")

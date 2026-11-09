@@ -3,8 +3,8 @@
 from ..comparison import ReadState
 import os
 import unittest
-from ._support import (FakeTableItem, load_ui_module, start_cdp_stubs,
-                       stop_cdp_stubs)
+from ._support import (FakeSignal, FakeTableItem, load_ui_module,
+                       start_cdp_stubs, stop_cdp_stubs)
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -21,9 +21,7 @@ class ToolbarIconTests(unittest.TestCase):
         return load_ui_module(get_icons_result, qt_stub)
 
     def test_genesis_loads_the_bundled_icon_when_calibre_helper_returns_null(self):
-        class Signal:
-            def connect(self, _slot):
-                pass
+        Signal = FakeSignal
 
         class Action:
             triggered = Signal()
@@ -73,16 +71,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
 
     @staticmethod
     def _qt_stub():
-        class Signal:
-            def __init__(self):
-                self.slots = []
-
-            def connect(self, slot):
-                self.slots.append(slot)
-
-            def emit(self, *args):
-                for slot in self.slots:
-                    slot(*args)
+        Signal = FakeSignal
 
         class Widget:
             def __init__(self, *args, **_kwargs):
@@ -357,8 +346,7 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
             "CheckState": type("CheckState", (),
                                {"Checked": 2, "Unchecked": 0}),
-            "AlignmentFlag": type("AlignmentFlag", (), {"AlignCenter": 132}),
-            "WidgetAttribute": type("WidgetAttribute", (),
+                "WidgetAttribute": type("WidgetAttribute", (),
                                      {"WA_QuitOnClose": 55}),
         })
         return {
@@ -377,7 +365,6 @@ class InventoryDialogBuildTests(unittest.TestCase):
             "QStyledItemDelegate": type(
                 "QStyledItemDelegate", (),
                 {"__init__": lambda self, *args, **kwargs: None}),
-            "QStyleOptionViewItem": type("QStyleOptionViewItem", (), {}),
             "QEvent": type("QEvent", (), {}),
             "QGroupBox": Widget,
             "QTableWidget": Table,
@@ -442,8 +429,6 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 metadata = dialog.table.item(index, 1)
                 mark_read = dialog.table.item(index, 2)
                 self.assertTrue(upload.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-                self.assertEqual(ui_module.dialogs.Qt.AlignmentFlag.AlignCenter,
-                                 upload.text_alignment)
                 self.assertEqual(in_cloud, bool(metadata.flags() &
                                                 ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
                 self.assertEqual(in_cloud, bool(mark_read.flags() &
@@ -454,12 +439,12 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 self.assertEqual(bool(row["metadata"]), metadata.isChecked())
                 self.assertFalse(mark_read.isChecked())
             self.assertIsInstance(dialog._check_delegate,
-                                  ui_module.dialogs._CenteredCheckDelegate)
+                                  ui_module.dialogs._CellCheckDelegate)
             self.assertEqual({0: dialog._check_delegate,
                               1: dialog._check_delegate,
                               2: dialog._check_delegate},
                              dialog.table.delegates)
-            self.assertEqual({0: 60, 1: 60, 2: 60, 3: 60, 4: 60},
+            self.assertEqual({0: 80, 1: 100, 2: 80, 3: 80, 4: 80},
                              {column: dialog.table.header.widths[column]
                               for column in (0, 1, 2, 3, 4)})
             self.assertEqual(

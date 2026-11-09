@@ -310,9 +310,8 @@ def grab_once_from_grabber(timeout=12):
 
     Returns the grabbed dict (refresh/hardware/idb lists, possibly empty)
     or None when no reader tab exists or the endpoint is not provably ours.
-    Used by the extract button so the Calibre GUI never blocks for minutes
-    waiting for a sign-in that may not happen – the user just clicks the
-    button again after signing in.
+    Wird vom Anmelde-Wartepfad genutzt, damit die Calibre-GUI nicht
+    minutenlang auf eine Anmeldung wartet, die vielleicht nie kommt.
     """
     target = _reader_targets(timeout=max(0.1, min(5, timeout)))
     if target is None or target["target"] is None:

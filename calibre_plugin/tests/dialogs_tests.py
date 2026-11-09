@@ -8,9 +8,9 @@ import unittest
 from . import ui_base_tests
 from ..plan import normalize_removals
 from ..run_context import RunContext
-from ._support import (FakeMenu, FakeMessageBox, FakeTableItem, _read_ids,
-                      compare_inventory, start_cdp_stubs,
-                      stop_cdp_stubs, ui_module_for)
+from ._support import (FakeMenu, FakeMessageBox, FakeSignal, FakeTableItem,
+                      _read_ids, compare_inventory, dashboard_stub,
+                      start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -254,8 +254,7 @@ class InventoryDialogSortTests(unittest.TestCase):
         try:
             dialog = ui_module.dialogs.InventoryDialog.__new__(
                 ui_module.dialogs.InventoryDialog)
-            dialog.options = {"deletions": True,
-                              "automatic": 3}
+            dialog.options = {"automatic": 3}
             note = dialog._automatic_note()
             self.assertIn("Sammlungen in tolino übernommen", note)
             self.assertIn("3 offen", note)
@@ -774,10 +773,10 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             ui_module._restore_stubs_for_tests()
 
 class SingleBookActionTests(_QtDialogTest):
-    """Download und Sammlungen gelten nur für EIN Buch.
+    """Einzelbuch-Aktionen gelten nur für EIN Buch.
 
-    Das stand bisher nur im Tooltip; jetzt sagt es der Menütext, und die
-    Ablehnung bei mehreren markierten Zeilen bleibt vor jedem Dialog.
+    Der Menütext benennt das; mehrere markierte Zeilen werden vor jedem
+    Dialog abgelehnt.
     """
 
     @staticmethod
@@ -952,14 +951,14 @@ class CloudDeletionDialogTests(_QtDialogTest):
     def _rows():
         return [
             {"title": "Löschen", "authors": "A", "status": "identical",
-             "book_id": 1, "tolino_id": "t-1", "uuid": "u-1",
+             "book_id": 1, "tolino_id": "t-1", "uuid": "a1111111-1111-4111-8111-111111111111",
              "read": ReadState(), "explanation": "In beiden vorhanden."},
             {"title": "Behalten", "authors": "B", "status": "identical",
-             "book_id": 2, "tolino_id": "t-2", "uuid": "u-2",
+             "book_id": 2, "tolino_id": "t-2", "uuid": "a2222222-2222-4222-8222-222222222222",
              "read": ReadState(), "explanation": "In beiden vorhanden."},
             {"title": "Nur lokal", "authors": "C",
              "status": "new_in_calibre", "book_id": 3, "tolino_id": "",
-             "uuid": "u-3", "read": ReadState(),
+             "uuid": "a3333333-3333-4333-8333-333333333333", "read": ReadState(),
              "explanation": "Nur in Calibre."},
         ]
 
@@ -1003,7 +1002,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             with self._marked(index):
                 dialog.delete_marked_from_cloud()
             self.assertEqual(
-                [("u-1", "t-1", "Löschen")],
+                [("a1111111-1111-4111-8111-111111111111", "t-1", "Löschen")],
                 dialog.selected_cloud_deletions())
             self.assertTrue(dialog.rows[index]["delete_cloud"])
             self.assertIn("Wird beim Start aus tolino gelöscht.",
@@ -1033,7 +1032,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             index = self._index(dialog, "Löschen")
             with self._marked(index):
                 dialog.delete_marked_from_cloud()
-            self.assertEqual([("u-1", "t-1", "Löschen")],
+            self.assertEqual([("a1111111-1111-4111-8111-111111111111", "t-1", "Löschen")],
                              dialog.selected_cloud_deletions())
             self.assertTrue(dialog.rows[index].get("delete_cloud"))
             self.assertFalse(_action_cell(dialog, index, 0).flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
@@ -1087,18 +1086,15 @@ class CloudDeletionPlanTests(unittest.TestCase):
 
     @staticmethod
     def _dashboard(ui_module):
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(
-            ui_module.dashboard.SyncDashboard)
-        dashboard.gui = type("Gui", (), {
-            "current_db": type("Db", (), {"field_metadata": {}})()})()
-        return dashboard
+        return dashboard_stub(gui=type("Gui", (), {
+            "current_db": type("Db", (), {"field_metadata": {}})()})())
 
     @staticmethod
     def _settings():
         return {"preferred_formats": ("EPUB",)}
 
     @staticmethod
-    def _metadata(uuid="u-1", title="Titel"):
+    def _metadata(uuid="a1111111-1111-4111-8111-111111111111", title="Titel"):
         return {1: {"uuid": uuid, "title": title, "formats": ["EPUB"],
                     "format_signatures": {}, "last_modified": "1"}}
 
@@ -1111,7 +1107,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
         ui_module = self._ui()
         try:
             dashboard = self._dashboard(ui_module)
-            cases = (("u-1", "t-1", "Titel", {"calibre_id": 1}),
+            cases = (("a1111111-1111-4111-8111-111111111111", "t-1", "Titel", {"calibre_id": 1}),
                      ("u-9", "t-9", "Alt", {}))
             for uuid, tolino_id, title, extra in cases:
                 with self.subTest(uuid=uuid):
@@ -1148,7 +1144,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
                     return []
 
                 def selected_cloud_deletions(self):
-                    return [("u-1", "t-1", "Titel")]
+                    return [("a1111111-1111-4111-8111-111111111111", "t-1", "Titel")]
 
             ui_module.dashboard.QDialog = FakeQDialog
             ui_module.dashboard.InventoryDialog = FakeInventory
@@ -1161,15 +1157,15 @@ class CloudDeletionPlanTests(unittest.TestCase):
                 [], self._settings(), client_factory=lambda: object())
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual([("u-1", "t-1", "Titel")],
+        self.assertEqual([("a1111111-1111-4111-8111-111111111111", "t-1", "Titel")],
                          selection["cloud_deletions"])
         self.assertNotIn("deletions", seen["options"])
 
     def test_normalize_ignores_malformed_entries_and_blank_ids(self):
         pairs, titles = normalize_removals(
-            [None, ("u-2", "", "ohne ID"), ("u-2", "t-1", "doppelt"),
-             ("u-3", "t-3", "Drei")])
-        self.assertEqual([("u-2", "t-1"), ("u-3", "t-3")], pairs)
+            [None, ("a2222222-2222-4222-8222-222222222222", "", "ohne ID"), ("a2222222-2222-4222-8222-222222222222", "t-1", "doppelt"),
+             ("a3333333-3333-4333-8333-333333333333", "t-3", "Drei")])
+        self.assertEqual([("a2222222-2222-4222-8222-222222222222", "t-1"), ("a3333333-3333-4333-8333-333333333333", "t-3")], pairs)
         self.assertEqual({"t-1": "doppelt", "t-3": "Drei"}, titles)
 
 class DialogLayoutTests(unittest.TestCase):
@@ -1216,18 +1212,15 @@ class ReviewHintTests(unittest.TestCase):
         self.assertIn("Zu prüfen", dialog.summary.text())
 
 class AuthorFormattingRegressionTests(unittest.TestCase):
-    """0.15 -> 0.16: anders geschriebene Autoren galten als Widerspruch.
+    """Andere Schreibweisen desselben Autors blockieren den Abgleich nicht.
 
-    In 0.15 war ein Buch mit gleicher ISBN und «Schätzing, Frank» gegen
-    «Frank Schatzing» ein normaler Unterschied (Metadaten-Abgleich wurde
-    vorausgewählt). 0.16 machte daraus «Zu prüfen» ohne Vorauswahl: Wer
-    «Synchronisierung starten» drückte, plante damit nichts ein – das Fenster
-    schloss sich und es wurde weder hochgeladen noch aktualisiert.
+    Ein Buch mit gleicher ISBN und «Schätzing, Frank» gegen «Frank
+    Schatzing» darf keine reine Prüfzeile ohne vorausgewählte Aktion werden.
     """
 
     @staticmethod
     def _metadata(**values):
-        base = {"uuid": "u1", "title": "Der Schwarm",
+        base = {"uuid": "11111111-1111-4111-8111-111111111111", "title": "Der Schwarm",
                 "authors": "Frank Schatzing", "isbn": "9783161484100",
                 "formats": ["EPUB"], "last_modified": "1",
                 "format_signatures": {}}
@@ -1244,8 +1237,7 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
     def _row(self, metadata=None, inventory=None, state=None):
         rows = compare_inventory(
             metadata or self._metadata(), state or {},
-            inventory or self._inventory(), ["EPUB"],
-            use_metadata_ids=False)
+            inventory or self._inventory(), ["EPUB"])
         return rows[0]
 
     def test_reversed_author_order_is_not_a_conflict(self):
@@ -1289,7 +1281,7 @@ class AuthorFormattingRegressionTests(unittest.TestCase):
         self.assertEqual("conflict", row["match_reason"])
 
     def test_known_tolino_id_with_reordered_authors_is_a_change(self):
-        state = {"u1": {"tolino_id": "t1"}}
+        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}
         row = self._row(state=state)
         self.assertNotEqual("review", row["status"])
         self.assertEqual("t1", row["tolino_id"])
@@ -1421,16 +1413,7 @@ class BackgroundCallTests(unittest.TestCase):
     def _threaded_qt(ui_module):
         """QThread-Ersatz, der den Worker in einem ECHTEN Thread ausfuehrt."""
 
-        class Signal:
-            def __init__(self):
-                self.slots = []
-
-            def connect(self, slot):
-                self.slots.append(slot)
-
-            def emit(self, *args):
-                for slot in self.slots:
-                    slot(*args)
+        Signal = FakeSignal
 
         class Thread:
             def __init__(self, parent=None):
@@ -1565,4 +1548,17 @@ class BackgroundCallTests(unittest.TestCase):
         self.assertEqual(1, len(seen))
         self.assertIsNot(threading.main_thread(), seen[0])
         self.assertTrue(os.path.exists(path))
+
+
+class DeletionConfirmationTests(unittest.TestCase):
+    def test_missing_title_falls_back_to_book_label_not_uuid(self):
+        ui_module = ui_module_for(
+            self, qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
+        uuid = "11111111-1111-4111-8111-111111111111"
+        with patch.object(ui_module.dashboard_parts, "_ask",
+                          return_value=True) as ask:
+            ui_module.dashboard_parts.confirm_deletions(None, [(uuid, "t-1")])
+        text = ask.call_args[0][2]
+        self.assertIn("Buch ohne Titel", text)
+        self.assertNotIn(uuid, text)
 
