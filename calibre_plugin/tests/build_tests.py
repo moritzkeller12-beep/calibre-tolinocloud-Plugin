@@ -30,7 +30,8 @@ class PluginArchiveTests(unittest.TestCase):
                 self.assertEqual(set(FILES), set(archive.namelist()))
                 self.assertEqual(b"", archive.read(MARKER))
                 for name in FILES:
-                    if name == MARKER or name in ("__init__.py", ICON):
+                    if name == MARKER or name in (
+                            "__init__.py", ICON, "README.md", "CHANGELOG.md"):
                         continue
                     source_text = (SOURCE / name).read_text(encoding="utf-8")
                     packaged_text = archive.read(name).decode("utf-8")

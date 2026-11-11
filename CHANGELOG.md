@@ -15,6 +15,7 @@
 - Der lokale Metadaten-Snapshot läuft in einem eigenen Thread; Calibres thread-sichere `new_api` wird dabei nur lesend genutzt.
 - Die Auswahlkästchen im Vergleichsfenster werden linksbündig statt mittig gezeichnet.
 - Aktionskästchen im Vergleichsfenster lassen sich unter Qt6 wieder abwählen; zuvor blieben bereits gesetzte Upload-, Metadaten- und Lesestatus-Häkchen gesetzt.
+- Das Release-ZIP enthält README und CHANGELOG.
 - Debug-Durchlauf: Callback-Bindungen im Sync-Worker korrigiert, doppelte Rundungs-Casts und ungenutzte Testreste entfernt. Ein bestehender Abbruchtest sichert die Reihenfolge von Checkpoint und Cloud-Aufruf ab.
 - Die Live-Grab-Normalisierung gibt bereits normalisierte Daten unverändert zurück; damit bleibt der Python-3.11-Testlauf grün.
 - HTTP-Fehlerantworten werden nach dem Auslesen geschlossen; Python 3.14 meldet damit keine offenen `HTTPError`-Ressourcen mehr, auch bei fehlgeschlagenen Downloads.
