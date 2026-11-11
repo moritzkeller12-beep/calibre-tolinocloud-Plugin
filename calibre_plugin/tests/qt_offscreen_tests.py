@@ -114,6 +114,11 @@ class InventoryDialogQtTests(unittest.TestCase):
         self.assertEqual(Qt.CheckState.Checked,
                          dialog.table.item(0, 2).checkState())
         self.assertEqual(["cloud-3"], _read_ids(dialog, True))
+        self.assertTrue(delegate.editorEvent(
+            Click(), model, QStyleOptionViewItem(), index))
+        self.assertEqual(Qt.CheckState.Unchecked,
+                         dialog.table.item(0, 2).checkState())
+        self.assertEqual([], _read_ids(dialog, True))
         dialog.close()
 
     def test_a_real_click_anywhere_in_the_check_cell_toggles_it(self):
