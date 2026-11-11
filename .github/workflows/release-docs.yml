@@ -1,6 +1,9 @@
 name: Rebuild 0.1.07 release with docs
 
 on:
+  push:
+    branches:
+      - release/0.1.07-docs
   workflow_dispatch:
 
 permissions:
