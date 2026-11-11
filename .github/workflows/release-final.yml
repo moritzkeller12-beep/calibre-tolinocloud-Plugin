@@ -1,0 +1,42 @@
+name: Final corrected 0.1.07
+
+on:
+  push:
+    branches:
+      - release/0.1.07-final
+
+permissions:
+  contents: write
+
+env:
+  FIXES_B64: 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
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/0.1.07-final
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild final release artifact
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s' "$FIXES_B64" | base64 -d | gzip -d > /tmp/fixes.patch
+          git apply /tmp/fixes.patch
+          python build_plugin.py
+          test "$(unzip -Z1 tolino_cloud_sync.zip | wc -l)" -eq 34
+          unzip -p tolino_cloud_sync.zip ui_dialogs.py | grep -F '_ignore_release'
+          unzip -p tolino_cloud_sync.zip ui_workers.py | grep -F 'entry.pop("reading"'
+          unzip -p tolino_cloud_sync.zip CHANGELOG.md | grep -F 'Doppelklick'
+          rm .github/workflows/release-final.yml
+          git add -A
+          git commit -m "Fix checkbox double-click and stale upload reading state"
+          git commit --allow-empty -m "Verify final 0.1.07 fixes artifact"
+          git push --force origin HEAD:refs/heads/0.1.07
