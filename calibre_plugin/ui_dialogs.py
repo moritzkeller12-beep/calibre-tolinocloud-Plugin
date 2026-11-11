@@ -135,8 +135,9 @@ class _CellCheckDelegate(QStyledItemDelegate):
             if not (flags & Qt.ItemFlag.ItemIsEnabled):
                 return False
             state = index.data(Qt.ItemDataRole.CheckStateRole)
-            state = (Qt.CheckState.Unchecked
-                     if state == Qt.CheckState.Checked
+            checked = (getattr(state, "value", state)
+                       == Qt.CheckState.Checked.value)
+            state = (Qt.CheckState.Unchecked if checked
                      else Qt.CheckState.Checked)
             return model.setData(index, state, Qt.ItemDataRole.CheckStateRole)
         return QStyledItemDelegate.editorEvent(self, event, model, option, index)

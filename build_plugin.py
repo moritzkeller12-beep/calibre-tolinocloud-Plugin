@@ -9,8 +9,9 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 ROOT, SOURCE = Path(__file__).parent, Path(__file__).parent / "calibre_plugin"
 MARKER = "plugin-import-name-tolino_cloud_sync.txt"
 ICON = "images/tolino_cloud_sync.png"
-FILES = ("__init__.py", *sorted(p.name for p in SOURCE.glob("*.py")
-                                if p.name != "test_sync.py"), ICON, MARKER)
+ROOT_FILES = ("__init__.py", "README.md", "CHANGELOG.md")
+FILES = (*ROOT_FILES, *sorted(p.name for p in SOURCE.glob("*.py")
+                              if p.name != "test_sync.py"), ICON, MARKER)
 DATE, MODE = (2026, 1, 1, 0, 0, 0), 0o644 << 16
 
 
@@ -91,7 +92,7 @@ def build_plugin(archive_path=ROOT / "tolino_cloud_sync.zip"):
     archive_path = Path(archive_path)
     with ZipFile(archive_path, "w", ZIP_DEFLATED, compresslevel=9) as archive:
         for name in FILES:
-            path = ROOT / name if name == "__init__.py" else SOURCE / name
+            path = ROOT / name if name in ROOT_FILES else SOURCE / name
             data = b"" if name == MARKER else path.read_bytes()
             # Nur die Module kürzen; __init__.py trägt den Lizenzhinweis.
             if path.parent == SOURCE and path.suffix == ".py":
