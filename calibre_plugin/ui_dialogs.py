@@ -124,23 +124,49 @@ class _CellCheckDelegate(QStyledItemDelegate):
     Paint-Pfad ist weder nötig noch erwünscht.
     """
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._last_toggle = None
+        self._ignore_release = False
+
     def editorEvent(self, event, model, option, index):
-        if event.type() in (QEvent.Type.MouseButtonRelease,
-                            QEvent.Type.MouseButtonDblClick):
-            if event.button() != Qt.MouseButton.LeftButton:
-                return False
-            flags = model.flags(index)
-            if not (flags & Qt.ItemFlag.ItemIsUserCheckable):
-                return False
-            if not (flags & Qt.ItemFlag.ItemIsEnabled):
-                return False
-            state = index.data(Qt.ItemDataRole.CheckStateRole)
-            checked = (getattr(state, "value", state)
-                       == Qt.CheckState.Checked.value)
-            state = (Qt.CheckState.Unchecked if checked
-                     else Qt.CheckState.Checked)
-            return model.setData(index, state, Qt.ItemDataRole.CheckStateRole)
-        return QStyledItemDelegate.editorEvent(self, event, model, option, index)
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._last_toggle = None
+            self._ignore_release = False
+            return QStyledItemDelegate.editorEvent(
+                self, event, model, option, index)
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            if (self._last_toggle is not None
+                    and self._last_toggle[:2] == (model, index)):
+                model.setData(self._last_toggle[1], self._last_toggle[2],
+                              Qt.ItemDataRole.CheckStateRole)
+            self._last_toggle = None
+            self._ignore_release = True
+            return True
+        if (event.type() == QEvent.Type.MouseButtonRelease
+                and self._ignore_release):
+            self._ignore_release = False
+            return True
+        if event.type() != QEvent.Type.MouseButtonRelease:
+            return QStyledItemDelegate.editorEvent(
+                self, event, model, option, index)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        flags = model.flags(index)
+        if not (flags & Qt.ItemFlag.ItemIsUserCheckable):
+            return False
+        if not (flags & Qt.ItemFlag.ItemIsEnabled):
+            return False
+        state = index.data(Qt.ItemDataRole.CheckStateRole)
+        previous = state
+        checked = (getattr(state, "value", state)
+                   == Qt.CheckState.Checked.value)
+        state = (Qt.CheckState.Unchecked if checked
+                 else Qt.CheckState.Checked)
+        changed = model.setData(index, state, Qt.ItemDataRole.CheckStateRole)
+        if changed:
+            self._last_toggle = (model, index, previous)
+        return changed
 
 
 class InventoryDialog(QDialog):

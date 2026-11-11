@@ -435,6 +435,9 @@ class SyncWorker(QObject):
                                    % job.label())
                 continue
             entry = dict(state_entry(self.state, job.book_uuid))
+            # Die neue Cloud-Kopie startet ungelesen; der alte Lesestand
+            # gehört zur ersetzten Kopie und darf nicht gespiegelt werden.
+            entry.pop("reading", None)
             entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
             entry.pop("collections", None)
             self.state[job.book_uuid] = entry

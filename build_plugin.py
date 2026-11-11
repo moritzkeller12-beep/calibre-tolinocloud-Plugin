@@ -78,7 +78,7 @@ def strip_docstrings(data):
         text = (text[:start]
                 + "0" + "".join("\n" if char == "\n" else
                                   "\r" if char == "\r" else " "
-                                  for char in segment[2:])
+                                  for char in segment[1:])
                 + text[end:])
     return text.encode(encoding)
 
