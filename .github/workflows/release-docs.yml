@@ -1,0 +1,34 @@
+name: Rebuild 0.1.07 release with docs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/0.1.07-docs
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild release artifact
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git apply .release-docs.patch
+          python build_plugin.py
+          test "$(unzip -Z1 tolino_cloud_sync.zip | wc -l)" -eq 34
+          unzip -p tolino_cloud_sync.zip ui_dialogs.py | grep -F '== Qt.CheckState.Checked.value'
+          rm .github/workflows/release-docs.yml .release-docs.patch
+          git add -A
+          git commit -m "Include README and changelog in 0.1.07 release artifact"
+          git commit --allow-empty -m "Verify 0.1.07 artifact with docs"
+          git push origin HEAD:refs/heads/0.1.07
