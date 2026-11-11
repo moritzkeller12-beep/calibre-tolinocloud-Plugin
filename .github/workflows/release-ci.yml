@@ -1,0 +1,51 @@
+name: Final 0.1.07 CI fix
+
+on:
+  push:
+    branches:
+      - release/0.1.07-ci
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/0.1.07-ci
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild final release artifact
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("calibre_plugin/ui_dialogs.py")
+          text = path.read_text(encoding="utf-8")
+          start = text.index("        if event.type() == QEvent.Type.MouseButtonPress:")
+          end = text.index("        if event.type() == QEvent.Type.MouseButtonDblClick:", start)
+          block = text[start:end]
+          old = """            return QStyledItemDelegate.editorEvent(
+                          self, event, model, option, index)"""
+          new = "            return False"
+          assert old in block, "press block not found"
+          text = text[:start] + block.replace(old, new, 1) + text[end:]
+          path.write_text(text, encoding="utf-8")
+          PY
+          python build_plugin.py
+          test "$(unzip -Z1 tolino_cloud_sync.zip | wc -l)" -eq 34
+          unzip -p tolino_cloud_sync.zip ui_dialogs.py | grep -F '_ignore_release'
+          unzip -p tolino_cloud_sync.zip ui_workers.py | grep -F 'entry.pop("reading"'
+          unzip -p tolino_cloud_sync.zip CHANGELOG.md | grep -F 'Doppelklick'
+          rm .github/workflows/release-ci.yml
+          git add -A
+          git commit -m "Avoid base delegate call on checkbox press"
+          git commit --allow-empty -m "Verify final 0.1.07 CI fixes"
+          git push origin HEAD:refs/heads/0.1.07
