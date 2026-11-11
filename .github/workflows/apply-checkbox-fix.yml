@@ -49,4 +49,4 @@ jobs:
           rm -f release.patch release.patch.gz.b64 .github/workflows/apply-checkbox-fix.yml
           git add -A
           git commit -m "Update 0.1.07 release archive"
-          git push origin HEAD:0.1.07
+          git push origin HEAD:refs/heads/0.1.07
