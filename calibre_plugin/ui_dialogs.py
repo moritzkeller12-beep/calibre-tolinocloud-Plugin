@@ -133,8 +133,7 @@ class _CellCheckDelegate(QStyledItemDelegate):
         if event.type() == QEvent.Type.MouseButtonPress:
             self._last_toggle = None
             self._ignore_release = False
-            return QStyledItemDelegate.editorEvent(
-                self, event, model, option, index)
+            return False
         if event.type() == QEvent.Type.MouseButtonDblClick:
             if (self._last_toggle is not None
                     and self._last_toggle[:2] == (model, index)):
