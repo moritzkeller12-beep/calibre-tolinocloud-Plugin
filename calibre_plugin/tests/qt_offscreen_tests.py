@@ -109,13 +109,37 @@ class InventoryDialogQtTests(unittest.TestCase):
             def button():
                 return Qt.MouseButton.LeftButton
 
-        self.assertTrue(delegate.editorEvent(
-            Click(), model, QStyleOptionViewItem(), index))
+        class Press(Click):
+            @staticmethod
+            def type():
+                return QEvent.Type.MouseButtonPress
+
+        class DoubleClick(Click):
+            @staticmethod
+            def type():
+                return QEvent.Type.MouseButtonDblClick
+
+        def click():
+            delegate.editorEvent(Press(), model, QStyleOptionViewItem(), index)
+            delegate.editorEvent(Click(), model, QStyleOptionViewItem(), index)
+
+        click()
         self.assertEqual(Qt.CheckState.Checked,
                          dialog.table.item(0, 2).checkState())
         self.assertEqual(["cloud-3"], _read_ids(dialog, True))
         self.assertTrue(delegate.editorEvent(
+            DoubleClick(), model, QStyleOptionViewItem(), index))
+        self.assertEqual(Qt.CheckState.Unchecked,
+                         dialog.table.item(0, 2).checkState())
+        # Die auf den DblClick folgende Release darf nicht nochmals toggeln.
+        self.assertTrue(delegate.editorEvent(
             Click(), model, QStyleOptionViewItem(), index))
+        self.assertEqual(Qt.CheckState.Unchecked,
+                         dialog.table.item(0, 2).checkState())
+        click()
+        self.assertEqual(Qt.CheckState.Checked,
+                         dialog.table.item(0, 2).checkState())
+        click()
         self.assertEqual(Qt.CheckState.Unchecked,
                          dialog.table.item(0, 2).checkState())
         self.assertEqual([], _read_ids(dialog, True))

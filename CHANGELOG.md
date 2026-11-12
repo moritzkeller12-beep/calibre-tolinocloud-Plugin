@@ -15,6 +15,11 @@
 - Der lokale Metadaten-Snapshot läuft in einem eigenen Thread; Calibres thread-sichere `new_api` wird dabei nur lesend genutzt.
 - Die Auswahlkästchen im Vergleichsfenster werden linksbündig statt mittig gezeichnet.
 - Aktionskästchen im Vergleichsfenster lassen sich unter Qt6 wieder abwählen; zuvor blieben bereits gesetzte Upload-, Metadaten- und Lesestatus-Häkchen gesetzt.
+- Ein Doppelklick auf ein Aktionskästchen schaltet nicht mehr doppelt um.
+- Nach einem Upload wird der alte Lesestand der ersetzten Cloud-Kopie aus dem State entfernt.
+- Der Release-Build bewahrt beim Entfernen von Docstrings die exakte Textlänge.
+- Defekte Einstellungen beenden den Keep-alive-Thread nicht mehr stillschweigend.
+- Ignorierte Bücher zählen nicht mehr als nicht eingeplante Aktionen.
 - Das Release-ZIP enthält README und CHANGELOG.
 - Debug-Durchlauf: Callback-Bindungen im Sync-Worker korrigiert, doppelte Rundungs-Casts und ungenutzte Testreste entfernt. Ein bestehender Abbruchtest sichert die Reihenfolge von Checkpoint und Cloud-Aufruf ab.
 - Die Live-Grab-Normalisierung gibt bereits normalisierte Daten unverändert zurück; damit bleibt der Python-3.11-Testlauf grün.

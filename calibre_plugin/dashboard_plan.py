@@ -86,17 +86,17 @@ def plan_actions(dialog, context, metadata, state, selection, series_map=None):
     removals, removal_titles = normalize_removals(
         (selection or {}).get("cloud_deletions"))
     titles = titles_for(metadata, removal_titles)
+    requested_metadata = set(selection["metadata"]) & syncable_ids
     meta_updates = plan_metadata_updates(
-        metadata, state, uploads,
-        only_book_ids=set(selection["metadata"]) & syncable_ids)
+        metadata, state, uploads, only_book_ids=requested_metadata)
     if series_map is None:
         series_map = series_map_from_metadata(syncable)
     jobs, skipped_uploads = upload_jobs(dialog, metadata, uploads)
     skipped_uploads = skipped_formats + list(skipped_uploads)
     planned_meta = {record[0] for record in meta_updates}
     gaps = {
-        "uploads": len(set(selection["uploads"]) - planned_book_ids),
-        "metadata": len(set(selection["metadata"]) - planned_meta),
+        "uploads": len(requested_uploads - planned_book_ids),
+        "metadata": len(requested_metadata - planned_meta),
     }
     return {
         "jobs": jobs,

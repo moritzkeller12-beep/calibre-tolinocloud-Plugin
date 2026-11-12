@@ -171,6 +171,7 @@ class SyncPlanTests(unittest.TestCase):
         metadata = {
             1: {"uuid": "11111111-1111-4111-8111-111111111111", "title": "EPUB verfügbar", "formats": ["EPUB"]},
             2: {"uuid": "22222222-2222-4222-8222-222222222222", "title": "Nur PDF", "formats": ["PDF"]},
+            3: {"uuid": "33333333-3333-4333-8333-333333333333", "title": "Ignoriert", "formats": ["EPUB"], "ignored": True},
         }
         dialog = type("Dialog", (), {})()
         with patch.object(plan_module, "normalize_formats",
@@ -180,7 +181,7 @@ class SyncPlanTests(unittest.TestCase):
                 preparation = plan_module.plan_actions(
                     dialog, RunContext(preferred_formats=("EPUB",)),
                     metadata, {},
-                    {"uploads": {1, 2}, "metadata": set(),
+                    {"uploads": {1, 2, 3}, "metadata": set(),
                      "read_changes": [], "cloud_deletions": []})
         self.assertEqual(1, normalize.call_count)
         self.assertEqual(1, preparation["selected_without_action"]["uploads"])

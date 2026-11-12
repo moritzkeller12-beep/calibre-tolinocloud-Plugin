@@ -163,13 +163,16 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             def delete(self, tolino_id):
                 deletes.append(tolino_id)
 
-        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "same-id", "calibre_id": 1}}
+        state = {"11111111-1111-4111-8111-111111111111": {
+            "tolino_id": "same-id", "calibre_id": 1,
+            "reading": {"read": True, "progress": {"percent": 100}}}}
         job = SyncJob(1, "11111111-1111-4111-8111-111111111111", "EPUB", "same-id", "/book", None, "A")
         worker, emitted, _saved, _credentials = self._run(
             ui_module, self._settings(state), [job], FakeClient)
         ui_module._restore_stubs_for_tests()
         self.assertEqual([], deletes)
         self.assertEqual("same-id", worker.state["11111111-1111-4111-8111-111111111111"]["tolino_id"])
+        self.assertNotIn("reading", worker.state["11111111-1111-4111-8111-111111111111"])
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertIsNone(emitted["failed"])
 
@@ -1448,6 +1451,16 @@ class KeepaliveSafetyTests(unittest.TestCase):
         self.assertEqual(1, len(logged))
         self.assertIn("Keep-alive", logged[0])
         self.assertNotIn("sk-geheim-token", logged[0])
+
+    def test_unreadable_settings_do_not_kill_keepalive(self):
+        logged = []
+        with patch("calibre_plugin.token_vault.settings",
+                   side_effect=RuntimeError("kaputt")), \
+                patch("calibre_plugin.token_vault.log_warning",
+                      logged.append):
+            self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh())
+        self.assertEqual(1, len(logged))
+        self.assertIn("Keep-alive", logged[0])
 
     def test_log_warning_never_raises_without_calibre(self):
         from ..tolino import log_warning

@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 from build_plugin import (FILES, ICON, MARKER, ROOT, SOURCE, build_plugin,
-                          strip_source)
+                          strip_docstrings, strip_source)
 
 
 def _docstring_owners(text):
@@ -72,6 +72,7 @@ class PluginArchiveTests(unittest.TestCase):
                   b"def answer():\n"
                   b'    """Antwort."""\n'
                   b"    return 42  # auch weg\n")
+        self.assertEqual(len(source), len(strip_docstrings(source)))
         stripped = strip_source(source)
         self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
         self.assertNotIn(b"Doc.", stripped)

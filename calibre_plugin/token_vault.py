@@ -80,8 +80,14 @@ class TokenVault:
 
     def keepalive_refresh(self):
         """Refresh saved accounts; return only the number of rotations."""
+        try:
+            accounts = settings()["accounts"]
+        except Exception:
+            log_warning("Tolino-Keep-alive: Einstellungen konnten nicht "
+                        "gelesen werden.")
+            return 0
         rotated = 0
-        for account in settings()["accounts"]:
+        for account in accounts:
             name = str(account.get("name") or "")
             if not name or not str(account.get("refresh_token") or "").strip():
                 continue
