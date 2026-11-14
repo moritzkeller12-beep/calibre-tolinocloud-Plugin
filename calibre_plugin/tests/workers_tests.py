@@ -226,6 +226,35 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual([], failures)
         self.assertEqual([(1, None)], writes)
 
+    def test_sync_result_persists_without_the_id_column(self):
+        """Ohne #tolino_id bleibt der Konto-State die fuehrende Quelle."""
+        ui_module = self._ui()
+        saved = []
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": object()})(),
+            account_name="A")
+        worker = type("Worker", (), {})()
+        worker.account_name = "A"
+        worker.context = type("Context", (), {"columns": {"id": False}})()
+        worker.read_updates = []
+        worker.progress_updates = []
+        dashboard.worker = worker
+        try:
+            with patch("calibre_plugin.ui_dashboard.save_account",
+                       lambda name, values, **kwargs: saved.append(
+                           (name, values))), \
+                 patch("calibre_plugin.ui_dashboard.update_tolino_ids",
+                       side_effect=AssertionError(
+                           "column must stay untouched")):
+                failures = ui_module.dashboard._persist_sync_result(
+                    dashboard, {"book": {"tolino_id": "t"}}, [])
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], failures)
+        self.assertEqual("A", saved[0][0])
+        self.assertEqual({"book": {"tolino_id": "t"}},
+                         saved[0][1]["state"])
+
     def test_first_upload_survives_a_failing_second_upload(self):
         ui_module = self._ui()
 

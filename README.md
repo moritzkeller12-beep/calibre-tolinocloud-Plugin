@@ -4,7 +4,7 @@ Synchronisiert Bücher, Metadaten, Lesestatus und Fortschritt zwischen Calibre u
 
 Aktuelle Version: **0.1.08** (Quelle: [`__init__.py`](__init__.py)).
 
-0.1.08 ist der neue State-Release: frühere Spalten- und `dbpath`-Migrationen werden nicht mehr ausgeführt. Der Config-Speicherkey bleibt unverändert, damit vorhandene Konten erhalten bleiben.
+0.1.08 ist der neue State-Release: frühere Spalten- und `dbpath`-Migrationen werden nicht mehr ausgeführt. Vorhandene Einstellungen werden beim ersten Start einmalig in den neuen Config-Namespace migriert und vorher gesichert; der alte Namespace wird nur als Migrationsquelle gelesen. Unter **Einstellungen → Datenbestand prüfen** lässt sich der alte Datenbestand read-only anzeigen.
 
 ## Installation
 

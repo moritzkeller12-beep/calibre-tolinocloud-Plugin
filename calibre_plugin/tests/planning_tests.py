@@ -13,7 +13,8 @@ import uuid
 from .. import config
 from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
                        bool_column_available, column_state, cover_bytes,
-                       create_custom_columns, metadata_ignored, metadata_tolino_id,
+                       create_custom_columns, legacy_column_report,
+                       metadata_ignored, metadata_tolino_id,
                        normalize_formats, safe_format_path,
                        update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
@@ -2456,3 +2457,137 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual("t2", worker.state["22222222-2222-4222-8222-222222222222"]["tolino_id"])
         self.assertEqual(previous["22222222-2222-4222-8222-222222222222"]["content_fp"],
                          worker.state["22222222-2222-4222-8222-222222222222"]["content_fp"])
+
+class PreferencesMigrationTests(unittest.TestCase):
+    """Einmalige Migration der alten Lite-Preferences."""
+
+    @staticmethod
+    def _store(data=None):
+        store = config.JSONConfig("test")
+        if data:
+            store.update(data)
+        return store
+
+    def test_old_accounts_are_moved_to_the_new_namespace_and_backed_up(self):
+        legacy = self._store({
+            "accounts": [{"name": "A", "partner_id": 4, "state": {
+                "11111111-1111-4111-8111-111111111111": {"tolino_id": "t"}}}],
+            "active_account": "A",
+            "preferred_formats": ["PDF"],
+            "refresh_token": "old-top-level",
+            "enable_deletions": True,
+        })
+        current, backup = self._store(), self._store()
+        self.assertTrue(config.migrate_preferences(current, legacy, backup))
+        self.assertEqual(legacy["accounts"], current["accounts"])
+        self.assertEqual("A", current["active_account"])
+        self.assertEqual(["PDF"], current["preferred_formats"])
+        self.assertEqual(config.SCHEMA_VERSION, current["schema_version"])
+        self.assertNotIn("refresh_token", current)
+        self.assertEqual("old-top-level", backup["refresh_token"])
+        self.assertTrue(backup["enable_deletions"])
+
+    def test_a_single_account_token_is_kept_as_the_default_account(self):
+        legacy = self._store({
+            "partner_id": 8, "hardware_id": "hw", "refresh_token": "tok"})
+        current, backup = self._store(), self._store()
+        self.assertTrue(config.migrate_preferences(current, legacy, backup))
+        account = current["accounts"][0]
+        self.assertEqual(config.DEFAULT_ACCOUNT_NAME, account["name"])
+        self.assertEqual(8, account["partner_id"])
+        self.assertEqual("hw", account["hardware_id"])
+        self.assertEqual("tok", account["refresh_token"])
+        self.assertEqual(config.DEFAULT_ACCOUNT_NAME, current["active_account"])
+
+    def test_existing_new_accounts_win_and_the_old_store_is_preserved(self):
+        current = self._store({"accounts": [{"name": "neu"}]})
+        legacy = self._store({"accounts": [{"name": "alt"}]})
+        backup = self._store()
+        self.assertTrue(config.migrate_preferences(current, legacy, backup))
+        self.assertEqual("neu", current["accounts"][0]["name"])
+        self.assertEqual("alt", backup["accounts"][0]["name"])
+        self.assertFalse(config.migrate_preferences(current, legacy, backup))
+
+    def test_fresh_install_does_not_write_a_migration(self):
+        current, legacy, backup = self._store(), self._store(), self._store()
+        self.assertFalse(config.migrate_preferences(current, legacy, backup))
+        self.assertNotIn("schema_version", current)
+
+    def test_a_failed_migration_keeps_the_legacy_store_active(self):
+        original = (config.PREFERENCES, config.LEGACY_PREFERENCES,
+                    config._USING_LEGACY_PREFERENCES)
+        legacy = self._store({"accounts": [{"name": "A"}]})
+        config.PREFERENCES = self._store()
+        config.LEGACY_PREFERENCES = legacy
+        config._USING_LEGACY_PREFERENCES = False
+        try:
+            with patch.object(config, "migrate_preferences",
+                              side_effect=RuntimeError("boom")):
+                self.assertFalse(config.ensure_preferences_migrated())
+            self.assertIs(legacy, config.PREFERENCES)
+            self.assertTrue(config._USING_LEGACY_PREFERENCES)
+        finally:
+            (config.PREFERENCES, config.LEGACY_PREFERENCES,
+             config._USING_LEGACY_PREFERENCES) = original
+
+    def test_saving_an_account_marks_the_schema_version(self):
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            self.assertTrue(config.save_account("A", {}))
+            self.assertEqual(config.SCHEMA_VERSION,
+                             config.PREFERENCES["schema_version"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_legacy_report_counts_without_exposing_values(self):
+        current = self._store({
+            "schema_version": config.SCHEMA_VERSION,
+            "accounts": [{"name": "A", "refresh_token": "secret", "state": {
+                "11111111-1111-4111-8111-111111111111": {},
+                "calibre-abcdef123456-7": {},
+            }}],
+        })
+        backup = self._store({"refresh_token": "secret", "accounts": []})
+        report = config.legacy_report(current, backup)
+        self.assertEqual(1, report["account_count"])
+        self.assertEqual(2, report["state_entries"])
+        self.assertEqual(1, report["fallback_state_keys"])
+        self.assertTrue(report["backup_available"])
+        self.assertEqual(("refresh_token",), report["legacy_preference_keys"])
+        self.assertNotIn("secret", str(report))
+
+
+class LegacyColumnReportTests(unittest.TestCase):
+    """Read-only Bestandsaufnahme der gemeinsamen ID-Spalte."""
+
+    class Api:
+        def all_book_ids(self):
+            return (1, 2, 3, 4)
+
+        @staticmethod
+        def field_for(_column, book_id):
+            return {
+                1: "old-id",
+                2: '{"A":"id-a"}',
+                3: '{}',
+                4: "",
+            }[book_id]
+
+    class Database:
+        field_metadata = {TOLINO_COLUMN: {"datatype": "text"}}
+
+    def test_missing_column_is_reported_as_missing(self):
+        class Missing:
+            field_metadata = {}
+
+        self.assertEqual(
+            {"column": False, "plain_values": 0, "account_maps": 0},
+            legacy_column_report(Missing()))
+
+    def test_plain_values_and_account_maps_are_counted_separately(self):
+        database = self.Database()
+        database.new_api = self.Api()
+        self.assertEqual(
+            {"column": True, "plain_values": 1, "account_maps": 2},
+            legacy_column_report(database))

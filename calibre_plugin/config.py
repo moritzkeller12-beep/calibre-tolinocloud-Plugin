@@ -4,9 +4,18 @@ import threading
 
 from calibre.utils.config import JSONConfig
 
-# Stable storage key. Do not rename it: existing accounts and tokens live
-# under this key, and changing it would hide all saved data.
-PREFERENCES = JSONConfig("plugins/Tolino Cloud Sync Lite")
+SCHEMA_VERSION = 2
+PREFERENCE_NAMESPACE = "plugins/Tolino Cloud Sync"
+LEGACY_NAMESPACE = "plugins/Tolino Cloud Sync Lite"
+BACKUP_NAMESPACE = "plugins/Tolino Cloud Sync Migration Backup 0.1.08"
+PREFERENCES = JSONConfig(PREFERENCE_NAMESPACE)
+LEGACY_PREFERENCES = JSONConfig(LEGACY_NAMESPACE)
+LEGACY_BACKUP = JSONConfig(BACKUP_NAMESPACE)
+LEGACY_PREFERENCE_KEYS = (
+    "refresh_token", "partner_id", "hardware_id", "state",
+    "enable_deletions", "compare_authors", "compare_title",
+    "compare_isbn", "sync_collections", "upload_covers",
+)
 DEFAULT_ACCOUNT_NAME = "default"
 ACCOUNT_KEYS = ("partner_id", "hardware_id", "refresh_token", "state")
 PREFERRED_FORMATS = "preferred_formats"
@@ -19,6 +28,7 @@ DEFAULT_ACCOUNT = {
 }
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
+_USING_LEGACY_PREFERENCES = False
 
 
 def load_state(raw):
@@ -58,6 +68,99 @@ def _named_accounts(raw):
         yield name, source
 
 
+def _snapshot(store):
+    """Copy a preferences store without assuming a concrete Calibre type."""
+    keys = getattr(store, "keys", None)
+    keys = list(keys()) if callable(keys) else [
+        key for key in LEGACY_PREFERENCE_KEYS if key in store]
+    return {key: copy.deepcopy(store.get(key)) for key in keys}
+
+
+def _commit(store):
+    commit = getattr(store, "commit", None)
+    if callable(commit):
+        commit()
+
+
+def _legacy_accounts(legacy):
+    """Return account records from an old list or single-account store."""
+    raw = legacy.get("accounts")
+    if isinstance(raw, list) and raw:
+        return list(raw)
+    if not any(key in legacy for key in ACCOUNT_KEYS):
+        return []
+    return [dict(
+        {"name": DEFAULT_ACCOUNT_NAME},
+        **{key: copy.deepcopy(legacy[key]) for key in ACCOUNT_KEYS
+           if key in legacy})]
+
+
+def migrate_preferences(current=None, legacy=None, backup=None):
+    """Move known settings from the old namespace once, with a backup.
+
+    Only current keys are copied; obsolete top-level options stay in the
+    backup. Existing data in the new namespace always wins. The function is
+    idempotent and returns True only when it wrote something.
+    """
+    current = PREFERENCES if current is None else current
+    legacy = LEGACY_PREFERENCES if legacy is None else legacy
+    backup = LEGACY_BACKUP if backup is None else backup
+    with _SETTINGS_LOCK:
+        try:
+            version = int(current.get("schema_version", 0) or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if version >= SCHEMA_VERSION:
+            return False
+        old = _snapshot(legacy)
+        if not old and not current:
+            return False
+        if old and not _snapshot(backup):
+            backup.update(old)
+            _commit(backup)
+        changes = {}
+        if not current.get("accounts"):
+            accounts = _legacy_accounts(legacy)
+            if accounts:
+                changes["accounts"] = copy.deepcopy(accounts)
+                names = [name for name, _source in _named_accounts(accounts)]
+                active = str(legacy.get("active_account") or "").strip()
+                changes["active_account"] = (
+                    active if active in names else names[0])
+        formats = legacy.get(PREFERRED_FORMATS)
+        if (PREFERRED_FORMATS not in current
+                and isinstance(formats, (list, tuple))):
+            changes[PREFERRED_FORMATS] = list(formats)
+        changes["schema_version"] = SCHEMA_VERSION
+        current.update(changes)
+        _commit(current)
+        return True
+
+
+def ensure_preferences_migrated():
+    """Run the one-time migration, falling back to the old store on failure."""
+    global PREFERENCES, _USING_LEGACY_PREFERENCES
+    try:
+        return migrate_preferences()
+    except Exception as exc:
+        # Never hide existing accounts behind a failed migration. The next
+        # plugin start retries against the old store.
+        PREFERENCES = LEGACY_PREFERENCES
+        _USING_LEGACY_PREFERENCES = True
+        try:
+            from .tolino import log_warning
+            log_warning("Preferences-Migration fehlgeschlagen: %s"
+                        % type(exc).__name__)
+        except Exception:
+            pass
+        return False
+
+
+def _mark_schema():
+    if not _USING_LEGACY_PREFERENCES:
+        PREFERENCES.update({"schema_version": SCHEMA_VERSION})
+
+
 def _account_summaries(raw):
     """Kontometadaten für UI und Keep-alive -- ohne die grossen States."""
     return [{"name": name,
@@ -95,6 +198,39 @@ def settings():
             "hardware_id": current["hardware_id"],
             "accounts": accounts,
             "active_account": active,
+        }
+
+
+def legacy_report(current=None, backup=None):
+    """Return counts of legacy settings and state; no values or tokens."""
+    current = PREFERENCES if current is None else current
+    backup = LEGACY_BACKUP if backup is None else backup
+    with _SETTINGS_LOCK:
+        backup_snapshot = _snapshot(backup)
+        source = backup_snapshot or _snapshot(LEGACY_PREFERENCES)
+        raw = current.get("accounts")
+        named = list(_named_accounts(raw)) if isinstance(raw, list) else []
+        state_entries = 0
+        fallback_keys = 0
+        for _name, account in named:
+            state = account.get("state") if isinstance(account, dict) else None
+            if not isinstance(state, dict):
+                continue
+            state_entries += len(state)
+            fallback_keys += sum(
+                1 for key in state if str(key).startswith("calibre-"))
+        try:
+            version = int(current.get("schema_version", 0) or 0)
+        except (TypeError, ValueError):
+            version = 0
+        return {
+            "schema_version": version,
+            "account_count": len(named),
+            "state_entries": state_entries,
+            "fallback_state_keys": fallback_keys,
+            "backup_available": bool(backup_snapshot),
+            "legacy_preference_keys": tuple(sorted(
+                key for key in LEGACY_PREFERENCE_KEYS if key in source)),
         }
 
 
@@ -140,6 +276,7 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
         PREFERENCES["active_account"] = name
     if preferred_formats is not None:
         PREFERENCES[PREFERRED_FORMATS] = list(preferred_formats)
+    _mark_schema()
     PREFERENCES.commit()
     return True
 
@@ -187,6 +324,7 @@ def set_active_account(name):
         if name not in names:
             return False
         PREFERENCES["active_account"] = name
+        _mark_schema()
         PREFERENCES.commit()
         return True
 
@@ -249,5 +387,6 @@ def remove_account(name):
         PREFERENCES["accounts"] = [source for _stored, source in remaining]
         PREFERENCES["active_account"] = (
             active if active != name else remaining[0][0])
+        _mark_schema()
         PREFERENCES.commit()
         return True

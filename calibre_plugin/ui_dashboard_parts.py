@@ -1,8 +1,9 @@
 """Aufbau und Bestätigungen des Sync-Dashboards."""
 from calibre.gui2 import error_dialog, info_dialog
+from .config import legacy_report
 from .identifiers import display_title
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
-                      create_custom_columns)
+                      create_custom_columns, legacy_column_report)
 from .partners import PARTNERS
 from .tolino import log_warning, sanitize_error
 from .ui_common import (QComboBox, QDialog, QFormLayout, QGroupBox,
@@ -184,6 +185,11 @@ class DashboardParts:
                 lambda _checked=False, key=label: self.create_columns(key))
             self.column_buttons[label] = button
             form.addRow("Calibre-Spalten" if index == 0 else "", button)
+        self.legacy_report_button = _button(
+            "Datenbestand prüfen …",
+            "Zeigt alte Preferences-, State- und Spaltenwerte. Es wird "
+            "nichts gelöscht.", self.show_legacy_report)
+        form.addRow("", self.legacy_report_button)
 
     def _build_account_settings(self):
         form = self.settings_dialog.accounts_form
@@ -230,3 +236,33 @@ class DashboardParts:
             "Angelegt: #%s.\n\nCalibre neu starten, damit die Spalte in der "
             "Bibliothek nutzbar ist." % label,
             show=True, show_copy_button=False)
+
+    def show_legacy_report(self):
+        database = getattr(self.gui, "current_db", None)
+        try:
+            report = legacy_report()
+            columns = legacy_column_report(database)
+        except Exception as exc:
+            log_warning("Datenbestand konnte nicht geprüft werden: %s"
+                        % sanitize_error(exc))
+            error_dialog(self, "Datenbestand nicht geprüft",
+                         sanitize_error(exc), show=True)
+            return
+        keys = ", ".join(report["legacy_preference_keys"]) or "keine"
+        lines = [
+            "Schema-Version: %d" % report["schema_version"],
+            "Gespeicherte Konten: %d" % report["account_count"],
+            "State-Einträge: %d" % report["state_entries"],
+            "Fallback-State-Keys: %d" % report["fallback_state_keys"],
+            "Alte Preferences-Keys: %s" % keys,
+            "Migrationsbackup: %s" % (
+                "vorhanden" if report["backup_available"] else "keines"),
+            "#tolino_id: %s" % (
+                "vorhanden" if columns["column"] else "fehlt"),
+            "Einfache alte Werte: %d" % columns["plain_values"],
+            "Kontomaps: %d" % columns["account_maps"],
+            "",
+            "Es werden keine Daten gelöscht.",
+        ]
+        info_dialog(self, "Datenbestand prüfen", "\n".join(lines),
+                    show=True, show_copy_button=False)
