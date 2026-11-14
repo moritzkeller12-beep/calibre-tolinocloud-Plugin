@@ -37,8 +37,9 @@ from ..tolino import (
     normalize_refresh_token, sanitize_error)
 from pathlib import Path
 from unittest.mock import patch
-from ._support import (compare_inventory, parsed_inventory, start_cdp_stubs,
-                       stop_cdp_stubs, ui_module_for)
+from ._support import (LogRecorder, LocalHTTP, compare_inventory,
+                       local_tolino_endpoints, parsed_inventory,
+                       start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -165,7 +166,7 @@ class SyncPlanTests(unittest.TestCase):
         )
         self.assertEqual([], uploads)
 
-    def test_upload_planner_filters_formats_without_rechecking_them(self):
+    def test_upload_planner_reports_selected_books_without_preferred_format(self):
         # Planung braucht keine Qt-Stubs mehr.
         from .. import dashboard_plan as plan_module
         metadata = {
@@ -174,16 +175,13 @@ class SyncPlanTests(unittest.TestCase):
             3: {"uuid": "33333333-3333-4333-8333-333333333333", "title": "Ignoriert", "formats": ["EPUB"], "ignored": True},
         }
         dialog = type("Dialog", (), {})()
-        with patch.object(plan_module, "normalize_formats",
-                          wraps=normalize_formats) as normalize:
-            with patch.object(plan_module, "upload_jobs",
-                              return_value=([], [])):
-                preparation = plan_module.plan_actions(
-                    dialog, RunContext(preferred_formats=("EPUB",)),
-                    metadata, {},
-                    {"uploads": {1, 2, 3}, "metadata": set(),
-                     "read_changes": [], "cloud_deletions": []})
-        self.assertEqual(1, normalize.call_count)
+        with patch.object(plan_module, "upload_jobs",
+                          return_value=([], [])):
+            preparation = plan_module.plan_actions(
+                dialog, RunContext(preferred_formats=("EPUB",)),
+                metadata, {},
+                {"uploads": {1, 2, 3}, "metadata": set(),
+                 "read_changes": [], "cloud_deletions": []})
         self.assertEqual(1, preparation["selected_without_action"]["uploads"])
         self.assertEqual(1, len(preparation["skipped_uploads"]))
         self.assertIn("Nur PDF", preparation["skipped_uploads"][0])
@@ -293,7 +291,8 @@ class SyncPlanTests(unittest.TestCase):
         })()
         with patch.object(dashboard_plan, "cover_bytes",
                           side_effect=OSError("cover unavailable")):
-            with patch.object(dashboard_plan, "log_warning") as warning:
+            warnings = LogRecorder()
+            with patch.object(dashboard_plan, "log_warning", warnings):
                 jobs, skipped = dashboard_plan.upload_jobs(
                     dialog,
                     {1: {"title": "Buch"}},
@@ -301,8 +300,8 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(1, len(jobs))
         self.assertIsNone(jobs[0].cover)
         self.assertEqual([], skipped)
-        warning.assert_called_once()
-        self.assertIn("cover unavailable", warning.call_args.args[0])
+        self.assertEqual(1, len(warnings))
+        self.assertIn("cover unavailable", warnings[0])
 
     def test_cover_bytes_uses_calibre_bytes_or_none_contract(self):
         class DatabaseAPI:
@@ -920,42 +919,27 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("refresh-secret-value", token)
 
     def test_partner_8_refresh_payload_is_url_encoded_and_not_access_token(self):
-        captured = {}
+        def responder(_method, _path, _headers, _body):
+            return (200, {"Content-Type": "application/json"},
+                    b'{"access_token":"access-secret","expires_in":3600}')
 
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b'{"access_token":"access-secret","expires_in":3600}'
-
-        def request(request, timeout):
-            captured["url"] = request.full_url
-            captured["body"] = request.data.decode("utf-8")
-            captured["content_type"] = request.headers["Content-type"]
-            captured["headers"] = request.headers
-            return Response()
-
-        with patch("calibre_plugin.tolino.urlopen", request):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             client = TolinoClient(4, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                                   " refresh-token ")
             client.login()
-        self.assertEqual(PARTNERS[4]["token_url"], captured["url"])
+        request = server.requests[0]
+        self.assertEqual("/token/4", request["path"])
+        body = request["body"].decode("utf-8")
         self.assertEqual(
             "client_id=webreader&grant_type=refresh_token&"
-            "refresh_token=refresh-token&scope=SCOPE_BOSH",
-            captured["body"])
+            "refresh_token=refresh-token&scope=SCOPE_BOSH", body)
+        headers = request["headers"]
         self.assertEqual("application/x-www-form-urlencoded",
-                         captured["content_type"])
-        headers = {key.casefold(): value for key, value in captured["headers"].items()}
+                         headers["content-type"])
         self.assertEqual("https://webreader.mytolino.com", headers["origin"])
         self.assertEqual("https://webreader.mytolino.com/", headers["referer"])
-        self.assertIn("scope=SCOPE_BOSH", captured["body"])
+        self.assertIn("scope=SCOPE_BOSH", body)
         self.assertNotIn("client_type", headers)
         self.assertNotIn("client_version", headers)
         self.assertNotIn("reseller_id", headers)
@@ -967,58 +951,60 @@ class SyncPlanTests(unittest.TestCase):
     def test_rotated_refresh_token_is_returned_and_persisted_before_followup_work(self):
         captured = []
 
-        class Response:
-            status = 200
+        def responder(_method, _path, _headers, _body):
+            return (200, {"Content-Type": "application/json"},
+                    b'{"access_token":"access-secret",'
+                    b'"refresh_token":"rotated-refresh","expires_in":3600}')
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return (b'{"access_token":"access-secret",'
-                        b'"refresh_token":"rotated-refresh","expires_in":3600}')
-
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             client = TolinoClient(4, "hardware", "old-refresh",
                                   token_callback=captured.append)
             self.assertEqual("rotated-refresh", client.login())
             self.assertEqual(["rotated-refresh"], captured)
             self.assertEqual("rotated-refresh", client.refresh)
-            # A second call uses the cached access token and cannot reuse the old grant.
+            # A second call uses the cached access token and cannot reuse the
+            # old grant: kein einziger weiterer Token-Request.
             self.assertEqual("rotated-refresh", client.login())
+        self.assertEqual(1, len(server.requests))
 
     def test_reuse_exceeded_is_not_retried_and_gives_user_action(self):
-        from urllib.error import HTTPError
+        body = (b'{"error":"invalid_grant","error_description":'
+                b'"Maximum allowed refresh token reuse exceeded"}')
 
-        body = b'{"error":"invalid_grant","error_description":"Maximum allowed refresh token reuse exceeded"}'
-        error = HTTPError("https://example.invalid/token", 400, "Bad Request", {}, None)
-        error.read = lambda: body
-        with patch("calibre_plugin.tolino.urlopen", side_effect=error) as request:
+        def responder(_method, _path, _headers, _payload):
+            return 400, {"Content-Type": "application/json"}, body
+
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             with self.assertRaisesRegex(TolinoAuthError, "Anmeldung abgelehnt"):
                 TolinoClient(4, "", "old-refresh").login()
-        self.assertEqual(1, request.call_count)
+        # Genau ein Versuch: ein verbranchter Single-Use-Token wird nie
+        # wiederholt.
+        self.assertEqual(1, len(server.requests))
 
     def test_403_with_invalid_grant_body_gives_user_action(self):
-        from urllib.error import HTTPError
-
         body = b'{"error":"invalid_grant","error_description":"token reused"}'
-        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
-        error.read = lambda: body
-        with patch("calibre_plugin.tolino.urlopen", side_effect=error):
+
+        def responder(_method, _path, _headers, _payload):
+            return 403, {"Content-Type": "application/json"}, body
+
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             with self.assertRaisesRegex(TolinoAuthError, "Anmeldung abgelehnt"):
                 TolinoClient(4, "", "old-refresh").login()
+        self.assertEqual(1, len(server.requests))
 
     def test_403_bot_protection_reports_response_detail(self):
-        from urllib.error import HTTPError
-
         body = b"Access denied | bot protection"
-        error = HTTPError("https://example.invalid/token", 403, "Forbidden", {}, None)
-        error.read = lambda: body
+
+        def responder(_method, _path, _headers, _payload):
+            return 403, {"Content-Type": "text/html"}, body
+
         client = TolinoClient(4, "", "old-refresh")
-        with patch("calibre_plugin.tolino.urlopen", side_effect=error), \
-                        patch("calibre_plugin.tolino.time.sleep"):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin), \
+                patch("calibre_plugin.tolino.time.sleep"):
             with self.assertRaisesRegex(TolinoAuthError, "Access denied"):
                 client.login()
         self.assertIn("Access denied", client.last_error_text)
@@ -1027,70 +1013,43 @@ class SyncPlanTests(unittest.TestCase):
         """Feldbefund: der erste Token-Aufruf nach der Browser-
         Anmeldung traf 403 (Bot-Schutz-Laufzeitbahn), jeder spaetere
         Klick lief – jetzt wird kurz gewartet und zwei Mal wiederholt."""
-        from urllib.error import HTTPError
-
-        bot = HTTPError("https://example.invalid/token", 403, "Forbidden",
-                        {}, None)
-        bot.read = lambda: (b"<!doctype html><title>Zugriff geblockt"
-                            b"</title>")
-        calls = []
         sleeps = []
+        attempts = []
 
-        class Response:
-            status = 200
+        def responder(_method, _path, _headers, _payload):
+            attempts.append(1)
+            if len(attempts) < 3:
+                return (403, {"Content-Type": "text/html"},
+                        b"<!doctype html><title>Zugriff geblockt</title>")
+            return (200, {"Content-Type": "application/json"},
+                    b'{"access_token":"access-secret",'
+                    b'"refresh_token":"rotated-refresh","expires_in":3600}')
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return (b'{"access_token":"access-secret",'
-                        b'"refresh_token":"rotated-refresh","expires_in":3600}')
-
-        def fake_urlopen(request, timeout=None):
-            calls.append(request.full_url)
-            if len(calls) < 3:
-                raise bot
-            return Response()
-
-        with patch("calibre_plugin.tolino.urlopen",
-                   side_effect=fake_urlopen), \
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin), \
                 patch("calibre_plugin.tolino.time.sleep",
                       side_effect=sleeps.append):
             client = TolinoClient(4, "hardware", "old-refresh")
             self.assertEqual("rotated-refresh", client.login())
-        self.assertEqual(3, len(calls))
+        self.assertEqual(3, len(server.requests))
         self.assertEqual([2.0, 5.0], sleeps)
         self.assertEqual("rotated-refresh", client.refresh)
 
     def test_other_partner_refresh_payload_keeps_configured_scope(self):
-        captured = {}
+        def responder(_method, _path, _headers, _payload):
+            return (200, {"Content-Type": "application/json"},
+                    b'{"access_token":"access-secret","expires_in":3600}')
 
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b'{"access_token":"access-secret","expires_in":3600}'
-
-        def request(request, timeout):
-            captured["body"] = request.data.decode("utf-8")
-            return Response()
-
-        with patch("calibre_plugin.tolino.urlopen", request):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             TolinoClient(1, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                          "refresh-token").login()
+        request = server.requests[0]
+        self.assertEqual("/token/1", request["path"])
         self.assertEqual(
             "client_id=webreader&grant_type=refresh_token&"
             "refresh_token=refresh-token&scope=SCOPE_BOSH",
-            captured["body"])
+            request["body"].decode("utf-8"))
 
     def test_sanitize_error_redacts_configured_variants_jwt_and_traceback(self):
         refresh = '  "refresh-secret-value"  '
@@ -1122,16 +1081,16 @@ class SyncPlanTests(unittest.TestCase):
         self.assertIn("[REDACTED]", rendered)
 
     def test_http_error_keeps_safe_fields_without_echoing_tokens(self):
-        from urllib.error import HTTPError
-
         token = "refresh-secret-value"
         body = ('{"error":"invalid_grant","error_description":"bad %s",'
                 '"refresh_token":"%s"}' % (token, token)).encode("utf-8")
-        error = HTTPError("https://example.invalid/token", 400, "Bad Request",
-                          {}, None)
-        error.read = lambda: body
+
+        def responder(_method, _path, _headers, _payload):
+            return 400, {"Content-Type": "application/json"}, body
+
         client = TolinoClient(4, "", token)
-        with patch("calibre_plugin.tolino.urlopen", side_effect=error):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             with self.assertRaisesRegex(TolinoAuthError, "Anmeldung abgelehnt"):
                 client.login()
         self.assertIn("invalid_grant", client.last_error_text)
@@ -1377,12 +1336,19 @@ class SyncPlanTests(unittest.TestCase):
         """Ohne Token und bei laufender Rotation passiert nichts."""
         accounts = [{"name": "A", "partner_id": 4, "hardware_id": "hw",
                      "refresh_token": "tok"}]
-        with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
+        logins = []
+
+        class NoLoginClient:
+            def __init__(self, *_args, **_kwargs):
+                logins.append("login")
+                raise AssertionError("keepalive must not log in here")
+
+        with patch("calibre_plugin.token_vault.TolinoClient", NoLoginClient), \
              patch("calibre_plugin.token_vault.settings",
                    lambda **_kwargs: {"accounts": []}):
             self.assertEqual(0, vault_module.TOKEN_VAULT.keepalive_refresh())
-            client_mock.assert_not_called()
-        with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
+        self.assertEqual([], logins)
+        with patch("calibre_plugin.token_vault.TolinoClient", NoLoginClient), \
              patch("calibre_plugin.token_vault.settings",
                    lambda **_kwargs: {"accounts": accounts}), \
              patch("calibre_plugin.token_vault.account_summary",
@@ -1390,7 +1356,7 @@ class SyncPlanTests(unittest.TestCase):
             with vault_module.TOKEN_VAULT._lock:
                 self.assertEqual(
                     0, vault_module.TOKEN_VAULT.keepalive_refresh())
-            client_mock.assert_not_called()
+        self.assertEqual([], logins)
 
 class MetadataUpdatePlanTests(unittest.TestCase):
     """In-place Metadaten-Updates (/meta) nur für ausgewählte Bücher.
@@ -2556,6 +2522,217 @@ class PreferencesMigrationTests(unittest.TestCase):
         self.assertTrue(report["backup_available"])
         self.assertEqual(("refresh_token",), report["legacy_preference_keys"])
         self.assertNotIn("secret", str(report))
+
+
+class LegacyCleanupTests(unittest.TestCase):
+    """Sichere Altdaten-Aufräumung: Plan, Backup und Apply."""
+
+    TARGET = "calibre-abcdef123456-7"
+    OTHER_TARGET = "calibre-fedcba654321-7"
+    UUID = "11111111-1111-4111-8111-111111111111"
+
+    class _Api:
+        def __init__(self, raw_uuid):
+            self.raw_uuid = raw_uuid
+
+        def all_book_ids(self):
+            return [7]
+
+        def all_field_for(self, _field, _book_ids):
+            return {7: self.raw_uuid}
+
+    class _Database:
+        def __init__(self, raw_uuid):
+            self.new_api = LegacyCleanupTests._Api(raw_uuid)
+
+    @staticmethod
+    def _store(data=None):
+        store = config.JSONConfig("test")
+        if data:
+            store.update(data)
+        return store
+
+    def _current(self, state=None):
+        return self._store({
+            "schema_version": config.SCHEMA_VERSION,
+            "accounts": [{"name": "A", "state": state or {}}],
+        })
+
+    def _legacy(self):
+        return self._store({
+            "refresh_token": "secret",
+            "enable_deletions": True,
+            "accounts": [{"name": "A"}],
+        })
+
+    def _duplicate_state(self):
+        entry = {"calibre_id": 7, "tolino_id": "t1"}
+        return {"calibre-7": dict(entry), self.TARGET: dict(entry)}
+
+    def _plan_and_backup(self):
+        current = self._current(self._duplicate_state())
+        legacy = self._legacy()
+        database = self._Database(self.UUID)
+        plan = config.plan_legacy_cleanup(
+            current, legacy, database=database)
+        backup = self._store()
+        confirmed = config.create_legacy_cleanup_backup(
+            plan, current, legacy, backup=backup)
+        return current, legacy, database, plan, backup, confirmed
+
+    def test_apply_refuses_without_verified_backup(self):
+        current, legacy, database, plan, _backup, _confirmed = \
+            self._plan_and_backup()
+        result = config.apply_legacy_cleanup(
+            plan, {}, current, legacy, database=database,
+            backup=self._store())
+        self.assertFalse(result["ok"])
+        self.assertIn("calibre-7", current["accounts"][0]["state"])
+
+    def test_apply_refuses_corrupt_backup(self):
+        current, legacy, database, plan, backup, confirmed = \
+            self._plan_and_backup()
+        backup["digest"] = "corrupt"
+        result = config.apply_legacy_cleanup(
+            plan, confirmed, current, legacy, database=database,
+            backup=backup)
+        self.assertFalse(result["ok"])
+        self.assertIn("calibre-7", current["accounts"][0]["state"])
+
+    def test_apply_refuses_when_data_changed_after_backup(self):
+        current, legacy, database, plan, backup, confirmed = \
+            self._plan_and_backup()
+        current["accounts"][0]["state"][self.TARGET]["tolino_id"] = "neu"
+        result = config.apply_legacy_cleanup(
+            plan, confirmed, current, legacy, database=database,
+            backup=backup)
+        self.assertFalse(result["ok"])
+        self.assertIn("calibre-7", current["accounts"][0]["state"])
+
+    def test_apply_refuses_when_legacy_store_is_active(self):
+        current, legacy, database, plan, backup, confirmed = \
+            self._plan_and_backup()
+        original = config._USING_LEGACY_PREFERENCES
+        config._USING_LEGACY_PREFERENCES = True
+        try:
+            result = config.apply_legacy_cleanup(
+                plan, confirmed, current, legacy, database=database,
+                backup=backup)
+        finally:
+            config._USING_LEGACY_PREFERENCES = original
+        self.assertFalse(result["ok"])
+        self.assertEqual("legacy-active", result["reason"])
+
+    def test_plan_counts_only_unscoped_state_keys(self):
+        current = self._current({self.TARGET: {
+            "calibre_id": 7, "tolino_id": "t1"}})
+        plan = config.plan_legacy_cleanup(
+            current, self._legacy(), database=self._Database(self.UUID))
+        self.assertEqual(0, plan["counts"]["legacy_state_keys"])
+        self.assertEqual((), plan["state_keys"])
+
+    def test_plan_removes_exact_duplicate_state_key(self):
+        current = self._current(self._duplicate_state())
+        plan = config.plan_legacy_cleanup(
+            current, self._legacy(), database=self._Database(self.UUID))
+        self.assertEqual(
+            (("A", "calibre-7", self.TARGET),), plan["state_keys"])
+        self.assertEqual(1, plan["counts"]["duplicate_legacy_state_keys"])
+
+    def test_plan_keeps_different_and_ambiguous_entries(self):
+        different = self._duplicate_state()
+        different[self.TARGET]["tolino_id"] = "changed"
+        plan = config.plan_legacy_cleanup(
+            self._current(different), self._legacy(),
+            database=self._Database(self.UUID))
+        self.assertEqual((), plan["state_keys"])
+        self.assertEqual(1, plan["counts"]["orphan_legacy_state_keys"])
+
+        ambiguous = self._duplicate_state()
+        ambiguous[self.OTHER_TARGET] = dict(ambiguous[self.TARGET])
+        plan = config.plan_legacy_cleanup(
+            self._current(ambiguous), self._legacy(),
+            database=self._Database(self.UUID))
+        self.assertEqual((), plan["state_keys"])
+        self.assertEqual(1, plan["counts"]["orphan_legacy_state_keys"])
+
+    def test_plan_without_database_only_counts_state_keys(self):
+        current = self._current(self._duplicate_state())
+        plan = config.plan_legacy_cleanup(current, self._legacy())
+        self.assertEqual((), plan["state_keys"])
+        self.assertFalse(plan["counts"]["state_cleanup_available"])
+        self.assertEqual(1, plan["counts"]["legacy_state_keys"])
+
+    def test_plan_skips_raw_uuid_collision(self):
+        current = self._current(self._duplicate_state())
+        plan = config.plan_legacy_cleanup(
+            current, self._legacy(),
+            database=self._Database("calibre-7"))
+        self.assertEqual((), plan["state_keys"])
+        self.assertEqual(1, plan["counts"]["orphan_legacy_state_keys"])
+
+    def test_apply_removes_only_planned_keys_and_keeps_legacy_accounts(self):
+        current, legacy, database, plan, backup, confirmed = \
+            self._plan_and_backup()
+        result = config.apply_legacy_cleanup(
+            plan, confirmed, current, legacy, database=database,
+            backup=backup)
+        self.assertTrue(result["ok"])
+        state = current["accounts"][0]["state"]
+        self.assertNotIn("calibre-7", state)
+        self.assertIn(self.TARGET, state)
+        self.assertNotIn("refresh_token", legacy)
+        self.assertIn("accounts", legacy)
+
+    def test_multi_account_cleanup_is_isolated(self):
+        current = self._store({
+            "schema_version": config.SCHEMA_VERSION,
+            "accounts": [
+                {"name": "A", "state": self._duplicate_state()},
+                {"name": "B", "state": {
+                    "calibre-7": {"calibre_id": 7, "tolino_id": "b"}}},
+            ],
+        })
+        legacy = self._legacy()
+        database = self._Database(self.UUID)
+        plan = config.plan_legacy_cleanup(current, legacy, database=database)
+        self.assertEqual(
+            (("A", "calibre-7", self.TARGET),), plan["state_keys"])
+        backup = self._store()
+        confirmed = config.create_legacy_cleanup_backup(
+            plan, current, legacy, backup=backup)
+        self.assertTrue(config.apply_legacy_cleanup(
+            plan, confirmed, current, legacy, database=database,
+            backup=backup)["ok"])
+        self.assertIn("calibre-7", current["accounts"][1]["state"])
+        self.assertNotIn("calibre-7", current["accounts"][0]["state"])
+
+    def test_backup_roundtrip_and_confirmation_token(self):
+        current, legacy, _database, plan, backup, confirmed = \
+            self._plan_and_backup()
+        self.assertEqual(backup["payload"]["current"], current)
+        self.assertEqual(backup["payload"]["legacy"], legacy)
+        self.assertEqual(64, len(confirmed["token"]))
+        self.assertEqual(backup["digest"], confirmed["backup_digest"])
+
+    def test_second_cleanup_is_idempotent(self):
+        current, legacy, database, plan, backup, confirmed = \
+            self._plan_and_backup()
+        self.assertTrue(config.apply_legacy_cleanup(
+            plan, confirmed, current, legacy, database=database,
+            backup=backup)["ok"])
+        second_plan = config.plan_legacy_cleanup(
+            current, legacy, database=database)
+        self.assertEqual((), second_plan["state_keys"])
+        self.assertEqual((), second_plan["preference_keys"])
+        second_backup = self._store()
+        second_confirmed = config.create_legacy_cleanup_backup(
+            second_plan, current, legacy, backup=second_backup)
+        result = config.apply_legacy_cleanup(
+            second_plan, second_confirmed, current, legacy,
+            database=database, backup=second_backup)
+        self.assertTrue(result["ok"])
+        self.assertEqual((), result["removed_state_keys"])
 
 
 class LegacyColumnReportTests(unittest.TestCase):

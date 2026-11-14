@@ -13,7 +13,7 @@ from . import ui_base_tests
 from ..tolino import TolinoAuthError
 from ._support import (
     _REAL_CLOSE_WINDOW, _full, start_cdp_stubs, stop_cdp_stubs)
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -172,30 +172,46 @@ class LiveGrabTests(unittest.TestCase):
                 self.refresh = "rotated-token"
 
         grabbed = {"refresh": [stale, fresh], "hardware": ["hw-live"]}
+        window = {"open": True}
+
+        def close(timeout=2):
+            if not window["open"]:
+                return False
+            window["open"] = False
+            return True
+
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
              patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=grabbed), \
-             patch("calibre_plugin.cdp.close_grabber_window") as closer:
+             patch("calibre_plugin.cdp.close_grabber_window", close):
             refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual("rotated-token", refresh)
         self.assertEqual("fake-hw", hardware)
         self.assertEqual([fresh], logins)
         # Nach dem Tausch gehört die Sitzung Calibre: das Anmeldefenster
-        # wird geschlossen, damit der Reader die übernommene Kopie nicht
-        # weiter rotiert.
-        self.assertEqual([call(timeout=2)], closer.call_args_list)
+        # ist zu, damit der Reader die übernommene Kopie nicht weiter
+        # rotiert.
+        self.assertFalse(window["open"])
 
     def test_grab_live_refresh_rejects_only_stale_candidates(self):
         """Nur veraltete Kandidaten scheitern klar, ohne Replay."""
         from ..browser_login import grab_live_refresh
         stale = self._jwt(time.time() - 7200, "sess-old")  # 2 h alt
+        window = {"open": True}
+
+        def close(timeout=2):
+            if not window["open"]:
+                return False
+            window["open"] = False
+            return True
+
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value={"refresh": [stale], "hardware": []}), \
-             patch("calibre_plugin.cdp.close_grabber_window") as closer, \
+             patch("calibre_plugin.cdp.close_grabber_window", close), \
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value={"window": False, "reader_tab": False}), \
              patch("calibre_plugin.browser_login.time.monotonic",
@@ -203,7 +219,9 @@ class LiveGrabTests(unittest.TestCase):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual("B02", ctx.exception.code)
-        closer.assert_called_once_with()
+        # Ohne übernommenen Zugang bleibt kein Fenster mit foreignem
+        # Reader offen.
+        self.assertFalse(window["open"])
         self.assertIn("gültiger Zugang", str(ctx.exception))
         self.assertNotIn(stale, _full(ctx.exception))
 
@@ -572,16 +590,23 @@ class LiveGrabTests(unittest.TestCase):
         """Bleibt der Tab ohne Web-Reader, gibt es einen Timeout-Hinweis –
         keine Meldung ueber ein geschlossenes Fenster."""
         from ..browser_login import grab_live_refresh
+        window = {"open": True}
+
+        def close(timeout=2):
+            window["open"] = False
+            return True
+
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=None), \
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value={"window": True, "reader_tab": False}), \
-             patch("calibre_plugin.cdp.close_grabber_window") as closer:
+             patch("calibre_plugin.cdp.close_grabber_window", close):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=0)
-        closer.assert_not_called()
+        # Das Fenster bleibt offen: der Nutzer soll sich dort anmelden.
+        self.assertTrue(window["open"])
         message = str(ctx.exception)
         self.assertIn("Zeitüberschreitung", message)
         self.assertIn("nicht abgeschlossen", message)
@@ -774,6 +799,12 @@ class LoginWindowWaitTests(_SidJwtTest):
             return None
 
         login_state = {"window": True, "reader_tab": False}
+        window = {"open": True}
+
+        def close(timeout=2):
+            window["open"] = False
+            return True
+
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
              patch("calibre_plugin.browser_login.TolinoClient", FailingClient), \
@@ -781,11 +812,13 @@ class LoginWindowWaitTests(_SidJwtTest):
                    side_effect=next_grab), \
              patch("calibre_plugin.cdp.grabber_window_state",
                    return_value=login_state), \
-             patch("calibre_plugin.cdp.close_grabber_window") as closer, \
+             patch("calibre_plugin.cdp.close_grabber_window", close), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
-        closer.assert_not_called()
+        # Die Anmeldeseite bleibt offen, damit die Anmeldung vor Ort
+        # noch ankommen kann.
+        self.assertTrue(window["open"])
         message = str(ctx.exception)
         self.assertIn("ist offen", message)
         self.assertIn("dort anmelden", message)
@@ -887,6 +920,14 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         from ..browser_login import grab_live_refresh
         blob = base64.b64encode(
             b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
+        window = {"open": True}
+
+        def close(timeout=2):
+            if not window["open"]:
+                return False
+            window["open"] = False
+            return True
+
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
@@ -894,11 +935,11 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
              patch("calibre_plugin.token_candidates.cryptojs_decrypt",
                    side_effect=TolinoAuthError(
                        "PyCryptodome fehlt.", code="A01")), \
-             patch("calibre_plugin.cdp.close_grabber_window") as closer:
+             patch("calibre_plugin.cdp.close_grabber_window", close):
             with self.assertRaises(TolinoAuthError) as caught:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
         self.assertEqual("A01", caught.exception.code)
-        closer.assert_called_once_with()
+        self.assertFalse(window["open"])
 
     def test_invalid_blobs_and_jwt_payloads_are_rejected(self):
         from ..browser_crypto import _pkcs7_unpad, cryptojs_decrypt
@@ -1570,9 +1611,6 @@ class CdpOwnershipTests(unittest.TestCase):
         self._launch(process, profile=profile)
         with patch.object(self.cdp, "_endpoint_answers",
                           side_effect=[True, False, False, False]), \
-             patch.object(self.cdp, "_stop_launched_process",
-                          side_effect=lambda child, timeout=2:
-                          child.terminate() or True) as stop, \
              patch.object(self.cdp, "_browser_ws_for_record",
                           return_value=(9223, "/devtools/browser/x")), \
              patch.object(self.cdp, "_send_browser_close",
@@ -1580,7 +1618,7 @@ class CdpOwnershipTests(unittest.TestCase):
                           or True), \
              patch.object(self.cdp.time, "sleep"):
             self.assertTrue(_REAL_CLOSE_WINDOW(timeout=0.2))
-        stop.assert_called_once_with(process, 0.2)
+        # Der echte Prozesspfad lief: terminate()/wait() sind aufgerufen.
         self.assertTrue(state["closed"])
         self.assertTrue(state["terminated"])
         self.assertFalse(os.path.exists(profile))

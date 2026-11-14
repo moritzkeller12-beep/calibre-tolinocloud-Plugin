@@ -6,9 +6,12 @@ Qt-/Calibre-Stubs und kleine Helfer.
 Die Testklassen selbst liegen thematisch in ``tests/*_tests.py``;
 ``calibre_plugin/test_sync.py`` sammelt sie wieder ein.
 """
+import contextlib
 import importlib
 import sys
+import threading
 import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 import calibre_plugin.cdp as cdp_module
@@ -267,24 +270,25 @@ def load_ui_module(get_icons_result, qt_stub=None):
                          ("qt", types.ModuleType("qt")),
                          ("qt.core", qt_core)):
         sys.modules[name] = module
+    # Nur Module mit Qt-/Calibre-Importen werden neu geladen. Reine
+    # Logikmodule (Token-Kandidaten, Crypto) bleiben dieselbe Instanz:
+    # sonst patcht ein Test eine Kopie, während bereits importierter
+    # Produktivcode die andere benutzt.
     for module_name in ("calibre_plugin.ui", "calibre_plugin.ui_common",
                         "calibre_plugin.ui_dialogs",
                         "calibre_plugin.dashboard_plan",
                         "calibre_plugin.cdp_transport",
-                        "calibre_plugin.browser_crypto",
-                        "calibre_plugin.token_candidates",
                         "calibre_plugin.ui_workers",
                         "calibre_plugin.ui_auth_workers",
                         "calibre_plugin.ui_dashboard",
-                        "calibre_plugin.ui_dashboard_parts",
-                        "calibre_plugin.dashboard_plan"):
+                        "calibre_plugin.ui_dashboard_parts"):
         sys.modules.pop(module_name, None)
     import calibre_plugin
     # Das Paket hält sonst die Referenz auf das zuvor geladene
     # ui-Modul (anderer Qt-Stub) und `from ... import ui` gäbe genau
     # diese alte Fassung zurück.
     for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
-                      "token_candidates", "browser_crypto", "ui_workers",
+                      "ui_workers",
                       "ui_auth_workers", "ui_dashboard",
                       "ui_dashboard_parts", "dashboard_plan"):
         if getattr(calibre_plugin, attribute, None) is not None:
@@ -394,6 +398,121 @@ class FakeMenu:
         if self.pick is None or not self.actions:
             return None
         return self.actions[self.pick]
+
+
+class LogRecorder(list):
+    """Echter Ersatz fuer die Log-Naht: sammelt die geschriebenen Zeilen."""
+
+    def __call__(self, message):
+        self.append(str(message))
+
+
+class LocalHTTP:
+    """Echter HTTP-Server auf Loopback fuer Transport-Tests.
+
+    `responder(method, path, headers, body)` liefert
+    ``(status, headers, body)``. Jede Anfrage landet in ``response.requests``
+    bzw. ``self.requests`` -- der Test beobachtet damit echte Sockets statt
+    `urlopen` zu patchen.
+    """
+
+    def __init__(self, responder):
+        self.responder = responder
+        self.requests = []
+        self._server = None
+        self._thread = None
+
+    def __enter__(self):
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def _handle(self):
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                body = self.rfile.read(length) if length else b""
+                outer.requests.append({
+                    "method": self.command,
+                    "path": self.path,
+                    "headers": {key.casefold(): value
+                                for key, value in self.headers.items()},
+                    "body": body,
+                })
+                status, headers, payload = outer.responder(
+                    self.command, self.path, self.headers, body)
+                payload = payload or b""
+                self.send_response(status)
+                for key, value in (headers or {}).items():
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
+
+            def log_message(self, *_args):
+                return None
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.01},
+            daemon=True)
+        self._thread.start()
+        return self
+
+    @property
+    def origin(self):
+        host, port = self._server.server_address
+        return "http://%s:%d" % (host, port)
+
+    def url(self, path):
+        return self.origin + path
+
+    def paths(self):
+        return [request["path"] for request in self.requests]
+
+    def __exit__(self, *_exc):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(5)
+        return False
+
+
+@contextlib.contextmanager
+def local_tolino_endpoints(origin, partner_ids=(1, 4, 5, 8)):
+    """Die absoluten Endpunkte des Clients auf den Testserver zeigen lassen.
+
+    Das ist eine echte Konfigurationsumlenkung: der Produktivcode baut
+    weiterhin `urllib`-Requests und spricht echte Sockets, nur eben mit
+    Loopback-Adressen.
+    """
+    from .. import tolino as module
+    from ..partners import PARTNERS
+
+    partners = {pid: PARTNERS[pid]["token_url"] for pid in partner_ids}
+    saved = (module.BASE_URL, module.TolinoClient.META_URL,
+             module.TolinoClient.DEVICES_URL,
+             module.TolinoClient.SYNC_DATA_URL)
+    module.BASE_URL = origin + "/bosh/rest"
+    module.TolinoClient.META_URL = module.BASE_URL + "/meta"
+    module.TolinoClient.DEVICES_URL = (module.BASE_URL
+                                       + "/handshake/devices/list")
+    module.TolinoClient.SYNC_DATA_URL = (module.BASE_URL
+                                         + "/sync-data?paths=publications")
+    for partner_id in partner_ids:
+        PARTNERS[partner_id]["token_url"] = origin + "/token/%d" % partner_id
+    try:
+        yield
+    finally:
+        (module.BASE_URL, module.TolinoClient.META_URL,
+         module.TolinoClient.DEVICES_URL,
+         module.TolinoClient.SYNC_DATA_URL) = saved
+        for partner_id, value in partners.items():
+            PARTNERS[partner_id]["token_url"] = value
 
 
 class FakeMessageBox:

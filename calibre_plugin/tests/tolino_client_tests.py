@@ -2,6 +2,7 @@
 
 import base64
 import calibre_plugin.tolino as tolino_module
+import contextlib
 import os
 import re
 import tempfile
@@ -13,7 +14,9 @@ from ..partners import PARTNERS
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, active_tags, tag_id_from_patch
 from ..browser_login import grab_live_refresh
-from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
+from ._support import (LocalHTTP, LogRecorder, compare_inventory,
+                       local_tolino_endpoints, start_cdp_stubs,
+                       stop_cdp_stubs)
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,57 +29,40 @@ class TolinoClientFeatureTests(unittest.TestCase):
     """Tests for the cloud client: device list, download, sync-data
     collections/read-state and refresh expiry tracking."""
 
+    TOKEN_BODY = (b'{"access_token":"access-secret",'
+                  b'"refresh_token":"rotated","expires_in":3600,'
+                  b'"refresh_expires_in":36000}')
+
     def _client(self):
         return TolinoClient(4, "hardware", "refresh-token")
 
     def _login_client(self, token_response=None):
+        """Client nach echtem Login gegen einen Loopback-Token-Endpunkt."""
         client = self._client()
+        body = token_response or self.TOKEN_BODY
 
-        class Response:
-            status = 200
+        def responder(_method, _path, _headers, _payload):
+            return 200, {"Content-Type": "application/json"}, body
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return token_response or (
-                    b'{"access_token":"access-secret",'
-                    b'"refresh_token":"rotated","expires_in":3600,'
-                    b'"refresh_expires_in":36000}')
-
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             client.login()
         return client
 
     def _device_list_client(self, devices_payload):
-        client = self._login_client()
-        captured = {}
+        def responder(_method, path, _headers, _payload):
+            body = (self.TOKEN_BODY if path.startswith("/token/4")
+                    else devices_payload)
+            return 200, {"Content-Type": "application/json"}, body
 
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return devices_payload
-
-        def request(url_request, timeout):
-            captured["url"] = url_request.full_url
-            captured["body"] = url_request.data.decode("utf-8")
-            return Response()
-
-        with patch("calibre_plugin.tolino.urlopen", request):
+        client = self._client()
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             hardware = client.fetch_hardware_id()
-        self.assertIn("handshake/devices/list", captured["url"])
-        self.assertIn("deviceListRequest", captured["body"])
-        self.assertIn("auth_token", captured["body"])
+        self.assertIn("/bosh/rest/handshake/devices/list", server.paths())
+        body = server.requests[-1]["body"]
+        self.assertIn(b"deviceListRequest", body)
+        self.assertIn(b"auth_token", body)
         return hardware
 
     def test_fetch_hardware_id_returns_most_recent_device(self):
@@ -89,19 +75,12 @@ class TolinoClientFeatureTests(unittest.TestCase):
         from ..tolino import TolinoApiError
         client = self._login_client()
 
-        class Response:
-            status = 200
+        def responder(_method, _path, _headers, _payload):
+            return (200, {"Content-Type": "application/json"},
+                    b'{"deviceListResponse":{"devices":[]}}')
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b'{"deviceListResponse":{"devices":[]}}'
-
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             with self.assertRaises(TolinoApiError):
                 client.fetch_hardware_id()
 
@@ -554,55 +533,65 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
     Geraete-Recovery aus: das registrierte Geraet des Kontos wird
     uebernommen, sonst wird unsere Hardware-ID per registerhw
     registriert – dann genau EIN Retry.
+
+    Alle Endpunkte sind echt: der Client spricht über Loopback-HTTP mit
+    einem stdlib-Server, der die BOSH-Antworten liefert.
     """
 
     INVENTORY_BODY = b'{"PublicationInventory": {"edata": []}}'
+    ADOPTED = "12345678-1234-4abc-8def-1234567890ab"
 
     def _client(self, hardware="configured-hw"):
-        from ..tolino import TolinoClient
         client = TolinoClient(4, hardware, "refresh-token-value")
         client.access = "access-value"
         client.expires_at = time.time() + 3600
         return client
 
-    def _response(self, body, status=200):
-        outer_body, outer_status = body, status
+    @staticmethod
+    def _devices_body(device_id):
+        return ('{"deviceListResponse":{"devices":[{"deviceId":"%s",'
+                '"deviceLastUsage":"1"}]}}' % device_id).encode("utf-8")
 
-        class Response(object):
-            status = outer_status
+    @contextlib.contextmanager
+    def _bosh(self, inventory, devices=((400, b"{}"),),
+              register=((200, b"{}"),), sleeps=None):
+        """Server fuer Inventar, Geraeteliste und registerhw.
 
-            def __enter__(self):
-                return self
+        `inventory`/`devices`/`register` sind Folgen von ``(status, body)``;
+        der letzte Eintrag wiederholt sich.
+        """
+        used = {"inventory": 0, "devices": 0, "register": 0}
 
-            def __exit__(self, *args):
-                return False
+        def reply(name, entries):
+            index = min(used[name], len(entries) - 1)
+            used[name] += 1
+            return entries[index]
 
-            def read(self):
-                return outer_body
-        return Response()
+        def responder(_method, path, _headers, _body):
+            if path.startswith("/bosh/rest/inventory/delta"):
+                status, payload = reply("inventory", inventory)
+            elif path.startswith("/bosh/rest/handshake/devices/list"):
+                status, payload = reply("devices", devices)
+            elif path.startswith("/bosh/rest/v2/registerhw"):
+                status, payload = reply("register", register)
+            else:
+                status, payload = 404, b"{}"
+            return status, {"Content-Type": "application/json"}, payload
 
-    def _error400(self, body):
-        from urllib.error import HTTPError
-        error = HTTPError("https://bosh.pageplace.de/bosh/rest/x", 400,
-                          "Bad Request", {}, None)
-        error.read = lambda: body
-        return error
+        recorder = sleeps if sleeps is not None else []
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin), \
+                patch("calibre_plugin.tolino.time.sleep", recorder.append):
+            yield server
 
     def test_error_text_surfaces_response_info_message(self):
         """BOSH meldet Fehler als ResponseInfo.message – ohne diesen
         Schluessel zeigte die Meldung nur ein nutzloses "{}"."""
         from ..tolino import TolinoApiError
         client = self._client()
-
-        def fake_urlopen(request, timeout=None):
-            raise self._error400(
-                b'{"ResponseInfo": {"message": "hardware not registered"}}')
-
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=tolino_module.TolinoApiError("no devices")), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   return_value=False):
+        failure = (400, b'{"ResponseInfo": {"message": '
+                        b'"hardware not registered"}}')
+        with self._bosh([failure]):
             with self.assertRaises(TolinoApiError) as ctx:
                 client.inventory()
         self.assertIn("hardware not registered", str(ctx.exception))
@@ -610,63 +599,42 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
     def test_inventory_adopts_registered_device_and_retries(self):
         """Ein fremdes, konfiguriertes Geraet wird durch das
         registrierte des Kontos ersetzt, danach folgt GENAU ein Retry."""
-        seen = []
         adopted = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            if len(seen) == 1:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
         client = self._client("stale-hw-000")
         client.hardware_callback = adopted.append
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   side_effect=AssertionError("register must not run")):
+        with self._bosh(
+                [(400, b"{}"), (200, self.INVENTORY_BODY)],
+                devices=[(200, self._devices_body(self.ADOPTED))]) as server:
             data = client.inventory()
         self.assertEqual([], data)
-        self.assertEqual(2, len(seen))
-        self.assertEqual(seen[0], seen[1])
-        self.assertEqual("12345678-1234-4abc-8def-1234567890ab",
-                         client.hardware)
-        self.assertEqual(["12345678-1234-4abc-8def-1234567890ab"], adopted)
+        self.assertEqual(2, server.paths().count(
+            "/bosh/rest/inventory/delta?strip=true"))
+        self.assertFalse(any("registerhw" in path
+                             for path in server.paths()))
+        self.assertEqual(self.ADOPTED, client.hardware)
+        self.assertEqual([self.ADOPTED], adopted)
 
     def test_inventory_registers_hardware_when_device_list_unavailable(self):
         """Ohne Geraeteliste wird die eigene Hardware-ID per registerhw
         registriert (wie die Referenz-Clients), dann der Retry."""
-        seen = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append((request.full_url,
-                         {key.casefold(): value
-                          for key, value in request.headers.items()}))
-            if "registerhw" in request.full_url:
-                return self._response(b"{}")
-            inventory_calls = len([1 for url, _ in seen
-                                   if "inventory" in url])
-            if inventory_calls == 1:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
+        sleeps = []
         client = self._client("configured-hw")
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=tolino_module.TolinoApiError("no devices")), \
-             patch("calibre_plugin.tolino.time.sleep"):
+        with self._bosh([(400, b"{}"), (200, self.INVENTORY_BODY)],
+                        sleeps=sleeps) as server:
             data = client.inventory()
         self.assertEqual([], data)
-        self.assertEqual(3, len(seen))
-        self.assertIn("/inventory/delta", seen[0][0])
-        self.assertIn("v2/registerhw", seen[1][0])
-        self.assertIn("/inventory/delta", seen[2][0])
-        register_headers = seen[1][1]
+        paths = server.paths()
+        self.assertEqual(4, len(paths))
+        self.assertTrue(paths[0].startswith("/bosh/rest/inventory/delta"))
+        self.assertEqual("/bosh/rest/handshake/devices/list", paths[1])
+        self.assertEqual("/bosh/rest/v2/registerhw", paths[2])
+        self.assertTrue(paths[3].startswith("/bosh/rest/inventory/delta"))
+        register_headers = server.requests[2]["headers"]
         self.assertEqual("HTML5", register_headers.get("hardware_type"))
         self.assertEqual("TOLINO_WEBREADER",
                          register_headers.get("client_type"))
         self.assertEqual("configured-hw", client.hardware)
+        self.assertEqual([1.5], sleeps)
 
     def test_failed_hardware_callback_is_nonfatal_and_redacted(self):
         client = self._client()
@@ -674,9 +642,11 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         client.access = "access-secret"
         client.hardware_callback = lambda _hardware: (_ for _ in ()).throw(
             RuntimeError("refresh-secret access-secret"))
-        with patch("calibre_plugin.tolino.log_warning") as warning:
+        warnings = LogRecorder()
+        with patch("calibre_plugin.tolino.log_warning", warnings):
             client._notify_hardware()
-        message = warning.call_args.args[0]
+        self.assertEqual(1, len(warnings))
+        message = warnings[0]
         self.assertIn("Geräte-ID", message)
         self.assertNotIn("refresh-secret", message)
         self.assertNotIn("access-secret", message)
@@ -684,14 +654,20 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
 
     def test_unexpected_recovery_error_is_not_hidden(self):
         client = self._client()
-        with patch("calibre_plugin.tolino.urlopen",
-                   side_effect=self._error400(b"{}")), \
-             patch.object(client, "fetch_hardware_id",
-                          side_effect=RuntimeError("device bug")), \
-             patch.object(client, "_register_hardware") as register:
+
+        def broken_device_list():
+            raise RuntimeError("device bug")
+
+        def must_not_register():
+            raise AssertionError("register must not run")
+
+        client.fetch_hardware_id = broken_device_list
+        client._register_hardware = must_not_register
+        with self._bosh([(400, b"{}")]) as server:
             with self.assertRaisesRegex(RuntimeError, "device bug"):
                 client.inventory()
-        register.assert_not_called()
+        # Nur der Inventar-Aufruf ging raus: kein weiterer Recovery-Versuch.
+        self.assertEqual(1, len(server.paths()))
         self.assertFalse(client._in_device_recovery)
 
     def test_registered_current_device_raises_without_extra_calls(self):
@@ -700,51 +676,35 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         Ursache) bleibt sichtbar."""
         from ..tolino import TolinoApiError
         client = self._client("configured-hw")
-        seen = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            raise self._error400(b"{}")
-
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="configured-hw"), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   side_effect=AssertionError("register must not run")):
+        with self._bosh([(400, b"{}")],
+                        devices=[(200, self._devices_body("configured-hw"))]
+                        ) as server:
             with self.assertRaises(TolinoApiError):
                 client.inventory()
-        self.assertEqual(1, len(seen))
+        paths = server.paths()
+        self.assertEqual(1, paths.count(
+            "/bosh/rest/inventory/delta?strip=true"))
+        self.assertFalse(any("registerhw" in path for path in paths))
 
     def test_registration_settles_with_waiting_retries(self):
         """Feldbefund: Der Verbindungstest direkt nach registerhw
         warf noch 400 (die ID war noch nicht angekommen), der naechste
         Klick Sekunden spaeter lief. Der erste Retry wartet jetzt kurz,
         und es gibt GENAU EINEN zweiten Versuch danach."""
-        seen = []
         sleeps = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            if "registerhw" in request.full_url:
-                return self._response(b"{}")
-            inventory_calls = len([1 for url in seen if "inventory" in url])
-            if inventory_calls <= 2:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
         client = self._client("configured-hw")
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=tolino_module.TolinoApiError("no devices")), \
-             patch("calibre_plugin.tolino.time.sleep",
-                   side_effect=sleeps.append):
+        with self._bosh([(400, b"{}"), (400, b"{}"),
+                         (200, self.INVENTORY_BODY)],
+                        sleeps=sleeps) as server:
             data = client.inventory()
         self.assertEqual([], data)
-        self.assertEqual(4, len(seen))
-        self.assertIn("/inventory/delta", seen[0])
-        self.assertIn("v2/registerhw", seen[1])
-        self.assertIn("/inventory/delta", seen[2])
-        self.assertIn("/inventory/delta", seen[3])
+        paths = server.paths()
+        self.assertEqual(5, len(paths))
+        self.assertTrue(paths[0].startswith("/bosh/rest/inventory/delta"))
+        self.assertEqual("/bosh/rest/handshake/devices/list", paths[1])
+        self.assertEqual("/bosh/rest/v2/registerhw", paths[2])
+        self.assertTrue(paths[3].startswith("/bosh/rest/inventory/delta"))
+        self.assertTrue(paths[4].startswith("/bosh/rest/inventory/delta"))
         self.assertEqual([1.5, 1.5], sleeps)
         # Danach ist die ID bekannt: der naechste Lauf braucht keine
         # Recovery (Flag ist verbraucht).
@@ -753,26 +713,16 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
     def test_adopted_device_needs_no_settle_wait(self):
         """Uebernommenes, registriertes Geraet: kein Warten, weiterhin
         genau ein direkter Retry."""
-        seen = []
         sleeps = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            if len(seen) == 1:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
         client = self._client("stale-hw-000")
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   side_effect=AssertionError("register must not run")), \
-             patch("calibre_plugin.tolino.time.sleep",
-                   side_effect=sleeps.append):
+        with self._bosh(
+                [(400, b"{}"), (200, self.INVENTORY_BODY)],
+                devices=[(200, self._devices_body(self.ADOPTED))],
+                sleeps=sleeps) as server:
             data = client.inventory()
         self.assertEqual([], data)
-        self.assertEqual(2, len(seen))
+        self.assertEqual(2, server.paths().count(
+            "/bosh/rest/inventory/delta?strip=true"))
         self.assertEqual([], sleeps)
         self.assertFalse(client._hw_registered_now)
 
@@ -802,66 +752,39 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
         self.assertEqual("https://www.thalia.at/auth/oauth2/token",
                          PARTNERS[2]["token_url"])
 
+    @staticmethod
+    def _token_ok(_method, _path, _headers, _body):
+        return (200, {"Content-Type": "application/json"},
+                b'{"access_token":"a","expires_in":3600}')
+
     def test_token_post_carries_reader_origin(self):
         """Der Token-POST sieht bei allen Shops aus wie der des Readers."""
         for pid in (1, 5, 8):
-            captured = {}
-
-            class Response:
-                status = 200
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *args):
-                    return False
-
-                def read(self):
-                    return b'{"access_token":"a","expires_in":3600}'
-
-            def request(request, timeout, _captured=captured):
-                _captured.update(
-                    {key.casefold(): value
-                     for key, value in request.headers.items()})
-                return Response()
-
-            with patch("calibre_plugin.tolino.urlopen", request):
+            with LocalHTTP(self._token_ok) as server, \
+                    local_tolino_endpoints(server.origin, partner_ids=(pid,)):
                 TolinoClient(pid, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                              "refresh-token").login()
+            request = server.requests[0]
+            self.assertEqual("/token/%d" % pid, request["path"], pid)
             self.assertEqual("https://webreader.mytolino.com",
-                             captured.get("origin"), pid)
+                             request["headers"].get("origin"), pid)
             self.assertEqual("https://webreader.mytolino.com/",
-                             captured.get("referer"), pid)
+                             request["headers"].get("referer"), pid)
 
     def test_authenticated_requests_send_webreader_client(self):
+        def responder(_method, _path, _headers, _body):
+            return 200, {"Content-Type": "application/json"}, b"{}"
+
         for pid in (1, 4, 5):
-            captured = {}
-
-            class Response:
-                status = 200
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *args):
-                    return False
-
-                def read(self):
-                    return b"{}"
-
-            def request(request, timeout, _captured=captured):
-                _captured.update(
-                    {key.casefold(): value
-                     for key, value in request.headers.items()})
-                return Response()
-
-            with patch("calibre_plugin.tolino.urlopen", request):
+            with LocalHTTP(responder) as server, \
+                    local_tolino_endpoints(server.origin, partner_ids=(pid,)):
                 client = TolinoClient(pid, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
                                       "refresh-token")
                 client.access = "access-token"
                 client.expires_at = time.time() + 60
                 client._request(
-                    "https://bosh.pageplace.de/bosh/rest/inventory/delta")
+                    server.url("/bosh/rest/inventory/delta"))
+            captured = server.requests[0]["headers"]
             self.assertEqual("TOLINO_WEBREADER",
                              captured.get("client_type"), pid)
             self.assertEqual("5.2.0", captured.get("client_version"), pid)
@@ -882,15 +805,6 @@ class RequestRetryBudgetTests(unittest.TestCase):
     Rettungen einen eigenen, sichtbaren Zaehler (Neuanmeldung, Geraete-
     Recovery, WAF-Warteversuch)."""
 
-    @staticmethod
-    def _bot_error():
-        from urllib.error import HTTPError
-        error = HTTPError("https://example.invalid/token", 403, "Forbidden",
-                          {}, None)
-        error.read = lambda: (b"<!doctype html><title>Zugriff geblockt"
-                              b"</title>")
-        return error
-
     def test_non_token_403_is_not_an_auth_failure(self):
         from urllib.error import HTTPError
         from ..tolino import TolinoApiError, TolinoClient
@@ -909,46 +823,47 @@ class RequestRetryBudgetTests(unittest.TestCase):
         self.assertEqual("access-token", client.access)
 
     def test_waf_budget_counts_down_and_then_raises(self):
-        from ..tolino import _WAF_RETRY_SECONDS, TolinoAuthError, TolinoClient
+        from ..tolino import _WAF_RETRY_SECONDS, TolinoAuthError
         sleeps = []
 
-        def fake_urlopen(request, timeout=None):
-            raise self._bot_error()
+        def responder(_method, _path, _headers, _body):
+            return (403, {"Content-Type": "text/html"},
+                    b"<!doctype html><title>Zugriff geblockt</title>")
 
-        with patch("calibre_plugin.tolino.urlopen",
-                   side_effect=fake_urlopen), \
-                patch("calibre_plugin.tolino.time.sleep",
-                      side_effect=sleeps.append):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin), \
+                patch("calibre_plugin.tolino.time.sleep", sleeps.append):
             client = TolinoClient(4, "hardware", "old-refresh")
             with self.assertRaises(TolinoAuthError):
                 client.login()
         # Genau die zwei Warteversuche der Kaskade, dann der sichtbare Fehler.
         self.assertEqual(list(_WAF_RETRY_SECONDS), sleeps)
+        self.assertEqual(3, len(server.requests))
 
     def test_bosh_400_attempts_device_recovery(self):
         """Ein BOSH-400 versucht, die registrierte Geräte-ID zu übernehmen."""
-        from urllib.error import HTTPError
+        from ..tolino import TolinoApiError
 
-        from ..tolino import TolinoApiError, TolinoClient
-        error = HTTPError("https://bosh.pageplace.de/bosh/rest/x", 400,
-                          "Bad Request", {}, None)
-        error.read = lambda: b"{}"
+        devices = (b'{"deviceListResponse":{"devices":[{'
+                   b'"deviceId":"registered-hw","deviceLastUsage":"1"}]}}')
+
+        def responder(_method, path, _headers, _body):
+            if "handshake/devices/list" in path:
+                return 200, {"Content-Type": "application/json"}, devices
+            if "v2/registerhw" in path:
+                return 200, {"Content-Type": "application/json"}, b"{}"
+            return 400, {"Content-Type": "application/json"}, b"{}"
+
         client = TolinoClient(4, "stale-hw", "refresh-token-value")
         client.access = "access-value"
         client.expires_at = time.time() + 3600
-
-        def fake_urlopen(request, timeout=None):
-            raise error
-
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-                patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                      return_value="registered-hw"), \
-                patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                      return_value=False):
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
             with self.assertRaises(TolinoApiError):
-                client._request("https://bosh.pageplace.de/bosh/rest/x")
+                client._request(server.url("/bosh/rest/x"))
         # Die Recovery lief trotz verbrauchtem Auth-Retry ...
         self.assertEqual("registered-hw", client.hardware)
+        self.assertIn("/bosh/rest/handshake/devices/list", server.paths())
 
 class ErrorCodeTests(unittest.TestCase):
     """Fehlercodes: kurzer Nutzertext, Details nur im Log."""
@@ -957,11 +872,13 @@ class ErrorCodeTests(unittest.TestCase):
         exc = tolino_module.TolinoApiError(
             "Tolino-Fehler (HTTP 500): <html>boom</html>", code="N03",
             short="Tolino meldet einen Fehler (HTTP 500).")
-        with patch.object(tolino_module, "log_warning") as log:
+        log = LogRecorder()
+        with patch.object(tolino_module, "log_warning", log):
             shown = tolino_module.report_error(exc)
         self.assertEqual("Tolino meldet einen Fehler (HTTP 500). (Code N03)",
                          shown)
-        self.assertIn("boom", log.call_args[0][0])
+        self.assertEqual(1, len(log))
+        self.assertIn("boom", log[0])
         self.assertIn("Tolino-Fehler (HTTP 500)", str(exc))
 
     def test_secrets_never_reach_the_dialog_the_log_or_the_history(self):
@@ -971,23 +888,25 @@ class ErrorCodeTests(unittest.TestCase):
             "refresh_token=%s password=%s Cookie: session=%s"
             % secrets[:3], code="A01",
             detail="access_token=%s" % secrets[3])
-        with patch.object(tolino_module, "log_warning") as log:
+        log = LogRecorder()
+        with patch.object(tolino_module, "log_warning", log):
             shown = tolino_module.report_error(exc, "Test", secrets)
-        log_text = log.call_args[0][0]
+        log_text = " ".join(log)
         blob = " ".join([shown, log_text])
         for secret in secrets:
             self.assertNotIn(secret, blob)
         self.assertIn("[REDACTED]", log_text)
 
     def test_unexpected_errors_get_e99_and_a_traceback_in_the_log(self):
-        with patch.object(tolino_module, "log_warning") as log:
+        log = LogRecorder()
+        with patch.object(tolino_module, "log_warning", log):
             try:
                 raise ValueError("kaputt")
             except ValueError as exc:
                 shown = tolino_module.report_error(exc, "Test")
         self.assertIn("(Code E99)", shown)
         self.assertIn("kaputt", shown)
-        logged = " ".join(call[0][0] for call in log.call_args_list)
+        logged = " ".join(log)
         self.assertIn("Traceback", logged)
 
     def test_code_without_message_defaults_to_e99(self):
@@ -1025,12 +944,14 @@ class UserTextTests(unittest.TestCase):
         exc = tolino_module.TolinoAuthError(
             "Die Tolino-Sitzung ist beendet. " + tolino_module.RELOGIN,
             code="A01", detail="HTTP 400: Token is not active")
-        with patch.object(tolino_module, "log_warning") as log:
+        log = LogRecorder()
+        with patch.object(tolino_module, "log_warning", log):
             shown = tolino_module.report_error(exc, "Vorbereitung")
         self.assertEqual(
             "Die Tolino-Sitzung ist beendet. Bitte bei tolino anmelden. "
             "(Code A01)", shown)
-        logged = log.call_args[0][0]
+        self.assertEqual(1, len(log))
+        logged = log[0]
         self.assertIn("A01", logged)
         self.assertIn("Token is not active", logged)
         self.assertNotIn("Token is not active", shown)
@@ -1048,10 +969,11 @@ class UserTextTests(unittest.TestCase):
                     "Die Tolino-Sitzung ist beendet. " + tolino_module.RELOGIN,
                     code="A01", detail="HTTP 400") from inner
         except tolino_module.TolinoAuthError as exc:
-            with patch.object(tolino_module, "log_warning") as log:
+            log = LogRecorder()
+            with patch.object(tolino_module, "log_warning", log):
                 shown = tolino_module.report_error(
                     exc, "Vorbereitung", (secret,))
-        calls = [call[0][0] for call in log.call_args_list]
+        calls = list(log)
         self.assertEqual(1, shown.count("\n") + 1)
         self.assertTrue(shown.endswith("(Code A01)"))
         self.assertTrue(any(c.startswith("Tolino-Details") for c in calls), calls)
@@ -1064,9 +986,10 @@ class UserTextTests(unittest.TestCase):
     def test_report_error_without_a_traceback_logs_a_single_line(self):
         """Ohne Traceback (z. B. selbst gebaute Meldung) bleibt es eine Zeile."""
         exc = tolino_module.TolinoError("Fehler ohne Traceback", code="E99")
-        with patch.object(tolino_module, "log_warning") as log:
+        log = LogRecorder()
+        with patch.object(tolino_module, "log_warning", log):
             shown = tolino_module.report_error(exc)
-        self.assertEqual(1, log.call_count)
+        self.assertEqual(1, len(log))
         self.assertEqual("Fehler ohne Traceback (Code E99)", shown)
 
 
@@ -1470,7 +1393,6 @@ class PersistCredentialsDedupTests(unittest.TestCase):
             config.PREFERENCES = original
 
     def test_token_vault_only_clears_explicitly_rejected_tokens(self):
-        from urllib.error import HTTPError
         from ..token_vault import TokenVault
 
         cases = ((400, b'{"error":"invalid_grant",'
@@ -1484,10 +1406,14 @@ class PersistCredentialsDedupTests(unittest.TestCase):
                     config.save_account("konto", {
                         "refresh_token": "alt", "hardware_id": "hw",
                     }, active="konto")
-                    error = HTTPError("https://example.invalid/token", status,
-                                      "Error", {}, None)
-                    error.read = lambda _body=body: _body
-                    with patch("calibre_plugin.tolino.urlopen", side_effect=error):
+
+                    def responder(_method, _path, _headers, _payload,
+                                  _status=status, _body=body):
+                        return (_status, {"Content-Type": "application/json"},
+                                _body)
+
+                    with LocalHTTP(responder) as server, \
+                            local_tolino_endpoints(server.origin):
                         with self.assertRaises(TolinoAuthError):
                             TokenVault().login("konto", 4)
                     account = config.account_by_name("konto")

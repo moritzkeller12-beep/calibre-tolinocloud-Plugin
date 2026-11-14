@@ -1555,10 +1555,16 @@ class DeletionConfirmationTests(unittest.TestCase):
         ui_module = ui_module_for(
             self, qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
         uuid = "11111111-1111-4111-8111-111111111111"
-        with patch.object(ui_module.dashboard_parts, "_ask",
-                          return_value=True) as ask:
+        asked = []
+
+        def ask(_parent, _title, text):
+            asked.append(text)
+            return True
+
+        with patch.object(ui_module.dashboard_parts, "_ask", ask):
             ui_module.dashboard_parts.confirm_deletions(None, [(uuid, "t-1")])
-        text = ask.call_args[0][2]
+        self.assertEqual(1, len(asked))
+        text = asked[0]
         self.assertIn("Buch ohne Titel", text)
         self.assertNotIn(uuid, text)
 

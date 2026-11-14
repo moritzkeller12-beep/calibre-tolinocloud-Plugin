@@ -1263,10 +1263,8 @@ class LoginMessageTests(unittest.TestCase):
         dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
             dashboard)
 
-        with patch.object(ui_module.dashboard, "grabber_window_state",
-                          create=True) as alive:
-            dashboard.login_completed("hw-neu")
-        alive.assert_not_called()
+        dashboard.login_completed("hw-neu")
+        # Keine Fenster-Warnung: die Statuszeile meldet nur den Erfolg.
         self.assertNotIn("offen", dashboard.status.value)
         self.assertIn("Angemeldet.", dashboard.status.value)
 

@@ -1486,7 +1486,19 @@ class KeepaliveSafetyTests(unittest.TestCase):
     def test_keepalive_skips_while_a_refresh_is_locked(self):
         accounts = [{"name": "A", "partner_id": 4, "hardware_id": "hw",
                      "refresh_token": "tok"}]
-        with patch("calibre_plugin.token_vault.TolinoClient") as client_mock, \
+        logins = []
+
+        class FakeClient:
+            def __init__(self, _partner_id, hardware, refresh, **_kwargs):
+                logins.append(refresh)
+                self.hardware = hardware
+                self.refresh = refresh
+                self.access = None
+
+            def login(self):
+                return self.refresh
+
+        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                 patch("calibre_plugin.token_vault.settings",
                       lambda **_kwargs: {"accounts": accounts}), \
                 patch("calibre_plugin.token_vault.account_summary",
@@ -1494,9 +1506,10 @@ class KeepaliveSafetyTests(unittest.TestCase):
             with vault_module.TOKEN_VAULT._lock:
                 result = vault_module.TOKEN_VAULT.keepalive_refresh()
             self.assertEqual(0, result)
-            client_mock.assert_not_called()
+            # Solange der Lock haelt, wurde kein Token eingeloest.
+            self.assertEqual([], logins)
             self.assertEqual(1, vault_module.TOKEN_VAULT.keepalive_refresh())
-        client_mock.assert_called_once()
+        self.assertEqual(["tok"], logins)
 
     def test_token_vault_serializes_refreshes_and_releases_on_failure(self):
         from ..token_vault import TOKEN_VAULT
