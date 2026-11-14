@@ -367,9 +367,7 @@ class SyncWorker(QObject):
         for book_uuid, tolino_id, series, operation in (
                 collection_ops if known is not None else ()):
             if (tolino_id, series) in known:
-                # Der Skip-Zweig läuft nicht durch `_step()` und braucht
-                # deshalb seinen eigenen Abbruch-Checkpoint.
-                checkpoint()
+                checkpoint()  # Skip-Zweig läuft nicht durch _step().
                 remember_collection(self.state, book_uuid, series)
                 self._finish_operation(operation, OP_SKIPPED,
                                        reason="schon in der Cloud")
