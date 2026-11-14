@@ -57,21 +57,32 @@ def _book_key_index(dashboard):
 
 def _write_reading_updates(dashboard, read_updates, progress_updates,
                            error_label):
-    """Write confirmed values and refresh the affected rows once."""
+    """Write confirmed values and refresh the affected rows once.
+
+    Lesestatus und Fortschritt sind getrennte Spalten: ein Fehler in einer
+    Spalte darf die andere nicht blockieren.
+    """
     if not (read_updates or progress_updates):
         return 0
     try:
         database = dashboard.gui.current_db
-        written = (update_read_status(database, read_updates)
-                   + update_progress_status(database, progress_updates))
-        if written:
-            book_ids = {book_id for book_id, _value
-                        in read_updates + progress_updates}
-            _refresh_library_view(dashboard, book_ids)
-        return written
     except Exception as exc:
         log_warning("%s: %s" % (error_label, sanitize_error(exc)))
         return 0
+    written = 0
+    for write, updates in ((update_read_status, read_updates),
+                           (update_progress_status, progress_updates)):
+        if not updates:
+            continue
+        try:
+            written += write(database, updates)
+        except Exception as exc:
+            log_warning("%s: %s" % (error_label, sanitize_error(exc)))
+    if written:
+        book_ids = {book_id for book_id, _value
+                    in read_updates + progress_updates}
+        _refresh_library_view(dashboard, book_ids)
+    return written
 
 
 def _mirror_account_reading(dashboard, account_name=None):
@@ -123,11 +134,11 @@ def _mirror_comparison_reading(dashboard, comparison):
 
 
 def _persist_sync_result(dialog, state, updates):
-    """Sync-Zustand, Tolino-IDs und bestätigten Lesestatus sichern.
+    """Sync-Zustand, Tolino-IDs, Lesestatus und Fortschritt sichern.
 
-    Die beiden Calibre-Schreibvorgänge laufen getrennt und sind einzeln
-    abgesichert: ein Fehler in einer Spalte darf weder den anderen
-    Schreibvorgang noch den Abschluss des Laufs verhindern.
+    Die Calibre-Schreibvorgänge laufen getrennt und sind einzeln
+    abgesichert: ein Fehler in einer Spalte darf weder die anderen
+    Schreibvorgänge noch den Abschluss des Laufs verhindern.
     """
     worker = getattr(dialog, "worker", None)
     account_name = str(
@@ -149,10 +160,14 @@ def _persist_sync_result(dialog, state, updates):
     ]
     if account_name and account_name == str(
             getattr(dialog, "account_name", "") or ""):
-        writers.append(
+        writers.extend([
             ("read", "Lesestatus",
              lambda db: update_read_status(
-                 db, list(getattr(worker, "read_updates", ()) or ()))))
+                 db, list(getattr(worker, "read_updates", ()) or ()))),
+            ("progress", "Lesefortschritt",
+             lambda db: update_progress_status(
+                 db, list(getattr(worker, "progress_updates", ()) or ()))),
+        ])
     for key, label, write in writers:
         if not columns.get(key):
             continue

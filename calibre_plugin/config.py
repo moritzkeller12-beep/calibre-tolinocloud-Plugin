@@ -104,31 +104,6 @@ def _account_records():
     return list(raw) if isinstance(raw, list) else []
 
 
-def _named_index(records, name):
-    """Index of a normalized account name, or None for a new account."""
-    if not records:
-        return None
-    for index, (stored, _source) in enumerate(_named_accounts(records)):
-        if stored == name:
-            return index
-    return None
-
-
-def _can_create(records, name, create, allow_virtual_default):
-    """May this write add ``name`` to the stored account list?"""
-    if create:
-        return True
-    return (allow_virtual_default and not records
-            and name == DEFAULT_ACCOUNT_NAME)
-
-
-def _activate(records, requested, previous, fallback):
-    """Select a valid active account after the records changed."""
-    names = {stored for stored, _source in _named_accounts(records)}
-    chosen = str(requested or previous or "").strip()
-    PREFERENCES["active_account"] = chosen if chosen in names else fallback
-
-
 def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
                    create=True, allow_virtual_default=False):
     """Persist one account and optionally the active/format settings.
@@ -140,13 +115,19 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
     if not name or not isinstance(values, dict):
         return False
     records = _account_records()
-    index = _named_index(records, name)
+    index = None
+    if records:
+        for position, (stored, _source) in enumerate(_named_accounts(records)):
+            if stored == name:
+                index = position
+                break
     previous_active = ""
     if active is not _UNSET:
         previous_active = _active_name(
             [{"name": stored} for stored, _source in _named_accounts(records)])
     if index is None:
-        if not _can_create(records, name, create, allow_virtual_default):
+        if not (create or (allow_virtual_default and not records
+                           and name == DEFAULT_ACCOUNT_NAME)):
             return False
         records.append(_account(dict(values, name=name), name))
     else:
@@ -157,7 +138,9 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
                                   copy_state="state" in values)
     PREFERENCES["accounts"] = records
     if active is not _UNSET:
-        _activate(records, active, previous_active, name)
+        names = {stored for stored, _source in _named_accounts(records)}
+        chosen = str(active or previous_active or "").strip()
+        PREFERENCES["active_account"] = chosen if chosen in names else name
     elif not PREFERENCES.get("active_account"):
         PREFERENCES["active_account"] = name
     if preferred_formats is not None:

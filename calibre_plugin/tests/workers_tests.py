@@ -176,6 +176,56 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertIsNone(emitted["failed"])
 
+    def test_successful_upload_clears_old_reading_columns(self):
+        ui_module = self._ui()
+        uuid = "11111111-1111-4111-8111-111111111111"
+        state = {uuid: {
+            "tolino_id": "old", "calibre_id": 1,
+            "reading": {"read": True, "progress": {"percent": 100}}}}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.refresh = "rot-A"
+
+            def login(self):
+                return self.refresh
+
+            def upload(self, _path):
+                return "new"
+
+        try:
+            worker, emitted, _saved, _credentials = self._run(
+                ui_module, self._settings(state),
+                [self._job(ui_module, 1, uuid)], FakeClient)
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertIsNone(emitted["failed"])
+        self.assertIsNotNone(emitted["completed"])
+        self.assertEqual([(1, None)], worker.read_updates)
+        self.assertEqual([(1, None)], worker.progress_updates)
+
+    def test_persist_result_writes_progress_for_uploaded_copy(self):
+        from ..ui_dashboard import _persist_sync_result
+        writes = []
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": object()})(),
+            account_name="A")
+        worker = type("Worker", (), {})()
+        worker.account_name = "A"
+        worker.context = type("Context", (), {
+            "columns": {"progress": True}})()
+        worker.read_updates = []
+        worker.progress_updates = [(1, None)]
+        dashboard.worker = worker
+        with patch("calibre_plugin.ui_dashboard.save_account",
+                   lambda *args, **kwargs: None), \
+             patch("calibre_plugin.ui_dashboard.update_progress_status",
+                   lambda _db, updates: writes.extend(updates)
+                   or len(updates)):
+            failures = _persist_sync_result(dashboard, {}, [])
+        self.assertEqual([], failures)
+        self.assertEqual([(1, None)], writes)
+
     def test_first_upload_survives_a_failing_second_upload(self):
         ui_module = self._ui()
 
@@ -2213,3 +2263,39 @@ class MultiAccountReadingStateTests(unittest.TestCase):
                       [self.UUID]["reading"]["read"])
         self.assertEqual(37, config.account_by_name("A")["state"]
                          [self.UUID]["reading"]["progress"]["percent"])
+
+    def test_read_error_does_not_block_progress_write(self):
+        from ..ui_dashboard import _write_reading_updates
+        writes, refreshed = [], []
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": object()})())
+        with patch("calibre_plugin.ui_dashboard.update_read_status",
+                   side_effect=RuntimeError("Lesestatus kaputt")), \
+             patch("calibre_plugin.ui_dashboard.update_progress_status",
+                   lambda _db, updates: writes.extend(updates)
+                   or len(updates)), \
+             patch("calibre_plugin.ui_dashboard._refresh_library_view",
+                   lambda _dashboard, book_ids: refreshed.append(set(book_ids))):
+            written = _write_reading_updates(
+                dashboard, [(1, True)], [(2, 42)], "Test")
+        self.assertEqual(1, written)
+        self.assertEqual([(2, 42)], writes)
+        self.assertEqual([{1, 2}], refreshed)
+
+    def test_progress_error_does_not_block_read_write(self):
+        from ..ui_dashboard import _write_reading_updates
+        writes, refreshed = [], []
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": object()})())
+        with patch("calibre_plugin.ui_dashboard.update_read_status",
+                   lambda _db, updates: writes.extend(updates)
+                   or len(updates)), \
+             patch("calibre_plugin.ui_dashboard.update_progress_status",
+                   side_effect=RuntimeError("Fortschritt kaputt")), \
+             patch("calibre_plugin.ui_dashboard._refresh_library_view",
+                   lambda _dashboard, book_ids: refreshed.append(set(book_ids))):
+            written = _write_reading_updates(
+                dashboard, [(1, True)], [(2, 42)], "Test")
+        self.assertEqual(1, written)
+        self.assertEqual([(1, True)], writes)
+        self.assertEqual([{1, 2}], refreshed)

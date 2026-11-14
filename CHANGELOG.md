@@ -1,5 +1,13 @@
 # Änderungen
 
+## 0.1.08
+
+- Nach einem Upload werden alter Lesestatus und Fortschritt der ersetzten Kopie aus den Calibre-Spalten entfernt.
+- Lesestatus und Fortschritt werden getrennt geschrieben; ein Fehler in einer Spalte blockiert die andere nicht mehr.
+- Der Sammlungs-Sync prüft den Abbruch im Skip-Zweig nur noch einmal; Schreibschritte nutzen den Checkpoint von `_step()`.
+- Der interne Konten-Schreibpfad wurde gestrafft, ohne die Regeln für Anlage, Aktivierung oder Kontentrennung zu ändern.
+- Doppelte Buch-IDs werden vor einer Gelesen-Markierung entfernt, wobei die Reihenfolge erhalten bleibt.
+
 ## 0.1.07
 
 - Cover-Uploads senden den von tolino erwarteten `control`-Block; ohne ihn antwortet der Cover-Endpunkt mit HTTP 400.

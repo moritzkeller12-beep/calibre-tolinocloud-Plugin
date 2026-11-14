@@ -819,8 +819,11 @@ class TolinoClient:
         Bereits gesetzte Marken werden nicht erneut geschrieben, fehlende
         beim Entfernen übersprungen.
         """
-        ids = [str(book_id) for book_id in book_ids or []
-               if str(book_id or "").strip()]
+        # Doppelte IDs würden denselben Patch mehrfach erzeugen. `dict`
+        # behält die erste Reihenfolge und entfernt nur echte Duplikate.
+        ids = list(dict.fromkeys(
+            str(book_id) for book_id in book_ids or []
+            if str(book_id or "").strip()))
         if not ids:
             raise TolinoApiError(
                 "Gelesen-Markierung ohne Buch.", code="E99",

@@ -66,8 +66,11 @@ class SyncWorker(QObject):
         # Der Worker ändert und speichert eine private Zustandskopie.
         self.state = copy.deepcopy(state) if isinstance(state, dict) else {}
         self.updates = []
-        # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung.
+        # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung;
+        # ``None`` leert die Spalte für eine neue Kopie.
         self.read_updates = []
+        # (Calibre-Nummer, None) für Kopien ohne alten Lesefortschritt.
+        self.progress_updates = []
         self.operations = []
         self.outcome = {
             "uploaded": 0, "deleted": 0,
@@ -364,8 +367,10 @@ class SyncWorker(QObject):
         # Schritt -- auch kein Checkpoint.
         for book_uuid, tolino_id, series, operation in (
                 collection_ops if known is not None else ()):
-            checkpoint()
             if (tolino_id, series) in known:
+                # Der Skip-Zweig läuft nicht durch `_step()` und braucht
+                # deshalb seinen eigenen Abbruch-Checkpoint.
+                checkpoint()
                 remember_collection(self.state, book_uuid, series)
                 self._finish_operation(operation, OP_SKIPPED,
                                        reason="schon in der Cloud")
@@ -448,6 +453,10 @@ class SyncWorker(QObject):
                 # Ein Upload bestätigt die Metadaten nicht per Read-back.
                 entry.pop("meta_verified_fp", None)
             self.updates.append((job.book_id, new_id))
+            # Die neue Kopie hat weder den Lesestatus noch den Fortschritt
+            # der ersetzten Kopie; beide Calibre-Spalten werden geleert.
+            self.read_updates.append((job.book_id, None))
+            self.progress_updates.append((job.book_id, None))
             # Der Upload ist nicht rueckgaengig zu machen: die neue ID muss
             # sofort im Konto stehen, nicht erst am Ende der Phase.
             self._persist_state()

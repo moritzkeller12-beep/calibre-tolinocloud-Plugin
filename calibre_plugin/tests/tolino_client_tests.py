@@ -196,6 +196,16 @@ class TolinoClientFeatureTests(unittest.TestCase):
         self.assertEqual(["/publications/book-2/tags"],
                          [item["path"] for item in calls[1]["data"]["patches"]])
 
+    def test_mark_read_many_deduplicates_ids_in_order(self):
+        client, calls = self._patching_client([
+            {"revision": 12, "patches": []},
+            {"revision": 13},
+        ])
+        client.mark_read_many(["book-2", "book-1", "book-2"])
+        self.assertEqual(["/publications/book-2/tags",
+                          "/publications/book-1/tags"],
+                         [item["path"] for item in calls[1]["data"]["patches"]])
+
     def test_mark_read_many_clears_only_existing_marks(self):
         """Ungelesen setzen: der Pfad trägt die Marken-ID der Cloud-Marke.
 
