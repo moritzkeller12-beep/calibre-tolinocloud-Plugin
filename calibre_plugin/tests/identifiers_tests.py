@@ -321,7 +321,7 @@ class UuidValueTests(unittest.TestCase):
 
 
 class LibraryScopedKeyTests(unittest.TestCase):
-    """Fallback keys name their library; old keys are adopted only once."""
+    """Fallback keys name their library."""
 
     class Api:
         def all_book_ids(self):
@@ -343,7 +343,7 @@ class LibraryScopedKeyTests(unittest.TestCase):
         self.assertEqual(first, library_scope(
             type("Db", (), {"library_id": "a"})()))
         self.assertNotEqual(first, second)
-        self.assertEqual(first, library_scope(
+        self.assertEqual(DEFAULT_LIBRARY_SCOPE, library_scope(
             type("Db", (), {"dbpath": "a"})()))
         self.assertEqual(DEFAULT_LIBRARY_SCOPE, library_scope(object()))
 

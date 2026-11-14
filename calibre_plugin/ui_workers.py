@@ -12,8 +12,7 @@ from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint, reading_state,
                          store_reading_state)
 from .dashboard_plan import local_metadata
-from .identifiers import (adopt_column_tolino_ids, display_title, state_entry,
-                          valid_book_uuid)
+from .identifiers import display_title, state_entry, valid_book_uuid
 from .library import image_suffix
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
@@ -604,7 +603,6 @@ class PrepareWorker(QObject):
         """
         original = load_state(self.state)
         working = copy.deepcopy(original)
-        adopt_column_tolino_ids(self.metadata, working)
         return working, original
 
     def _load_optional(self, label, loader):

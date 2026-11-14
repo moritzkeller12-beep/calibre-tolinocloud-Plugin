@@ -4,6 +4,8 @@ Synchronisiert Bücher, Metadaten, Lesestatus und Fortschritt zwischen Calibre u
 
 Aktuelle Version: **0.1.08** (Quelle: [`__init__.py`](__init__.py)).
 
+0.1.08 ist der neue State-Release: frühere Spalten- und `dbpath`-Migrationen werden nicht mehr ausgeführt. Der Config-Speicherkey bleibt unverändert, damit vorhandene Konten erhalten bleiben.
+
 ## Installation
 
 1. [Plugin-ZIP für 0.1.08 herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/0.1.08/tolino_cloud_sync.zip).

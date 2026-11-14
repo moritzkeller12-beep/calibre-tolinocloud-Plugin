@@ -1,11 +1,11 @@
-"""Fresh settings store for tolino Cloud Sync."""
+"""Persistent settings and account state for tolino Cloud Sync."""
 import copy
 import threading
 
 from calibre.utils.config import JSONConfig
 
-# Keep the historic Lite namespace: changing it would hide existing user
-# settings and credentials in Calibre's preferences store.
+# Stable storage key. Do not rename it: existing accounts and tokens live
+# under this key, and changing it would hide all saved data.
 PREFERENCES = JSONConfig("plugins/Tolino Cloud Sync Lite")
 DEFAULT_ACCOUNT_NAME = "default"
 ACCOUNT_KEYS = ("partner_id", "hardware_id", "refresh_token", "state")
@@ -98,12 +98,6 @@ def settings():
         }
 
 
-def _account_records():
-    """Return a mutable copy of the stored account list."""
-    raw = PREFERENCES.get("accounts", None)
-    return list(raw) if isinstance(raw, list) else []
-
-
 def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
                    create=True, allow_virtual_default=False):
     """Persist one account and optionally the active/format settings.
@@ -114,7 +108,8 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
     name = str(name or "").strip()
     if not name or not isinstance(values, dict):
         return False
-    records = _account_records()
+    raw = PREFERENCES.get("accounts", None)
+    records = list(raw) if isinstance(raw, list) else []
     index = None
     if records:
         for position, (stored, _source) in enumerate(_named_accounts(records)):

@@ -2,6 +2,7 @@
 
 ## 0.1.08
 
+- State-Release: Die alten `#tolino_id`-Spalten- und `dbpath`-Migrationspfade entfallen; der Config-Speicherkey bleibt als Datenanker unverändert.
 - Nach einem Upload werden alter Lesestatus und Fortschritt der ersetzten Kopie aus den Calibre-Spalten entfernt.
 - Lesestatus und Fortschritt werden getrennt geschrieben; ein Fehler in einer Spalte blockiert die andere nicht mehr.
 - Der Sammlungs-Sync prüft den Abbruch im Skip-Zweig nur noch einmal; Schreibschritte nutzen den Checkpoint von `_step()`.

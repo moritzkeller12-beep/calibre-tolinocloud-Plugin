@@ -70,26 +70,3 @@ def state_entry(state, key):
     """Zustandseintrag eines Buchs -- fremde Formen zählen als leer."""
     entry = state.get(key) if key and isinstance(state, dict) else None
     return entry if isinstance(entry, dict) else {}
-
-
-def adopt_column_tolino_ids(metadata_by_id, state):
-    """Konto-IDs aus `#tolino_id` einmalig in den State übernehmen.
-
-    Die Spalte ist nur eine Migrationsquelle für ältere Installationen. Ein
-    bereits vorhandener State-Eintrag bleibt unangetastet -- auch wenn er
-    keine `tolino_id` mehr enthält. So kann eine bewusst entfernte, veraltete
-    Cloud-ID nicht aus der Spalte zurückkehren.
-    """
-    if not isinstance(metadata_by_id, dict) or not isinstance(state, dict):
-        return False
-    changed = False
-    for book_id, item in metadata_by_id.items():
-        if not isinstance(item, dict):
-            continue
-        key = valid_book_uuid(item.get("uuid"))
-        column_id = str(item.get("tolino_id") or "").strip()
-        if not key or not column_id or key in state:
-            continue
-        state[key] = {"tolino_id": column_id, "calibre_id": book_id}
-        changed = True
-    return changed
