@@ -2,11 +2,13 @@
 
 ## 0.1.08
 
-- State-Release: Die alten `#tolino_id`-Spalten- und `dbpath`-Migrationspfade entfallen; der Config-Speicherkey bleibt als Datenanker unverändert.
+- State-Release: Die alten `#tolino_id`-Spalten- und `dbpath`-Migrationspfade entfallen.
+- Bewusste Ausnahme: Der Preferences-Key `plugins/Tolino Cloud Sync Lite` bleibt als Datenanker unverändert; eine Umbenennung ohne sichere Migration würde vorhandene Konten und Tokens verlieren.
+- Bewusste Ausnahme: `comparison_read_updates()` und `comparison_progress_updates()` bleiben getrennt. Die gemeinsame Auswahl liegt in `_known_reading_values()`, die Zeilenauswahl in `_matched_reading_rows()`; ein Zusammenlegen würde die unterschiedlichen Rückgabeformen und die getrennte Bedeutung von Lesestatus und Fortschritt verwischen.
 - Nach einem Upload werden alter Lesestatus und Fortschritt der ersetzten Kopie aus den Calibre-Spalten entfernt.
-- Lesestatus und Fortschritt werden getrennt geschrieben; ein Fehler in einer Spalte blockiert die andere nicht mehr.
+- Lesestatus und Fortschritt werden getrennt geschrieben; der gemeinsame Helfer `_write_reading_updates()` bündelt beide Spalten, führt sie aber in getrennten `try`-Blöcken aus, damit ein Fehler die andere Spalte nicht blockiert.
 - Der Sammlungs-Sync prüft den Abbruch im Skip-Zweig nur noch einmal; Schreibschritte nutzen den Checkpoint von `_step()`.
-- Der interne Konten-Schreibpfad wurde gestrafft, ohne die Regeln für Anlage, Aktivierung oder Kontentrennung zu ändern.
+- Die internen Helfer `_named_index()`, `_can_create()` und `_activate()` sind in `_write_account()` aufgegangen, ohne die Regeln für Anlage, Aktivierung oder Kontentrennung zu ändern.
 - Doppelte Buch-IDs werden vor einer Gelesen-Markierung entfernt, wobei die Reihenfolge erhalten bleibt.
 
 ## 0.1.07

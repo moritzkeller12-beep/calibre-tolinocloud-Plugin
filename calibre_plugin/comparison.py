@@ -199,26 +199,26 @@ def _matched_reading_rows(comparison):
         yield row, book_id, tolino_id
 
 
+def _known_reading_values(comparison, key):
+    """Yield (Calibre id, state) for confirmed values of one reading field."""
+    for row, book_id, _tolino_id in _matched_reading_rows(comparison):
+        value = row.get(key)
+        if value is None or not getattr(value, "known", False):
+            continue
+        yield book_id, value
+
+
 def comparison_read_updates(comparison):
     """Return confirmed (Calibre id, read?) updates for mapped rows."""
-    updates = []
-    for row, book_id, _tolino_id in _matched_reading_rows(comparison):
-        read = row.get("read")
-        if read is None or not getattr(read, "known", False):
-            continue
-        updates.append((book_id, bool(read.cloud)))
-    return updates
+    return [(book_id, bool(read.cloud))
+            for book_id, read in _known_reading_values(comparison, "read")]
 
 
 def comparison_progress_updates(comparison):
     """Return confirmed (Calibre id, percent) updates for mapped rows."""
-    updates = []
-    for row, book_id, _tolino_id in _matched_reading_rows(comparison):
-        progress = row.get("progress")
-        if progress is None or not getattr(progress, "known", False):
-            continue
-        updates.append((book_id, progress.percent))
-    return updates
+    return [(book_id, progress.percent)
+            for book_id, progress in _known_reading_values(
+                comparison, "progress")]
 
 
 def store_reading_state(state, comparison):

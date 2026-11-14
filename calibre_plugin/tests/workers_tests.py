@@ -591,6 +591,42 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual(["S2"], worker.state["22222222-2222-4222-8222-222222222222"].get("collections"))
         self.assertNotIn("collections", worker.state["11111111-1111-4111-8111-111111111111"])
 
+    def test_collection_checkpoint_runs_once_per_step_in_both_branches(self):
+        """Skip-Zweig und `_step()` pruefen den Abbruch je genau einmal."""
+        ui_module = self._ui()
+        first = "11111111-1111-4111-8111-111111111111"
+        second = "22222222-2222-4222-8222-222222222222"
+        state = {first: {"tolino_id": "t-1", "calibre_id": 1},
+                 second: {"tolino_id": "t-2", "calibre_id": 2}}
+        checkpoints = []
+        added = []
+
+        class FakeClient:
+            def collection_pairs(self):
+                return {("t-1", "S1")}
+
+            def add_to_collection(self, tolino_id, series, revision=None):
+                added.append((tolino_id, series))
+                return 7
+
+        try:
+            with patch("calibre_plugin.ui_workers.save_account",
+                       lambda *args, **kwargs: None):
+                worker = ui_module.workers.SyncWorker(
+                    RunContext.from_values(self._settings(state)), [], [],
+                    series_map={first: "S1", second: "S2"}, state=state)
+                operations = worker._plan_collection_operations()
+                done = worker._run_collections(
+                    FakeClient(), operations,
+                    lambda: checkpoints.append(1), 0, len(operations))
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual(2, len(checkpoints))
+        self.assertEqual([("t-2", "S2")], added)
+        self.assertEqual(2, done)
+        self.assertEqual(["S1"], worker.state[first]["collections"])
+        self.assertEqual(["S2"], worker.state[second]["collections"])
+
     def test_an_auth_error_still_stops_the_run(self):
         """Anmeldeprobleme bleiben fatal -- jeder weitere Aufruf scheiterte."""
         ui_module = self._ui()
