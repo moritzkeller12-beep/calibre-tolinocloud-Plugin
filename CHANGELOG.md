@@ -10,30 +10,7 @@
 
 ## 0.1.07
 
-- Cover-Uploads senden den von tolino erwarteten `control`-Block; ohne ihn antwortet der Cover-Endpunkt mit HTTP 400.
-- Das Vergleichsfenster trägt den Titel „Bibliothek vergleichen“ und breitere Aktionsspalten (80/100 px), damit die Kopfzeilen vollständig sichtbar bleiben.
-- Die Browser-Anmeldung räumt das Chromium-Fenster auch bei Fehlern auf; redundante interne Fehler-Wrapper wurden entfernt.
-
-- Beim Konto-Wechsel bleiben Lesestatus und Fortschritt auch für Bücher ohne echte Calibre-UUID erhalten; die Zuordnung nutzt einen bibliotheksbezogenen Fallback aus Bibliothekskennung und Calibre-Nummer. Eine echte UUID hat Vorrang; alte Einträge werden nicht mehr fälschlich darübergelegt.
-- Alte ungescopte `calibre-<id>`-Einträge werden nicht mehr übernommen und nicht neu erzeugt; Zuordnungen laufen über echte UUIDs bzw. den bibliotheksbezogenen Fallback.
-- Fehlt PyCryptodome für verschlüsselte Web-Reader-Tokens, meldet die Anmeldung einen klaren Fehler mit Code A01 statt eines stillen Fehlschlags.
-- Kontobezogene `#tolino_id`-Zuordnungen werden beim ersten Vergleich in den State übernommen; danach ist der State maßgeblich.
-- Die frühere Einzel-ID in `#tolino_id` wird beim ersten kontobezogenen Schreiben ersetzt.
-- Der alte `/registerhw`-Fallback entfällt.
-- Der lokale Metadaten-Snapshot läuft in einem eigenen Thread; Calibres thread-sichere `new_api` wird dabei nur lesend genutzt.
-- Die Auswahlkästchen im Vergleichsfenster werden linksbündig statt mittig gezeichnet.
-- Aktionskästchen im Vergleichsfenster lassen sich unter Qt6 wieder abwählen; zuvor blieben bereits gesetzte Upload-, Metadaten- und Lesestatus-Häkchen gesetzt.
-- Ein Doppelklick auf ein Aktionskästchen schaltet nicht mehr doppelt um.
-- Nach einem Upload wird der alte Lesestand der ersetzten Cloud-Kopie aus dem State entfernt.
-- Der Release-Build bewahrt beim Entfernen von Docstrings die exakte Textlänge.
-- Defekte Einstellungen beenden den Keep-alive-Thread nicht mehr stillschweigend.
-- Ignorierte Bücher zählen nicht mehr als nicht eingeplante Aktionen.
-- Das Release-ZIP enthält README und CHANGELOG.
-- Debug-Durchlauf: Callback-Bindungen im Sync-Worker korrigiert, doppelte Rundungs-Casts und ungenutzte Testreste entfernt. Ein bestehender Abbruchtest sichert die Reihenfolge von Checkpoint und Cloud-Aufruf ab.
-- Die Live-Grab-Normalisierung gibt bereits normalisierte Daten unverändert zurück; damit bleibt der Python-3.11-Testlauf grün.
-- HTTP-Fehlerantworten werden nach dem Auslesen geschlossen; Python 3.14 meldet damit keine offenen `HTTPError`-Ressourcen mehr, auch bei fehlgeschlagenen Downloads.
-- Zwei doppelte Tests entfernt und die README auf Installation, Benutzung und Hinweise gestrafft.
-- Legacy-Prüfung: In diesem Patch wird keine Altlast entfernt; die bewussten Kompatibilitätspfade (historischer Config-Namespace, `adopt_column_tolino_ids`, alte Einzel-`#tolino_id`-Migration, `dbpath`-Fallback) bleiben bestehen.
+- Fehlerbehebungen und Härtung für Anmeldung, Cloud-Sync, Lesestatus und UI; keine Legacy-Pfade entfernt.
 
 ## 0.1.06
 
