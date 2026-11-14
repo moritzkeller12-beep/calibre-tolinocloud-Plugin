@@ -86,11 +86,6 @@ def bool_column_available(database, column):
     return _column_available(database, column, ("bool",))
 
 
-def integer_column_available(database, column):
-    """True, wenn Calibre ``column`` als Zahl (int/float) kennt."""
-    return _column_available(database, column, ("int", "float"))
-
-
 def bool_column_value(metadata, column):
     """Ja/Nein-Wert einer Spalte: True, False oder None (leer/unbekannt)."""
     getter = getattr(metadata, "get", None)
@@ -187,8 +182,8 @@ def column_state(database):
     """
     return {"id": TOLINO_COLUMN in database.field_metadata,
             "read": bool_column_available(database, TOLINO_READ_COLUMN),
-            "progress": integer_column_available(
-                database, TOLINO_PROGRESS_COLUMN)}
+            "progress": _column_available(
+                database, TOLINO_PROGRESS_COLUMN, ("int", "float"))}
 
 
 def legacy_column_report(database):

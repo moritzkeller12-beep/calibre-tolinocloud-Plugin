@@ -1,6 +1,7 @@
 """Aufbau und Bestätigungen des Sync-Dashboards."""
 from calibre.gui2 import error_dialog, info_dialog
-from .config import legacy_report
+from .config import (apply_legacy_cleanup, create_legacy_cleanup_backup,
+                     legacy_report, plan_legacy_cleanup)
 from .identifiers import display_title
 from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
                       create_custom_columns, legacy_column_report)
@@ -190,6 +191,12 @@ class DashboardParts:
             "Zeigt alte Preferences-, State- und Spaltenwerte. Es wird "
             "nichts gelöscht.", self.show_legacy_report)
         form.addRow("", self.legacy_report_button)
+        self.legacy_cleanup_button = _button(
+            "Altdaten aufräumen …",
+            "Entfernt alte Lite-Preferences und exakte doppelte "
+            "Fallback-State-Keys nach einer geprüften Sicherung.",
+            self.show_legacy_cleanup)
+        form.addRow("", self.legacy_cleanup_button)
 
     def _build_account_settings(self):
         form = self.settings_dialog.accounts_form
@@ -266,3 +273,81 @@ class DashboardParts:
         ]
         info_dialog(self, "Datenbestand prüfen", "\n".join(lines),
                     show=True, show_copy_button=False)
+
+    def show_legacy_cleanup(self):
+        """Plan, verified backup, and explicit confirmation for legacy data."""
+        database = getattr(self.gui, "current_db", None)
+        try:
+            plan = plan_legacy_cleanup(database=database)
+        except Exception as exc:
+            log_warning("Altdaten konnten nicht geplant werden: %s"
+                        % sanitize_error(exc))
+            error_dialog(self, "Altdaten nicht geprüft",
+                         sanitize_error(exc), show=True)
+            return
+        counts = plan["counts"]
+        candidates = (counts["legacy_preference_keys"]
+                      + counts["duplicate_legacy_state_keys"])
+        if not candidates:
+            info_dialog(
+                self, "Altdaten aufräumen",
+                "Es gibt keine sicher entfernbaren Altdaten.\n\n"
+                "Fallback-State-Keys: %d (nur Zählung)\n"
+                % counts["legacy_state_keys"],
+                show=True, show_copy_button=False)
+            return
+        lines = [
+            "Alte Preferences-Keys: %d"
+            % counts["legacy_preference_keys"],
+            "Fallback-State-Keys: %d" % counts["legacy_state_keys"],
+            "Davon exakte Duplikate: %d"
+            % counts["duplicate_legacy_state_keys"],
+            "Nicht löschbare Orphans: %d"
+            % counts["orphan_legacy_state_keys"],
+        ]
+        if not counts["state_cleanup_available"]:
+            lines.append(
+                "State-Keys werden ohne Bibliotheksprüfung nur gezählt "
+                "und nicht gelöscht.")
+        lines.extend(["", "Zuerst wird eine Sicherung erstellt."])
+        if not _ask(self, "Altdaten aufräumen?", "\n".join(lines)):
+            return
+        try:
+            confirmed = create_legacy_cleanup_backup(plan)
+        except Exception as exc:
+            log_warning("Altdaten-Sicherung fehlgeschlagen: %s"
+                        % sanitize_error(exc))
+            error_dialog(self, "Sicherung fehlgeschlagen",
+                         sanitize_error(exc), show=True)
+            return
+        if not _ask(
+                self, "Sicherung geprüft",
+                "Die Sicherung wurde geschrieben und verifiziert.\n\n"
+                "Digest: %s\n\nJetzt die ausgewählten Altdaten löschen?"
+                % confirmed["backup_digest"][:16]):
+            return
+        try:
+            result = apply_legacy_cleanup(
+                plan, confirmed, database=database)
+        except Exception as exc:
+            log_warning("Altdaten konnten nicht aufgeräumt werden: %s"
+                        % sanitize_error(exc))
+            error_dialog(self, "Altdaten nicht aufgeräumt",
+                         sanitize_error(exc), show=True)
+            return
+        if not result.get("ok"):
+            info_dialog(
+                self, "Altdaten nicht aufgeräumt",
+                "Die Daten haben sich geändert oder die Sicherung ist nicht "
+                "mehr gültig. Es wurde nichts gelöscht.\n\nGrund: %s"
+                % result.get("reason", "unbekannt"),
+                show=True, show_copy_button=False)
+            return
+        removed_prefs = len(result["removed_preference_keys"])
+        removed_states = len(result["removed_state_keys"])
+        info_dialog(
+            self, "Altdaten aufgeräumt",
+            "Entfernt: %d alte Preferences-Keys, %d doppelte "
+            "Fallback-State-Keys.\n\nDie Sicherung bleibt erhalten."
+            % (removed_prefs, removed_states),
+            show=True, show_copy_button=False)
