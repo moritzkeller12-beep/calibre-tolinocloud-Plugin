@@ -1642,8 +1642,18 @@ class ConservativeMatchingTests(unittest.TestCase):
 
     def test_plan_actions_drops_ignored_books_but_keeps_the_others(self):
         """Letzte Sicherung: auch eine erzwungene Auswahl bleibt wirkungslos."""
+        import os
+        import shutil
+        import tempfile
+
         from ..dashboard_plan import plan_actions
-        state = {"22222222-2222-4222-8222-222222222222": {"tolino_id": "t2"}}
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        paths = {}
+        for book_id in (1, 2):
+            paths[book_id] = os.path.join(directory, "%d.epub" % book_id)
+            with open(paths[book_id], "wb") as handle:
+                handle.write(b"epub")
 
         def planned(ignored):
             metadata = {
@@ -1654,17 +1664,30 @@ class ConservativeMatchingTests(unittest.TestCase):
             }
             if ignored:
                 metadata[1]["ignored"] = True
-            seen = []
+            class _Api:
+                @staticmethod
+                def has_id(book_id):
+                    return book_id in metadata
 
-            with patch("calibre_plugin.dashboard_plan.upload_jobs",
-                       side_effect=lambda _dialog, _metadata, uploads:
-                       (seen.extend(uploads) or [], [])):
-                plan_actions(
-                    object(), RunContext(preferred_formats=("EPUB",)),
-                    metadata,
-                    dict(state),
-                    {"uploads": [1, 2], "metadata": [1], "read_changes": [], "cloud_deletions": []})
-            return [record[0] for record in seen]
+                @staticmethod
+                def format_abspath(book_id, format_name):
+                    return paths[book_id]
+
+                @staticmethod
+                def cover(_book_id):
+                    return None
+
+            class _Db:
+                new_api = _Api()
+
+            dialog = type("Dialog", (), {
+                "gui": type("Gui", (), {"current_db": _Db()})()})()
+            preparation = plan_actions(
+                dialog, RunContext(preferred_formats=("EPUB",)), metadata,
+                {},
+                {"uploads": [1, 2], "metadata": [1], "read_changes": [],
+                 "cloud_deletions": []})
+            return [job.book_id for job in preparation["jobs"]]
 
         self.assertEqual([2], planned(True))
         self.assertEqual([1, 2], planned(False))
@@ -2421,6 +2444,17 @@ class FingerprintCommitTests(unittest.TestCase):
                          worker.state["22222222-2222-4222-8222-222222222222"]["content_fp"])
 
 
+class RealFunctionEdgeCaseTests(unittest.TestCase):
+    """Grenzfaelle reiner Funktionen -- ohne Attrappen, ohne Calibre."""
+
+    def test_empty_author_names_never_match(self):
+        """Ein leeres Autorenfeld darf nie als Treffer gelten."""
+        for left, right in (("", "Fred Vargas"), ("Fred Vargas", ""),
+                            ("", ""), ("   ", "Fred Vargas")):
+            with self.subTest(left=left, right=right):
+                self.assertFalse(authors_match(left, right))
+
+
 class PreferencesNamespaceTests(unittest.TestCase):
     """Der bisherige Store ist der einzige -- keine zweite Datenquelle."""
 
@@ -2438,3 +2472,134 @@ class PreferencesNamespaceTests(unittest.TestCase):
         self.assertEqual("tok", saved["refresh_token"])
         self.assertEqual("hw", saved["hardware_id"])
 
+
+
+class SessionColumnGuardTests(unittest.TestCase):
+    """Fehlende optionale Calibre-APIs bleiben ein No-op, kein Absturz."""
+
+    def test_a_field_map_without_record_index_setter_is_left_alone(self):
+        from ..library import _assign_record_index
+        fields = {"#tolino_id": {"datatype": "text"}}
+        _assign_record_index(fields, "tolino_id")
+        self.assertEqual({"datatype": "text"}, fields["#tolino_id"])
+
+    def test_a_backend_without_execute_is_left_alone(self):
+        from ..library import _register_session_columns
+
+        class Backend:
+            @staticmethod
+            def custom_table_names(_num):
+                return ("custom_columns",)
+
+            prefs = {"bools_are_tristate": False}
+
+        class Api:
+            backend = Backend()
+
+        class Database:
+            new_api = Api()
+            field_metadata = {"#tolino_id": {"datatype": "text"}}
+
+        _register_session_columns(Database(), ["tolino_id"])
+
+
+class PlanSelectionEdgeCaseTests(unittest.TestCase):
+    """Randfaelle der Auswahl, die frueher nur Attrappen kannten."""
+
+    def _dialog(self):
+        class Api:
+            @staticmethod
+            def has_id(book_id):
+                return True
+
+            @staticmethod
+            def format_abspath(book_id, format_name):
+                return __file__
+
+            @staticmethod
+            def cover(_book_id):
+                return None
+
+        class Db:
+            new_api = Api()
+
+        return type("Dialog", (), {
+            "gui": type("Gui", (), {"current_db": Db()})()})()
+
+    def test_a_junk_uuid_is_not_reported_as_missing_format(self):
+        from ..dashboard_plan import plan_actions
+        metadata = {1: {"uuid": "kein-uuid", "title": "Kaputt",
+                        "formats": ["EPUB"]}}
+        preparation = plan_actions(
+            self._dialog(), RunContext(preferred_formats=("EPUB",)), metadata,
+            {}, {"uploads": [1], "metadata": [], "read_changes": [],
+                 "cloud_deletions": []})
+        self.assertEqual([], preparation["skipped_uploads"])
+
+    def test_a_series_map_is_built_when_the_caller_has_none(self):
+        from ..dashboard_plan import plan_actions
+        metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111",
+                        "title": "Reihe", "authors": "A", "formats": ["EPUB"],
+                        "series": "Saga", "series_index": 2.0}}
+        preparation = plan_actions(
+            self._dialog(), RunContext(preferred_formats=("EPUB",)), metadata,
+            {}, {"uploads": [], "metadata": [], "read_changes": [],
+                 "cloud_deletions": []})
+        self.assertTrue(preparation["series_map"])
+
+    def test_only_uploads_still_explain_the_unplanned_actions(self):
+        from ..dashboard_plan import nothing_to_do_text
+        text = nothing_to_do_text(
+            {"selected_without_action": {"uploads": 2, "metadata": 0}})
+        self.assertIn("2 ausgewählte Aktionen", text)
+
+    def test_an_empty_preferred_format_falls_back_to_epub(self):
+        from ..dashboard_plan import plan_actions
+        metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111",
+                        "title": "Mobi", "authors": "A", "formats": ["MOBI"]}}
+        for preferred in ((), (None,)):
+            preparation = plan_actions(
+                self._dialog(), RunContext(preferred_formats=preferred),
+                metadata, {},
+                {"uploads": [1], "metadata": [], "read_changes": [],
+                 "cloud_deletions": []})
+            self.assertEqual(1, len(preparation["skipped_uploads"]))
+            self.assertIn("kein Format EPUB",
+                          preparation["skipped_uploads"][0])
+
+
+class AccountRecordEdgeCaseTests(unittest.TestCase):
+    """Ein Kontoeintrag behaelt seinen Namen; Muell legt kein Konto an."""
+
+    def setUp(self):
+        self._original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test-account-record")
+
+    def tearDown(self):
+        config.PREFERENCES = self._original
+
+    def test_a_named_account_keeps_its_name(self):
+        from ..config import _account
+        self.assertEqual("Zweitkonto",
+                         _account({"name": "Zweitkonto"})["name"])
+
+    def test_a_record_without_values_is_refused_and_changes_nothing(self):
+        from ..config import save_account
+        self.assertFalse(save_account("Konto", None))
+        self.assertEqual({}, dict(config.PREFERENCES))
+
+
+class FieldNameSummaryTests(unittest.TestCase):
+    """Fehlermeldungen nennen Feldnamen, nie Werte -- und sagen, wenn keine."""
+
+    def test_field_names_are_listed_alphabetically(self):
+        from ..inventory import _field_names
+        self.assertEqual("autor, titel", _field_names({"titel": "X", "autor": "Y"}))
+
+    def test_an_empty_mapping_says_there_are_none(self):
+        from ..inventory import _field_names
+        self.assertEqual("keine", _field_names({}))
+
+    def test_other_types_are_named_by_their_type(self):
+        from ..inventory import _field_names
+        self.assertEqual("list", _field_names([]))

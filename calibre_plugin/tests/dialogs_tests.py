@@ -12,18 +12,49 @@ from ._support import (FakeMenu, FakeMessageBox, FakeSignal, FakeTableItem,
                       _read_ids, compare_inventory, dashboard_stub,
                       start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
+import contextlib
+
+
+class _SelectionTable:
+    """Nur die Qt-Schnittstelle, die das Plugin von der Tabelle liest."""
+
+    def __init__(self, rows, delegate=None):
+        self._rows = list(rows)
+        self._delegate = delegate
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+    def selectionModel(self):
+        rows = list(self._rows)
+
+        class _Index:
+            def __init__(self, row):
+                self._row = row
+
+            def row(self):
+                return self._row
+
+        class _Selection:
+            def selectedRows(self):
+                return [_Index(row) for row in rows]
+
+        return _Selection()
+
+
+@contextlib.contextmanager
+def _selecting(dialog, rows):
+    original = dialog.table
+    dialog.table = _SelectionTable(rows, delegate=original)
+    try:
+        yield
+    finally:
+        dialog.table = original
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
-
-
-def _marked_rows(indexes):
-    """`_selected_rows` für die Dauer des with-Blocks ersetzen."""
-
-    return patch("calibre_plugin.ui_dialogs._selected_rows",
-                 lambda _table: list(indexes))
 
 
 def _action_cell(dialog, index, column):
@@ -39,8 +70,8 @@ class _QtDialogTest(unittest.TestCase):
             self, qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
 
     @staticmethod
-    def _marked(marked):
-        return _marked_rows(marked)
+    def _marked(dialog, marked):
+        return _selecting(dialog, marked)
 
     @staticmethod
     def _rows():
@@ -685,7 +716,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             before = [dict(row) for row in dialog.rows]
-            with self._marked([]):
+            with self._marked(dialog, []):
                 dialog.set_column_for_marked_rows("upload", True, "keine Datei")
             self.assertEqual(before, dialog.rows)
             self.assertEqual("", dialog.action_feedback.text())
@@ -699,7 +730,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             index = self._index(dialog, "Ungelesen")
-            with self._marked([index]):
+            with self._marked(dialog, [index]):
                 dialog.set_column_for_marked_rows("upload", True, "keine Datei")
             self.assertTrue(self._row(dialog, "Ungelesen")["upload"])
             self.assertFalse(self._row(dialog, "Gelesen")["upload"])
@@ -718,7 +749,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
         try:
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            with self._marked(range(len(dialog.rows))):
+            with self._marked(dialog, range(len(dialog.rows))):
                 dialog.set_column_for_marked_rows("metadata", True,
                                                   "keine Cloud")
             # «Nur lokal» hat keine Cloud-Kopie – eine Zeile wird übersprungen.
@@ -741,12 +772,12 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
         try:
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            with self._marked(range(len(dialog.rows))):
+            with self._marked(dialog, range(len(dialog.rows))):
                 dialog.set_column_for_marked_rows("metadata", True,
                                                   "keine Cloud")
             self.assertIn("3 von 4", dialog.action_feedback.text())
             # Dieselbe Aktion noch einmal: jetzt ist nichts mehr zu tun.
-            with self._marked(range(len(dialog.rows))):
+            with self._marked(dialog, range(len(dialog.rows))):
                 dialog.set_column_for_marked_rows("metadata", True,
                                                   "keine Cloud")
             self.assertEqual("", dialog.action_feedback.text())
@@ -760,7 +791,7 @@ class MarkedRowActionFeedbackTests(_QtDialogTest):
         try:
             calls = self._messages(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            with self._marked(range(len(dialog.rows))):
+            with self._marked(dialog, range(len(dialog.rows))):
                 dialog.set_column_for_marked_rows(
                     "read", True, "sind schon gelesen")
             self.assertEqual(
@@ -817,7 +848,7 @@ class SingleBookActionTests(_QtDialogTest):
         if title is not None:
             marked = [next(index for index, row in enumerate(dialog.rows)
                            if row["title"] == title)]
-        with self._marked(marked):
+        with self._marked(dialog, marked):
             dialog.download_selected()
         return events
 
@@ -886,8 +917,7 @@ class RowActionPromptTests(_QtDialogTest):
             ui_module.dialogs.QMessageBox = type("MsgBox", (), {
                 "information": staticmethod(lambda *args, **kwargs: None)})
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            with patch("calibre_plugin.ui_dialogs._selected_rows",
-                       lambda _table: [0, 1, 2]):
+            with _selecting(dialog, [0, 1, 2]):
                 dialog.choose_row_action()
             self.assertEqual(6, len(chosen))
             self.assertTrue(dialog.rows[0]["upload"])
@@ -906,8 +936,7 @@ class RowActionPromptTests(_QtDialogTest):
                                if row["title"] == "Nur lokal")
             dialog.rows[local_index]["has_preferred_format"] = True
             dialog.rows[local_index]["upload"] = False
-            with patch("calibre_plugin.ui_dialogs._selected_rows",
-                       lambda _table: [local_index]):
+            with _selecting(dialog, [local_index]):
                 dialog.choose_row_action()
             self.assertEqual(["Upload aktivieren"], chosen)
             self.assertNotIn("Aus tolino herunterladen …", chosen)
@@ -935,8 +964,7 @@ class RowActionPromptTests(_QtDialogTest):
             ui_module.dialogs.QMenu = Menu
             ui_module.dialogs.QMessageBox = MsgBox
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            with patch("calibre_plugin.ui_dialogs._selected_rows",
-                       lambda _table: []):
+            with _selecting(dialog, []):
                 dialog.choose_row_action()
             self.assertEqual(["info"], prompts)
         finally:
@@ -986,9 +1014,8 @@ class CloudDeletionDialogTests(_QtDialogTest):
         return calls
 
     @staticmethod
-    def _marked(index):
-        return patch("calibre_plugin.ui_dialogs._selected_rows",
-                     lambda _table: [index])
+    def _marked(dialog, index):
+        return _selecting(dialog, [index])
 
     def test_marked_cloud_copy_is_queued_and_conflicting_actions_clear(self):
         ui_module = self._ui()
@@ -997,7 +1024,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             dialog.clear_all_selection()
             index = self._index(dialog, "Löschen")
-            with self._marked(index):
+            with self._marked(dialog, index):
                 dialog.delete_marked_from_cloud()
             self.assertEqual(
                 [("a1111111-1111-4111-8111-111111111111", "t-1", "Löschen")],
@@ -1028,7 +1055,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             self._msgbox(ui_module, confirm=False)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             index = self._index(dialog, "Löschen")
-            with self._marked(index):
+            with self._marked(dialog, index):
                 dialog.delete_marked_from_cloud()
             self.assertEqual([("a1111111-1111-4111-8111-111111111111", "t-1", "Löschen")],
                              dialog.selected_cloud_deletions())
@@ -1043,10 +1070,10 @@ class CloudDeletionDialogTests(_QtDialogTest):
             calls = self._msgbox(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             index = self._index(dialog, "Löschen")
-            with self._marked(index):
+            with self._marked(dialog, index):
                 dialog.delete_marked_from_cloud()
             self.assertEqual(1, len(dialog.selected_cloud_deletions()))
-            with self._marked(index):
+            with self._marked(dialog, index):
                 dialog.clear_cloud_delete_for_marked_rows()
             self.assertEqual([], dialog.selected_cloud_deletions())
             self.assertFalse(dialog.rows[index].get("delete_cloud"))
@@ -1066,7 +1093,7 @@ class CloudDeletionDialogTests(_QtDialogTest):
             calls = self._msgbox(ui_module)
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
             index = self._index(dialog, "Nur lokal")
-            with self._marked(index):
+            with self._marked(dialog, index):
                 dialog.delete_marked_from_cloud()
             self.assertEqual([], dialog.selected_cloud_deletions())
             self.assertEqual(1, len(calls))

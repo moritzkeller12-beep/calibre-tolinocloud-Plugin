@@ -8,7 +8,7 @@ from . import ui_base_tests
 from .. import config
 from ..planning_values import SyncJob
 from ..run_context import RunContext
-from ._support import (compare_inventory, dashboard_stub, start_cdp_stubs,
+from ._support import (CalibreDatabase, compare_inventory, dashboard_stub, start_cdp_stubs,
                        stop_cdp_stubs)
 from unittest.mock import patch
 
@@ -739,15 +739,13 @@ class NoSilentDeadEndTests(unittest.TestCase):
     def test_a_failed_bookkeeping_still_reports_the_result(self):
         ui_module = self._ui_module()
         boxes = []
+        database = CalibreDatabase({"#tolino_id": {"datatype": "text"}})
         dashboard = dashboard_stub()
         dashboard.account_name = "A"
         dashboard.refresh = type("F", (), {"text": lambda self: "tok",
                                            "setText": lambda self, _v: None})()
-        dashboard.gui = type("Gui", (), {
-            "current_db": type(
-                "Db", (), {"field_metadata": {}})()})()
-        dashboard.status = type(
-            "Status", (), {"setText": lambda self, _text: None})()
+        dashboard.gui = type("Gui", (), {"current_db": database})()
+        dashboard.status = type("Status", (), {"setText": lambda self, _text: None})()
         dashboard.columns = {"id": False, "read": False}
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
@@ -761,13 +759,14 @@ class NoSilentDeadEndTests(unittest.TestCase):
         def boom(*_args, **_kwargs):
             raise OSError("Platte voll")
 
-        with patch("calibre_plugin.ui_dashboard.save_account", boom), \
-             patch("calibre_plugin.ui_dashboard.update_tolino_ids",
-                   lambda *args, **kwargs: None), \
-             patch("calibre_plugin.ui_dashboard.error_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            ui_module.dashboard.SyncDashboard.sync_completed(
-                dashboard, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}, [(1, "new-1")])
+        try:
+            with patch("calibre_plugin.ui_dashboard.save_account", boom), \
+                 patch("calibre_plugin.ui_dashboard.error_dialog",
+                       lambda *args, **kwargs: boxes.append(args)):
+                ui_module.dashboard.SyncDashboard.sync_completed(
+                    dashboard, worker.state, [(1, "new-1")])
+        finally:
+            ui_module._restore_stubs_for_tests()
         self.assertEqual(1, len(boxes))
         self.assertIn("1 hochgeladen", boxes[0][2])
         self.assertIn("Sync-Zustand", boxes[0][2])
@@ -776,17 +775,14 @@ class NoSilentDeadEndTests(unittest.TestCase):
         """Ein Calibre-Fehler nach dem Lauf darf den Dialog nicht sperren."""
         ui_module = self._ui_module()
         boxes, finished = [], []
+        database = CalibreDatabase({"#tolino_id": {"datatype": "text"}},
+                                   fail={"#tolino_id"})
         dashboard = dashboard_stub()
         dashboard.account_name = "A"
-        dashboard.refresh = type("F", (), {
-            "text": lambda self: "tok",
-            "setText": lambda self, value: None,
-        })()
-        dashboard.gui = type("Gui", (), {
-            "current_db": type(
-                "Db", (), {"field_metadata": {}})()})()
-        dashboard.status = type(
-            "Status", (), {"setText": lambda self, _text: None})()
+        dashboard.refresh = type("F", (), {"text": lambda self: "tok",
+                                           "setText": lambda self, _v: None})()
+        dashboard.gui = type("Gui", (), {"current_db": database})()
+        dashboard.status = type("Status", (), {"setText": lambda self, _text: None})()
         dashboard.finish_thread = lambda: finished.append(True)
         worker = type("Worker", (), {})()
         worker.account_name = "A"
@@ -796,17 +792,15 @@ class NoSilentDeadEndTests(unittest.TestCase):
         worker.updates = [(1, "new-1")]
         worker.outcome = {"uploaded": 1, "skipped": 0, "failed": 0}
         dashboard.worker = worker
-
-        def boom(*_args, **_kwargs):
-            raise OSError("Spalte gesperrt")
-
-        with patch("calibre_plugin.ui_dashboard.save_account",
-                   lambda *args, **kwargs: None), \
-             patch("calibre_plugin.ui_dashboard.update_tolino_ids", boom), \
-             patch("calibre_plugin.ui_dashboard.error_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            ui_module.dashboard.SyncDashboard.sync_completed(
-                dashboard, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}, [(1, "new-1")])
+        try:
+            with patch("calibre_plugin.ui_dashboard.save_account",
+                       lambda *args, **kwargs: None), \
+                 patch("calibre_plugin.ui_dashboard.error_dialog",
+                       lambda *args, **kwargs: boxes.append(args)):
+                ui_module.dashboard.SyncDashboard.sync_completed(
+                    dashboard, worker.state, [(1, "new-1")])
+        finally:
+            ui_module._restore_stubs_for_tests()
         self.assertEqual([True], finished)
         self.assertEqual(1, len(boxes))
         self.assertIn("1 hochgeladen", boxes[0][2])

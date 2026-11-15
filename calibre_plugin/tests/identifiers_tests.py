@@ -371,3 +371,24 @@ class LibraryScopedKeyTests(unittest.TestCase):
                          first_metadata[7]["uuid"])
         self.assertNotEqual(first_metadata[7]["uuid"],
                             second_metadata[7]["uuid"])
+
+
+class IdentifierEdgeCaseTests(unittest.TestCase):
+    """Grenzfaelle der Buch-Schluessel: Platzhalter, Laenge, ISBN-Zeichen."""
+
+    def test_placeholder_texts_are_never_keys(self):
+        from ..identifiers import _UUID_PLACEHOLDERS, valid_book_uuid
+        for placeholder in _UUID_PLACEHOLDERS:
+            self.assertEqual("", valid_book_uuid(placeholder))
+
+    def test_an_overlong_scoped_key_is_rejected(self):
+        from ..identifiers import valid_book_uuid
+        overlong = "calibre-abcdef012345-" + "1" * 200
+        self.assertEqual("", valid_book_uuid(overlong))
+
+    def test_thirteen_letters_are_not_an_isbn(self):
+        from ..matching import is_valid_isbn
+        self.assertFalse(is_valid_isbn("abcdefghijklm"))
+        # 13 Zeichen, aber mit X: kein ISBN-13 und kein Absturz.
+        self.assertFalse(is_valid_isbn("123456789012X"))
+        self.assertFalse(is_valid_isbn("X234567890123"))

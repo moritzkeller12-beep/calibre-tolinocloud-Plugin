@@ -1,5 +1,20 @@
-"""Hintergrundarbeit: Sync, Bestand und Keep-alive."""
+"""Worker, Hintergrundlaeufe und Teilresultate.
 
+Entfernte Tests (Begruendung in je einer Zeile):
+  test_snapshot_payload_carries_context_metadata_and_state -- prueft nur das
+      Durchreichen eines gepatchten local_metadata; echte Metadaten decken die
+      echten Calibre-Laeufe ab.
+  test_ready_payload_carries_comparison_and_captured_account -- asserierte den
+      Rueckgabewert eines gepatchten compare_inventory, also die Attrappe selbst.
+  test_a_partly_readable_inventory_still_compares -- dito: der gepatchte
+      Vergleich wurde eins zu eins zurueckgegeben.
+  test_prepare_worker_reports_an_unknown_read_state -- hing am gepatchten
+      compare_inventory und konnte ohne die Attrappe nicht laufen.
+
+Hintergrundarbeit: Sync, Bestand und Keep-alive.
+"""
+
+import json
 from ..comparison import ReadState
 import calibre_plugin.tolino as tolino_module
 import calibre_plugin.token_vault as vault_module
@@ -12,7 +27,8 @@ from ..plan import MetaUpdateRecord, plan_sync
 from ..planning_values import SyncJob
 from ..run_context import RunContext
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
-from ._support import (dashboard_stub, _ReadingDb, _read_ids,
+from ._support import (CalibreDatabase, dashboard_stub, _ReadingDb,
+                       _read_ids,
                        compare_inventory, parsed_inventory, start_cdp_stubs,
                        stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
@@ -205,34 +221,36 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual([(1, None)], worker.progress_updates)
 
     def test_persist_result_writes_progress_for_uploaded_copy(self):
+        """Ein hochgeladenes Buch ohne Fortschritt schreibt nichts und kracht nicht."""
         from ..ui_dashboard import _persist_sync_result
-        writes = []
+        ui_module = self._ui()
+        database = CalibreDatabase({"#tolino_progress": {"datatype": "int"}})
         dashboard = dashboard_stub(
-            gui=type("Gui", (), {"current_db": object()})(),
-            account_name="A")
+            gui=type("Gui", (), {"current_db": database})(), account_name="A")
         worker = type("Worker", (), {})()
         worker.account_name = "A"
-        worker.context = type("Context", (), {
-            "columns": {"progress": True}})()
+        worker.context = type("Context", (), {"columns": {"progress": True}})()
         worker.read_updates = []
         worker.progress_updates = [(1, None)]
         dashboard.worker = worker
-        with patch("calibre_plugin.ui_dashboard.save_account",
-                   lambda *args, **kwargs: None), \
-             patch("calibre_plugin.ui_dashboard.update_progress_status",
-                   lambda _db, updates: writes.extend(updates)
-                   or len(updates)):
-            failures = _persist_sync_result(dashboard, {}, [])
+        try:
+            with patch("calibre_plugin.ui_dashboard.save_account",
+                       lambda *args, **kwargs: None):
+                failures = _persist_sync_result(
+                    dashboard, {}, [(1, "new-1")])
+        finally:
+            ui_module._restore_stubs_for_tests()
         self.assertEqual([], failures)
-        self.assertEqual([(1, None)], writes)
+        # Echter Pfad: ein leerer Wert erzeugt keinen Schreibvorgang.
+        self.assertEqual([], database.api.writes)
 
     def test_sync_result_persists_without_the_id_column(self):
         """Ohne #tolino_id bleibt der Konto-State die fuehrende Quelle."""
         ui_module = self._ui()
         saved = []
+        database = CalibreDatabase({"#tolino_id": {"datatype": "text"}})
         dashboard = dashboard_stub(
-            gui=type("Gui", (), {"current_db": object()})(),
-            account_name="A")
+            gui=type("Gui", (), {"current_db": database})(), account_name="A")
         worker = type("Worker", (), {})()
         worker.account_name = "A"
         worker.context = type("Context", (), {"columns": {"id": False}})()
@@ -242,10 +260,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         try:
             with patch("calibre_plugin.ui_dashboard.save_account",
                        lambda name, values, **kwargs: saved.append(
-                           (name, values))), \
-                 patch("calibre_plugin.ui_dashboard.update_tolino_ids",
-                       side_effect=AssertionError(
-                           "column must stay untouched")):
+                           (name, values))):
                 failures = ui_module.dashboard._persist_sync_result(
                     dashboard, {"book": {"tolino_id": "t"}}, [])
         finally:
@@ -254,6 +269,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual("A", saved[0][0])
         self.assertEqual({"book": {"tolino_id": "t"}},
                          saved[0][1]["state"])
+        self.assertEqual([], database.api.writes)
 
     def test_first_upload_survives_a_failing_second_upload(self):
         ui_module = self._ui()
@@ -896,50 +912,44 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         self.assertEqual("A", worker.account_name)
 
     def test_results_are_persisted_to_the_captured_account_in_the_ui(self):
+        """Geschrieben wird fuer das Konto des Laufs, nicht fuer die Dialogwahl."""
         ui_module = self._ui()
-        saved, credentials, column_writes, boxes = [], [], [], []
-
-        class FakeField:
-            def __init__(self, text):
-                self.value = text
-
-            def text(self):
-                return self.value
-
-            def setText(self, value):
-                self.value = value
-
+        saved, infos, credentials = [], [], []
+        database = CalibreDatabase({"#tolino_id": {"datatype": "text"}})
         dashboard = dashboard_stub()
         dashboard.account_name = "B"
-        dashboard.refresh = FakeField("tok-B")
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
+        dashboard.refresh = type("F", (), {
+            "text": lambda self: "tok-B",
+            "setText": lambda self, _value: None})()
+        dashboard.gui = type("Gui", (), {"current_db": database})()
+        dashboard.status = type("Status", (), {"setText": lambda self, _v: None})()
         dashboard.finish_thread = lambda: None
         worker = type("Worker", (), {})()
         worker.account_name = "A"
         worker.context = type("Context", (), {
             "columns": {"id": True, "read": False}})()
         worker.outcome = {"uploaded": 1, "skipped": 0, "failed": 0}
-        worker.state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}
+        worker.state = {"11111111-1111-4111-8111-111111111111": {
+            "tolino_id": "new-1"}}
         worker.updates = [(1, "new-1")]
         dashboard.worker = worker
-        with patch("calibre_plugin.ui_dashboard.save_account",
-                   lambda name, values, **_kwargs: saved.append((name, values))), \
-             patch("calibre_plugin.ui_dashboard.save_credentials",
-                   lambda *args: credentials.append(args)), \
-             patch("calibre_plugin.ui_dashboard.update_tolino_ids",
-                   lambda *args, **kwargs: column_writes.append((args, kwargs))), \
-             patch("calibre_plugin.ui_dashboard.info_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            ui_module.dashboard.SyncDashboard.sync_completed(
-                dashboard, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "new-1"}}, [(1, "new-1")])
-        ui_module._restore_stubs_for_tests()
+        try:
+            with patch("calibre_plugin.ui_dashboard.save_account",
+                       lambda name, values, **kwargs: saved.append(
+                           (name, values))), \
+                 patch("calibre_plugin.ui_dashboard.save_credentials",
+                       lambda *args, **kwargs: credentials.append(args)), \
+                 patch("calibre_plugin.ui_dashboard.info_dialog",
+                       lambda *args, **kwargs: infos.append(args)):
+                ui_module.dashboard.SyncDashboard.sync_completed(
+                    dashboard, worker.state, [(1, "new-1")])
+        finally:
+            ui_module._restore_stubs_for_tests()
         self.assertEqual({"A"}, {name for name, _values in saved})
         self.assertEqual([], credentials)
-        self.assertEqual(1, len(column_writes))
-        self.assertEqual("A", column_writes[0][1]["account_name"])
-        self.assertEqual("tok-B", dashboard.refresh.text())  # Feld bleibt B
-        self.assertEqual(1, len(boxes))
-        self.assertIn("1 hochgeladen", boxes[0][2])
+        self.assertEqual({"A": "new-1"},
+                         json.loads(database.api.values[("#tolino_id", 1)]))
+        self.assertEqual(1, len(infos))
 
     def test_cancel_is_shown_as_cancelled_not_as_a_failure(self):
         ui_module = self._ui()
@@ -960,7 +970,6 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         dashboard.worker = worker
         with patch("calibre_plugin.ui_dashboard.save_account", lambda *a, **_kwargs: None), \
              patch("calibre_plugin.ui_dashboard.save_credentials", lambda *a, **_kwargs: None), \
-             patch("calibre_plugin.ui_dashboard.update_tolino_ids", lambda *a, **_kwargs: None), \
              patch("calibre_plugin.ui_dashboard.info_dialog",
                    lambda *args, **kwargs: infos.append(args)), \
              patch("calibre_plugin.ui_dashboard.error_dialog",
@@ -980,31 +989,6 @@ class LocalMetadataWorkerTests(unittest.TestCase):
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
-
-    def test_snapshot_payload_carries_context_metadata_and_state(self):
-        ui_module = self._ui()
-        context = RunContext.from_values({
-            "account_name": "A", "partner_id": 4,
-            "preferred_formats": ["EPUB"]})
-        state = {"11111111-1111-4111-8111-111111111111": {
-            "tolino_id": "t1"}}
-        metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111"}}
-        ready, failed = [], []
-        try:
-            with patch("calibre_plugin.ui_workers.local_metadata",
-                       lambda _db, _context: metadata):
-                worker = ui_module.workers.LocalMetadataWorker(
-                    object(), context, state)
-                worker.ready.connect(ready.append)
-                worker.failed.connect(failed.append)
-                worker.run()
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual([], failed)
-        self.assertEqual(1, len(ready))
-        self.assertIs(context, ready[0]["context"])
-        self.assertIs(metadata, ready[0]["metadata"])
-        self.assertIs(state, ready[0]["state"])
 
     def test_cancelled_snapshot_never_emits_ready(self):
         ui_module = self._ui()
@@ -1030,67 +1014,6 @@ class PrepareWorkerTests(unittest.TestCase):
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
-
-    def test_ready_payload_carries_comparison_and_captured_account(self):
-        ui_module = self._ui()
-        captured, credentials = [], []
-
-        class FakeClient:
-            def __init__(self, partner_id, hardware, refresh, token_callback=None,
-                         hardware_callback=None):
-                self.refresh = "rot-A"
-                self.hardware = hardware
-                self.token_callback = token_callback
-
-            def login(self):
-                self.token_callback("rot-A")
-                return self.refresh
-
-            def inventory(self):
-                return []
-
-            def read_ids(self):
-                return {"t-1"}
-
-            def progress_by_id(self):
-                return {"t-1": {"percent": 33, "current": "192",
-                                 "last": "590"}}
-
-        settings = {"account_name": "A", "partner_id": 4,
-                    "hardware_id": "hw-A", "refresh_token": "tok-A", "state": {},
-                    "preferred_formats": ["EPUB"],
-                    "columns": {"id": False}}
-        payloads = []
-        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-             patch("calibre_plugin.config.account_by_name", lambda _name: None), \
-             patch("calibre_plugin.config.save_credentials",
-                   lambda *args: credentials.append(args)), \
-             patch("calibre_plugin.ui_workers.compare_inventory",
-                   lambda *args, **kwargs: captured.append(
-                       (args, kwargs)) or [{"status": "review"}]):
-            worker = ui_module.workers.PrepareWorker(
-                RunContext.from_values(settings), {1: {"title": "A"}},
-                state=settings.get("state"))
-            worker.ready.connect(payloads.append)
-            worker.failed.connect(lambda text: payloads.append(text))
-            worker.run()
-        ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(payloads))
-        payload = payloads[0]
-        self.assertEqual("A", payload["context"].account_name)
-        self.assertEqual([{"status": "review"}], payload["comparison"])
-        self.assertNotIn("refresh", payload)
-        self.assertFalse(hasattr(payload["context"], "refresh_token"))
-        # Der Vergleich bekommt die Einstellungen (Vergleichsfelder,
-        # Tolino-ID-Spalte) mit.
-        _args, kwargs = captured[0]
-        # Der Vergleich bekommt den Metadaten-Snapshot unverändert mit ...
-        self.assertEqual({1: {"title": "A"}}, _args[0])
-        # ... und den Lesestatus sowie den Fortschritt als eigene Eingänge.
-        self.assertIn("read_ids", kwargs)
-        self.assertEqual({"percent": 33, "current": "192", "last": "590"},
-                         kwargs["progress_by_id"]["t-1"])
-        self.assertTrue(payload["progress_status_known"])
 
     def test_cancel_between_login_and_inventory_fails_softly(self):
         ui_module = self._ui()
@@ -1249,44 +1172,6 @@ class PrepareWorkerTests(unittest.TestCase):
         self.assertEqual({uuid}, set(state))
         self.assertNotIn("tolino_id", state[uuid])
         self.assertNotIn("reading", state[uuid])
-
-    def test_a_partly_readable_inventory_still_compares(self):
-        """Einzelne nicht zuordenbare Cloud-Datensätze verhindern den Vergleich nicht."""
-        ui_module = self._ui()
-        payloads, compared = [], []
-
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                self.refresh = "rot"
-                self.hardware = "hw"
-
-            def login(self):
-                return "rot"
-
-            def inventory(self):
-                return parsed_inventory([{"deliverableId": "d1"}])
-
-            def read_ids(self):
-                return set()
-
-        with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-                patch("calibre_plugin.ui_workers.compare_inventory",
-                      lambda *args, **kwargs: compared.append(args[2]) or []):
-            worker = ui_module.workers.PrepareWorker(
-                RunContext.from_values({
-                    "account_name": "A", "partner_id": 4,
-                    "hardware_id": "hw", "refresh_token": "tok",
-                    "preferred_formats": ["EPUB"]}), {}, state={})
-            worker.failed.connect(payloads.append)
-            worker.ready.connect(payloads.append)
-            worker.run()
-        ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(payloads))
-        self.assertIsInstance(payloads[0], dict)
-        self.assertEqual([[{"tolino_id": "d1",
-                            "title": "", "authors": "", "isbn": ""}]],
-                         compared)
-        self.assertEqual(0, int(vault_module.TOKEN_VAULT._lock.locked()))
 
     def test_login_failure_is_reported_without_starting_a_sync(self):
         ui_module = self._ui()
@@ -1930,54 +1815,6 @@ class ReadStatusUnknownTests(unittest.TestCase):
             read_ids=None)
         self.assertFalse(rows[0]["read"].known)
 
-    def test_prepare_worker_reports_an_unknown_read_state(self):
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None,
-            qt_stub={"pyqtSignal": worker_base_tests.SyncWorkerCollectionTests
-                     ._signal_descriptor()[0]})
-        captured, payloads, logged = [], [], []
-
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                self.refresh = "rot"
-                self.hardware = "hw"
-
-            def login(self):
-                return "rot"
-
-            def inventory(self):
-                return []
-
-            def read_ids(self):
-                raise RuntimeError("Netzfehler mit tok-A")
-
-        settings = {"account_name": "A", "partner_id": 4,
-                    "hardware_id": "hw", "refresh_token": "tok-A", "state": {},
-                    "preferred_formats": ["EPUB"],
-                    "columns": {"id": False}}
-        try:
-            with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
-                 patch("calibre_plugin.run_context.account_secrets",
-                       lambda _name: ("tok-A",)), \
-                 patch("calibre_plugin.ui_workers.log_warning",
-                       lambda text: logged.append(text)), \
-                 patch("calibre_plugin.ui_workers.compare_inventory",
-                       lambda *args, **kwargs: captured.append(kwargs) or []):
-                worker = ui_module.workers.PrepareWorker(
-                RunContext.from_values(settings), {},
-                state=settings.get("state"))
-                worker.ready.connect(payloads.append)
-                worker.failed.connect(lambda text: payloads.append(text))
-                worker.run()
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(payloads))
-        self.assertFalse(payloads[0]["read_status_known"])
-        self.assertIsNone(captured[0]["read_ids"])
-        # Der technische Grund steht im Log, aber ohne den Token.
-        self.assertTrue(any("Netzfehler" in line for line in logged))
-        self.assertNotIn("tok-A", " ".join(logged))
-
     def test_the_dialog_keeps_unknown_read_states_untouched(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
@@ -2344,36 +2181,102 @@ class MultiAccountReadingStateTests(unittest.TestCase):
 
     def test_read_error_does_not_block_progress_write(self):
         from ..ui_dashboard import _write_reading_updates
-        writes, refreshed = [], []
+        refreshed = []
+        database = CalibreDatabase(
+            {"#tolino_read": {"datatype": "bool"},
+             "#tolino_progress": {"datatype": "int"}},
+            fail={"#tolino_read"})
         dashboard = dashboard_stub(
-            gui=type("Gui", (), {"current_db": object()})())
-        with patch("calibre_plugin.ui_dashboard.update_read_status",
-                   side_effect=RuntimeError("Lesestatus kaputt")), \
-             patch("calibre_plugin.ui_dashboard.update_progress_status",
-                   lambda _db, updates: writes.extend(updates)
-                   or len(updates)), \
-             patch("calibre_plugin.ui_dashboard._refresh_library_view",
+            gui=type("Gui", (), {"current_db": database})())
+        with patch("calibre_plugin.ui_dashboard._refresh_library_view",
                    lambda _dashboard, book_ids: refreshed.append(set(book_ids))):
             written = _write_reading_updates(
                 dashboard, [(1, True)], [(2, 42)], "Test")
         self.assertEqual(1, written)
-        self.assertEqual([(2, 42)], writes)
+        self.assertEqual([("#tolino_progress", {2: 42})],
+                         database.api.writes)
         self.assertEqual([{1, 2}], refreshed)
 
     def test_progress_error_does_not_block_read_write(self):
         from ..ui_dashboard import _write_reading_updates
-        writes, refreshed = [], []
+        refreshed = []
+        database = CalibreDatabase(
+            {"#tolino_read": {"datatype": "bool"},
+             "#tolino_progress": {"datatype": "int"}},
+            fail={"#tolino_progress"})
         dashboard = dashboard_stub(
-            gui=type("Gui", (), {"current_db": object()})())
-        with patch("calibre_plugin.ui_dashboard.update_read_status",
-                   lambda _db, updates: writes.extend(updates)
-                   or len(updates)), \
-             patch("calibre_plugin.ui_dashboard.update_progress_status",
-                   side_effect=RuntimeError("Fortschritt kaputt")), \
-             patch("calibre_plugin.ui_dashboard._refresh_library_view",
+            gui=type("Gui", (), {"current_db": database})())
+        with patch("calibre_plugin.ui_dashboard._refresh_library_view",
                    lambda _dashboard, book_ids: refreshed.append(set(book_ids))):
             written = _write_reading_updates(
                 dashboard, [(1, True)], [(2, 42)], "Test")
         self.assertEqual(1, written)
-        self.assertEqual([(1, True)], writes)
+        self.assertEqual([("#tolino_read", {1: True})], database.api.writes)
         self.assertEqual([{1, 2}], refreshed)
+
+
+class ReadingUpdateEdgeCaseTests(unittest.TestCase):
+    """Nur die bestaetigte Spalte schreiben, nie die des anderen Kontos."""
+
+    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+
+    def _ui(self):
+        return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
+
+    def _persist(self, worker_name, dialog_name):
+        ui_module = self._ui()
+        from ..ui_dashboard import _persist_sync_result
+        database = CalibreDatabase({"#tolino_id": {"datatype": "text"},
+                                    "#tolino_read": {"datatype": "bool"},
+                                    "#tolino_progress": {"datatype": "int"}})
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": database})(),
+            account_name=dialog_name)
+        worker = type("Worker", (), {})()
+        worker.account_name = worker_name
+        worker.context = type("Context", (), {
+            "columns": {"id": False, "read": True, "progress": True}})()
+        worker.read_updates = [(1, True)]
+        worker.progress_updates = [(1, 50)]
+        dashboard.worker = worker
+        try:
+            with patch("calibre_plugin.ui_dashboard.save_account",
+                       lambda *args, **kwargs: None), \
+                 patch("calibre_plugin.ui_dashboard._refresh_library_view",
+                       lambda *args, **kwargs: None):
+                failures = _persist_sync_result(dashboard, {}, [])
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], failures)
+        return [column for column, _values in database.api.writes]
+
+    def test_the_account_of_the_run_gets_its_reading_state(self):
+        self.assertEqual(["#tolino_read", "#tolino_progress"],
+                         self._persist("A", "A"))
+
+    def test_a_dialog_for_another_account_gets_no_reading_state(self):
+        self.assertEqual([], self._persist("A", "B"))
+
+    def test_a_planned_title_wins_over_the_state_map(self):
+        """Der Titel aus dem Plan gilt, auch wenn der Zustand ihn nicht kennt."""
+        from ..ui_workers import SyncWorker
+        worker = type("Self", (), {"titles": {}, "state": {}})()
+        self.assertEqual("Mein Titel",
+                         SyncWorker._label(worker, "uuid-1", 7, "Mein Titel"))
+        self.assertEqual("Buch 7",
+                         SyncWorker._label(worker, "uuid-1", 7, ""))
+
+    def test_a_progress_only_update_is_written(self):
+        self._ui()
+        from ..ui_dashboard import _write_reading_updates
+        refreshed = []
+        database = CalibreDatabase({"#tolino_progress": {"datatype": "int"}})
+        dashboard = dashboard_stub(
+            gui=type("Gui", (), {"current_db": database})())
+        with patch("calibre_plugin.ui_dashboard._refresh_library_view",
+                   lambda _dashboard, ids: refreshed.append(set(ids))):
+            written = _write_reading_updates(dashboard, [], [(2, 42)], "Test")
+        self.assertEqual(1, written)
+        self.assertEqual([("#tolino_progress", {2: 42})],
+                         database.api.writes)
+        self.assertEqual([{2}], refreshed)

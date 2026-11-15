@@ -534,3 +534,47 @@ class FakeMessageBox:
     def question(self, *args, **_kwargs):
         self.calls.append(args)
         return self.question_result
+
+
+class CalibreApi:
+    """Calibres new_api als Grenze: merkt Schreibvorgaenge, kann scheitern."""
+
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+        self.values = {}
+        self.writes = []
+
+    def has_id(self, book_id):
+        return True
+
+    def field_for(self, column, book_id):
+        return self.values.get((column, book_id))
+
+    def set_field(self, column, values):
+        if column in self.fail:
+            raise OSError("Spalte gesperrt")
+        self.writes.append((column, dict(values)))
+        for book_id, value in values.items():
+            self.values[(column, book_id)] = value
+
+
+class CalibreDatabase:
+    """Nur die Calibre-Schnittstelle, die das Plugin benutzt."""
+
+    def __init__(self, columns=None, fail=(), create_error=None):
+        self.field_metadata = dict(columns or {})
+        self.api = CalibreApi(fail)
+        self.created = []
+        self.create_error = create_error
+
+    @property
+    def new_api(self):
+        return self.api
+
+    def create_custom_column(self, label, name, datatype, is_multiple,
+                             editable=True, display=None):
+        if self.create_error is not None:
+            raise self.create_error
+        self.created.append(label)
+        self.field_metadata["#" + label] = {"datatype": datatype}
+        return len(self.field_metadata)

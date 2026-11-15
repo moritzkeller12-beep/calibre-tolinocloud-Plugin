@@ -14,6 +14,35 @@ from ..tolino import TolinoAuthError
 from ._support import (
     _REAL_CLOSE_WINDOW, _full, start_cdp_stubs, stop_cdp_stubs)
 from unittest.mock import patch
+import contextlib
+
+
+@contextlib.contextmanager
+def _no_pycryptodome():
+    """Fehlende optionale Abhaengigkeit -- echte Grenze statt Plugin-Patch."""
+    import sys
+    blocked = {"Crypto": None, "Crypto.Cipher": None,
+               "Cryptodome": None, "Cryptodome.Cipher": None}
+    saved = {name: sys.modules.get(name) for name in blocked}
+    sys.modules.update(blocked)
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+class _BrokenAes:
+    """Die optionale Krypto-Bibliothek liefert einen kaputten Decoder."""
+
+    MODE_CBC = 2
+
+    @staticmethod
+    def new(*_args, **_kwargs):
+        raise RuntimeError("broken decoder")
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -932,9 +961,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
                    return_value=9223), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value={"refresh": [blob], "hardware": []}), \
-             patch("calibre_plugin.token_candidates.cryptojs_decrypt",
-                   side_effect=TolinoAuthError(
-                       "PyCryptodome fehlt.", code="A01")), \
+             _no_pycryptodome(), \
              patch("calibre_plugin.cdp.close_grabber_window", close):
             with self.assertRaises(TolinoAuthError) as caught:
                 grab_live_refresh(4, "cfg-hw", timeout=1)
@@ -965,10 +992,11 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
 
     def test_unexpected_decoder_failure_is_not_hidden(self):
         from ..token_candidates import _decrypt_reader_blob
-        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
-                   side_effect=RuntimeError("broken decoder")):
+        blob = base64.b64encode(
+            b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
+        with patch("calibre_plugin.browser_crypto._aes", lambda: _BrokenAes):
             with self.assertRaisesRegex(RuntimeError, "broken decoder"):
-                _decrypt_reader_blob("U2FsdGVk")
+                _decrypt_reader_blob(blob)
 
     def test_unwrap_decrypts_reader_user_token_blob(self):
         """Der verschluesselte Kandidat wird zum echten JWT – und ist
@@ -1024,9 +1052,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         plain = self._refresh_jwt(time.time() - 5)
         blob = base64.b64encode(
             b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
-        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
-                   side_effect=TolinoAuthError(
-                       "PyCryptodome fehlt.", code="A01")):
+        with _no_pycryptodome():
             normalized = _normalize_live_grab(
                 {"refresh": [plain], "hardware": [blob]})
             hardware_only = _normalize_live_grab(
@@ -1041,9 +1067,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         plain = self._refresh_jwt(time.time() - 5)
         blob = base64.b64encode(
             b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
-        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
-                   side_effect=TolinoAuthError(
-                       "PyCryptodome fehlt.", code="A01")):
+        with _no_pycryptodome():
             normalized = _normalize_live_grab(
                 {"refresh": [blob, plain], "hardware": []})
         self.assertEqual([plain], normalized["refresh"])
@@ -1053,9 +1077,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         from ..token_candidates import _normalize_live_grab
         blob = base64.b64encode(
             b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
-        with patch("calibre_plugin.token_candidates.cryptojs_decrypt",
-                   side_effect=TolinoAuthError(
-                       "PyCryptodome fehlt.", code="A01")):
+        with _no_pycryptodome():
             with self.assertRaises(TolinoAuthError) as caught:
                 _normalize_live_grab({"refresh": [blob], "hardware": []})
         self.assertEqual("A01", caught.exception.code)
@@ -1721,3 +1743,23 @@ class ThreadShutdownTests(unittest.TestCase):
         finally:
             ui_module.common._THREADS.clear()
             ui_module._restore_stubs_for_tests()
+
+
+class EvpKeyDerivationTests(unittest.TestCase):
+    """Der Schluesselableitung (OpenSSL EVP_BytesToKey) auf den Zaehnen."""
+
+    def test_a_known_salt_derives_the_documented_key_and_iv(self):
+        from ..browser_crypto import _evp_bytes_to_key
+        key, iv = _evp_bytes_to_key(b"", b"saltsalt")
+        # Referenzwerte aus OpenSSL/CryptoJS (MD5-basiert, Passwort leer).
+        self.assertEqual(
+            "f3d07de5efb5e2c3eafc16b0cf7e07faccf4e8bdacccd13efcb96a0c0b0a6e0a", key.hex())
+        self.assertEqual(
+            "08c84148d0df2a7f941de44937bd4d7b", iv.hex())
+        self.assertEqual((32, 16), (len(key), len(iv)))
+
+    def test_the_derivation_needs_three_blocks(self):
+        from ..browser_crypto import _evp_bytes_to_key
+        first, _iv = _evp_bytes_to_key(b"", b"saltsalt")
+        second, _iv2 = _evp_bytes_to_key(b"", b"anderesalz")
+        self.assertNotEqual(first, second)

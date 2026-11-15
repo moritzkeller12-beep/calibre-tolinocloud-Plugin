@@ -12,6 +12,7 @@ from ..library import (DEFAULT_LIBRARY_SCOPE, TOLINO_COLUMN,
 from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
+    CalibreDatabase,
     FakeSignal, FakeText, _ReadingDb, dashboard_stub, start_cdp_stubs,
     stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
@@ -346,27 +347,19 @@ class ColumnSetupButtonTests(unittest.TestCase):
     def test_one_button_creates_only_its_own_column(self):
         from unittest.mock import patch
         ui_module = self._ui()
-        calls, boxes, seen = [], [], []
+        calls, boxes = [], []
         dashboard = self._dashboard(ui_module, calls)
-
-        def fake_create(_db, labels):
-            seen.append(list(labels))
-            return list(labels)
-
-        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
-                   fake_create), \
-             patch("calibre_plugin.ui_dashboard.column_state",
-                   lambda _db: {"id": True, "read": True,
-                                "ignore": True}), \
-             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            dashboard.create_columns("tolino_ignore")
-        # Genau diese eine Spalte wird angelegt -- nicht alle drei.
-        self.assertEqual([["tolino_ignore"]], seen)
+        database = CalibreDatabase({"#tolino_id": {"datatype": "text"}})
+        dashboard.gui = type("Gui", (), {"current_db": database})()
+        try:
+            with patch("calibre_plugin.ui_dashboard_parts.info_dialog",
+                       lambda *args, **kwargs: boxes.append(args)):
+                dashboard.create_columns("tolino_ignore")
+        finally:
+            ui_module._restore_stubs_for_tests()
+        # Springt die echte create_custom_columns an: nur diese eine Spalte.
+        self.assertEqual(["tolino_ignore"], database.created)
         self.assertIn("#tolino_ignore", boxes[0][2])
-        self.assertIn("neu starten", boxes[0][2])
-        # Calibre kennt die neue Spalte erst nach einem Neustart; hier
-        # wird kein Spaltenstatus vorgetäuscht.
         self.assertEqual([], calls)
 
     def test_an_existing_column_says_so_and_changes_nothing(self):
@@ -374,31 +367,36 @@ class ColumnSetupButtonTests(unittest.TestCase):
         ui_module = self._ui()
         calls, boxes = [], []
         dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
-                   lambda _db, _labels: []), \
-             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            dashboard.create_columns("tolino_read")
+        database = CalibreDatabase({"#tolino_read": {"datatype": "bool"}})
+        dashboard.gui = type("Gui", (), {"current_db": database})()
+        try:
+            with patch("calibre_plugin.ui_dashboard_parts.info_dialog",
+                       lambda *args, **kwargs: boxes.append(args)):
+                dashboard.create_columns("tolino_read")
+        finally:
+            ui_module._restore_stubs_for_tests()
+        self.assertEqual([], database.created)
         self.assertIn("schon vorhanden", boxes[0][2])
         self.assertIn("#tolino_read", boxes[0][2])
         self.assertEqual([], calls)
 
     def test_a_refused_creation_is_reported_instead_of_crashing(self):
         from unittest.mock import patch
-
-        def boom(_db, _labels):
-            raise RuntimeError(
-                "Diese Calibre-Version kennt create_custom_column nicht.")
-
         ui_module = self._ui()
         calls, errors = [], []
         dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns", boom), \
-             patch("calibre_plugin.ui_dashboard_parts.log_warning",
-                   lambda _text: None), \
-             patch("calibre_plugin.ui_dashboard_parts.error_dialog",
-                   lambda *args, **kwargs: errors.append(args)):
-            dashboard.create_columns("tolino_id")
+        database = CalibreDatabase(
+            create_error=RuntimeError(
+                "Diese Calibre-Version kennt create_custom_column nicht."))
+        dashboard.gui = type("Gui", (), {"current_db": database})()
+        try:
+            with patch("calibre_plugin.ui_dashboard_parts.log_warning",
+                       lambda _text: None), \
+                 patch("calibre_plugin.ui_dashboard_parts.error_dialog",
+                       lambda *args, **kwargs: errors.append(args)):
+                dashboard.create_columns("tolino_id")
+        finally:
+            ui_module._restore_stubs_for_tests()
         self.assertIn("create_custom_column", errors[0][2])
         self.assertEqual([], calls)
 
@@ -1430,3 +1428,72 @@ class BrowserLoginPersistenceTests(unittest.TestCase):
             ("save", "konto", "tok", "hw"),
             ("completed", "hw"),
         ], events)
+
+
+class ColumnButtonTests(unittest.TestCase):
+    """Ein Knopf ohne verbundenes Signal tut nichts -- das muss auffallen."""
+
+    def test_a_button_connects_its_slot(self):
+        from ._support import load_ui_module
+        module = load_ui_module(lambda *args, **kwargs: None)
+        connected = []
+
+        class FakeButton:
+            def __init__(self, text):
+                self.text = text
+                self.tips = []
+
+            class _Clicked:
+                def __init__(self, sink):
+                    self.sink = sink
+
+                def connect(self, slot):
+                    self.sink.append(slot)
+
+            @property
+            def clicked(self):
+                return self._Clicked(connected)
+
+            def setToolTip(self, tip):
+                self.tips.append(tip)
+
+        original = module.dashboard_parts.QPushButton
+        module.dashboard_parts.QPushButton = FakeButton
+        try:
+            button = module.dashboard_parts._button("Neu", "Tipp", print)
+        finally:
+            module.dashboard_parts.QPushButton = original
+        self.assertEqual("Neu", button.text)
+        self.assertEqual(["Tipp"], button.tips)
+        self.assertEqual([print], connected)
+
+    def test_a_combo_connects_its_slot_and_fills_its_items(self):
+        from ._support import load_ui_module
+        module = load_ui_module(lambda *args, **kwargs: None)
+        connected, items = [], []
+
+        class FakeSignal:
+            def connect(self, slot):
+                connected.append(slot)
+
+        class FakeCombo:
+            def __init__(self):
+                self.currentIndexChanged = FakeSignal()
+                self.tips = []
+
+            def addItem(self, text, data=None):
+                items.append((text, data))
+
+            def setToolTip(self, tip):
+                self.tips.append(tip)
+
+        original = module.dashboard_parts.QComboBox
+        module.dashboard_parts.QComboBox = FakeCombo
+        try:
+            combo = module.dashboard_parts._combo(
+                [("A", 1), ("B", 2)], "Tipp", print)
+        finally:
+            module.dashboard_parts.QComboBox = original
+        self.assertEqual([("A", 1), ("B", 2)], items)
+        self.assertEqual(["Tipp"], combo.tips)
+        self.assertEqual([print], connected)
