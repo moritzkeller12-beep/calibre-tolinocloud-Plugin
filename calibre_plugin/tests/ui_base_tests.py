@@ -266,6 +266,20 @@ class InventoryDialogBuildTests(unittest.TestCase):
             def __init__(self, text=""):
                 Widget.__init__(self, text)
                 self.clicked = Signal()
+                self.auto_default = False
+                self.default = False
+
+            def setAutoDefault(self, value):
+                self.auto_default = value
+
+            def autoDefault(self):
+                return self.auto_default
+
+            def setDefault(self, value):
+                self.default = value
+
+            def isDefault(self):
+                return self.default
 
         class ComboBox(Widget):
             def __init__(self, *args, **_kwargs):

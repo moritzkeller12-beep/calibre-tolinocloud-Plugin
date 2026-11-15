@@ -46,9 +46,8 @@ def is_valid_isbn(value):
     if len(digits) == 10:
         total = 0
         for index, character in enumerate(digits):
-            if character == "X":
-                if index != 9:
-                    return False
+            # Das X steht nur an letzter Stelle fuer die Pruefziffer 10.
+            if character == "X" and index == 9:
                 digit = 10
             elif character.isdigit():
                 digit = int(character)

@@ -125,12 +125,25 @@ COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein",
 # In dieser Calibre-Sitzung angelegte Spalten. Calibre fuehrt eine neue
 # Spalte in `field_metadata` erst nach einem Neustart -- ohne diesen Merker
 # wollte ein zweiter Klick dieselben Spalten erneut anlegen.
-CREATED_COLUMNS = set()
+# Spalten, die dieses Plugin in DIESER Bibliothek angelegt hat -- je
+# Bibliothek, denn ein Bibliothekswechsel bringt eine andere field_metadata.
+CREATED_COLUMNS = {}
+
+
+def _library_key(database):
+    """Kennung der Bibliothek: angelegte Spalten gelten nur dort."""
+    for holder in (database, getattr(database, "new_api", None)):
+        dbpath = getattr(holder, "dbpath", None)
+        if isinstance(dbpath, str) and dbpath:
+            return dbpath
+    return id(database)
 
 
 def _column_present(database, label):
     """True, wenn die Spalte in der Bibliothek (oder in dieser Sitzung) da ist."""
-    return label in CREATED_COLUMNS or ("#" + label) in database.field_metadata
+    if label in CREATED_COLUMNS.get(_library_key(database), ()):
+        return True
+    return ("#" + label) in database.field_metadata
 
 
 def _live_field_metadata(database):
@@ -285,7 +298,8 @@ def create_custom_columns(database, labels=None):
     created = []
     for label, name, datatype in missing:
         create(label, name, datatype, False, editable=True, display={})
-        CREATED_COLUMNS.add(label)
+        CREATED_COLUMNS.setdefault(
+            _library_key(database), set()).add(label)
         created.append(label)
     _register_session_columns(database, created)
     return created

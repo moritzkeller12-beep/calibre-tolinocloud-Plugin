@@ -21,6 +21,7 @@ from .library import (TOLINO_IGNORE_COLUMN, column_state, library_scope,
                       update_tolino_ids)
 
 from . import dashboard_plan as _dashboard_plan
+from .errors import needs_new_login
 from .tolino import (RELOGIN, TolinoError, hardware_id, log_info, log_warning,
                      normalize_refresh_token, report_error, sanitize_error)
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
@@ -29,6 +30,10 @@ from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
                                  report_skipped_uploads)
 from .ui_dialogs import InventoryDialog
 from .ui_workers import LocalMetadataWorker, PrepareWorker, SyncWorker
+
+
+# Statuszeile nach einem abgelehnten Zugang (A01/A02/B01/B02).
+NEEDS_LOGIN_STATUS = "Anmeldung abgelehnt – bitte neu anmelden."
 
 
 def _book_key_index(dashboard):
@@ -380,7 +385,12 @@ class SyncDashboard(DashboardParts, QDialog):
         self.settings_dialog.exec()
 
     def close_settings(self):
+        typed = self._typed_refresh()
         self._save_visible_account()
+        if typed:
+            # Ein eingetippter Zugangstoken ist eine Eingabe wie jede andere:
+            # «Speichern und schließen» darf ihn nicht still verwerfen.
+            self.store_refresh(typed)
         self.settings_dialog.accept()
 
     def primary_action(self):
@@ -695,19 +705,28 @@ class SyncDashboard(DashboardParts, QDialog):
         self._start_prepare_worker(payload["context"], payload["metadata"],
                                    payload["state"])
 
-    @gui_guard
-    def _snapshot_failed(self, message):
-        worker = getattr(self, "snapshot_worker", None)
+    def _failed(self, message, worker_name, finish, log_text):
+        """Abbruch melden oder Fehler protokollieren und anzeigen."""
+        worker = getattr(self, worker_name, None)
         cancelled = bool(getattr(worker, "cancelled", False))
-        self._finish_snapshot()
+        finish()
         if cancelled or str(message) == CANCEL_MESSAGE:
             info_dialog(
                 self, "Abgebrochen", "Abgebrochen. Es wurde nichts geändert.",
                 show=True, show_copy_button=False)
             return
-        log_warning("Bibliothek konnte nicht gelesen werden: "
-                    + sanitize_error(message))
+        log_warning(log_text + sanitize_error(message))
         error_dialog(self, "Vergleich fehlgeschlagen", str(message), show=True)
+        if needs_new_login(message):
+            # Ein abgelehnter Zugang darf nicht als «Angemeldet.» stehen
+            # bleiben: sonst sieht der Nutzer keinen Grund, sich neu
+            # anzumelden, und der Vergleich scheitert immer wieder.
+            self.status.setText(NEEDS_LOGIN_STATUS)
+
+    @gui_guard
+    def _snapshot_failed(self, message):
+        self._failed(message, "snapshot_worker", self._finish_snapshot,
+                     "Bibliothek konnte nicht gelesen werden: ")
 
     def _start_prepare_worker(self, context, metadata, state):
         """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
@@ -731,16 +750,8 @@ class SyncDashboard(DashboardParts, QDialog):
 
     @gui_guard
     def _prepare_failed(self, message):
-        worker = getattr(self, "prepare_worker", None)
-        cancelled = bool(getattr(worker, "cancelled", False))
-        self._finish_prepare()
-        if cancelled or str(message) == CANCEL_MESSAGE:
-            info_dialog(
-                self, "Abgebrochen", "Abgebrochen. Es wurde nichts geändert.",
-                show=True, show_copy_button=False)
-            return
-        log_warning("Vergleich fehlgeschlagen: " + sanitize_error(message))
-        error_dialog(self, "Vergleich fehlgeschlagen", str(message), show=True)
+        self._failed(message, "prepare_worker", self._finish_prepare,
+                     "Vergleich fehlgeschlagen: ")
 
     @gui_guard
     def _prepare_ready(self, payload):

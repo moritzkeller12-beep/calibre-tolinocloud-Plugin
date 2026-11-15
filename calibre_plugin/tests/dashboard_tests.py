@@ -3,6 +3,7 @@
 import calibre_plugin.tolino as tolino_module
 import calibre_plugin.token_vault as vault_module
 import unittest
+from types import MethodType, SimpleNamespace
 from . import ui_base_tests
 from .. import config
 from ..partners import PARTNERS
@@ -1497,3 +1498,226 @@ class ColumnButtonTests(unittest.TestCase):
         self.assertEqual([("A", 1), ("B", 2)], items)
         self.assertEqual(["Tipp"], combo.tips)
         self.assertEqual([print], connected)
+
+class AccountRetentionTests(unittest.TestCase):
+    """Ein Konto anlegen, waehrend ein anderes aktiv ist.
+
+    Onscreen-Befund: nach dem Anlegen bei aktivem Zweitkonto sah es aus, als
+    waere das vorher aktive Konto verschwunden. Ursache war der virtuelle
+    Default-Account einer frischen Installation, nicht die Speicherlogik --
+    dieser Test haelt die Speicherlogik selbst fest.
+    """
+
+    def setUp(self):
+        self.original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test")
+        config.PREFERENCES.update({"accounts": [], "active_account": ""})
+        self.addCleanup(setattr, config, "PREFERENCES", self.original)
+
+    def test_adding_an_account_while_another_is_active_keeps_every_account(self):
+        config.save_account("Eins", {"hardware_id": "hw-1"}, active="Eins")
+        config.save_account("Zwei", {"hardware_id": "hw-2"}, active="Zwei")
+        # Neues Konto anlegen, waehrend "Zwei" aktiv bleibt.
+        config.save_account("Drei", {"hardware_id": "hw-3"}, active="Zwei")
+        settings = config.settings()
+        self.assertEqual(["Eins", "Zwei", "Drei"],
+                         [item["name"] for item in settings["accounts"]])
+        self.assertEqual("Zwei", settings["active_account"])
+        self.assertEqual("hw-1",
+                         config.account_by_name("Eins")["hardware_id"])
+        self.assertEqual("hw-2",
+                         config.account_by_name("Zwei")["hardware_id"])
+        self.assertEqual("hw-3",
+                         config.account_by_name("Drei")["hardware_id"])
+
+class DefaultButtonTests(unittest.TestCase):
+    """Enter im Fenster darf nicht die Browser-Anmeldung starten.
+
+    Onscreen-Befund: ein Return nach einem Kontowechsel per Tastatur landete
+    beim Standardknopf des Dialogs -- und das war der zuerst gebaute Knopf
+    "Bei tolino anmelden", also ein Browserfenster. Der Test baut die
+    Knopfreihe des Dashboards wirklich auf und prueft die Zuweisung.
+    """
+
+    def test_the_built_actions_make_enter_hit_the_primary_button(self):
+        module = ui_module_for(self).dashboard_parts
+
+        class Button:
+            def __init__(self, text=""):
+                self.text = text
+                self.auto_default = True   # Qt-Vorgabe fuer Dialogknoepfe
+                self.default = False
+                self.clicked = FakeSignal()
+
+            def setToolTip(self, _tip):
+                pass
+
+            def setAutoDefault(self, value):
+                self.auto_default = value
+
+            def autoDefault(self):
+                return self.auto_default
+
+            def setDefault(self, value):
+                self.default = value
+
+            def isDefault(self):
+                return self.default
+
+        class Combo:
+            def __init__(self, *_args, **_kwargs):
+                self.currentIndexChanged = FakeSignal()
+
+            def addItem(self, _text, _data=None):
+                pass
+
+            def setToolTip(self, _tip):
+                pass
+
+        class Label:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def setWordWrap(self, _value):
+                pass
+
+            def setVisible(self, _value):
+                pass
+
+        class Progress:
+            def setRange(self, _low, _high):
+                pass
+
+            def setVisible(self, _value):
+                pass
+
+        class Form:
+            def addRow(self, _label, _widget):
+                pass
+
+        class Root:
+            def addLayout(self, _layout):
+                pass
+
+        names = {"QPushButton": Button, "QComboBox": Combo, "QLabel": Label,
+                 "QProgressBar": Progress, "QFormLayout": Form}
+        originals = {name: getattr(module, name) for name in names}
+        try:
+            for name, replacement in names.items():
+                setattr(module, name, replacement)
+            parts = module.DashboardParts.__new__(module.DashboardParts)
+            parts._account_selected = lambda *_args: None
+            parts.browser_login = lambda: None
+            parts.primary_action = lambda: None
+            parts.open_settings = lambda: None
+            parts._build_main_actions(Root())
+        finally:
+            for name, original in originals.items():
+                setattr(module, name, original)
+        self.assertFalse(parts.login_button.autoDefault())
+        self.assertFalse(parts.settings_button.autoDefault())
+        self.assertTrue(parts.primary.isDefault())
+
+class SettingsSaveTests(unittest.TestCase):
+    """Was im Einstellungsfenster steht, muss «Speichern und schließen» sichern.
+
+    Onscreen-Befund: ein eingetippter Zugangstoken landete nur über den
+    Anmeldeknopf im Konto. Der Knopf «Speichern und schließen» verwarf die
+    Eingabe still, obwohl das Feld genau dafür da ist.
+    """
+
+    class Field:
+        def __init__(self, value=""):
+            self.value = value
+
+        def text(self):
+            return self.value
+
+        def setText(self, value):
+            self.value = value
+
+    def test_closing_the_settings_keeps_a_typed_token(self):
+        calls = []
+
+        class Dialog:
+            def accept(self):
+                calls.append("accept")
+
+        dashboard = SimpleNamespace(
+            account_name="konto", refresh=self.Field(" token-neu "),
+            hardware=self.Field("hw-1"), settings_dialog=Dialog(),
+            _save_visible_account=lambda values=None: calls.append("save"),
+            store_refresh=lambda token, hardware="": calls.append(
+                ("store", token)),
+            update_status=lambda: None)
+        module = ui_module_for(self).dashboard
+        dashboard._typed_refresh = MethodType(
+            module.SyncDashboard._typed_refresh, dashboard)
+        module.SyncDashboard.close_settings(dashboard)
+        self.assertEqual(["save", ("store", "token-neu"), "accept"], calls)
+
+    def test_closing_the_settings_without_a_typed_token_stores_nothing(self):
+        calls = []
+
+        class Dialog:
+            def accept(self):
+                calls.append("accept")
+
+        dashboard = SimpleNamespace(
+            account_name="konto", refresh=self.Field(""),
+            hardware=self.Field("hw-1"), settings_dialog=Dialog(),
+            _save_visible_account=lambda values=None: calls.append("save"),
+            store_refresh=lambda token, hardware="": calls.append(
+                ("store", token)),
+            update_status=lambda: None)
+        module = ui_module_for(self).dashboard
+        dashboard._typed_refresh = MethodType(
+            module.SyncDashboard._typed_refresh, dashboard)
+        module.SyncDashboard.close_settings(dashboard)
+        self.assertEqual(["save", "accept"], calls)
+
+
+class PrepareFailureStatusTests(unittest.TestCase):
+    """Nach einem abgelehnten Zugang darf nicht «Angemeldet.» stehen bleiben.
+
+    Onscreen-Befund: der Vergleich scheiterte mit «Anmeldung abgelehnt
+    (Code A01)», die Statuszeile zeigte danach aber weiter «Angemeldet.» –
+    der Nutzer sah keinen Grund, sich neu anzumelden.
+    """
+
+    class Status:
+        def __init__(self, value="Angemeldet."):
+            self.value = value
+
+        def setText(self, value):
+            self.value = value
+
+    def _failed_text(self, message):
+        from unittest.mock import patch
+        module = ui_module_for(self).dashboard
+        status = self.Status()
+        dashboard = SimpleNamespace(
+            status=status, prepare_worker=None, snapshot_worker=None,
+            update_status=lambda: None)
+        with patch.object(module, "error_dialog", lambda *a, **k: None), \
+                patch.object(module, "info_dialog", lambda *a, **k: None), \
+                patch.object(module, "log_warning", lambda *a, **k: None):
+            module.SyncDashboard._failed(
+                dashboard, message, "prepare_worker", lambda: None,
+                "Vergleich fehlgeschlagen: ")
+        return status.value
+
+    def test_a_rejected_login_asks_for_a_new_login(self):
+        text = self._failed_text(
+            "tolino hat die Anmeldung abgelehnt. (Code A01)")
+        self.assertEqual("Anmeldung abgelehnt – bitte neu anmelden.", text)
+
+    def test_a_missing_browser_also_asks_for_a_new_login(self):
+        text = self._failed_text(
+            "Kein Chromium-Browser gefunden. (Code B01)")
+        self.assertEqual("Anmeldung abgelehnt – bitte neu anmelden.", text)
+
+    def test_a_server_error_keeps_the_login_status(self):
+        text = self._failed_text(
+            "tolino meldet einen Fehler (HTTP 500). (Code N03)")
+        self.assertEqual("Angemeldet.", text)

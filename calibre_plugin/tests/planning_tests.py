@@ -406,6 +406,34 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual([], create_custom_columns(database, ("tolino_ignore",)))
         self.assertEqual(["tolino_ignore"], database.calls)
 
+    def test_columns_of_one_library_do_not_count_in_another(self):
+        """Spalten gelten je Bibliothek: nach einem Wechsel wird neu angelegt."""
+        from .. import library as library_module
+        library_module.CREATED_COLUMNS.clear()
+        self.addCleanup(library_module.CREATED_COLUMNS.clear)
+
+        class Database:
+            def __init__(self, dbpath):
+                self.dbpath = dbpath
+                self.field_metadata = {"#tolino_id": {"datatype": "text"}}
+                self.calls = []
+
+            def create_custom_column(self, label, name, datatype,
+                                     is_multiple, editable=True, display=None):
+                self.calls.append(label)
+                self.field_metadata["#" + label] = {"datatype": datatype}
+                return 1
+
+        first = Database("/libs/eins/metadata.db")
+        second = Database("/libs/zwei/metadata.db")
+        self.assertEqual(["tolino_read"],
+                         create_custom_columns(first, ("tolino_read",)))
+        # Dieselbe Spalte in einer ANDEREN Bibliothek ist dort nicht vorhanden.
+        self.assertEqual(["tolino_read"],
+                         create_custom_columns(second, ("tolino_read",)))
+        self.assertEqual([], create_custom_columns(first, ("tolino_read",)))
+        self.assertEqual([], create_custom_columns(second, ("tolino_read",)))
+
     def test_a_present_column_needs_no_calibre_api(self):
         """Ist die Spalte schon da, gibt es keinen Fehler -- nur «schon da»."""
         from .. import library as library_module

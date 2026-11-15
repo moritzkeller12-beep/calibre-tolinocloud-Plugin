@@ -22,6 +22,16 @@ class TolinoError(Exception):
         self.detail = detail
 
 
+# Fehlercodes, nach denen nur eine neue Anmeldung weiterhilft.
+RELOGIN_CODES = ("A01", "A02", "B01", "B02")
+
+
+def needs_new_login(message):
+    """True, wenn der angezeigte Fehlertext eine neue Anmeldung verlangt."""
+    text = str(message or "")
+    return any("(Code %s)" % code in text for code in RELOGIN_CODES)
+
+
 class TolinoAuthError(TolinoError):
     pass
 

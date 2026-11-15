@@ -2,14 +2,11 @@
 
 ## 0.1.08
 
-- State-Release: Die alten `#tolino_id`-Spalten- und `dbpath`-Migrationspfade entfallen.
-- Die Spalte `#tolino_id` bleibt aktiv und speichert weiterhin die kontobezogene Zuordnung; entfernt wurde nur die automatische Übernahme alter Spaltenwerte in den State.
-- Bewusste Ausnahme: `comparison_read_updates()` und `comparison_progress_updates()` bleiben getrennt. Die gemeinsame Auswahl liegt in `_known_reading_values()`, die Zeilenauswahl in `_matched_reading_rows()`; ein Zusammenlegen würde die unterschiedlichen Rückgabeformen und die getrennte Bedeutung von Lesestatus und Fortschritt verwischen.
-- Nach einem Upload werden alter Lesestatus und Fortschritt der ersetzten Kopie aus den Calibre-Spalten entfernt.
-- Lesestatus und Fortschritt werden getrennt geschrieben; der gemeinsame Helfer `_write_reading_updates()` bündelt beide Spalten, führt sie aber in getrennten `try`-Blöcken aus, damit ein Fehler die andere Spalte nicht blockiert.
-- Der Sammlungs-Sync prüft den Abbruch im Skip-Zweig nur noch einmal; Schreibschritte nutzen den Checkpoint von `_step()`.
-- Die internen Helfer `_named_index()`, `_can_create()` und `_activate()` sind in `_write_account()` aufgegangen, ohne die Regeln für Anlage, Aktivierung oder Kontentrennung zu ändern.
-- Doppelte Buch-IDs werden vor einer Gelesen-Markierung entfernt, wobei die Reihenfolge erhalten bleibt.
+- Nach einem abgelehnten Zugang (A01/B01/B02) steht in der Statuszeile «Anmeldung abgelehnt – bitte neu anmelden.» statt weiter «Angemeldet.».
+- «Speichern und schließen» übernimmt einen eingetippten Token; Enter speichert, statt die Browser-Anmeldung zu starten.
+- Jeder Spalten-Knopf prüft und meldet nur seine eigene Calibre-Spalte.
+- Nach einem Upload werden Lesestatus und Fortschritt der ersetzten Kopie geleert; beide werden getrennt geschrieben, damit ein Fehler den anderen nicht blockiert.
+- Alte `#tolino_id`- und `dbpath`-Migrationspfade entfallen; Config-Speicher, Konten und Tokens bleiben unverändert.
 
 ## 0.1.07
 

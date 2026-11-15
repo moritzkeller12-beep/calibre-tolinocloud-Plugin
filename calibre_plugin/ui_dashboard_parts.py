@@ -58,6 +58,19 @@ def _ask(dialog, title, text):
     return QMessageBox.question(dialog, title, text, yes | no, no) == yes
 
 
+def _default_buttons(login_button, primary, settings_button):
+    """Enter gehoert dem Hauptknopf -- nie der Browser-Anmeldung.
+
+    Ohne diese Zuweisung wird der zuerst gebaute Knopf automatisch der
+    Standardknopf des Dialogs. Ein versehentliches Return im Fenster (etwa
+    nach einem Kontowechsel per Tastatur) oeffnete dann ein Browserfenster
+    zur Anmeldung.
+    """
+    login_button.setAutoDefault(False)
+    settings_button.setAutoDefault(False)
+    primary.setDefault(True)
+
+
 @gui_guard
 def offer_next_step(dialog):
     """Nach der Anmeldung ist der Hauptknopf der naechste Schritt."""
@@ -156,6 +169,7 @@ class DashboardParts:
         self.settings_button = _button(
             "Einstellungen …", "Upload-Formate und Konten.",
             self.open_settings)
+        _default_buttons(self.login_button, self.primary, self.settings_button)
         form = QFormLayout()
         for label, widget in (
                 ("Buchhändler", self.partner),
@@ -226,7 +240,8 @@ class DashboardParts:
             return
         info_dialog(
             self, "Calibre-Spalte angelegt",
-            "Angelegt: #%s.\n\nCalibre neu starten, damit die Spalte in der "
-            "Bibliothek nutzbar ist." % label,
+            "Angelegt: #%s.\n\nDer Abgleich schreibt sofort hinein; in der "
+            "Bibliotheksansicht erscheint die Spalte nach einem Neustart "
+            "von Calibre." % label,
             show=True, show_copy_button=False)
 

@@ -94,30 +94,36 @@ class _Ws:
         out, self.buf = self.buf[:n], self.buf[n:]
         return out
 
+    def _read_frame(self, deadline, pending=0):
+        """Einen Frame lesen: ``(final, opcode, payload)``.
+
+        RFC 6455: FIN/Opcode und MASK/Länge belegen je ein Byte; ``pending``
+        ist die bereits gesammelte Fragmentgröße, damit die Obergrenze vor
+        dem Lesen der Nutzlast greift.
+        """
+        header = self._read_exact(2, deadline)
+        final = bool(header[0] & 0x80)
+        opcode = header[0] & 0x0F
+        length = header[1] & 0x7F
+        masked = header[1] & 0x80
+        if length == 126:
+            length = struct.unpack(">H", self._read_exact(2, deadline))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", self._read_exact(8, deadline))[0]
+        if length > _MAX_MESSAGE_BYTES or pending + length > _MAX_MESSAGE_BYTES:
+            raise OSError("websocket message too large")
+        mask = self._read_exact(4, deadline) if masked else b""
+        payload = self._read_exact(length, deadline)
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        return final, opcode, payload
+
     def recv_json(self, timeout=10):
         deadline = time.time() + max(1, timeout)
         fragmented = bytearray()
         fragmented_opcode = None
         while True:
-            # RFC 6455: FIN/Opcode und MASK/Länge belegen je ein Byte.
-            header = self._read_exact(2, deadline)
-            final = bool(header[0] & 0x80)
-            opcode = header[0] & 0x0F
-            length = header[1]
-            masked = length & 0x80
-            length &= 0x7F
-            if length == 126:
-                length = struct.unpack(">H", self._read_exact(2, deadline))[0]
-            elif length == 127:
-                length = struct.unpack(">Q", self._read_exact(8, deadline))[0]
-            if (length > _MAX_MESSAGE_BYTES
-                    or len(fragmented) + length > _MAX_MESSAGE_BYTES):
-                raise OSError("websocket message too large")
-            mask = self._read_exact(4, deadline) if masked else b""
-            payload = self._read_exact(length, deadline)
-            if mask:
-                payload = bytes(b ^ mask[i % 4]
-                                for i, b in enumerate(payload))
+            final, opcode, payload = self._read_frame(deadline, len(fragmented))
             if opcode == 0x8:  # close
                 raise OSError("websocket closed by peer")
             if opcode in (0x9, 0xA):  # answer ping; ignore pong
