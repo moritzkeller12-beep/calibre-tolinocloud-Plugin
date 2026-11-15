@@ -257,19 +257,34 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         """Abbruch im Bestandsvergleich startet keinen Sync-Worker."""
         ui_module = self._ui_module()
         try:
+            StartSyncOrchestrationTests._install_fake_qt(ui_module)
             settings = self._settings()
             settings["account_name"] = "konto"
             dashboard = ui_module.dashboard.SyncDashboard.__new__(
                 ui_module.dashboard.SyncDashboard)
             dashboard.account_name = "konto"
             dashboard.thread = None
+            dashboard.snapshot_thread = None
             dashboard.prepare_thread = None
             dashboard.prepare_worker = None
+            dashboard.progress = type("Bar", (), {
+                "setRange": lambda self, *args: None,
+                "setValue": lambda self, value: None,
+                "setVisible": lambda self, value: None,
+            })()
+            dashboard.progress_label = type("Label", (), {
+                "setText": lambda self, text: setattr(self, "text_value", text),
+                "setVisible": lambda self, value: None,
+            })()
+            dashboard.status = type("Label", (), {
+                "setText": lambda self, text: setattr(self, "text_value", text),
+            })()
             dashboard._finish_prepare = lambda: None
             dashboard._confirm_comparison = (
                 lambda _comp, given, client_factory=None, automatic=0: None)
-            started = []
-            dashboard._start_sync_worker = lambda *args: started.append(args)
+            errors = []
+            dashboard._show_prepare_error = (
+                lambda exc, context: errors.append(exc))
             dashboard._prepare_ready({
                 "context": RunContext.from_values(settings),
                 "metadata": {}, "state": {}, "comparison": [],
@@ -277,20 +292,23 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             })
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual([], started)
+        # Kein Fehler und kein gestarteter Thread: der Abbruch endet still.
+        self.assertEqual([], errors)
+        self.assertIsNone(dashboard.thread)
 
     def test_a_running_sync_ignores_the_second_click(self):
         ui_module = self._ui_module()
         try:
             settings = self._settings()
-            dashboard = self._dashboard(ui_module, settings, thread=object())
-            calls = []
-            dashboard.values = lambda: calls.append("values")
-            dashboard._start_sync_worker = lambda given, _prep: calls.append("worker")
+            running = object()
+            dashboard = self._dashboard(ui_module, settings, thread=running)
+            dashboard.snapshot_thread = None
             dashboard.start_sync()
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual([], calls)
+        # Der laufende Thread bleibt unangetastet, kein Snapshot startet neu.
+        self.assertIs(running, dashboard.thread)
+        self.assertIsNone(dashboard.snapshot_thread)
 
     def test_the_worker_gets_the_finished_plan(self):
         ui_module = self._ui_module()
@@ -585,13 +603,12 @@ class NoSilentDeadEndTests(unittest.TestCase):
                 passed.account_name, passed.partner_id)
         self.assertEqual([("thalia", "hw-neu", "neu-token")], seen)
 
-    def test_the_plan_is_named_before_the_run_starts(self):
+    def test_the_started_run_shows_its_plan(self):
         ui_module = self._ui_module()
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
             RunContext.from_values(dashboard.values()),
             _preparation(jobs=["job-1", "job-2"]), {})
-        self.assertEqual(1, dashboard.thread.starts)
         self.assertIn("2", dashboard.progress_label.text_value)
         self.assertIn("Upload", dashboard.progress_label.text_value)
 
@@ -921,14 +938,20 @@ class ReplacementConfirmationTests(unittest.TestCase):
         dashboard, asked = self._run(
             ui_module, 1, [self._job(ui_module, 1, "Der Schwarm", "t-0")])
         self.assertEqual(1, len(asked))
-        self.assertEqual(1, dashboard.thread.starts)
+        # Der bestätigte Job kommt beim Worker an und der Plan steht im Fenster.
+        self.assertEqual(1, len(dashboard.worker.arguments[1]))
+        self.assertIn("Läuft: 1 Upload",
+                      dashboard.progress_label.text_value)
+        self.assertIs(dashboard.thread, dashboard.worker.moved_to)
 
     def test_a_first_upload_asks_nothing(self):
         ui_module = self._ui()
         dashboard, asked = self._run(
             ui_module, 0, [self._job(ui_module, 1, "Der Schwarm", None)])
         self.assertEqual([], asked)
-        self.assertEqual(1, dashboard.thread.starts)
+        self.assertEqual(1, len(dashboard.worker.arguments[1]))
+        self.assertIn("Läuft: 1 Upload",
+                      dashboard.progress_label.text_value)
 
     def test_more_than_twenty_replacements_are_summarised(self):
         ui_module = self._ui()

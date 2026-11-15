@@ -297,6 +297,11 @@ class UuidValueTests(unittest.TestCase):
         uploads = plan_sync(self._metadata("obj"), {}, ["EPUB"],
                             upload_book_ids={1})
         self.assertEqual(1, len(uploads))
+        upload = uploads[0]
+        self.assertEqual(1, upload.book_id)
+        self.assertEqual(self.UUID, upload.book_uuid)
+        self.assertEqual("EPUB", upload.format_name)
+        self.assertIsNone(upload.old_id)
 
     def test_metadata_update_is_planned_for_a_uuid_object(self):
         state = {}

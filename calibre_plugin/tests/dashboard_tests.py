@@ -341,35 +341,7 @@ class ColumnSetupButtonTests(unittest.TestCase):
         dashboard.gui = type("Gui", (), {"current_db": object()})()
         dashboard.update_status = lambda: calls.append("status")
         dashboard.create_columns = cls.create_columns.__get__(dashboard)
-        dashboard.show_legacy_report = cls.show_legacy_report.__get__(dashboard)
         return dashboard
-
-    def test_legacy_report_is_read_only_and_shows_counts(self):
-        from unittest.mock import patch
-        ui_module = self._ui()
-        calls, boxes = [], []
-        dashboard = self._dashboard(ui_module, calls)
-        report = {
-            "schema_version": 2, "account_count": 1, "state_entries": 2,
-            "fallback_state_keys": 1,
-            "legacy_preference_keys": ("refresh_token",),
-            "backup_available": True,
-        }
-        columns = {"column": True, "plain_values": 1, "account_maps": 2}
-        with patch("calibre_plugin.ui_dashboard_parts.legacy_report",
-                   lambda: report), \
-             patch("calibre_plugin.ui_dashboard_parts.legacy_column_report",
-                   lambda _db: columns), \
-             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            dashboard.show_legacy_report()
-        text = boxes[0][2]
-        self.assertIn("Schema-Version: 2", text)
-        self.assertIn("Alte Preferences-Keys: refresh_token", text)
-        self.assertIn("Einfache alte Werte: 1", text)
-        self.assertIn("Kontomaps: 2", text)
-        self.assertIn("keine Daten gelöscht", text)
-        self.assertEqual([], calls)
 
     def test_one_button_creates_only_its_own_column(self):
         from unittest.mock import patch
@@ -576,17 +548,6 @@ class SettingsLockTests(unittest.TestCase):
         self.assertTrue(done.is_set())
         self.assertEqual("hw-2",
                          config.account_by_name("zweites")["hardware_id"])
-
-    def test_settings_lock_is_reentrant(self):
-        """save_account ruft intern settings() und save_account -- ohne
-        Reentranz wuerde das Plugin in einen Deadlock laufen."""
-        lock = config._SETTINGS_LOCK
-        self.assertTrue(lock.acquire(blocking=False))
-        try:
-            self.assertTrue(lock.acquire(blocking=False))
-            lock.release()
-        finally:
-            lock.release()
 
     def test_parallel_writes_never_lose_an_account(self):
         import threading

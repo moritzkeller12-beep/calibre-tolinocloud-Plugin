@@ -5,23 +5,28 @@ import struct
 import threading
 import unittest
 from unittest.mock import patch
-from urllib.error import URLError
 
 from ..cdp_transport import _Ws, _http_get_json
+from ._support import LocalHTTP
 
 
 class DevToolsHttpTests(unittest.TestCase):
-    def test_expected_failures_are_unavailable_but_program_errors_propagate(self):
-        for error in (URLError("offline"), OSError("timeout")):
-            with self.subTest(error=error), patch(
-                    "urllib.request.build_opener", side_effect=error):
-                self.assertIsNone(_http_get_json("http://127.0.0.1:1"))
-        response = unittest.mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b"not json"
-        with patch("urllib.request.build_opener") as opener:
-            opener.return_value.open.return_value = response
-            self.assertIsNone(_http_get_json("http://127.0.0.1:1"))
-        with patch("urllib.request.build_opener", side_effect=RuntimeError("bug")):
+    def test_a_refused_connection_is_unavailable(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        self.assertIsNone(
+            _http_get_json("http://127.0.0.1:%d" % port, timeout=2))
+
+    def test_invalid_json_is_unavailable(self):
+        with LocalHTTP(lambda *_args: (200, {}, b"not json")) as server:
+            self.assertIsNone(
+                _http_get_json(server.url("/json/version"), timeout=2))
+
+    def test_program_errors_propagate(self):
+        with patch("urllib.request.build_opener",
+                   side_effect=RuntimeError("bug")):
             with self.assertRaisesRegex(RuntimeError, "bug"):
                 _http_get_json("http://127.0.0.1:1")
 

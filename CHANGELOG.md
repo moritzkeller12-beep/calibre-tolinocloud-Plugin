@@ -3,9 +3,6 @@
 ## 0.1.08
 
 - State-Release: Die alten `#tolino_id`-Spalten- und `dbpath`-Migrationspfade entfallen.
-- Vorhandene Einstellungen werden beim ersten Plugin-Start einmalig in den Namespace `plugins/Tolino Cloud Sync` migriert und vorher unter `plugins/Tolino Cloud Sync Migration Backup 0.1.08` gesichert. Der alte Namespace wird nur noch als Migrationsquelle gelesen.
-- Die Preferences tragen eine `schema_version`; die Migration ist idempotent und überschreibt keine bereits vorhandenen neuen Konten.
-- Unter **Einstellungen → Datenbestand prüfen** zeigt das Plugin alte Preferences-Keys, Fallback-State-Keys und einfache alte `#tolino_id`-Werte an. Der Bericht löscht nichts.
 - Die Spalte `#tolino_id` bleibt aktiv und speichert weiterhin die kontobezogene Zuordnung; entfernt wurde nur die automatische Übernahme alter Spaltenwerte in den State.
 - Bewusste Ausnahme: `comparison_read_updates()` und `comparison_progress_updates()` bleiben getrennt. Die gemeinsame Auswahl liegt in `_known_reading_values()`, die Zeilenauswahl in `_matched_reading_rows()`; ein Zusammenlegen würde die unterschiedlichen Rückgabeformen und die getrennte Bedeutung von Lesestatus und Fortschritt verwischen.
 - Nach einem Upload werden alter Lesestatus und Fortschritt der ersetzten Kopie aus den Calibre-Spalten entfernt.

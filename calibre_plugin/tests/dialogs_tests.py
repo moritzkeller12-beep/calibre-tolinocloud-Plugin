@@ -395,8 +395,7 @@ class ComparisonLayoutTests(unittest.TestCase):
                           "Löschmarkierung aufheben"], labels)
         # Jeder Menüpunkt nennt eine vorhandene Methode und ein Prädikat.
         for _label, method, args, predicate in actions:
-            self.assertTrue(hasattr(ui_module.dialogs.InventoryDialog, method),
-                            "Handler %s fehlt" % method)
+            self.assertIn(method, ui_module.dialogs.InventoryDialog.__dict__)
             self.assertIsInstance(args, tuple)
             self.assertTrue(callable(predicate))
 
@@ -822,18 +821,17 @@ class SingleBookActionTests(_QtDialogTest):
             dialog.download_selected()
         return events
 
-    def test_bulk_selection_updates_the_summary_once(self):
-        """Sammelaktionen schreiben die Zusammenfassung genau einmal."""
+    def test_bulk_actions_leave_a_matching_summary(self):
+        """Sammelaktionen hinterlassen die passenden Zahlen im Fenster."""
         ui_module = self._ui()
         try:
             dialog = ui_module.dialogs.InventoryDialog(self._rows())
-            calls = []
-            dialog._update_summary = lambda *args: calls.append(args)
             dialog.apply_recommended()
-            self.assertEqual(1, len(calls))
-            calls.clear()
+            summary = dialog.summary.text()
+            self.assertIn("Ausgewählt:", summary)
+            self.assertNotIn("Ausgewählt: 0 Uploads", summary)
             dialog.clear_all_selection()
-            self.assertEqual(1, len(calls))
+            self.assertIn("Ausgewählt: 0 Uploads", dialog.summary.text())
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -1349,30 +1347,44 @@ class DialogClientReuseTests(_QtDialogTest):
 
     def test_client_is_cached_between_actions(self):
         ui_module = self._ui()
-        calls = []
-        client = type("Client", (), {
-            "download": lambda self, _tolino_id: b"PK\x03\x04"})()
+        created = []
+
+        class Client:
+            def __init__(self, number):
+                self.number = number
+
+            def download(self, _tolino_id):
+                return b"PK\x03\x04-%d" % self.number
+
         try:
             dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-            dialog.client_factory = lambda: calls.append(1) or client
-            self.assertEqual(b"PK\x03\x04", dialog._download_content("t-1"))
-            self.assertEqual(b"PK\x03\x04", dialog._download_content("t-1"))
+            dialog.client_factory = (
+                lambda: created.append(Client(len(created) + 1))
+                or created[-1])
+            first = dialog._download_content("t-1")
+            second = dialog._download_content("t-1")
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual(1, len(calls))
+        # Ein zweiter Client lieferte b"PK\x03\x04-2".
+        self.assertEqual(b"PK\x03\x04-1", first)
+        self.assertEqual(first, second)
 
     def test_a_failed_action_drops_the_cached_login(self):
         ui_module = self._ui()
-        factory_calls = []
         clients = []
 
         class Client:
+
+            def __init__(self, number):
+                self.number = number
+
             def download(self, tolino_id, **kwargs):
-                raise RuntimeError("Download kaputt")
+                if self.number == 1:
+                    raise RuntimeError("Download kaputt")
+                return b"PK\x03\x04-%d" % self.number
 
         def factory():
-            factory_calls.append(1)
-            clients.append(Client())
+            clients.append(Client(len(clients) + 1))
             return clients[-1]
 
         class Index:
@@ -1398,13 +1410,13 @@ class DialogClientReuseTests(_QtDialogTest):
         ui_module.dialogs.error_dialog = lambda *args, **kwargs: None
         try:
             dialog.download_selected()
-            self.assertEqual(1, len(factory_calls))
-            # Nach dem Fehler darf der nächste Versuch wieder anmelden.
-            with self.assertRaises(RuntimeError):
-                dialog._download_content("t-1")
-            self.assertEqual(2, len(factory_calls))
+            # Nach dem Fehler meldet der nächste Versuch neu an; ein
+            # weiterverwendeter Client 1 würde erneut "Download kaputt" werfen.
+            self.assertEqual(b"PK\x03\x04-2",
+                             dialog._download_content("t-1"))
         finally:
             ui_module._restore_stubs_for_tests()
+
 
 class BackgroundCallTests(unittest.TestCase):
     """Netzaufrufe verlassen den GUI-Thread."""

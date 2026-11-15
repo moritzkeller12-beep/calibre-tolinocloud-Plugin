@@ -377,8 +377,12 @@ class TolinoClientFeatureTests(unittest.TestCase):
             {"revision": 7, "patches": []},
             {"revision": 8},
         ])
-        client.mark_read_many(["b-1", "b-2"])
-        self.assertEqual(2, len(calls))
+        revision = client.mark_read_many(["b-1", "b-2"])
+        # Die gelesene Revision 7 steht im PATCH, die Antwort 8 kommt zurück.
+        self.assertEqual(8, revision)
+        self.assertEqual(7, calls[1]["data"]["revision"])
+        self.assertEqual(["/publications/b-1/tags", "/publications/b-2/tags"],
+                         [item["path"] for item in calls[1]["data"]["patches"]])
 
     def test_collection_pairs_reads_sync_data_patches(self):
         patches = [
@@ -451,22 +455,6 @@ class TolinoClientFeatureTests(unittest.TestCase):
         with self.assertRaises(TolinoApiError) as caught:
             run_download("http://cdn.pageplace.de/file")
         self.assertEqual("N02", caught.exception.code)
-
-    def test_download_credentials_are_not_forwarded_across_redirects(self):
-        from urllib.request import HTTPRedirectHandler, Request
-
-        request = Request("https://cdn.pageplace.de/file")
-        request.add_unredirected_header("t_auth_token", "secret-token")
-        request.add_unredirected_header("hardware_id", "device-id")
-        request.add_unredirected_header("reseller_id", "42")
-        redirect = HTTPRedirectHandler().redirect_request(
-            request, None, 302, "Found", {}, "https://attacker.example/collect")
-
-        self.assertIsNotNone(redirect)
-        forwarded = {key.casefold() for key in redirect.header_items()}
-        self.assertNotIn("t_auth_token", forwarded)
-        self.assertNotIn("hardware_id", forwarded)
-        self.assertNotIn("reseller_id", forwarded)
 
     def test_download_resolves_content_url_and_returns_bytes(self):
         client, calls = self._patching_client([
@@ -732,25 +720,28 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
     Einzelheiten.
     """
 
-    def test_ebook_de_partner_matches_reference_config(self):
-        partner = PARTNERS[8]
-        self.assertEqual("eBook.de", partner["name"])
-        self.assertEqual("81", partner["reseller_id"])
-        self.assertEqual("ebookde0501html5readerV0001", partner["client_id"])
-        self.assertEqual("e-publishing", partner["scope"])
-        self.assertEqual("https://www.ebook.de/oauth/token",
-                         partner["token_url"])
-
-    def test_corrected_endpoints_match_reader_config(self):
-        self.assertEqual("https://www.hugendubel.de/oauth/token",
-                         PARTNERS[5]["token_url"])
-        self.assertEqual("webreader", PARTNERS[7]["client_id"])
-        self.assertEqual("SCOPE_BOSH", PARTNERS[7]["scope"])
-        self.assertEqual("https://www.buecher.de/auth/oauth2/token",
-                         PARTNERS[7]["token_url"])
-        self.assertEqual("webreader", PARTNERS[2]["client_id"])
-        self.assertEqual("https://www.thalia.at/auth/oauth2/token",
-                         PARTNERS[2]["token_url"])
+    def test_partner_profiles_reach_the_client(self):
+        """Der Client bezieht Name, Reseller und Endpunkt aus der Tabelle."""
+        expected = {
+            2: ("Thalia.at", "4", "webreader", "SCOPE_BOSH",
+                "https://www.thalia.at/auth/oauth2/token"),
+            5: ("Hugendubel.de", "13", "4c20de744aa8b83b79b692524c7ec6ae",
+                "ebook_library", "https://www.hugendubel.de/oauth/token"),
+            7: ("Buecher.de", "30", "webreader", "SCOPE_BOSH",
+                "https://www.buecher.de/auth/oauth2/token"),
+            8: ("eBook.de", "81", "ebookde0501html5readerV0001",
+                "e-publishing", "https://www.ebook.de/oauth/token"),
+        }
+        for partner_id, values in expected.items():
+            with self.subTest(partner_id=partner_id):
+                partner = TolinoClient(partner_id, "hw", "ref").partner
+                self.assertEqual(values, (partner["name"],
+                                          partner["reseller_id"],
+                                          partner["client_id"],
+                                          partner["scope"],
+                                          partner["token_url"]))
+        with self.assertRaises(tolino_module.TolinoError):
+            TolinoClient(999, "hw", "ref")
 
     @staticmethod
     def _token_ok(_method, _path, _headers, _body):

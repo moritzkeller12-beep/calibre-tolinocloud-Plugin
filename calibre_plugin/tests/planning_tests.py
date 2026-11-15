@@ -11,12 +11,11 @@ import calibre_plugin.token_vault as vault_module
 import unittest
 import uuid
 from .. import config
-from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN, CUSTOM_COLUMNS,
+from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN,
                        bool_column_available, column_state, cover_bytes,
-                       create_custom_columns, legacy_column_report,
-                       metadata_ignored, metadata_tolino_id,
-                       normalize_formats, safe_format_path,
-                       update_tolino_ids)
+                       create_custom_columns, metadata_ignored,
+                       metadata_tolino_id, normalize_formats,
+                       safe_format_path, update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
 from ..plan import (metadata_update_fields, plan_collection_updates,
@@ -29,9 +28,6 @@ from ..matching import (author_tokens, authors_match, normalize_isbn,
                         normalized_authors)
 from ..config import load_state
 from ..run_context import RunContext
-from ..partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
-                        WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS,
-                        WEBREADER_URL)
 from ..tolino import (
     TolinoAuthError, TolinoClient, hardware_id, normalize_hardware_id,
     normalize_refresh_token, sanitize_error)
@@ -422,13 +418,32 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual([], create_custom_columns(WithoutColumns(),
                                                    ("tolino_id",)))
 
-    def test_the_column_types_match_what_the_plugin_reads(self):
-        """Text fuer die ID, Ja/Nein fuer Lesestatus und Ignorieren."""
-        self.assertEqual([("tolino_id", "tolino-ID", "text"),
-                          ("tolino_read", "Gelesen (tolino)", "bool"),
-                          ("tolino_progress", "tolino gelesen %", "int"),
-                          ("tolino_ignore", "Ignoriert (tolino)", "bool")],
-                         list(CUSTOM_COLUMNS))
+    def test_all_missing_columns_get_their_calibre_types(self):
+        """Vier fehlende Spalten werden mit Text, Ja/Nein und Zahl angelegt."""
+        from .. import library as library_module
+        library_module.CREATED_COLUMNS.clear()
+        self.addCleanup(library_module.CREATED_COLUMNS.clear)
+
+        class Database:
+            field_metadata = {}
+
+            def __init__(self):
+                self.calls = []
+
+            def create_custom_column(self, label, name, datatype,
+                                     is_multiple, editable=True, display=None):
+                self.calls.append((label, datatype))
+                self.field_metadata["#" + label] = {"datatype": datatype}
+                return 1
+
+        database = Database()
+        self.assertEqual(
+            ["tolino_id", "tolino_read", "tolino_progress", "tolino_ignore"],
+            create_custom_columns(database))
+        self.assertEqual(
+            [("tolino_id", "text"), ("tolino_read", "bool"),
+             ("tolino_progress", "int"), ("tolino_ignore", "bool")],
+            database.calls)
 
     def test_without_the_calibre_api_the_error_names_the_columns(self):
         """Eine alte Calibre-Fassung bekommt eine umsetzbare Meldung."""
@@ -878,31 +893,10 @@ class SyncPlanTests(unittest.TestCase):
             existing, state, ["EPUB"], upload_book_ids=set())
         self.assertEqual([], uploads)
 
-    def test_reference_partners_and_webreader_configuration(self):
-        for partner_id in (1, 2, 4, 5, 6, 7, 8):
-            self.assertIn(partner_id, PARTNERS)
-        # Hardware IDs use the web reader's 8-4-4-4-12 UUID format.
-        self.assertRegex(hardware_id(), r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-        # The protocol reseller IDs stay stable while plugin IDs are
-        # consecutive; Orell Fuessli keeps reseller 8 (new plugin ID 4).
-        self.assertEqual("8", PARTNERS[4]["reseller_id"])
-        self.assertEqual("3", PARTNERS[1]["reseller_id"])
-        self.assertEqual("13", PARTNERS[5]["reseller_id"])
-        self.assertEqual("webreader", PARTNERS[4]["client_id"])
-        self.assertEqual("SCOPE_BOSH", PARTNERS[4]["scope"])
-        self.assertEqual("https://www.orellfuessli.ch/auth/oauth2/token",
-                         PARTNERS[4]["token_url"])
-        self.assertEqual("https://webreader.mytolino.com/library/",
-                         WEBREADER_URL)
-        self.assertEqual("TOLINO_WEBREADER", WEBREADER_CLIENT_TYPE)
-        self.assertEqual("5.2.0", WEBREADER_CLIENT_VERSION)
-        self.assertEqual("https://webreader.mytolino.com",
-                         WEBREADER_TOKEN_HEADERS["Origin"])
-        self.assertEqual("https://webreader.mytolino.com/",
-                         WEBREADER_TOKEN_HEADERS["Referer"])
-        self.assertNotIn("client_type", PARTNERS[4])
-        self.assertNotIn("client_version", PARTNERS[4])
-        self.assertNotIn("token_headers", PARTNERS[4])
+    def test_generated_hardware_id_has_the_webreader_format(self):
+        self.assertRegex(hardware_id(),
+                         r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                         r"[0-9a-f]{4}-[0-9a-f]{12}$")
 
     def test_compact_hardware_id_is_normalized_to_uuid(self):
         self.assertEqual(
@@ -1191,8 +1185,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual(
             "calibre_plugins.tolino_cloud_sync.ui:TolinoSyncAction",
             plugin.actual_plugin)
-        self.assertFalse(hasattr(plugin, "icon"))
-        self.assertFalse(hasattr(plugin, "has_html"))
         self.assertEqual((6, 0, 0), tuple(plugin.minimum_calibre_version))
         self.assertEqual("InterfaceAction", plugin.type)
 
@@ -1428,12 +1420,14 @@ class MetadataUpdatePlanTests(unittest.TestCase):
         state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "d1"}}
         updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
+        self.assertEqual((1, "d1"), (updates[0][0], updates[0][2]))
 
     def test_selected_metadata_update_reconciles_even_if_fingerprint_matches(self):
         book = self._book()
         state = self._state(book)
         updates = plan_metadata_updates({1: book}, state, [], {1})
         self.assertEqual(1, len(updates))
+        self.assertEqual((1, "d1"), (updates[0][0], updates[0][2]))
 
     def test_comparison_detected_metadata_difference_is_not_filtered_by_fp(self):
         """Ein Upload kann die Tolino-ID und den lokalen Fingerabdruck bereits
@@ -1692,8 +1686,10 @@ class ConservativeMatchingTests(unittest.TestCase):
         metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111", "series": "Reihe", "ignored": True},
                     2: {"uuid": "22222222-2222-4222-8222-222222222222", "series": "Reihe"}}
         state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}, "22222222-2222-4222-8222-222222222222": {"tolino_id": "t2"}}
-        self.assertEqual(1, len(plan_collection_updates(
-            series_map_from_metadata(syncable_metadata(metadata)), state)))
+        self.assertEqual(
+            [("22222222-2222-4222-8222-222222222222", "t2", "Reihe")],
+            plan_collection_updates(
+                series_map_from_metadata(syncable_metadata(metadata)), state))
 
     @staticmethod
     def _metadata(**values):
@@ -2424,347 +2420,21 @@ class FingerprintCommitTests(unittest.TestCase):
         self.assertEqual(previous["22222222-2222-4222-8222-222222222222"]["content_fp"],
                          worker.state["22222222-2222-4222-8222-222222222222"]["content_fp"])
 
-class PreferencesMigrationTests(unittest.TestCase):
-    """Einmalige Migration der alten Lite-Preferences."""
 
-    @staticmethod
-    def _store(data=None):
-        store = config.JSONConfig("test")
-        if data:
-            store.update(data)
-        return store
+class PreferencesNamespaceTests(unittest.TestCase):
+    """Der bisherige Store ist der einzige -- keine zweite Datenquelle."""
 
-    def test_old_accounts_are_moved_to_the_new_namespace_and_backed_up(self):
-        legacy = self._store({
-            "accounts": [{"name": "A", "partner_id": 4, "state": {
-                "11111111-1111-4111-8111-111111111111": {"tolino_id": "t"}}}],
-            "active_account": "A",
-            "preferred_formats": ["PDF"],
-            "refresh_token": "old-top-level",
-            "enable_deletions": True,
-        })
-        current, backup = self._store(), self._store()
-        self.assertTrue(config.migrate_preferences(current, legacy, backup))
-        self.assertEqual(legacy["accounts"], current["accounts"])
-        self.assertEqual("A", current["active_account"])
-        self.assertEqual(["PDF"], current["preferred_formats"])
-        self.assertEqual(config.SCHEMA_VERSION, current["schema_version"])
-        self.assertNotIn("refresh_token", current)
-        self.assertEqual("old-top-level", backup["refresh_token"])
-        self.assertTrue(backup["enable_deletions"])
-
-    def test_a_single_account_token_is_kept_as_the_default_account(self):
-        legacy = self._store({
-            "partner_id": 8, "hardware_id": "hw", "refresh_token": "tok"})
-        current, backup = self._store(), self._store()
-        self.assertTrue(config.migrate_preferences(current, legacy, backup))
-        account = current["accounts"][0]
-        self.assertEqual(config.DEFAULT_ACCOUNT_NAME, account["name"])
-        self.assertEqual(8, account["partner_id"])
-        self.assertEqual("hw", account["hardware_id"])
-        self.assertEqual("tok", account["refresh_token"])
-        self.assertEqual(config.DEFAULT_ACCOUNT_NAME, current["active_account"])
-
-    def test_existing_new_accounts_win_and_the_old_store_is_preserved(self):
-        current = self._store({"accounts": [{"name": "neu"}]})
-        legacy = self._store({"accounts": [{"name": "alt"}]})
-        backup = self._store()
-        self.assertTrue(config.migrate_preferences(current, legacy, backup))
-        self.assertEqual("neu", current["accounts"][0]["name"])
-        self.assertEqual("alt", backup["accounts"][0]["name"])
-        self.assertFalse(config.migrate_preferences(current, legacy, backup))
-
-    def test_fresh_install_does_not_write_a_migration(self):
-        current, legacy, backup = self._store(), self._store(), self._store()
-        self.assertFalse(config.migrate_preferences(current, legacy, backup))
-        self.assertNotIn("schema_version", current)
-
-    def test_a_failed_migration_keeps_the_legacy_store_active(self):
-        original = (config.PREFERENCES, config.LEGACY_PREFERENCES,
-                    config._USING_LEGACY_PREFERENCES)
-        legacy = self._store({"accounts": [{"name": "A"}]})
-        config.PREFERENCES = self._store()
-        config.LEGACY_PREFERENCES = legacy
-        config._USING_LEGACY_PREFERENCES = False
-        try:
-            with patch.object(config, "migrate_preferences",
-                              side_effect=RuntimeError("boom")):
-                self.assertFalse(config.ensure_preferences_migrated())
-            self.assertIs(legacy, config.PREFERENCES)
-            self.assertTrue(config._USING_LEGACY_PREFERENCES)
-        finally:
-            (config.PREFERENCES, config.LEGACY_PREFERENCES,
-             config._USING_LEGACY_PREFERENCES) = original
-
-    def test_saving_an_account_marks_the_schema_version(self):
+    def test_saving_and_reading_use_the_legacy_store(self):
+        self.assertEqual("plugins/Tolino Cloud Sync Lite",
+                         config.PREFERENCE_NAMESPACE)
         original = config.PREFERENCES
         try:
             config.PREFERENCES = config.JSONConfig("test")
-            self.assertTrue(config.save_account("A", {}))
-            self.assertEqual(config.SCHEMA_VERSION,
-                             config.PREFERENCES["schema_version"])
+            config.save_account("A", {"refresh_token": "tok",
+                                      "hardware_id": "hw"})
+            saved = config.account_by_name("A")
         finally:
             config.PREFERENCES = original
+        self.assertEqual("tok", saved["refresh_token"])
+        self.assertEqual("hw", saved["hardware_id"])
 
-    def test_legacy_report_counts_without_exposing_values(self):
-        current = self._store({
-            "schema_version": config.SCHEMA_VERSION,
-            "accounts": [{"name": "A", "refresh_token": "secret", "state": {
-                "11111111-1111-4111-8111-111111111111": {},
-                "calibre-abcdef123456-7": {},
-            }}],
-        })
-        backup = self._store({"refresh_token": "secret", "accounts": []})
-        report = config.legacy_report(current, backup)
-        self.assertEqual(1, report["account_count"])
-        self.assertEqual(2, report["state_entries"])
-        self.assertEqual(1, report["fallback_state_keys"])
-        self.assertTrue(report["backup_available"])
-        self.assertEqual(("refresh_token",), report["legacy_preference_keys"])
-        self.assertNotIn("secret", str(report))
-
-
-class LegacyCleanupTests(unittest.TestCase):
-    """Sichere Altdaten-Aufräumung: Plan, Backup und Apply."""
-
-    TARGET = "calibre-abcdef123456-7"
-    OTHER_TARGET = "calibre-fedcba654321-7"
-    UUID = "11111111-1111-4111-8111-111111111111"
-
-    class _Api:
-        def __init__(self, raw_uuid):
-            self.raw_uuid = raw_uuid
-
-        def all_book_ids(self):
-            return [7]
-
-        def all_field_for(self, _field, _book_ids):
-            return {7: self.raw_uuid}
-
-    class _Database:
-        def __init__(self, raw_uuid):
-            self.new_api = LegacyCleanupTests._Api(raw_uuid)
-
-    @staticmethod
-    def _store(data=None):
-        store = config.JSONConfig("test")
-        if data:
-            store.update(data)
-        return store
-
-    def _current(self, state=None):
-        return self._store({
-            "schema_version": config.SCHEMA_VERSION,
-            "accounts": [{"name": "A", "state": state or {}}],
-        })
-
-    def _legacy(self):
-        return self._store({
-            "refresh_token": "secret",
-            "enable_deletions": True,
-            "accounts": [{"name": "A"}],
-        })
-
-    def _duplicate_state(self):
-        entry = {"calibre_id": 7, "tolino_id": "t1"}
-        return {"calibre-7": dict(entry), self.TARGET: dict(entry)}
-
-    def _plan_and_backup(self):
-        current = self._current(self._duplicate_state())
-        legacy = self._legacy()
-        database = self._Database(self.UUID)
-        plan = config.plan_legacy_cleanup(
-            current, legacy, database=database)
-        backup = self._store()
-        confirmed = config.create_legacy_cleanup_backup(
-            plan, current, legacy, backup=backup)
-        return current, legacy, database, plan, backup, confirmed
-
-    def test_apply_refuses_without_verified_backup(self):
-        current, legacy, database, plan, _backup, _confirmed = \
-            self._plan_and_backup()
-        result = config.apply_legacy_cleanup(
-            plan, {}, current, legacy, database=database,
-            backup=self._store())
-        self.assertFalse(result["ok"])
-        self.assertIn("calibre-7", current["accounts"][0]["state"])
-
-    def test_apply_refuses_corrupt_backup(self):
-        current, legacy, database, plan, backup, confirmed = \
-            self._plan_and_backup()
-        backup["digest"] = "corrupt"
-        result = config.apply_legacy_cleanup(
-            plan, confirmed, current, legacy, database=database,
-            backup=backup)
-        self.assertFalse(result["ok"])
-        self.assertIn("calibre-7", current["accounts"][0]["state"])
-
-    def test_apply_refuses_when_data_changed_after_backup(self):
-        current, legacy, database, plan, backup, confirmed = \
-            self._plan_and_backup()
-        current["accounts"][0]["state"][self.TARGET]["tolino_id"] = "neu"
-        result = config.apply_legacy_cleanup(
-            plan, confirmed, current, legacy, database=database,
-            backup=backup)
-        self.assertFalse(result["ok"])
-        self.assertIn("calibre-7", current["accounts"][0]["state"])
-
-    def test_apply_refuses_when_legacy_store_is_active(self):
-        current, legacy, database, plan, backup, confirmed = \
-            self._plan_and_backup()
-        original = config._USING_LEGACY_PREFERENCES
-        config._USING_LEGACY_PREFERENCES = True
-        try:
-            result = config.apply_legacy_cleanup(
-                plan, confirmed, current, legacy, database=database,
-                backup=backup)
-        finally:
-            config._USING_LEGACY_PREFERENCES = original
-        self.assertFalse(result["ok"])
-        self.assertEqual("legacy-active", result["reason"])
-
-    def test_plan_counts_only_unscoped_state_keys(self):
-        current = self._current({self.TARGET: {
-            "calibre_id": 7, "tolino_id": "t1"}})
-        plan = config.plan_legacy_cleanup(
-            current, self._legacy(), database=self._Database(self.UUID))
-        self.assertEqual(0, plan["counts"]["legacy_state_keys"])
-        self.assertEqual((), plan["state_keys"])
-
-    def test_plan_removes_exact_duplicate_state_key(self):
-        current = self._current(self._duplicate_state())
-        plan = config.plan_legacy_cleanup(
-            current, self._legacy(), database=self._Database(self.UUID))
-        self.assertEqual(
-            (("A", "calibre-7", self.TARGET),), plan["state_keys"])
-        self.assertEqual(1, plan["counts"]["duplicate_legacy_state_keys"])
-
-    def test_plan_keeps_different_and_ambiguous_entries(self):
-        different = self._duplicate_state()
-        different[self.TARGET]["tolino_id"] = "changed"
-        plan = config.plan_legacy_cleanup(
-            self._current(different), self._legacy(),
-            database=self._Database(self.UUID))
-        self.assertEqual((), plan["state_keys"])
-        self.assertEqual(1, plan["counts"]["orphan_legacy_state_keys"])
-
-        ambiguous = self._duplicate_state()
-        ambiguous[self.OTHER_TARGET] = dict(ambiguous[self.TARGET])
-        plan = config.plan_legacy_cleanup(
-            self._current(ambiguous), self._legacy(),
-            database=self._Database(self.UUID))
-        self.assertEqual((), plan["state_keys"])
-        self.assertEqual(1, plan["counts"]["orphan_legacy_state_keys"])
-
-    def test_plan_without_database_only_counts_state_keys(self):
-        current = self._current(self._duplicate_state())
-        plan = config.plan_legacy_cleanup(current, self._legacy())
-        self.assertEqual((), plan["state_keys"])
-        self.assertFalse(plan["counts"]["state_cleanup_available"])
-        self.assertEqual(1, plan["counts"]["legacy_state_keys"])
-
-    def test_plan_skips_raw_uuid_collision(self):
-        current = self._current(self._duplicate_state())
-        plan = config.plan_legacy_cleanup(
-            current, self._legacy(),
-            database=self._Database("calibre-7"))
-        self.assertEqual((), plan["state_keys"])
-        self.assertEqual(1, plan["counts"]["orphan_legacy_state_keys"])
-
-    def test_apply_removes_only_planned_keys_and_keeps_legacy_accounts(self):
-        current, legacy, database, plan, backup, confirmed = \
-            self._plan_and_backup()
-        result = config.apply_legacy_cleanup(
-            plan, confirmed, current, legacy, database=database,
-            backup=backup)
-        self.assertTrue(result["ok"])
-        state = current["accounts"][0]["state"]
-        self.assertNotIn("calibre-7", state)
-        self.assertIn(self.TARGET, state)
-        self.assertNotIn("refresh_token", legacy)
-        self.assertIn("accounts", legacy)
-
-    def test_multi_account_cleanup_is_isolated(self):
-        current = self._store({
-            "schema_version": config.SCHEMA_VERSION,
-            "accounts": [
-                {"name": "A", "state": self._duplicate_state()},
-                {"name": "B", "state": {
-                    "calibre-7": {"calibre_id": 7, "tolino_id": "b"}}},
-            ],
-        })
-        legacy = self._legacy()
-        database = self._Database(self.UUID)
-        plan = config.plan_legacy_cleanup(current, legacy, database=database)
-        self.assertEqual(
-            (("A", "calibre-7", self.TARGET),), plan["state_keys"])
-        backup = self._store()
-        confirmed = config.create_legacy_cleanup_backup(
-            plan, current, legacy, backup=backup)
-        self.assertTrue(config.apply_legacy_cleanup(
-            plan, confirmed, current, legacy, database=database,
-            backup=backup)["ok"])
-        self.assertIn("calibre-7", current["accounts"][1]["state"])
-        self.assertNotIn("calibre-7", current["accounts"][0]["state"])
-
-    def test_backup_roundtrip_and_confirmation_token(self):
-        current, legacy, _database, plan, backup, confirmed = \
-            self._plan_and_backup()
-        self.assertEqual(backup["payload"]["current"], current)
-        self.assertEqual(backup["payload"]["legacy"], legacy)
-        self.assertEqual(64, len(confirmed["token"]))
-        self.assertEqual(backup["digest"], confirmed["backup_digest"])
-
-    def test_second_cleanup_is_idempotent(self):
-        current, legacy, database, plan, backup, confirmed = \
-            self._plan_and_backup()
-        self.assertTrue(config.apply_legacy_cleanup(
-            plan, confirmed, current, legacy, database=database,
-            backup=backup)["ok"])
-        second_plan = config.plan_legacy_cleanup(
-            current, legacy, database=database)
-        self.assertEqual((), second_plan["state_keys"])
-        self.assertEqual((), second_plan["preference_keys"])
-        second_backup = self._store()
-        second_confirmed = config.create_legacy_cleanup_backup(
-            second_plan, current, legacy, backup=second_backup)
-        result = config.apply_legacy_cleanup(
-            second_plan, second_confirmed, current, legacy,
-            database=database, backup=second_backup)
-        self.assertTrue(result["ok"])
-        self.assertEqual((), result["removed_state_keys"])
-
-
-class LegacyColumnReportTests(unittest.TestCase):
-    """Read-only Bestandsaufnahme der gemeinsamen ID-Spalte."""
-
-    class Api:
-        def all_book_ids(self):
-            return (1, 2, 3, 4)
-
-        @staticmethod
-        def field_for(_column, book_id):
-            return {
-                1: "old-id",
-                2: '{"A":"id-a"}',
-                3: '{}',
-                4: "",
-            }[book_id]
-
-    class Database:
-        field_metadata = {TOLINO_COLUMN: {"datatype": "text"}}
-
-    def test_missing_column_is_reported_as_missing(self):
-        class Missing:
-            field_metadata = {}
-
-        self.assertEqual(
-            {"column": False, "plain_values": 0, "account_maps": 0},
-            legacy_column_report(Missing()))
-
-    def test_plain_values_and_account_maps_are_counted_separately(self):
-        database = self.Database()
-        database.new_api = self.Api()
-        self.assertEqual(
-            {"column": True, "plain_values": 1, "account_maps": 2},
-            legacy_column_report(database))

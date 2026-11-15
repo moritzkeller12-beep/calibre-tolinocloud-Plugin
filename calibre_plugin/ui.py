@@ -9,8 +9,6 @@ class TolinoSyncAction(InterfaceAction):
                    "tolino Cloud Sync öffnen", None)
 
     def genesis(self):
-        from .config import ensure_preferences_migrated
-        ensure_preferences_migrated()
         self.qaction.triggered.connect(self.show_dashboard)
         icon = self._toolbar_icon()
         if icon is not None and not icon.isNull():

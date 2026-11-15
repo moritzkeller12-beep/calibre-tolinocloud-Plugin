@@ -186,29 +186,6 @@ def column_state(database):
                 database, TOLINO_PROGRESS_COLUMN, ("int", "float"))}
 
 
-def legacy_column_report(database):
-    """Count plain and account-map values in the shared ID column."""
-    metadata = getattr(database, "field_metadata", {}) or {}
-    if TOLINO_COLUMN not in metadata:
-        return {"column": False, "plain_values": 0, "account_maps": 0}
-    api = getattr(database, "new_api", None)
-    all_ids = getattr(api, "all_book_ids", None)
-    field_for = getattr(api, "field_for", None)
-    if not callable(all_ids) or not callable(field_for):
-        return {"column": True, "plain_values": 0, "account_maps": 0}
-    plain_values = account_maps = 0
-    for book_id in all_ids():
-        value = str(field_for(TOLINO_COLUMN, book_id) or "").strip()
-        if not value:
-            continue
-        if value.startswith("{"):
-            account_maps += 1
-        else:
-            plain_values += 1
-    return {"column": True, "plain_values": plain_values,
-            "account_maps": account_maps}
-
-
 _SKIP = object()
 
 
