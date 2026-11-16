@@ -4,28 +4,12 @@ from . import ui_base_tests
 import unittest
 from unittest.mock import patch
 from ..run_context import RunContext
-from ._support import FakeSignal, start_cdp_stubs, stop_cdp_stubs
+from ._support import (FakeSignal, start_account_stub, stop_account_stub)
 
 
-# Der Einzellauf richtet die CDP-Stubs selbst ein.
-_ACCOUNT_PATCH = None
-
-
-def setUpModule():
-    global _ACCOUNT_PATCH
-    start_cdp_stubs()
-    _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_summary",
-        lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
-    _ACCOUNT_PATCH.start()
-
-
-def tearDownModule():
-    global _ACCOUNT_PATCH
-    if _ACCOUNT_PATCH is not None:
-        _ACCOUNT_PATCH.stop()
-        _ACCOUNT_PATCH = None
-    stop_cdp_stubs()
+# Der Einzellauf stubbte CDP und das gespeicherte Konto selbst ein.
+setUpModule = start_account_stub
+tearDownModule = stop_account_stub
 
 class SyncWorkerCollectionTests(unittest.TestCase):
     """Serien → Sammlungen im SyncWorker.
@@ -57,7 +41,7 @@ class SyncWorkerCollectionTests(unittest.TestCase):
     def _run_worker(self, series_map, state, known_pairs, read_changes=None):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
-            qt_stub={"pyqtSignal": self._signal_descriptor()[0]})
+            qt_stub={"pyqtSignal": signal_stub()})
         calls = {"pairs_reads": 0, "added": [], "progress": [],
                  "completed": None, "failed": None, "read_marks": [],
                  "worker": None}
@@ -202,7 +186,7 @@ class SyncWorkerStateTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     SyncWorkerCollectionTests._signal_descriptor()[0]})
+                     signal_stub()})
         settings = {"partner_id": 4, "state": {"alt": {"tolino_id": "t-alt"}}}
         try:
             worker = ui_module.workers.SyncWorker(
@@ -212,3 +196,19 @@ class SyncWorkerStateTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
         self.assertEqual({"neu": {"tolino_id": "t-neu"}}, worker.state)
         self.assertIsNot(worker.state, settings["state"])
+
+
+def load_ui_with_signals():
+    """UI-Modul laden, dessen pyqtSignal ein echter Descriptor ist."""
+    return ui_base_tests.ToolbarIconTests._load_ui_module(
+        lambda *args, **kwargs: None,
+        qt_stub={"pyqtSignal": signal_stub()})
+
+
+def signal_stub():
+    """Frischer pyqtSignal-Ersatz: je Instanz ein eigenes Signal.
+
+    Jeder Aufruf liefert einen eigenen Descriptor, damit jedes geladene
+    UI-Modul seinen eigenen Signalnamen bekommt.
+    """
+    return SyncWorkerCollectionTests._signal_descriptor()[0]

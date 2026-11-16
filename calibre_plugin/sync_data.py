@@ -34,6 +34,11 @@ def _publication_path_parts(path, kind):
     return str(parts[2]), str(parts[4] if len(parts) > 4 else "")
 
 
+def _is_removal(item):
+    """Fehlt `op`, gilt der Eintrag als Hinzufuegen -- wie in der Cloud-API."""
+    return str((item or {}).get("op") or "add") == "remove"
+
+
 def tag_path_parts(path):
     """Return (book ID, tag ID) for valid publication tag paths."""
     return _publication_path_parts(path, "tags")
@@ -59,7 +64,7 @@ def active_tags(patches, category, name=None):
         if parts is None:
             continue
         key = (parts[0], str(value.get("name") or ""))
-        if str(item.get("op") or "add") == "remove":
+        if _is_removal(item):
             active.pop(key, None)
         else:
             active[key] = item
@@ -152,7 +157,7 @@ def reading_progress(patches):
         if parts is None:
             continue
         key = (parts[0], parts[1])
-        if str(item.get("op") or "add") == "remove":
+        if _is_removal(item):
             active.pop(key, None)
             continue
         entry = _bookmark_entry(item.get("value"))

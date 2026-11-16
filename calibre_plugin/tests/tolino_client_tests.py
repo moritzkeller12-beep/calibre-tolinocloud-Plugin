@@ -3,18 +3,19 @@
 import base64
 import calibre_plugin.tolino as tolino_module
 import contextlib
+import json
 import os
 import re
 import tempfile
 import time
 import unittest
-from . import ui_base_tests, worker_base_tests
+from . import worker_base_tests
 from .. import config
 from ..partners import PARTNERS
 from ..tolino import TolinoAuthError, TolinoClient
 from ..sync_data import READ_TAG, active_tags, tag_id_from_patch
 from ..browser_login import grab_live_refresh
-from ._support import (LocalHTTP, LogRecorder, compare_inventory,
+from ._support import (LocalHTTP, LogRecorder, compare_inventory, jwt_token,
                        local_tolino_endpoints, start_cdp_stubs,
                        stop_cdp_stubs)
 from pathlib import Path
@@ -602,6 +603,24 @@ class BoshDeviceRecoveryTests(unittest.TestCase):
         self.assertEqual(self.ADOPTED, client.hardware)
         self.assertEqual([self.ADOPTED], adopted)
 
+    def test_an_unrelated_400_never_saves_the_adopted_device(self):
+        """Ein 400 aus anderem Grund darf die Geräte-ID im Konto nicht ersetzen.
+
+        Die Wiederbelebung läuft bei jedem 400; erst ein geglückter
+        Wiederholungsversuch bestätigt die übernommene ID.
+        """
+        from ..tolino import TolinoApiError
+        adopted = []
+        client = self._client("stale-hw-000")
+        client.hardware_callback = adopted.append
+        with self._bosh(
+                [(400, b"{}"),
+                 (400, b'{"ResponseInfo": {"message": "invalid metadata"}}')],
+                devices=[(200, self._devices_body(self.ADOPTED))]):
+            with self.assertRaises(TolinoApiError):
+                client.inventory()
+        self.assertEqual([], adopted)
+
     def test_inventory_registers_hardware_when_device_list_unavailable(self):
         """Ohne Geraeteliste wird die eigene Hardware-ID per registerhw
         registriert (wie die Referenz-Clients), dann der Retry."""
@@ -743,6 +762,18 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
         with self.assertRaises(tolino_module.TolinoError):
             TolinoClient(999, "hw", "ref")
 
+    def test_shop_is_derived_from_the_token_issuer(self):
+        """Der Aussteller des Tokens bestimmt den Buchhändler."""
+        from ..partners import partner_from_token
+
+        self.assertEqual(1, partner_from_token(jwt_token()))
+        self.assertEqual(2, partner_from_token(jwt_token(
+            iss="https://www.thalia.at/auth/oauth2/token")))
+        # Auch ohne Schema und ohne www. bleibt der Shop erkennbar.
+        self.assertEqual(2, partner_from_token(jwt_token(iss="www.thalia.at")))
+        self.assertIsNone(partner_from_token(jwt_token(iss="https://example.com")))
+        self.assertIsNone(partner_from_token("kein-jwt"))
+
     @staticmethod
     def _token_ok(_method, _path, _headers, _body):
         return (200, {"Content-Type": "application/json"},
@@ -787,7 +818,7 @@ class SharedWebreaderPartnerTests(unittest.TestCase):
         Fehler sichtbar statt still ein fremder Browser geoeffnet."""
         for pid in (1, 5, 8):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(pid, "test_hardware")
+                grab_live_refresh("test_hardware")
             self.assertIn("Kein Chromium-Browser gefunden",
                           str(ctx.exception))
 
@@ -1306,10 +1337,7 @@ class PersistCredentialsDedupTests(unittest.TestCase):
 
     @staticmethod
     def _ui_module():
-        return ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None,
-            qt_stub={"pyqtSignal":
-                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
+        return worker_base_tests.load_ui_with_signals()
 
     def test_save_credentials_writes_token_and_hardware(self):
         original = config.PREFERENCES
@@ -1383,6 +1411,192 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
+    def test_a_write_keeps_an_account_saved_by_another_process(self):
+        """Zweite Instanz hat geschrieben, waehrend diese ihren Stand hielt.
+
+        `JSONConfig` haelt den Stand im Speicher und schreibt beim Commit
+        alles zurueck: ohne Reload vor dem Schreiben loescht der eigene,
+        veraltete Stand das Konto der anderen Instanz (live beobachtet:
+        verschwundene Tokens).
+        """
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("eigen", {"refresh_token": "eins"})
+            # Der andere Prozess schreibt nur auf die Platte.
+            path = Path(config.PREFERENCES.file_path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["accounts"].append({"name": "fremd", "partner_id": 2,
+                                     "hardware_id": "",
+                                     "refresh_token": "zwei", "state": {}})
+            path.write_text(json.dumps(data), encoding="utf-8")
+            config.save_refresh_token("eigen", "drei")
+            names = {item["name"] for item in config.settings()["accounts"]}
+            self.assertIn("fremd", names)
+            self.assertEqual(
+                "drei", config.account_by_name("eigen")["refresh_token"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_every_settings_write_keeps_an_account_from_another_process(self):
+        """Auch Kontowechsel und Loeschen gehen ueber einen frischen Stand."""
+        original = config.PREFERENCES
+        try:
+            for label, action in (
+                    ("set_active_account",
+                     lambda: config.set_active_account("eigen")),
+                    ("remove_account",
+                     lambda: config.remove_account("weg"))):
+                with self.subTest(label=label):
+                    config.PREFERENCES = config.JSONConfig("test")
+                    config.save_account("eigen", {"refresh_token": "eins"})
+                    config.save_account("weg", {"refresh_token": "zwei"})
+                    path = Path(config.PREFERENCES.file_path)
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    data["accounts"].append({
+                        "name": "fremd", "partner_id": 2,
+                        "hardware_id": "", "refresh_token": "drei",
+                        "state": {}})
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    action()
+                    names = {item["name"]
+                             for item in config.settings()["accounts"]}
+                    self.assertIn("fremd", names)
+        finally:
+            config.PREFERENCES = original
+
+    def test_reading_sees_the_disk_state_without_a_write_or_restart(self):
+        """Ein offenes Fenster soll einen fremden Stand anzeigen.
+
+        Live beobachtet: das Dashboard listete 22 s lang ein fremdes Konto
+        nicht, weil nur der Schreibpfad neu lud. Lesen muss ebenfalls
+        nachladen -- sonst wirkt jede Aenderung erst nach einem Neustart.
+        """
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("eigen", {"refresh_token": "eins"})
+            self.assertEqual(
+                ["eigen"],
+                [item["name"] for item in config.settings()["accounts"]])
+            path = Path(config.PREFERENCES.file_path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["accounts"].append({"name": "fremd", "partner_id": 2,
+                                     "hardware_id": "",
+                                     "refresh_token": "zwei", "state": {}})
+            path.write_text(json.dumps(data), encoding="utf-8")
+            self.assertIn("fremd", [item["name"]
+                                    for item in config.settings()["accounts"]])
+            self.assertEqual(
+                "zwei", config.account_summary("fremd")["refresh_token"])
+            self.assertEqual(
+                "zwei", config.account_by_name("fremd")["refresh_token"])
+            data["accounts"] = [account for account in data["accounts"]
+                               if account["name"] != "fremd"]
+            path.write_text(json.dumps(data), encoding="utf-8")
+            self.assertNotIn("fremd", [item["name"]
+                                       for item in config.settings()["accounts"]])
+        finally:
+            config.PREFERENCES = original
+
+    def test_exactly_one_reload_per_change(self):
+        """Eigener und fremder Schreibvorgang kosten je genau einen Reload.
+
+        Deckt zugleich «eigener Commit, direkt danach schreibt ein zweiter
+        Prozess»: der naechste Lesevorgang sieht dessen Stand.
+        """
+        original, parses = config.PREFERENCES, []
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("eigen", {"refresh_token": "eins"})
+            path = Path(config.PREFERENCES.file_path)
+            parse = config._parse
+
+            def counting(raw):
+                parses.append(raw)
+                return parse(raw)
+
+            with patch.object(config, "_parse", counting):
+                config.settings()
+                config.settings()
+                self.assertEqual(1, len(parses))          # eigener Stand
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["accounts"].append({"name": "fremd",
+                                         "refresh_token": "zwei", "state": {}})
+                path.write_text(json.dumps(data), encoding="utf-8")
+                self.assertIn("fremd", [item["name"] for item
+                                        in config.settings()["accounts"]])
+                config.settings()
+                self.assertEqual(2, len(parses))          # ein Reload je Aenderung
+        finally:
+            config.PREFERENCES = original
+
+    def test_a_foreign_write_with_identical_timestamp_is_seen(self):
+        """Gleiche Groesse und gleiche mtime: entschieden wird am Inhalt."""
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("eigen", {"refresh_token": "aaaa"})
+            path = Path(config.PREFERENCES.file_path)
+            before = os.stat(path)
+            path.write_text(path.read_text(encoding="utf-8").replace(
+                "aaaa", "bbbb"), encoding="utf-8")
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = os.stat(path)
+            self.assertEqual((before.st_size, before.st_mtime_ns),
+                             (after.st_size, after.st_mtime_ns))
+            self.assertEqual(
+                "bbbb", config.account_by_name("eigen")["refresh_token"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_a_half_written_file_keeps_the_last_good_state(self):
+        """Leer, abgeschnitten oder kein Objekt: alter Stand bleibt, Schreiben bricht ab."""
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("eigen", {"refresh_token": "eins"})
+            path = Path(config.PREFERENCES.file_path)
+            good = path.read_text(encoding="utf-8")
+            for broken in ("", '{"accounts": [', "[1, 2]"):
+                with self.subTest(broken=broken):
+                    path.write_text(broken, encoding="utf-8")
+                    self.assertEqual(
+                        ["eigen"], [item["name"] for item
+                                    in config.settings()["accounts"]])
+                    self.assertFalse(config.save_refresh_token("eigen", "zwei"))
+                    self.assertEqual(broken, path.read_text(encoding="utf-8"))
+                    path.write_text(good, encoding="utf-8")
+                    self.assertEqual(
+                        "eins", config.account_by_name("eigen")["refresh_token"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_a_missing_file_reads_like_a_fresh_install(self):
+        """Fehlende Datei ist kein Fehler; ein neu erzeugter Stand gilt wieder."""
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            path = Path(config.PREFERENCES.file_path)
+            if path.exists():
+                path.unlink()
+            values = config.settings()
+            self.assertEqual(["default"], [item["name"]
+                                           for item in values["accounts"]])
+            self.assertEqual("default", values["active_account"])
+            config.save_account("eigen", {"refresh_token": "eins"})
+            path.unlink()                              # extern geloescht
+            self.assertEqual(["eigen"], [item["name"] for item
+                                        in config.settings()["accounts"]])
+            path.write_text(json.dumps({
+                "accounts": [{"name": "neu", "refresh_token": "x",
+                              "state": {}}],
+                "active_account": "neu"}), encoding="utf-8")
+            self.assertEqual(["neu"], [item["name"] for item
+                                       in config.settings()["accounts"]])
+        finally:
+            config.PREFERENCES = original
+
     def test_token_vault_only_clears_explicitly_rejected_tokens(self):
         from ..token_vault import TokenVault
 
@@ -1413,6 +1627,84 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         finally:
             config.PREFERENCES = original
 
+    def test_a_rejected_token_never_deletes_a_newer_stored_one(self):
+        """Während der Ablehnung kann ein anderer Prozess rotiert haben.
+
+        Der frisch gespeicherte Token des Gewinners darf nicht mitgelöscht
+        werden -- sonst erzwingt ein harmloses Rennen eine neue Anmeldung.
+        """
+        from ..token_vault import TokenVault
+
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("konto", {
+                "refresh_token": "alt", "hardware_id": "hw",
+            }, active="konto")
+
+            def responder(_method, _path, _headers, _payload):
+                # Ein paralleler Refresh hat denselben Einmal-Token bereits
+                # erfolgreich eingelöst und den neuen gespeichert.
+                config.save_refresh_token("konto", "neu")
+                return (400, {"Content-Type": "application/json"},
+                        b'{"error":"invalid_grant"}')
+
+            with LocalHTTP(responder) as server, \
+                    local_tolino_endpoints(server.origin):
+                with self.assertRaises(TolinoAuthError):
+                    TokenVault().login("konto", 4)
+            account = config.account_by_name("konto")
+            self.assertEqual("neu", account["refresh_token"])
+            self.assertEqual("hw", account["hardware_id"])
+        finally:
+            config.PREFERENCES = original
+
+    def test_relogin_clears_the_token_it_actually_used(self):
+        """Nach einem relogin gilt der frisch geladene Token -- und nur der.
+
+        Der Callback darf nicht am Token aus `login()` kleben: sonst bleibt
+        ein per `relogin` abgelehnter Token fuer immer im Konto stehen.
+        """
+        from ..token_vault import TokenVault
+
+        calls = []
+
+        def responder(_method, _path, _headers, _body):
+            calls.append(1)
+            if len(calls) == 1:
+                return (200, {"Content-Type": "application/json"},
+                        b'{"access_token":"a1","refresh_token":"zweiter"}')
+            return (400, {"Content-Type": "application/json"},
+                    b'{"error":"invalid_grant"}')
+
+        original = config.PREFERENCES
+        try:
+            config.PREFERENCES = config.JSONConfig("test")
+            config.save_account("konto", {
+                "refresh_token": "erster", "hardware_id": "hw",
+            }, active="konto")
+            with LocalHTTP(responder) as server, \
+                    local_tolino_endpoints(server.origin):
+                vault = TokenVault()
+                client = vault.login("konto", 4)
+                config.save_refresh_token("konto", "dritter")
+                with self.assertRaises(TolinoAuthError):
+                    vault.relogin(client)
+            def sent_token(body):
+                for part in body.decode("utf-8", "replace").split("&"):
+                    if part.startswith("refresh_token="):
+                        return part.split("=", 1)[1]
+                return ""
+
+            # Beide Runden haben den jeweils gespeicherten Token benutzt.
+            self.assertEqual(["erster", "dritter"],
+                             [sent_token(request["body"])
+                              for request in server.requests])
+            self.assertEqual("",
+                             config.account_by_name("konto")["refresh_token"])
+        finally:
+            config.PREFERENCES = original
+
     def test_dashboard_stores_a_manually_entered_token(self):
         ui_module = self._ui_module()
 
@@ -1432,12 +1724,14 @@ class PersistCredentialsDedupTests(unittest.TestCase):
         # Das Feld ist leer: der Token kommt ins Konto, nicht in die UI.
         dashboard.refresh = Field("")
         dashboard.hardware = Field("hw-alt")
+        dashboard._hardware_edited = False
         dashboard.update_status = lambda: None
         try:
             with patch("calibre_plugin.ui_dashboard.save_credentials",
                        lambda *args: saved.append(args)):
+                token = jwt_token()
                 ui_module.dashboard.SyncDashboard.store_refresh(
-                    dashboard, "tok-neu")
+                    dashboard, token)
         finally:
             ui_module._restore_stubs_for_tests()
-        self.assertEqual([("konto", "tok-neu", "hw-alt")], saved)
+        self.assertEqual([("konto", token, "hw-alt", 1)], saved)

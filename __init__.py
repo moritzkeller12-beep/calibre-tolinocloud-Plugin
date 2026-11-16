@@ -1,3 +1,4 @@
+# Ohne Calibre (Metadaten-Test via runpy) gibt es customize nicht.
 try:
     from calibre.customize import InterfaceActionBase
 except ImportError:

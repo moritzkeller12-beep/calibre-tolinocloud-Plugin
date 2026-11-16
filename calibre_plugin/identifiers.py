@@ -25,10 +25,6 @@ def valid_book_uuid(value):
     return ""
 
 
-def _scope_text(scope):
-    return str(scope or "").strip().casefold()
-
-
 def _book_number(book_id):
     return str(book_id if book_id is not None else "").strip()
 
@@ -36,7 +32,7 @@ def _book_number(book_id):
 def calibre_key(book_id, library_scope=""):
     """Stable scoped state key; empty without a book number or scope."""
     number = _book_number(book_id)
-    scope = _scope_text(library_scope)
+    scope = normalize_uuid_text(library_scope)
     if not number or not scope:
         return ""
     return "calibre-%s-%s" % (scope, number)

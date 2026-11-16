@@ -6,6 +6,7 @@ from .. import browser_finder
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -15,6 +16,19 @@ from ._support import (
     _REAL_CLOSE_WINDOW, _full, start_cdp_stubs, stop_cdp_stubs)
 from unittest.mock import patch
 import contextlib
+
+
+def _window():
+    """Offenes Grabber-Fenster plus Schliess-Stub für die Zusicherung."""
+    window = {"open": True}
+
+    def close(timeout=2):
+        if not window["open"]:
+            return False
+        window["open"] = False
+        return True
+
+    return window, close
 
 
 @contextlib.contextmanager
@@ -64,7 +78,8 @@ def _read_exact(conn, size):
 def _jwt_token(iat, sid=None):
     """Minimales, datierbares Refresh-JWT (Kopf, Nutzlast, Signatur)."""
     head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
-    payload = {"iat": int(iat), "typ": "Refresh"}
+    payload = {"iat": int(iat), "typ": "Refresh",
+               "iss": "https://www.thalia.de/auth/oauth2/token"}
     if sid:
         payload["sid"] = sid
     body = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8"))
@@ -152,6 +167,10 @@ class LiveGrabTests(unittest.TestCase):
             def __init__(self, args, **kwargs):
                 spawned["args"] = list(args)
 
+            @staticmethod
+            def poll():
+                return None
+
         with tempfile.TemporaryDirectory():
             prefix = ["/usr/bin/flatpak", "run", "--command=brave",
                       "com.brave.Browser"]
@@ -201,13 +220,7 @@ class LiveGrabTests(unittest.TestCase):
                 self.refresh = "rotated-token"
 
         grabbed = {"refresh": [stale, fresh], "hardware": ["hw-live"]}
-        window = {"open": True}
-
-        def close(timeout=2):
-            if not window["open"]:
-                return False
-            window["open"] = False
-            return True
+        window, close = _window()
 
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
@@ -215,7 +228,7 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value=grabbed), \
              patch("calibre_plugin.cdp.close_grabber_window", close):
-            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+            refresh, hardware, partner = grab_live_refresh("cfg-hw", timeout=1)
         self.assertEqual("rotated-token", refresh)
         self.assertEqual("fake-hw", hardware)
         self.assertEqual([fresh], logins)
@@ -228,13 +241,7 @@ class LiveGrabTests(unittest.TestCase):
         """Nur veraltete Kandidaten scheitern klar, ohne Replay."""
         from ..browser_login import grab_live_refresh
         stale = self._jwt(time.time() - 7200, "sess-old")  # 2 h alt
-        window = {"open": True}
-
-        def close(timeout=2):
-            if not window["open"]:
-                return False
-            window["open"] = False
-            return True
+        window, close = _window()
 
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
@@ -246,7 +253,7 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.browser_login.time.monotonic",
                    side_effect=[0, 0, 1, 1]):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=1)
+                grab_live_refresh("cfg-hw", timeout=1)
         self.assertEqual("B02", ctx.exception.code)
         # Ohne übernommenen Zugang bleibt kein Fenster mit foreignem
         # Reader offen.
@@ -287,7 +294,7 @@ class LiveGrabTests(unittest.TestCase):
                    side_effect=next_grab), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=1)
+                grab_live_refresh("cfg-hw", timeout=1)
         message = _full(ctx.exception)
         self.assertIn("bei tolino anmelden", message)
         self.assertIn("gültiger Zugang", message)
@@ -326,7 +333,7 @@ class LiveGrabTests(unittest.TestCase):
                                  "idb": []}), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=1)
+                grab_live_refresh("cfg-hw", timeout=1)
         self.assertEqual([spent], logins)
         self.assertIn("Tolino hat den Zugang", ctx.exception.detail)
 
@@ -451,10 +458,23 @@ class LiveGrabTests(unittest.TestCase):
 
         grabbed = {"refresh": [access, refresh], "hardware": []}
         with patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
-            result = _exchange_grabbed_token(4, "hw", grabbed,
+            result = _exchange_grabbed_token("hw", grabbed,
                                              [access, refresh])
         self.assertEqual([refresh], logins)
         self.assertEqual("rotated", result[0])
+
+    def test_exchange_refuses_tokens_without_a_shop(self):
+        """Ohne ``iss`` gibt es keinen Endpunkt: klarer Fehler, kein Tausch."""
+        from ..browser_login import _exchange_grabbed_token
+        built = []
+        with patch("calibre_plugin.browser_login.TolinoClient",
+                   lambda *args: built.append(args)):
+            with self.assertRaises(TolinoAuthError) as ctx:
+                _exchange_grabbed_token(
+                    "hw", {"refresh": ["kein-jwt"], "hardware": []},
+                    ["kein-jwt"])
+        self.assertEqual("B03", ctx.exception.code)
+        self.assertEqual([], built)
 
     def test_grab_live_refresh_picks_up_token_written_during_wait(self):
         """Leerer erster Grab => das Plugin wartet, bis der Reader selbst
@@ -479,7 +499,7 @@ class LiveGrabTests(unittest.TestCase):
                                  "hardware": ["hw-live"], "idb": []}]), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
              patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
-            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+            refresh, hardware, partner = grab_live_refresh("cfg-hw", timeout=1)
         self.assertEqual("rotated-after-wait", refresh)
         self.assertEqual("hw-live", hardware)
 
@@ -526,7 +546,7 @@ class LiveGrabTests(unittest.TestCase):
                                  "hardware": [reader_hw],
                                  "idb": []}]), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
-            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+            refresh, hardware, partner = grab_live_refresh("cfg-hw", timeout=1)
         self.assertEqual("rotated-after-wait", refresh)
         self.assertEqual(reader_hw, hardware)
         self.assertEqual([spent, fresh], logins)
@@ -550,7 +570,7 @@ class LiveGrabTests(unittest.TestCase):
 
         with patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
             _exchange_grabbed_token(
-                4, "abcdef01-2345-4678-9abc-def012345678",
+                "abcdef01-2345-4678-9abc-def012345678",
                 {"refresh": [fresh],
                  "hardware": ["12345678-1234-4abc-8def-1234567890ab"]},
                 [fresh])
@@ -591,7 +611,7 @@ class LiveGrabTests(unittest.TestCase):
              patch("calibre_plugin.cdp.close_grabber_window"), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
              patch("calibre_plugin.browser_login.TolinoClient", FakeClient):
-            result = grab_live_refresh(4, "cfg-hw", timeout=1,
+            result = grab_live_refresh("cfg-hw", timeout=1,
                                        progress=messages.append)
         self.assertEqual("rotated", result[0])
         self.assertTrue(any("anmelden" in text for text in messages))
@@ -610,7 +630,7 @@ class LiveGrabTests(unittest.TestCase):
                    return_value={"window": False, "reader_tab": False}), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=30,
+                grab_live_refresh("cfg-hw", timeout=30,
                                   progress=lambda _t: None)
         self.assertIn("geschlossen", str(ctx.exception))
         self.assertEqual("B02", ctx.exception.code)
@@ -633,7 +653,7 @@ class LiveGrabTests(unittest.TestCase):
                    return_value={"window": True, "reader_tab": False}), \
              patch("calibre_plugin.cdp.close_grabber_window", close):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=0)
+                grab_live_refresh("cfg-hw", timeout=0)
         # Das Fenster bleibt offen: der Nutzer soll sich dort anmelden.
         self.assertTrue(window["open"])
         message = str(ctx.exception)
@@ -844,7 +864,7 @@ class LoginWindowWaitTests(_SidJwtTest):
              patch("calibre_plugin.cdp.close_grabber_window", close), \
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=1)
+                grab_live_refresh("cfg-hw", timeout=1)
         # Die Anmeldeseite bleibt offen, damit die Anmeldung vor Ort
         # noch ankommen kann.
         self.assertTrue(window["open"])
@@ -879,7 +899,7 @@ class LoginWindowWaitTests(_SidJwtTest):
              patch("calibre_plugin.browser_login._NEW_TOKEN_INTERVAL", 0), \
              patch("calibre_plugin.browser_login._WINDOW_CHECK_INTERVAL", 0):
             with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(4, "cfg-hw", timeout=1)
+                grab_live_refresh("cfg-hw", timeout=1)
         self.assertLessEqual(len(grabs), 4)
         self.assertIn("gültiger Zugang", str(ctx.exception))
 
@@ -949,13 +969,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
         from ..browser_login import grab_live_refresh
         blob = base64.b64encode(
             b"Salted__" + b"saltsalt" + b"ciphertextblock!").decode()
-        window = {"open": True}
-
-        def close(timeout=2):
-            if not window["open"]:
-                return False
-            window["open"] = False
-            return True
+        window, close = _window()
 
         with patch("calibre_plugin.cdp.launch_reader_window",
                    return_value=9223), \
@@ -964,7 +978,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
              _no_pycryptodome(), \
              patch("calibre_plugin.cdp.close_grabber_window", close):
             with self.assertRaises(TolinoAuthError) as caught:
-                grab_live_refresh(4, "cfg-hw", timeout=1)
+                grab_live_refresh("cfg-hw", timeout=1)
         self.assertEqual("A01", caught.exception.code)
         self.assertFalse(window["open"])
 
@@ -1104,7 +1118,7 @@ class ReaderBlobLiveGrabTests(_SidJwtTest):
              patch("calibre_plugin.browser_login.TolinoClient", FakeClient), \
              patch("calibre_plugin.cdp.grab_once_from_grabber",
                    return_value={"refresh": [blob], "hardware": []}):
-            refresh, hardware = grab_live_refresh(4, "cfg-hw", timeout=1)
+            refresh, hardware, partner = grab_live_refresh("cfg-hw", timeout=1)
         self.assertEqual(("rotated-token", "fake-hw"),
                          (refresh, hardware))
         self.assertEqual([fresh], logins)
@@ -1190,6 +1204,10 @@ class ChromiumOpensRegardlessOfDefaultTests(unittest.TestCase):
                 if args[0] == "/usr/bin/broken":
                     raise OSError("exec format error")
                 spawned["args"] = list(args)
+
+            @staticmethod
+            def poll():
+                return None
 
         with tempfile.TemporaryDirectory():
             with _patch.object(browser_finder, "find_browsers",
@@ -1513,9 +1531,10 @@ class CdpOwnershipTests(unittest.TestCase):
         cdp._LAUNCHED.update({"process": None, "port": None, "profile": ""})
 
     def _launch(self, process, port=9223, profile=None):
+        profile = profile or tempfile.mkdtemp(prefix="cdp-test-")
+        self.addCleanup(shutil.rmtree, profile, True)
         self.cdp._LAUNCHED.update({
-            "process": process, "port": port,
-            "profile": profile or tempfile.mkdtemp(prefix="cdp-test-")})
+            "process": process, "port": port, "profile": profile})
         return self.cdp._verified_owner(require_endpoint=False)
 
     def test_reader_target_builds_only_port_and_path(self):
@@ -1582,6 +1601,26 @@ class CdpOwnershipTests(unittest.TestCase):
             self.assertEqual(9223, self.cdp._verified_owner()["port"])
         with patch.object(self.cdp, "_endpoint_answers", return_value=False):
             self.assertIsNone(self.cdp._verified_owner())
+
+    def test_a_window_that_cannot_be_closed_blocks_a_second_launch(self):
+        """Haengendes Anmeldefenster: klarer Fehler statt zweitem Browser."""
+        class Process:
+            @staticmethod
+            def poll():
+                return None
+
+        self._launch(Process())
+        with patch.object(browser_finder, "find_browsers",
+                          return_value=([["/usr/bin/chromium"]], "")), \
+             patch.object(self.cdp, "close_grabber_window",
+                          return_value=False), \
+             patch.object(self.cdp, "_endpoint_answers", return_value=False), \
+             patch.object(self.cdp.subprocess, "Popen",
+                          side_effect=AssertionError("zweiter Browser")):
+            with self.assertRaises(TolinoAuthError) as caught:
+                self.cdp.launch_reader_window()
+        self.assertEqual("B01", caught.exception.code)
+        self.assertIn("vorherige Anmeldefenster", str(caught.exception))
 
     def test_launch_uses_fresh_temporary_profile_and_remembers_process(self):
         spawned = {}
@@ -1688,7 +1727,13 @@ class ThreadShutdownTests(unittest.TestCase):
         try:
             calls = []
 
+            class Signal(object):
+                def connect(self, _slot):
+                    return None
+
             class SlowThread:
+                finished = Signal()
+
                 def quit(self):
                     calls.append("quit")
 
@@ -1708,12 +1753,64 @@ class ThreadShutdownTests(unittest.TestCase):
             ui_module.common._THREADS.clear()
             ui_module._restore_stubs_for_tests()
 
+    def test_a_running_worker_stays_referenced_until_its_thread_finishes(self):
+        """closeEvent gibt die Worker-Referenz ab; der QObject muss leben."""
+        ui_module = self._ui()
+        try:
+            class Signal(object):
+                def __init__(self):
+                    self.slots = []
+
+                def connect(self, slot):
+                    self.slots.append(slot)
+
+            class SlowThread(object):
+                def __init__(self):
+                    self.started = Signal()
+                    self.finished = Signal()
+
+                def start(self):
+                    pass
+
+                def deleteLater(self):
+                    pass
+
+            class Worker(object):
+                def __init__(self):
+                    self.run = lambda: None
+
+                def moveToThread(self, thread):
+                    self.thread = thread
+
+            class Dialog(object):
+                pass
+
+            thread, worker, dialog = SlowThread(), Worker(), Dialog()
+            ui_module.common.start_worker(
+                dialog, worker, thread, "thread", "worker")
+            self.assertIs(worker, dialog.worker)
+            dialog.worker = None      # wie closeEvent beim Schliessen
+            self.assertIn(worker, ui_module.common._WORKERS)
+            for slot in thread.finished.slots:
+                slot()
+            self.assertNotIn(worker, ui_module.common._WORKERS)
+        finally:
+            ui_module.common._THREADS.clear()
+            ui_module.common._WORKERS.clear()
+            ui_module._restore_stubs_for_tests()
+
     def test_close_event_cancels_and_never_waits_forever(self):
         ui_module = self._ui()
         try:
             calls = []
 
+            class Signal(object):
+                def connect(self, _slot):
+                    return None
+
             class SlowThread:
+                finished = Signal()
+
                 def quit(self):
                     calls.append("quit")
 
@@ -1757,9 +1854,62 @@ class EvpKeyDerivationTests(unittest.TestCase):
         self.assertEqual(
             "08c84148d0df2a7f941de44937bd4d7b", iv.hex())
         self.assertEqual((32, 16), (len(key), len(iv)))
+        # Ein anderes Salz muss einen anderen Schluessel ergeben; sonst waere
+        # die Ableitung nicht vom gespeicherten Salz abhaengig.
+        self.assertNotEqual(key, _evp_bytes_to_key(b"", b"anderesalz")[0])
 
-    def test_the_derivation_needs_three_blocks(self):
-        from ..browser_crypto import _evp_bytes_to_key
-        first, _iv = _evp_bytes_to_key(b"", b"saltsalt")
-        second, _iv2 = _evp_bytes_to_key(b"", b"anderesalz")
-        self.assertNotEqual(first, second)
+
+class DashboardCloseExitTests(unittest.TestCase):
+    """Schliessen des Dashboards beendet den Prozess -- im echten Kindprozess.
+
+    Der Kindprozess oeffnet das Fenster ueber den Plugin-Pfad
+    (`TolinoSyncAction.show_dashboard` -> `SyncDashboard.exec()`), haelt einen
+    echten Worker im Lauf und schliesst das Fenster mitten darin. Genau dieser
+    Moment brach vor `_keep_worker_alive` ab (QThread lief weiter, waehrend das
+    Fenster samt Worker eingesammelt wurde). Isoliertes HOME, offscreen,
+    kein Konto -- also kein Netzaufruf.
+    """
+
+    def test_closing_the_dashboard_ends_the_process_with_code_zero(self):
+        launcher = shutil.which("calibre-debug")
+        if not launcher:
+            self.skipTest("calibre-debug fehlt: Qt-Kindprozess nicht startbar")
+        root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            library = os.path.join(tmp, "library")
+            os.makedirs(home)
+            os.makedirs(library)
+            env = dict(os.environ)
+            env.update({
+                "HOME": home,
+                "QT_QPA_PLATFORM": "offscreen",
+                "XDG_CONFIG_HOME": os.path.join(home, "config"),
+                "XDG_DATA_HOME": os.path.join(home, "data"),
+                "XDG_CACHE_HOME": os.path.join(home, "cache"),
+                "TOLINO_EXIT_ROOT": root,
+                "TOLINO_EXIT_LIBRARY": library,
+            })
+            env.pop("refresh_token", None)
+            env.pop("hardware_id", None)
+            process = subprocess.Popen(
+                [launcher, "-e", os.path.join(
+                    root, "calibre_plugin", "tests",
+                    "dashboard_exit_child.py")],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True)
+            try:
+                output = process.communicate(timeout=15)[0] or ""
+            except subprocess.TimeoutExpired:
+                # Genau der alte Fehler: nach dem Schliessen haengt der
+                # Prozess an einer Rueckmeldung, die niemand mehr sieht.
+                process.kill()
+                output = process.communicate()[0] or ""
+                self.fail("Kindprozess hing 15 s nach dem Schliessen:\n"
+                          + output[-2000:])
+        self.assertEqual(0, process.returncode, output[-2000:])
+        self.assertIn("WORKER-GESTARTET", output)
+        self.assertIn("FENSTER-GESCHLOSSEN Referenzen=(None, None)", output)
+        self.assertIn("BLOCKING=0", output)
+        self.assertIn("OK-EXIT", output)

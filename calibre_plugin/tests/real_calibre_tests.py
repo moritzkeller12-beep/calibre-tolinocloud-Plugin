@@ -184,6 +184,9 @@ class RealCalibreColumnTests(unittest.TestCase):
         proc = subprocess.run([CALIBREDB, "--with-library", self.library,
                                *args], capture_output=True, text=True,
                               timeout=180)
+        if "Another calibre program" in (proc.stderr + proc.stdout):
+            raise unittest.SkipTest(
+                "Calibre laeuft: die Test-Bibliothek braucht exklusiven Zugriff")
         self.assertEqual(proc.returncode, 0,
                          "calibredb %s: %s" % (args, proc.stderr[-400:]))
         return proc.stdout

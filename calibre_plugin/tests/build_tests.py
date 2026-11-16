@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 from build_plugin import (FILES, ICON, MARKER, ROOT, SOURCE, build_plugin,
-                          strip_docstrings, strip_source)
+                          strip_source)
 
 
 def _docstring_owners(text):
@@ -20,7 +20,8 @@ def _docstring_owners(text):
 class PluginArchiveTests(unittest.TestCase):
     def test_build_includes_plugin_modules_and_excludes_test_runner(self):
         self.assertIn("token_vault.py", FILES)
-        self.assertIn("plan.py", FILES)
+        self.assertIn("planning.py", FILES)
+        self.assertIn("ui_dialogs.py", FILES)
         self.assertNotIn("test_sync.py", FILES)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -72,7 +73,6 @@ class PluginArchiveTests(unittest.TestCase):
                   b"def answer():\n"
                   b'    """Antwort."""\n'
                   b"    return 42  # auch weg\n")
-        self.assertEqual(len(source), len(strip_docstrings(source)))
         stripped = strip_source(source)
         self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
         self.assertNotIn(b"Doc.", stripped)

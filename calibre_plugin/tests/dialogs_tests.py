@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unittest
 from . import ui_base_tests
-from ..plan import normalize_removals
+from ..planning import normalize_removals
 from ..run_context import RunContext
 from ._support import (FakeMenu, FakeMessageBox, FakeSignal, FakeTableItem,
                       _read_ids, compare_inventory, dashboard_stub,
@@ -1137,7 +1137,7 @@ class CloudDeletionPlanTests(unittest.TestCase):
             for uuid, tolino_id, title, extra in cases:
                 with self.subTest(uuid=uuid):
                     state = {uuid: dict(extra, tolino_id=tolino_id, title=title)}
-                    preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+                    preparation = ui_module.dashboard._planning.plan_actions(
                         dashboard, RunContext.from_values(self._settings()),
                         self._metadata(), state,
                         self._selection([(uuid, tolino_id, title)]))

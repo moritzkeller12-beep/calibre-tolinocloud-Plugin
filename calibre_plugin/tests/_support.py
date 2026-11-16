@@ -7,8 +7,12 @@ Die Testklassen selbst liegen thematisch in ``tests/*_tests.py``;
 ``calibre_plugin/test_sync.py`` sammelt sie wieder ein.
 """
 import contextlib
+import glob
 import importlib
+import os
+import shutil
 import sys
+import tempfile
 import threading
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -80,11 +84,124 @@ _WORKER_FIELDS = ("thread", "worker", "prepare_thread", "prepare_worker",
                   "login_worker")
 
 
+class _Button:
+    """Steht für einen Qt-Knopf; die Aufrufe selbst werden nicht geprüft."""
+
+    def setDefault(self, _value):
+        pass
+
+    def setFocus(self):
+        pass
+
+
+# Felder, die der Produktivcode ohne Wächter liest: das Double ist vollständig.
+_DASHBOARD_FIELDS = {"account_name": "", "account_names": [],
+                     "_hardware_edited": False, "_partner_chosen": False,
+                     "login_button": None, "gui": None, "primary": _Button()}
+
+
 def dashboard_stub(**attrs):
     """Minimales Dashboard mit leeren Worker-Referenzen."""
-    values = dict.fromkeys(_WORKER_FIELDS)
+    values = dict(dict.fromkeys(_WORKER_FIELDS), **_DASHBOARD_FIELDS)
     values.update(attrs)
     return types.SimpleNamespace(**values)
+
+
+# Felder, die der Produktivcode als Widgets anspricht.
+_WIDGET_FIELDS = ("account_select", "account_quick", "partner", "hardware",
+                  "refresh", "formats", "account_quick_label", "status",
+                  "progress", "progress_label", "primary", "covers",
+                  "deletions", "tolino_column")
+
+
+class ComboStub:
+    """Minimaler Qt-Nachbau für Kombobox, Eingabe und Label."""
+
+    def __init__(self, *_args, **_kwargs):
+        self.items = []
+        self.current_index = 0
+        self.visible = True
+        self.text_value = ""
+
+    def blockSignals(self, value):
+        self.blocked = value
+
+    def clear(self):
+        self.items = []
+
+    def addItem(self, text, data=None):
+        self.items.append((text, data))
+
+    def setCurrentIndex(self, index):
+        self.current_index = index
+
+    def currentData(self):
+        return self.itemData(self.current_index)
+
+    def findData(self, data):
+        return next((index for index, (_text, item) in enumerate(self.items)
+                     if item == data), -1)
+
+    def itemData(self, index):
+        if 0 <= index < len(self.items):
+            return self.items[index][1]
+        return None
+
+    def setVisible(self, value):
+        self.visible = value
+
+    def setText(self, text):
+        self.text_value = text
+
+    def text(self):
+        return self.text_value
+
+    def setToolTip(self, text):
+        self.tooltip = text
+
+    def setEnabled(self, value):
+        self.enabled = value
+
+    def setChecked(self, value):
+        self.checked = bool(value)
+
+    def isChecked(self):
+        return getattr(self, "checked", False)
+
+    def setRange(self, *_args):
+        pass
+
+    def setValue(self, _value):
+        pass
+
+
+def dashboard_with_widgets(widget_factory):
+    """Dashboard-Stub, dessen Widget-Felder der Qt-Nachbau besetzt."""
+    dashboard = dashboard_stub()
+    for name in _WIDGET_FIELDS:
+        setattr(dashboard, name, widget_factory())
+    return dashboard
+
+
+_ACCOUNT_PATCH = None
+
+
+def start_account_stub():
+    """Jeder Test sieht ein gespeichertes Konto (Vault-Stub)."""
+    global _ACCOUNT_PATCH
+    start_cdp_stubs()
+    _ACCOUNT_PATCH = patch(
+        "calibre_plugin.token_vault.account_summary",
+        lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
+    _ACCOUNT_PATCH.start()
+
+
+def stop_account_stub():
+    global _ACCOUNT_PATCH
+    if _ACCOUNT_PATCH is not None:
+        _ACCOUNT_PATCH.stop()
+        _ACCOUNT_PATCH = None
+    stop_cdp_stubs()
 
 
 class _ReadingDb:
@@ -276,7 +393,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     # Produktivcode die andere benutzt.
     for module_name in ("calibre_plugin.ui", "calibre_plugin.ui_common",
                         "calibre_plugin.ui_dialogs",
-                        "calibre_plugin.dashboard_plan",
+                        "calibre_plugin.planning",
                         "calibre_plugin.cdp_transport",
                         "calibre_plugin.ui_workers",
                         "calibre_plugin.ui_auth_workers",
@@ -290,7 +407,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
                       "ui_workers",
                       "ui_auth_workers", "ui_dashboard",
-                      "ui_dashboard_parts", "dashboard_plan"):
+                      "ui_dashboard_parts", "planning"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
     modules_before_entry = set(sys.modules)
@@ -337,11 +454,14 @@ def ui_module_for(test_case, qt_stub=None):
 # care about the close patch the name again with their own mock.
 _PICK_CHROMIUM_PATCH = None
 _CLOSE_WINDOW_PATCH = None
+_GRAB_PROFILE_SNAPSHOT = None
 
 
 def start_cdp_stubs():
     """Browser-Start und echtes Fenster-Schliessen fuer die Suite stilllegen."""
-    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
+    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH, _GRAB_PROFILE_SNAPSHOT
+    _GRAB_PROFILE_SNAPSHOT = set(glob.glob(os.path.join(
+        tempfile.gettempdir(), "tolino-grab-*")))
     if _PICK_CHROMIUM_PATCH is None:
         _PICK_CHROMIUM_PATCH = patch(
             "calibre_plugin.browser_finder.find_browsers",
@@ -355,7 +475,14 @@ def start_cdp_stubs():
 
 def stop_cdp_stubs():
     """Die Stubs wieder entfernen (auch nach einem Abbruch)."""
-    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH
+    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH, _GRAB_PROFILE_SNAPSHOT
+    # Der gestubbte Browser schliesst nie, also raeumt auch niemand sein
+    # Profil weg. Nur die in DIESEM Lauf entstandenen Verzeichnisse loeschen.
+    for path in glob.glob(os.path.join(tempfile.gettempdir(),
+                                       "tolino-grab-*")):
+        if path not in (_GRAB_PROFILE_SNAPSHOT or set()):
+            shutil.rmtree(path, ignore_errors=True)
+    _GRAB_PROFILE_SNAPSHOT = None
     if _PICK_CHROMIUM_PATCH is not None:
         _PICK_CHROMIUM_PATCH.stop()
         _PICK_CHROMIUM_PATCH = None
@@ -578,3 +705,16 @@ class CalibreDatabase:
         self.created.append(label)
         self.field_metadata["#" + label] = {"datatype": datatype}
         return len(self.field_metadata)
+
+
+def jwt_token(iat=None, iss="https://www.thalia.de/auth/oauth2/token"):
+    """Kleines Refresh-JWT mit ``iss`` -- zum Testen der Shop-Ableitung."""
+    import base64
+    import json
+    import time as _time
+
+    payload = {"iat": int(_time.time() if iat is None else iat),
+               "typ": "Refresh", "iss": iss}
+    head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode())
+    return "%s.%s.sig" % (head.decode().rstrip("="), body.decode().rstrip("="))

@@ -11,6 +11,36 @@ from ..library import (TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN,
 from ..sync_data import reading_progress
 
 
+_READING_DATATYPES = {TOLINO_READ_COLUMN: "bool", TOLINO_PROGRESS_COLUMN: "int"}
+
+
+def _reading_column_db(known, column=TOLINO_READ_COLUMN, fields=None):
+    """Minimale Calibre-DB: bekannte Buchnummern und eine Schreibspalte."""
+    if fields is None:
+        fields = {column: {"datatype": _READING_DATATYPES[column]}}
+
+    class Api:
+        def __init__(self):
+            self.label = None
+            self.values = {}
+
+        @staticmethod
+        def has_id(book_id):
+            return book_id in known
+
+        def set_field(self, label, mapping):
+            self.label = label
+            self.values = dict(mapping)
+
+    api = Api()
+
+    class Db:
+        field_metadata = fields
+        new_api = api
+
+    return Db()
+
+
 class ReadColumnLibraryTests(unittest.TestCase):
     @staticmethod
     def _db(fields):
@@ -36,35 +66,17 @@ class ReadColumnWriteBackTests(unittest.TestCase):
 
     @staticmethod
     def _db(known, fields=None):
-        if fields is None:
-            fields = {TOLINO_READ_COLUMN: {"datatype": "bool"}}
-
-        class Api:
-            def __init__(self):
-                self.label = None
-                self.values = {}
-
-            @staticmethod
-            def has_id(book_id):
-                return book_id in known
-
-            def set_field(self, label, mapping):
-                self.label = label
-                self.values = dict(mapping)
-
-        api = Api()
-
-        class Db:
-            field_metadata = fields
-            new_api = api
-
-        return Db()
+        return _reading_column_db(known, fields=fields)
 
     def test_confirmed_states_are_written_to_the_column(self):
         db = self._db({1: None, 2: None})
         self.assertEqual(2, update_read_status(db, [(1, False), (2, True)]))
         self.assertEqual(TOLINO_READ_COLUMN, db.new_api.label)
         self.assertEqual({1: False, 2: True}, db.new_api.values)
+        # «unbekannt» (None) leert die Spalte, statt zu False zu werden.
+        cleared = self._db({1: True})
+        self.assertEqual(1, update_read_status(cleared, [(1, None)]))
+        self.assertEqual({1: None}, cleared.new_api.values)
 
     def test_only_confirmed_known_books_are_written_when_the_column_exists(self):
         db = self._db({1: None})
@@ -73,11 +85,6 @@ class ReadColumnWriteBackTests(unittest.TestCase):
         db = self._db({1: None}, fields={})
         self.assertEqual(0, update_read_status(db, [(1, False)]))
         self.assertEqual({}, db.new_api.values)
-
-    def test_none_clears_the_column_instead_of_becoming_false(self):
-        db = self._db({1: None})
-        self.assertEqual(1, update_read_status(db, [(1, None)]))
-        self.assertEqual({1: None}, db.new_api.values)
 
 
 class ReadColumnComparisonTests(unittest.TestCase):
@@ -219,29 +226,7 @@ class ProgressColumnTests(unittest.TestCase):
 
     @staticmethod
     def _db(known, fields=None):
-        if fields is None:
-            fields = {TOLINO_PROGRESS_COLUMN: {"datatype": "int"}}
-
-        class Api:
-            def __init__(self):
-                self.label = None
-                self.values = {}
-
-            @staticmethod
-            def has_id(book_id):
-                return book_id in known
-
-            def set_field(self, label, mapping):
-                self.label = label
-                self.values = dict(mapping)
-
-        api = Api()
-
-        class Db:
-            field_metadata = fields
-            new_api = api
-
-        return Db()
+        return _reading_column_db(known, TOLINO_PROGRESS_COLUMN, fields)
 
     def test_progress_is_written_as_rounded_percent_and_can_be_cleared(self):
         db = self._db({1, 2, 3})

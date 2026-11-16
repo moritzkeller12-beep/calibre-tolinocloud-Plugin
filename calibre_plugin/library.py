@@ -37,10 +37,7 @@ def library_scope(database):
 
 def _column_value(metadata):
     """Read the raw Calibre custom-column value."""
-    getter = getattr(metadata, "get", None)
-    if callable(getter):
-        return getter(TOLINO_COLUMN, "") or ""
-    return ""
+    return metadata.get(TOLINO_COLUMN, "") or ""
 
 
 def _decode_tolino_ids(value):
@@ -88,8 +85,7 @@ def bool_column_available(database, column):
 
 def bool_column_value(metadata, column):
     """Ja/Nein-Wert einer Spalte: True, False oder None (leer/unbekannt)."""
-    getter = getattr(metadata, "get", None)
-    value = getter(column, None) if callable(getter) else None
+    value = metadata.get(column, None)
     if isinstance(value, bool):
         return value
     text = str(value if value is not None else "").strip().casefold()
@@ -131,7 +127,7 @@ CREATED_COLUMNS = {}
 
 
 def _library_key(database):
-    """Kennung der Bibliothek: angelegte Spalten gelten nur dort."""
+    """Kennung der Bibliothek; LibraryDatabase/Cache tragen dbpath."""
     for holder in (database, getattr(database, "new_api", None)):
         dbpath = getattr(holder, "dbpath", None)
         if isinstance(dbpath, str) and dbpath:
@@ -147,7 +143,7 @@ def _column_present(database, label):
 
 
 def _live_field_metadata(database):
-    """Alle Feldmetadaten-Objekte der laufenden Sitzung (ohne Doppelte)."""
+    """Feldmetadaten der Sitzung; Cache und LibraryDatabase je eigene."""
     views = []
     for holder in (getattr(database, "new_api", None), database):
         fields = getattr(holder, "field_metadata", None)
@@ -167,12 +163,12 @@ def _assign_record_index(fields, label):
     setter = getattr(fields, "set_field_record_index", None)
     if not callable(setter) or key not in fields:
         return
-    if getattr(fields[key], "get", lambda *_: None)("rec_index") is not None:
+    if fields[key].get("rec_index") is not None:
         return
     used = 0
     try:
         for name in fields:
-            index = getattr(fields[name], "get", lambda *_: None)("rec_index")
+            index = fields[name].get("rec_index")
             if isinstance(index, int) and index > used:
                 used = index
     except (KeyError, TypeError):

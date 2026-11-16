@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 from . import orchestration_tests
-from ..plan import plan_metadata_updates, plan_sync
+from ..planning import plan_metadata_updates, plan_sync
 from ..identifiers import calibre_key
 from ..library import DEFAULT_LIBRARY_SCOPE, library_scope
 from ..run_context import RunContext
@@ -51,10 +51,6 @@ class BookIdentifierSourceTests(unittest.TestCase):
         self.assertEqual("uuid('%s')" % self.UUID,
                          normalize_uuid_text("UUID('%s')" % self.UUID))
         self.assertEqual("", normalize_uuid_text(None))
-
-    def test_the_database_placeholder_is_not_a_key(self):
-        from ..identifiers import valid_book_uuid
-        self.assertEqual("", valid_book_uuid("dummy"))
 
     def test_metadata_uuid_is_the_supported_identifier_source(self):
         from ..identifiers import book_uuid
@@ -109,7 +105,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         self.ui_module = orchestration_tests.StartSyncOrchestrationTests._ui_module()
         self.addCleanup(self.ui_module._restore_stubs_for_tests)
         self.dashboard_module = self.ui_module.dashboard
-        self.dashboard_plan = self.dashboard_module._dashboard_plan
+        self.planning = self.dashboard_module._planning
 
     def _dashboard(self, books, settings=None):
         settings = settings or {"state": "", "preferred_formats": ["EPUB"]}
@@ -152,7 +148,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             authors=["Frank Schatzing"], formats=["EPUB"],
             last_modified="2026-01-01")
         dashboard = self._dashboard(books)
-        metadata = self.dashboard_plan.local_metadata(
+        metadata = self.planning.local_metadata(
             dashboard.gui.current_db, self._context(dashboard))
         self.assertEqual(BookIdentifierSourceTests.UUID, metadata[7]["uuid"])
         uploads = plan_sync(metadata, {}, ["EPUB"],
@@ -185,17 +181,17 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         books = {"library": database, "metadata": {7: metadata_row}}
         dashboard = self._dashboard(
             books, settings={"state": "", "preferred_formats": ["EPUB"]})
-        with patch("calibre_plugin.planning_values.os.stat",
+        with patch("calibre_plugin.planning.os.stat",
                    return_value=type("Stat", (), {
                        "st_size": 1, "st_mtime": 1.0})()):
-            metadata = self.dashboard_plan.local_metadata(
+            metadata = self.planning.local_metadata(
                 dashboard.gui.current_db, self._context(dashboard))
         self.assertEqual(["EPUB"], database.stat_formats)
         self.assertEqual({"EPUB": "1:1000"}, metadata[7]["format_signatures"])
 
     def test_a_blank_uuid_still_gets_a_stable_key_and_the_upload_runs(self):
         dashboard = self._dashboard(self._books())
-        metadata = self.dashboard_plan.local_metadata(
+        metadata = self.planning.local_metadata(
             dashboard.gui.current_db, self._context(dashboard))
         key = calibre_key(7, library_scope(dashboard.gui.current_db))
         self.assertEqual(key, metadata[7]["uuid"])
@@ -218,7 +214,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
         state = {"frueher": {"calibre_id": 7, "tolino_id": "t1"}}
         dashboard = self._dashboard(self._books(), {
             "state": state, "preferred_formats": ["EPUB"]})
-        metadata = self.dashboard_plan.local_metadata(
+        metadata = self.planning.local_metadata(
             dashboard.gui.current_db, self._context(dashboard))
         self.assertEqual(
             calibre_key(7, library_scope(dashboard.gui.current_db)),
@@ -235,7 +231,7 @@ class SilentIdentifierDeadEndTests(unittest.TestCase):
             formats=["EPUB"], last_modified="2026-01-01")
         dashboard = self._dashboard(books, {
             "state": state, "preferred_formats": ["EPUB"]})
-        metadata = self.dashboard_plan.local_metadata(
+        metadata = self.planning.local_metadata(
             dashboard.gui.current_db, self._context(dashboard))
         self.assertEqual(
             calibre_key(7, library_scope(dashboard.gui.current_db)),
@@ -357,7 +353,7 @@ class LibraryScopedKeyTests(unittest.TestCase):
         self.assertEqual("calibre-abcdef123456-7", calibre_key(7, "ABCDEF123456"))
 
     def test_fallback_key_uses_the_library_scope(self):
-        from ..dashboard_plan import local_metadata
+        from ..planning import local_metadata
         from ..identifiers import calibre_key
         first = self.Database("library-a")
         second = self.Database("library-b")

@@ -4,6 +4,7 @@ from . import ui_base_tests
 from . import worker_base_tests
 import json
 import runpy
+import shutil
 import subprocess
 import sys
 import time
@@ -18,10 +19,10 @@ from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN,
                        safe_format_path, update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
-from ..plan import (metadata_update_fields, plan_collection_updates,
+from ..planning import (metadata_update_fields, plan_collection_updates,
                     plan_metadata_updates, plan_sync,
                     remember_collection, series_map_from_metadata)
-from ..plan import UploadRecord
+from ..planning import UploadRecord
 from ..inventory import normalize_inventory_record
 from ..matching import (author_tokens, authors_match, normalize_isbn,
                         normalize_match_text,
@@ -35,40 +36,29 @@ from pathlib import Path
 from unittest.mock import patch
 from ._support import (LogRecorder, LocalHTTP, compare_inventory,
                        local_tolino_endpoints, parsed_inventory,
-                       start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+                       start_account_stub, stop_account_stub, ui_module_for)
 
 
-# Der Einzellauf richtet die CDP-Stubs selbst ein.
-_ACCOUNT_PATCH = None
-
-
-def setUpModule():
-    global _ACCOUNT_PATCH
-    start_cdp_stubs()
-    _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_summary",
-        lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
-    _ACCOUNT_PATCH.start()
-
-
-def tearDownModule():
-    global _ACCOUNT_PATCH
-    if _ACCOUNT_PATCH is not None:
-        _ACCOUNT_PATCH.stop()
-        _ACCOUNT_PATCH = None
-    stop_cdp_stubs()
+# Der Einzellauf stubbte CDP und das gespeicherte Konto selbst ein.
+setUpModule = start_account_stub
+tearDownModule = stop_account_stub
 
 class QtFreePlanningTests(unittest.TestCase):
     """Die Planung ist ohne Qt-Stubs importierbar (eigener Prozess)."""
 
-    def test_dashboard_plan_imports_without_qt(self):
-        """Ein frischer Interpreter lädt dashboard_plan ohne qt.core."""
+    def test_planning_imports_without_qt(self):
+        """Ein frischer Interpreter lädt planning ohne qt.core."""
         root = Path(__file__).resolve().parent.parent.parent
+        # Calibres Interpreter startet mit geladenem Qt; dort lässt sich die
+        # Vorbedingung nicht herstellen. Dann ein System-Python nehmen.
+        interpreter = shutil.which("python3") or sys.executable
+        if "calibre" in Path(interpreter).name.casefold():
+            self.skipTest("kein Qt-freier Interpreter verfügbar")
         result = subprocess.run(
-            [sys.executable, "-c",
+            [interpreter, "-c",
              "import sys\n"
              "import calibre_plugin.tests  # Calibre-Config-Stub\n"
-             "import calibre_plugin.dashboard_plan\n"
+             "import calibre_plugin.planning\n"
              "assert 'qt.core' not in sys.modules, 'Qt wurde geladen'\n"
              "assert 'PyQt6' not in sys.modules, 'PyQt wurde geladen'\n"],
             cwd=str(root), capture_output=True, text=True)
@@ -164,7 +154,7 @@ class SyncPlanTests(unittest.TestCase):
 
     def test_upload_planner_reports_selected_books_without_preferred_format(self):
         # Planung braucht keine Qt-Stubs mehr.
-        from .. import dashboard_plan as plan_module
+        from .. import planning as plan_module
         metadata = {
             1: {"uuid": "11111111-1111-4111-8111-111111111111", "title": "EPUB verfügbar", "formats": ["EPUB"]},
             2: {"uuid": "22222222-2222-4222-8222-222222222222", "title": "Nur PDF", "formats": ["PDF"]},
@@ -236,8 +226,8 @@ class SyncPlanTests(unittest.TestCase):
             safe_format_path(Database(), 2, "../EPUB")
 
     def test_local_metadata_reads_isbn_from_calibre_identifiers(self):
-        # Direkter Import: dashboard_plan ist Qt-frei.
-        from ..dashboard_plan import local_metadata
+        # Direkter Import: planning ist Qt-frei.
+        from ..planning import local_metadata
 
         class Db:
             field_metadata = {}
@@ -250,12 +240,21 @@ class SyncPlanTests(unittest.TestCase):
             def values():
                 return {"state": {}, "preferred_formats": []}
 
-        metadata = type("Metadata", (), {
-            "uuid": "00000000-0000-4000-8000-000000000001",
-            "title": "Buch", "authors": ["Autor"],
-            "identifiers": {"isbn": "9783161484100", "amazon": "B00X123"},
-            "formats": [], "last_modified": "now", "series": "",
-        })()
+        class Metadata:
+            """Wie Calibres Metadata: Attribute plus ``get``."""
+
+            uuid = "00000000-0000-4000-8000-000000000001"
+            title = "Buch"
+            authors = ["Autor"]
+            identifiers = {"isbn": "9783161484100", "amazon": "B00X123"}
+            formats = []
+            last_modified = "now"
+            series = ""
+
+            def get(self, name, default=None):
+                return getattr(self, name, default)
+
+        metadata = Metadata()
         class Api:
             def all_book_ids(self):
                 return [1]
@@ -269,7 +268,7 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual("9783161484100", result[1]["isbn"])
 
     def test_upload_job_skips_cover_when_cover_read_raises_os_error(self):
-        from .. import dashboard_plan
+        from .. import planning as planning
         class DatabaseAPI:
             @staticmethod
             def has_id(_book_id):
@@ -285,11 +284,11 @@ class SyncPlanTests(unittest.TestCase):
         dialog = type("Dialog", (), {
             "gui": type("Gui", (), {"current_db": Database()})(),
         })()
-        with patch.object(dashboard_plan, "cover_bytes",
+        with patch.object(planning, "cover_bytes",
                           side_effect=OSError("cover unavailable")):
             warnings = LogRecorder()
-            with patch.object(dashboard_plan, "log_warning", warnings):
-                jobs, skipped = dashboard_plan.upload_jobs(
+            with patch.object(planning, "log_warning", warnings):
+                jobs, skipped = planning.upload_jobs(
                     dialog,
                     {1: {"title": "Buch"}},
                     [UploadRecord(1, "11111111-1111-4111-8111-111111111111", "EPUB", None)])
@@ -1664,7 +1663,7 @@ class ConservativeMatchingTests(unittest.TestCase):
             self.assertEqual("action", rows[0]["group"], value)
 
     def test_ignored_books_are_filtered_out_of_syncable_metadata(self):
-        from ..dashboard_plan import syncable_metadata
+        from ..planning import syncable_metadata
         metadata = {1: {"ignored": True}, 2: {}, 3: {"ignored": False}}
         self.assertEqual({2, 3}, set(syncable_metadata(metadata)))
 
@@ -1674,7 +1673,7 @@ class ConservativeMatchingTests(unittest.TestCase):
         import shutil
         import tempfile
 
-        from ..dashboard_plan import plan_actions
+        from ..planning import plan_actions
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         paths = {}
@@ -1722,7 +1721,7 @@ class ConservativeMatchingTests(unittest.TestCase):
 
     def test_an_ignored_book_creates_no_collection(self):
         """Die Serien-Zuordnung folgt den gefilterten Metadaten."""
-        from ..dashboard_plan import syncable_metadata
+        from ..planning import syncable_metadata
         metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111", "series": "Reihe", "ignored": True}}
         state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}
         self.assertEqual([("11111111-1111-4111-8111-111111111111", "t1", "Reihe")],
@@ -1733,7 +1732,7 @@ class ConservativeMatchingTests(unittest.TestCase):
 
     def test_automatic_collections_skip_ignored_books(self):
         """Ein ignoriertes Buch zählt auch automatisch nicht mit."""
-        from ..dashboard_plan import syncable_metadata
+        from ..planning import syncable_metadata
         metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111", "series": "Reihe", "ignored": True},
                     2: {"uuid": "22222222-2222-4222-8222-222222222222", "series": "Reihe"}}
         state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}, "22222222-2222-4222-8222-222222222222": {"tolino_id": "t2"}}
@@ -1896,21 +1895,17 @@ class ReadStateComparisonTests(unittest.TestCase):
         return compare_inventory({1: self.BOOK}, state, inventory, ["EPUB"],
                                  read_ids=read_ids)
 
-    def test_matching_book_carries_the_cloud_read_state(self):
-        rows = self._rows({"t-1"})
-        matched = next(row for row in rows if row["book_id"] == 1)
+    def test_read_ids_prefill_matching_cloud_only_and_unknown_books(self):
+        matched = next(row for row in self._rows({"t-1"})
+                       if row["book_id"] == 1)
         self.assertTrue(matched["read"].cloud)
         self.assertTrue(matched["read"])
         self.assertEqual("t-1", matched["tolino_id"])
-
-    def test_cloud_only_book_carries_the_read_state_too(self):
-        rows = self._rows({"t-9"})
-        only_cloud = next(row for row in rows if row["tolino_id"] == "t-9")
+        only_cloud = next(row for row in self._rows({"t-9"})
+                          if row["tolino_id"] == "t-9")
         self.assertEqual("only_tolino", only_cloud["status"])
         self.assertTrue(only_cloud["read"].cloud)
         self.assertTrue(only_cloud["read"])
-
-    def test_without_read_ids_nothing_is_prechecked(self):
         for row in self._rows(()):
             self.assertFalse(row["read"].cloud)
             self.assertFalse(row["read"])
@@ -2103,7 +2098,7 @@ class MissingPreferredFormatStateTests(unittest.TestCase):
 class PrepareStateCopyTests(unittest.TestCase):
     """Die Vorbereitung veraendert den gespeicherten Zustand nicht."""
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
     UUID = "8f3c5f0e-1a2b-4c3d-9e8f-001122334455"
 
     def test_load_state_accepts_mappings_and_rejects_invalid_values(self):
@@ -2146,6 +2141,8 @@ class PrepareStateCopyTests(unittest.TestCase):
                     "deliverableId": "t-1", "title": "Der Schwarm",
                     "authors": "Frank Schatzing"}])
 
+            def progress_by_id(self):
+                return {}
             def read_ids(self):
                 return set()
 
@@ -2210,7 +2207,7 @@ class FingerprintCommitTests(unittest.TestCase):
     «aktuell» aussehen -- der Schritt wurde nie wieder angeboten.
     """
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -2263,7 +2260,7 @@ class FingerprintCommitTests(unittest.TestCase):
 
     def _prepare(self, ui_module, metadata, previous, selection):
         settings = self._settings(previous)
-        preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+        preparation = ui_module.dashboard._planning.plan_actions(
             self._dashboard(ui_module), RunContext.from_values(settings),
             metadata, previous, selection)
         return settings, preparation
@@ -2512,6 +2509,7 @@ class SessionColumnGuardTests(unittest.TestCase):
         self.assertEqual({"datatype": "text"}, fields["#tolino_id"])
 
     def test_a_backend_without_execute_is_left_alone(self):
+        """Ohne Backend-Zugriff bleibt der Spalten-Cache unveraendert."""
         from ..library import _register_session_columns
 
         class Backend:
@@ -2523,12 +2521,16 @@ class SessionColumnGuardTests(unittest.TestCase):
 
         class Api:
             backend = Backend()
+            fields = {}
 
         class Database:
             new_api = Api()
             field_metadata = {"#tolino_id": {"datatype": "text"}}
 
-        _register_session_columns(Database(), ["tolino_id"])
+        metadata = dict(Database.field_metadata)
+        self.assertIsNone(_register_session_columns(Database(), ["tolino_id"]))
+        self.assertEqual(metadata, Database.field_metadata)
+        self.assertEqual({}, Api.fields)
 
 
 class PlanSelectionEdgeCaseTests(unittest.TestCase):
@@ -2555,7 +2557,7 @@ class PlanSelectionEdgeCaseTests(unittest.TestCase):
             "gui": type("Gui", (), {"current_db": Db()})()})()
 
     def test_a_junk_uuid_is_not_reported_as_missing_format(self):
-        from ..dashboard_plan import plan_actions
+        from ..planning import plan_actions
         metadata = {1: {"uuid": "kein-uuid", "title": "Kaputt",
                         "formats": ["EPUB"]}}
         preparation = plan_actions(
@@ -2565,7 +2567,7 @@ class PlanSelectionEdgeCaseTests(unittest.TestCase):
         self.assertEqual([], preparation["skipped_uploads"])
 
     def test_a_series_map_is_built_when_the_caller_has_none(self):
-        from ..dashboard_plan import plan_actions
+        from ..planning import plan_actions
         metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111",
                         "title": "Reihe", "authors": "A", "formats": ["EPUB"],
                         "series": "Saga", "series_index": 2.0}}
@@ -2576,13 +2578,13 @@ class PlanSelectionEdgeCaseTests(unittest.TestCase):
         self.assertTrue(preparation["series_map"])
 
     def test_only_uploads_still_explain_the_unplanned_actions(self):
-        from ..dashboard_plan import nothing_to_do_text
+        from ..planning import nothing_to_do_text
         text = nothing_to_do_text(
             {"selected_without_action": {"uploads": 2, "metadata": 0}})
         self.assertIn("2 ausgewählte Aktionen", text)
 
     def test_an_empty_preferred_format_falls_back_to_epub(self):
-        from ..dashboard_plan import plan_actions
+        from ..planning import plan_actions
         metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111",
                         "title": "Mobi", "authors": "A", "formats": ["MOBI"]}}
         for preferred in ((), (None,)):
@@ -2620,14 +2622,10 @@ class AccountRecordEdgeCaseTests(unittest.TestCase):
 class FieldNameSummaryTests(unittest.TestCase):
     """Fehlermeldungen nennen Feldnamen, nie Werte -- und sagen, wenn keine."""
 
-    def test_field_names_are_listed_alphabetically(self):
+    def test_field_names_are_summarized(self):
         from ..inventory import _field_names
-        self.assertEqual("autor, titel", _field_names({"titel": "X", "autor": "Y"}))
-
-    def test_an_empty_mapping_says_there_are_none(self):
-        from ..inventory import _field_names
-        self.assertEqual("keine", _field_names({}))
-
-    def test_other_types_are_named_by_their_type(self):
-        from ..inventory import _field_names
-        self.assertEqual("list", _field_names([]))
+        for value, expected in (({"titel": "X", "autor": "Y"}, "autor, titel"),
+                                ({}, "keine"),
+                                ([], "list")):
+            with self.subTest(value=value):
+                self.assertEqual(expected, _field_names(value))

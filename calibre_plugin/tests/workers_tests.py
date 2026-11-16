@@ -23,38 +23,26 @@ from . import ui_base_tests, worker_base_tests
 from .. import config
 from ..identifiers import display_title
 from ..library import TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
-from ..plan import MetaUpdateRecord, plan_sync
-from ..planning_values import SyncJob
+from ..planning import MetaUpdateRecord, plan_sync
+from ..planning import SyncJob
 from ..run_context import RunContext
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
 from ._support import (CalibreDatabase, dashboard_stub, _ReadingDb,
-                       _read_ids,
-                       compare_inventory, parsed_inventory, start_cdp_stubs,
-                       stop_cdp_stubs, ui_module_for)
+                       _read_ids, compare_inventory, parsed_inventory,
+                       start_account_stub, stop_account_stub, ui_module_for)
 from unittest.mock import patch
 
 
-# Der Einzellauf richtet die CDP-Stubs selbst ein. Die Worker-Tests
-# arbeiten mit Fake-Clients; der Vault findet dort einen gespeicherten
-# Zugang, ohne dass jeder Test ein Konto anlegen muss.
-_ACCOUNT_PATCH = None
+# Die Worker-Tests arbeiten mit Fake-Clients; der Vault findet dort einen
+# gespeicherten Zugang, ohne dass jeder Test ein Konto anlegen muss.
+setUpModule = start_account_stub
+tearDownModule = stop_account_stub
 
 
-def setUpModule():
-    global _ACCOUNT_PATCH
-    start_cdp_stubs()
-    _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_summary",
-        lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
-    _ACCOUNT_PATCH.start()
-
-
-def tearDownModule():
-    global _ACCOUNT_PATCH
-    if _ACCOUNT_PATCH is not None:
-        _ACCOUNT_PATCH.stop()
-        _ACCOUNT_PATCH = None
-    stop_cdp_stubs()
+def _record_signals(worker, emitted):
+    """completed/failed eines Workers in ``emitted`` mitschreiben."""
+    worker.completed.connect(lambda *args: emitted.update(completed=args))
+    worker.failed.connect(lambda *args: emitted.update(failed=args))
 def _changes(read_marks=(), read_unmarks=()):
     """Lesestatus-Änderungen als (tolino-ID, Calibre-Nummer, gelesen?)."""
 
@@ -65,7 +53,7 @@ def _changes(read_marks=(), read_unmarks=()):
 class CloudDeletionWorkerTests(unittest.TestCase):
     """Der Worker führt ausdrücklich markierte Cloud-Löschungen direkt aus."""
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def test_explicitly_marked_deletion_is_executed(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -97,10 +85,7 @@ class CloudDeletionWorkerTests(unittest.TestCase):
                 worker = ui_module.workers.SyncWorker(
                     RunContext.from_values(settings), [], [("a1111111-1111-4111-8111-111111111111", "t-1")],
                     [], {}, state=settings.get("state"))
-                worker.completed.connect(
-                    lambda *args: emitted.update(completed=args))
-                worker.failed.connect(
-                    lambda *args: emitted.update(failed=args))
+                _record_signals(worker, emitted)
                 worker.run()
         finally:
             ui_module._restore_stubs_for_tests()
@@ -112,10 +97,51 @@ class CloudDeletionWorkerTests(unittest.TestCase):
         self.assertIsNone(emitted.get("failed"))
         self.assertIsNotNone(emitted.get("completed"))
 
+class DeleteSkipTests(unittest.TestCase):
+    """Eine schon geloeschte Kopie ist kein Fehler -- live geprueft."""
+
+    def setUp(self):
+        self.ui_module = ui_module_for(self)
+        self.skip = self.ui_module.workers.SyncWorker._delete_or_skip
+
+    @staticmethod
+    def _client(remaining):
+        class Client:
+            def delete(self, _deliverable_id):
+                raise TolinoApiError("tolino-Fehler (HTTP 400): None",
+                                     code="N03")
+
+            def inventory(self):
+                return [{"tolino_id": value} for value in remaining]
+
+        return Client()
+
+    def test_a_400_without_text_uses_the_inventory(self):
+        # Live: /deletecontent antwortet auf unbekannte Kennungen mit 400.
+        self.assertFalse(self.skip(self._client(set()), "t-1"))
+
+    def test_a_copy_still_in_the_cloud_stays_an_error(self):
+        with self.assertRaises(TolinoApiError):
+            self.skip(self._client({"t-1"}), "t-1")
+
+    def test_an_unreadable_inventory_keeps_the_original_error(self):
+        class Client:
+            def delete(self, _deliverable_id):
+                raise TolinoApiError("tolino-Fehler (HTTP 400): None",
+                                     code="N03")
+
+            def inventory(self):
+                raise TolinoApiError("Bestand nicht lesbar", code="N02")
+
+        with self.assertRaises(TolinoApiError) as caught:
+            self.skip(Client(), "t-1")
+        self.assertEqual("N03", caught.exception.code)
+
+
 class SyncWorkerPartialResultTests(unittest.TestCase):
     """Teilresultate, Abbruch und Kontobindung im SyncWorker (P1/C/E/H)."""
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -200,6 +226,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
             "reading": {"read": True, "progress": {"percent": 100}}}}
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot-A"
 
@@ -321,6 +348,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}, "22222222-2222-4222-8222-222222222222": {"tolino_id": "t2"}}
 
         class FakeClient:
+            access = ""
             def delete(self, tolino_id):
                 calls.append(("delete", tolino_id))
 
@@ -342,6 +370,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         saved = []
 
         class FakeClient:
+            access = ""
             def upload(self, path):
                 return "new-1"
 
@@ -363,6 +392,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         calls, emitted = [], {}
 
         class FakeClient:
+            access = ""
             def upload(self, path):
                 calls.append(("upload", path))
                 return "new-1"
@@ -409,6 +439,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         state = {}
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot-A"
 
@@ -647,6 +678,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         added = []
 
         class FakeClient:
+            access = ""
             def collection_pairs(self):
                 return {("t-1", "S1")}
 
@@ -805,6 +837,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         saved = []
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot-A"
                 self.calls = 0
@@ -846,6 +879,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         state = {}
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot-A"
 
@@ -885,6 +919,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
         state = {}
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot-A"
 
@@ -985,7 +1020,7 @@ class SyncWorkerPartialResultTests(unittest.TestCase):
 class LocalMetadataWorkerTests(unittest.TestCase):
     """The Calibre snapshot is read outside the GUI thread."""
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1010,7 +1045,7 @@ class LocalMetadataWorkerTests(unittest.TestCase):
 class PrepareWorkerTests(unittest.TestCase):
     """Netz-Vorbereitung im Hintergrund, gebunden an das Konto (P2/G)."""
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1020,6 +1055,7 @@ class PrepareWorkerTests(unittest.TestCase):
         holder = {}
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot"
                 self.hardware = "hw"
@@ -1052,6 +1088,7 @@ class PrepareWorkerTests(unittest.TestCase):
         messages = []
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rot"
                 self.hardware = "hw"
@@ -1080,6 +1117,7 @@ class PrepareWorkerTests(unittest.TestCase):
 
     def test_complete_inventory_clears_stale_cloud_id_in_worker_state(self):
         class FakeClient:
+            access = ""
             refresh = "rot"
             hardware = "hw"
 
@@ -1092,6 +1130,8 @@ class PrepareWorkerTests(unittest.TestCase):
             def inventory(self):
                 return inventory
 
+            def progress_by_id(self):
+                return {}
             def read_ids(self):
                 return set()
 
@@ -1136,6 +1176,8 @@ class PrepareWorkerTests(unittest.TestCase):
             def inventory(self):
                 return []
 
+            def progress_by_id(self):
+                return {}
             def read_ids(self):
                 raise RuntimeError("Lesestatus nicht lesbar")
 
@@ -1177,6 +1219,7 @@ class PrepareWorkerTests(unittest.TestCase):
         ui_module = self._ui()
 
         class FakeClient:
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "tok"
                 self.hardware = "hw"
@@ -1232,6 +1275,7 @@ class PrepareWorkerTests(unittest.TestCase):
         seen = []
 
         class FakeClient:
+            access = ""
             def __init__(self, partner_id, hardware, refresh, *args, **kwargs):
                 seen.append((refresh, hardware))
                 self.refresh = refresh
@@ -1243,6 +1287,8 @@ class PrepareWorkerTests(unittest.TestCase):
             def inventory(self):
                 return []
 
+            def progress_by_id(self):
+                return {}
             def read_ids(self):
                 return set()
 
@@ -1268,6 +1314,7 @@ class PrepareWorkerTests(unittest.TestCase):
         saved = []
 
         class FakeClient:
+            access = ""
             def __init__(self, partner_id, hardware, refresh,
                          token_callback=None, hardware_callback=None):
                 self.refresh = refresh
@@ -1302,10 +1349,11 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
+                     worker_base_tests.signal_stub()})
         seen = []
 
         class FakeClient(object):
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rotated"
 
@@ -1335,10 +1383,11 @@ class SyncKeepsKeepaliveQuietTests(unittest.TestCase):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
             qt_stub={"pyqtSignal":
-                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
+                     worker_base_tests.signal_stub()})
         completed = []
 
         class FakeClient(object):
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "rotated"
                 self.hardware = "hw"
@@ -1423,6 +1472,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
         logged = []
 
         class FakeClient(object):
+            access = ""
             def __init__(self, *args, **kwargs):
                 self.refresh = "neu"
 
@@ -1483,7 +1533,7 @@ class KeepaliveSafetyTests(unittest.TestCase):
 class BackgroundCallTokenTests(unittest.TestCase):
     """Einzelaufrufe laufen ohne globalen Refresh-Token-Zähler."""
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1505,7 +1555,7 @@ class InventoryFailureDeletionTests(unittest.TestCase):
     Zustandsbereinigung unterbleibt und steht als Fehler im Bericht.
     """
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})
@@ -1697,13 +1747,31 @@ class InventorySchemaTests(unittest.TestCase):
                               "deliverable": [{"deliverableId": "d5"}]}}]}})
         self.assertEqual(["d5"], [record["tolino_id"]
                                    for record in client.inventory()])
-        # Nur ``identifier``: lesbar, aber keine Loesch-/Download-Grundlage.
+        # Nur ``identifier`` im Meta-Block: lesbar, aber keine Grundlage.
         bought = self._client({"PublicationInventory": {"ebook": [
             {"resellerId": 3,
              "epubMetaData": {"identifier": "978-3-16-148410-0",
                               "title": "Gekauft"}}]}})
         bought_records = bought.inventory()
         self.assertEqual("", bought_records[0]["tolino_id"])
+
+    def test_a_bought_book_uses_its_deliverable_identifier(self):
+        """Gekaufte Titel tragen ihre Kennung in ``epubMetaData.deliverable``.
+
+        Live geprueft: dieser ``identifier`` laedt das Buch herunter und
+        adressiert es beim Loeschen -- er ist die Deliverable-Kennung.
+        """
+        data = {"PublicationInventory": {"ebook": [{
+            "resellerId": 3,
+            "epubMetaData": {
+                "identifier": "DT0400.9783832170141_A38978050",
+                "title": "Gekauft",
+                "deliverable": [{"deliverableType": "Deliverable",
+                                  "identifier":
+                                      "DT0400.9783832170141_A38978050"}]}}]}}
+        record = self._client(data).inventory()[0]
+        self.assertEqual("DT0400.9783832170141_A38978050", record["tolino_id"])
+        self.assertEqual("9783832170141", record["isbn"])
 
     def test_an_unreadable_envelope_never_looks_like_an_empty_library(self):
         for data in ({}, {"unexpected": "shape"},
@@ -1891,11 +1959,7 @@ class MultiAccountReadingStateTests(unittest.TestCase):
 
     @staticmethod
     def _ui():
-        return ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None,
-            qt_stub={"pyqtSignal": worker_base_tests
-                     .SyncWorkerCollectionTests
-                     ._signal_descriptor()[0]})
+        return worker_base_tests.load_ui_with_signals()
 
     @classmethod
     def _metadata(cls):
@@ -1928,6 +1992,7 @@ class MultiAccountReadingStateTests(unittest.TestCase):
         metadata = self._metadata()
 
         class FakeClient:
+            access = ""
             hardware = "hw"
             refresh = "rot"
 
@@ -1940,6 +2005,8 @@ class MultiAccountReadingStateTests(unittest.TestCase):
             def inventory(self):
                 return inventory
 
+            def progress_by_id(self):
+                return {}
             def read_ids(self):
                 if fail_read:
                     raise RuntimeError("Netz weg")
@@ -2124,6 +2191,7 @@ class MultiAccountReadingStateTests(unittest.TestCase):
         emitted, calls = {}, []
 
         class FakeClient:
+            access = ""
             def mark_read_many(self, book_ids, finished=True):
                 calls.append((list(book_ids), finished))
                 if fail:
@@ -2138,10 +2206,7 @@ class MultiAccountReadingStateTests(unittest.TestCase):
                                             "partner_id": 4}),
                     [], [], [], {},
                     [("t1", 1, True, self.UUID)], state=state)
-                worker.completed.connect(
-                    lambda *args: emitted.update(completed=args))
-                worker.failed.connect(
-                    lambda *args: emitted.update(failed=args))
+                _record_signals(worker, emitted)
                 worker.run()
         finally:
             ui_module._restore_stubs_for_tests()
@@ -2218,7 +2283,7 @@ class MultiAccountReadingStateTests(unittest.TestCase):
 class ReadingUpdateEdgeCaseTests(unittest.TestCase):
     """Nur die bestaetigte Spalte schreiben, nie die des anderen Kontos."""
 
-    Signal = worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]
+    Signal = worker_base_tests.signal_stub()
 
     def _ui(self):
         return ui_module_for(self, qt_stub={"pyqtSignal": self.Signal})

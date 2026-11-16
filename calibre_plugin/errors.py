@@ -23,7 +23,7 @@ class TolinoError(Exception):
 
 
 # Fehlercodes, nach denen nur eine neue Anmeldung weiterhilft.
-RELOGIN_CODES = ("A01", "A02", "B01", "B02")
+RELOGIN_CODES = ("A01", "B01", "B02")
 
 
 def needs_new_login(message):

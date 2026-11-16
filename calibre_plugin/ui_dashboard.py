@@ -1,8 +1,10 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
-from .ui_common import (CANCEL_MESSAGE, QDialog, QInputDialog,
-                        QMessageBox, QThread, _active_work_thread, _apply_busy,
-                        _dialog_busy, gui_guard, start_worker,
-                        LOGIN_NEXT_STEP, _login_failure_guidance,
+from .ui_common import (CANCEL_MESSAGE, COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP,
+                        QDialog, QInputDialog, LOGIN_BUTTON_TEXT,
+                        LOGIN_BUTTON_TIP, QMessageBox, QThread,
+                        _active_work_thread, _apply_busy, _dialog_busy,
+                        gui_guard, start_worker, LOGIN_NEXT_STEP,
+                        _login_failure_guidance,
                         _stop_thread, sync_result_detail,
                         sync_result_text, Qt)
 from calibre.gui2 import error_dialog, info_dialog
@@ -20,9 +22,11 @@ from .library import (TOLINO_IGNORE_COLUMN, column_state, library_scope,
                       update_progress_status, update_read_status,
                       update_tolino_ids)
 
-from . import dashboard_plan as _dashboard_plan
+from . import planning as _planning
 from .errors import needs_new_login
-from .tolino import (RELOGIN, TolinoError, hardware_id, log_info, log_warning,
+from .partners import UNKNOWN_SHOP, partner_from_token
+from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoError, hardware_id, log_info,
+                     log_warning, normalize_hardware_id,
                      normalize_refresh_token, report_error, sanitize_error)
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
 from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
@@ -34,6 +38,22 @@ from .ui_workers import LocalMetadataWorker, PrepareWorker, SyncWorker
 
 # Statuszeile nach einem abgelehnten Zugang (A01/A02/B01/B02).
 NEEDS_LOGIN_STATUS = "Anmeldung abgelehnt – bitte neu anmelden."
+
+
+def _window_gone(dialog):
+    """Modale Rueckmeldung nur, solange das Fenster noch offen ist.
+
+    Wird das Dashboard waehrend eines Laufs geschlossen, melden die Worker
+    danach «Abgebrochen.» oder einen Fehler. Ein Dialog auf einem
+    geschlossenen Fenster sieht niemand, blockiert aber den GUI-Thread und
+    haelt einen eigenstaendig gestarteten Prozess am Leben. Protokolliert
+    wird der Ausgang trotzdem.
+
+    Test-Doubles ohne `isVisible` gelten als offen -- dort bleibt alles beim
+    alten Verhalten.
+    """
+    visible = getattr(dialog, "isVisible", None)
+    return visible is not None and not visible()
 
 
 def _book_key_index(dashboard):
@@ -264,7 +284,7 @@ class SyncDashboard(DashboardParts, QDialog):
         globalen Schluessel stehen in config. Der Zustand fehlt bewusst:
         `save_account()` merged ihn aus dem Konto, statt ihn zu ersetzen.
         """
-        if not getattr(self, "account_name", None):
+        if not self.account_name:
             return
         values = dict(values or self.values())
         name = str(values.get("account_name") or "")
@@ -275,7 +295,7 @@ class SyncDashboard(DashboardParts, QDialog):
             return
         # Ein unverändertes Feld darf eine vom Worker übernommene Geräte-ID
         # nicht mit einem veralteten Anzeigewert überschreiben.
-        if not getattr(self, "_hardware_edited", False):
+        if not self._hardware_edited:
             values.pop("hardware_id", None)
         save_account(name, values, active=name,
                      preferred_formats=values[PREFERRED_FORMATS])
@@ -287,7 +307,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _account_selected(self, index, combo):
         """Gewähltes Konto übernehmen -- ein Weg für beide Comboboxen."""
-        if index < 0 or not getattr(self, "account_names", None):
+        if index < 0 or not self.account_names:
             return
         self.switch_account(combo.itemData(index))
 
@@ -303,10 +323,10 @@ class SyncDashboard(DashboardParts, QDialog):
         name = str(name or "")
         if not name or name == self.account_name:
             return False
-        if name not in getattr(self, "account_names", ()):
+        if name not in self.account_names:
             return False
         # Eine laufende Anmeldeprüfung bleibt an ihr Startkonto gebunden.
-        login = getattr(self, "login_thread", None)
+        login = self.login_thread
         if login is not None and login.isRunning():
             try:
                 self.load_values()
@@ -366,12 +386,13 @@ class SyncDashboard(DashboardParts, QDialog):
         multiple = len(self.account_names) > 1
         self.account_quick.setVisible(multiple)
         self.account_quick_label.setVisible(multiple)
-        partner_id = values["partner_id"]
-        if self.partner.findData(partner_id) < 0:
-            partner_id = self.partner.itemData(0)
-            if partner_id is not None:
-                save_account(self.account_name, {"partner_id": partner_id})
-        self.partner.setCurrentIndex(max(0, self.partner.findData(partner_id)))
+        # Der Buchhändler ist reine Anzeige: gesetzt wird er beim Anmelden
+        # aus dem Token; die Auswahl in den Einstellungen ist nur Rückfall.
+        self.partner.blockSignals(True)
+        self.partner.setCurrentIndex(
+            max(0, self.partner.findData(values["partner_id"])))
+        self.partner.blockSignals(False)
+        self._partner_chosen = False
         self.hardware.setText(values["hardware_id"] or hardware_id())
         self._hardware_edited = False
         # Das leere Feld darf einen rotierten Token nicht überschreiben.
@@ -389,7 +410,7 @@ class SyncDashboard(DashboardParts, QDialog):
         self._save_visible_account()
         if typed:
             # Ein eingetippter Zugangstoken ist eine Eingabe wie jede andere:
-            # «Speichern und schließen» darf ihn nicht still verwerfen.
+            # «Speichern und schliessen» darf ihn nicht still verwerfen.
             self.store_refresh(typed)
         self.settings_dialog.accept()
 
@@ -413,7 +434,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 running_text = "Synchronisierung läuft …"
             elif self.prepare_thread is not None:
                 running_text = "Vergleich läuft …"
-            elif getattr(self, "snapshot_thread", None) is not None:
+            elif self.snapshot_thread is not None:
                 running_text = "Bibliothek wird gelesen …"
             else:
                 running_text = "Anmeldung wird geprüft …"
@@ -424,15 +445,15 @@ class SyncDashboard(DashboardParts, QDialog):
             self.status.setText("Nicht angemeldet.")
         self.progress.setVisible(running)
         self.progress_label.setVisible(running)
-        login_button = getattr(self, "login_button", None)
+        login_button = self.login_button
         if login_button is not None:
             if logged_in:
                 login_button.setText("Anmeldung prüfen")
                 login_button.setToolTip(
                     "Prüft die gespeicherte Anmeldung. Öffnet den Browser nur bei Bedarf.")
             else:
-                login_button.setText("Bei tolino anmelden")
-                login_button.setToolTip("Öffnet ein Browserfenster zur Anmeldung.")
+                login_button.setText(LOGIN_BUTTON_TEXT)
+                login_button.setToolTip(LOGIN_BUTTON_TIP)
         if running:
             self.primary.setText("Abbrechen")
             self.primary.setToolTip(
@@ -440,11 +461,11 @@ class SyncDashboard(DashboardParts, QDialog):
             self.primary.setEnabled(True)
         else:
             _apply_busy(self, False)
-            self.primary.setText("Bibliothek vergleichen …")
+            self.primary.setText(COMPARE_BUTTON_TEXT)
             self.primary.setEnabled(logged_in)
             self.primary.setToolTip(
-                "Vergleicht deine Calibre-Bibliothek mit tolino."
-                if logged_in else "Noch nicht angemeldet. " + RELOGIN)
+                COMPARE_BUTTON_TIP if logged_in
+                else "Noch nicht angemeldet. " + RELOGIN)
 
     def _stored_refresh(self):
         """Gespeicherter Zugang des ANGEGEZEIGTEN Kontos -- nie ein anderes."""
@@ -453,30 +474,52 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _typed_refresh(self):
         """Von Hand eingetippter Token; leer heisst «nichts ersetzen»."""
-        refresh = getattr(self, "refresh", None)
+        refresh = self.refresh
         return normalize_refresh_token(refresh.text()) if refresh is not None else ""
 
     def _effective_refresh(self):
         """Der Token, mit dem gearbeitet wird: eingetippt vor gespeichert."""
         return self._typed_refresh() or self._stored_refresh()
 
-    def store_refresh(self, refresh, hardware=""):
-        """Token im Konto speichern -- der einzige Ort fuer Zugangsdaten."""
+    def _partner_selected(self, _index=None):
+        """Buchhändler von Hand wählen – nur für Zugänge ohne ``iss``."""
+        self._partner_chosen = True
+        partner_id = self.partner.currentData()
+        if self.account_name and partner_id:
+            save_account(self.account_name, {"partner_id": partner_id})
+
+    def store_refresh(self, refresh):
+        """Token im Konto speichern -- der einzige Ort fuer Zugangsdaten.
+
+        Der Buchhändler wird aus dem Token gelesen; nennt er keinen, zählt
+        nur eine bewusste Auswahl in den Einstellungen. Sonst gibt es eine
+        klare Meldung statt eines geratenen Shops.
+        """
         token = normalize_refresh_token(refresh)
         if not token or not self.account_name:
-            return
-        hardware = str(hardware or "").strip()
-        if not hardware and not getattr(self, "_hardware_edited", False):
-            account = account_summary(getattr(self, "account_name", "")) or {}
+            return False
+        partner_id = partner_from_token(token) or (
+            self.partner.currentData()
+            if self._partner_chosen else None)
+        if not partner_id:
+            error_dialog(self, "Buchhändler nicht erkannt", UNKNOWN_SHOP,
+                         show=True)
+            return False
+        hardware = ""
+        if not self._hardware_edited:
+            account = account_summary(self.account_name) or {}
             hardware = str(account.get("hardware_id") or "")
         save_credentials(
             self.account_name, token,
-            hardware or self.hardware.text().strip() or hardware_id())
+            hardware or normalize_hardware_id(self.hardware.text())
+            or hardware_id(),
+            partner_id)
         self.refresh.setText("")
         self.update_status()
+        return True
 
     def logout(self):
-        """Nur den gespeicherten Zugang loeschen -- Konto und ID bleiben."""
+        """Nur den gespeicherten Zugang löschen – Konto und ID bleiben."""
         if not self.account_name:
             return
         save_account(self.account_name, {"refresh_token": ""},
@@ -486,7 +529,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _selected_account(self):
         """The account this dialog shows – never a different 'active' one."""
-        return account_summary(getattr(self, "account_name", None))
+        return account_summary(self.account_name)
 
     def values(self):
         """Sichtbare Werte des Kontos -- nie Zugangsdaten.
@@ -502,12 +545,13 @@ class SyncDashboard(DashboardParts, QDialog):
         account = self._selected_account()
         if not isinstance(account, dict):
             account = {}
-        hardware = self.hardware.text().strip() or hardware_id()
+        # Eine getippte 32-Hex-ID gehört schon hier ins UUID-Format: sonst
+        # stünde im Konto eine andere Form als die, mit der getauscht wird.
+        hardware = normalize_hardware_id(self.hardware.text()) or hardware_id()
         formats = [fmt for fmt in normalize_formats(self.formats.text())
                    if fmt in ("EPUB", "PDF")]
         return {
             "account_name": str(account.get("name") or ""),
-            "partner_id": self.partner.currentData(),
             "hardware_id": hardware,
             "preferred_formats": formats or ["EPUB"],
         }
@@ -530,7 +574,8 @@ class SyncDashboard(DashboardParts, QDialog):
         values = self.values()
         if typed:
             # Von Hand eingetippt: erst ins Konto speichern, dann pruefen.
-            self.store_refresh(typed)
+            if not self.store_refresh(typed):
+                return
             values = self.values()
         context = RunContext.from_values(values)
         if typed or self._stored_refresh():
@@ -574,7 +619,7 @@ class SyncDashboard(DashboardParts, QDialog):
     def login_check_busy(self, _reason=""):
         """Anmeldung wird gerade geprüft; keine zweite Prüfung starten."""
         self._login_cleanup()
-        self.status.setText("Die Anmeldung wird gerade erneuert, bitte kurz warten.")
+        self.status.setText(BUSY_MESSAGE)
 
     def _start_login_window(self, context):
         """Das eigene Anmeldefenster öffnen und die Anmeldung übernehmen."""
@@ -583,10 +628,9 @@ class SyncDashboard(DashboardParts, QDialog):
         _apply_busy(self, True)
         self.primary.setEnabled(False)
         self.status.setText(
-            "Bitte im Browserfenster anmelden, bis die Bücherliste erscheint.")
+            "Bitte im Browserfenster anmelden, bis die Bücherliste lädt.")
         worker = BrowserLoginWorker(
-            context.account_name, context.partner_id,
-            self.hardware.text().strip())
+            context.account_name, self.hardware.text().strip())
         worker.progress.connect(self._login_progress)
         worker.completed.connect(self.login_completed)
         worker.failed.connect(self.login_failed)
@@ -615,7 +659,8 @@ class SyncDashboard(DashboardParts, QDialog):
         code = error.code if isinstance(error, TolinoError) else "E99"
         title = "%s (Code %s)" % (_login_failure_guidance(error), code)
         self.status.setText("Anmeldung fehlgeschlagen.")
-        QMessageBox.warning(self, title, LOGIN_NEXT_STEP)
+        if not _window_gone(self):
+            QMessageBox.warning(self, title, LOGIN_NEXT_STEP)
 
     @gui_guard
     def _login_progress(self, text):
@@ -631,12 +676,14 @@ class SyncDashboard(DashboardParts, QDialog):
     @staticmethod
     def _worker_client(context):
         """Client aus dem Lauf-Kontext bauen; der Vault liest den Token."""
-        return TOKEN_VAULT.login(context.account_name, context.partner_id)
+        return TOKEN_VAULT.login(context.account_name)
 
     def _show_prepare_error(self, exc, context):
         """Nur den kurzen Fehlertext zeigen; technische Details protokollieren."""
         secrets = context.secrets()
         message = report_error(exc, "Vorbereitung", secrets)
+        if _window_gone(self):
+            return
         error_dialog(self, "Vergleich fehlgeschlagen",
                      message + " Es wurde nichts geändert.", show=True)
 
@@ -710,6 +757,10 @@ class SyncDashboard(DashboardParts, QDialog):
         worker = getattr(self, worker_name, None)
         cancelled = bool(getattr(worker, "cancelled", False))
         finish()
+        if _window_gone(self):
+            log_warning("Fenster geschlossen; Ergebnis nur im Log: %s"
+                        % sanitize_error(message))
+            return
         if cancelled or str(message) == CANCEL_MESSAGE:
             info_dialog(
                 self, "Abgebrochen", "Abgebrochen. Es wurde nichts geändert.",
@@ -761,14 +812,14 @@ class SyncDashboard(DashboardParts, QDialog):
         metadata = payload["metadata"]
         state = payload["state"]
         self._finish_prepare()
-        active_name = str(getattr(self, "account_name", "") or "")
+        active_name = str(self.account_name or "")
         is_active = active_name == account_name
         if is_active:
             _mirror_account_reading(self, account_name)
             _mirror_comparison_reading(self, payload.get("comparison"))
 
         # Den rotierten Token speichert bereits der Client-Callback.
-        hardware = getattr(self, "hardware", None)
+        hardware = self.hardware
         if payload.get("hardware") and hardware is not None and is_active:
             hardware.setText(str(payload["hardware"]))
         if payload.get("read_status_known") is False:
@@ -777,23 +828,22 @@ class SyncDashboard(DashboardParts, QDialog):
             log_warning("Lesefortschritt unbekannt – die Spalte bleibt "
                         "unverändert.")
         if not is_active:
-            log_warning("Vergleich für «%s» abgeschlossen; angezeigt wird «%s»."
-                        % (account_name, active_name))
-            self.status.setText(
-                "Vergleich für Konto «%s» abgeschlossen. Angezeigt wird «%s»."
-                % (account_name, active_name))
+            note = ("Vergleich für Konto «%s» abgeschlossen. Angezeigt "
+                    "wird «%s»." % (account_name, active_name))
+            log_warning(note)
+            self.status.setText(note)
             return
-        series_map = _dashboard_plan.series_map_from_metadata(
-            _dashboard_plan.syncable_metadata(metadata))
+        series_map = _planning.series_map_from_metadata(
+            _planning.syncable_metadata(metadata))
         try:
             selection = self._confirm_comparison(
                 payload["comparison"], context,
                 client_factory=lambda: self._worker_client(context),
-                automatic=len(_dashboard_plan.plan_collection_updates(
+                automatic=len(_planning.plan_collection_updates(
                     series_map, state)))
             if selection is None:
                 return
-            preparation = _dashboard_plan.plan_actions(
+            preparation = _planning.plan_actions(
                 self, context, metadata, state, selection,
                 series_map=series_map)
             if preparation["removals"] and not confirm_deletions(
@@ -821,7 +871,7 @@ class SyncDashboard(DashboardParts, QDialog):
                 # Für den Hinweis im Fenster: ohne diese Spalte bleiben
                 # gekaufte Bücher Upload-Kandidaten.
                 "ignore_column": bool_column_available(
-                    getattr(getattr(self, "gui", None), "current_db", None),
+                    getattr(self.gui, "current_db", None),
                     TOLINO_IGNORE_COLUMN),
             })
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -838,9 +888,9 @@ class SyncDashboard(DashboardParts, QDialog):
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
         # Der Vault liest den möglicherweise rotierten Token erst beim Login.
-        total = _dashboard_plan.plan_counts(preparation, len(jobs))["steps"]
+        total = _planning.plan_counts(preparation, len(jobs))["steps"]
         replacements = [job for job in jobs
-                        if getattr(job, "old_id", None)]
+                        if job.old_id]
         if replacements and not confirm_replacements(self, replacements):
             self.status.setText(
                 "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
@@ -848,13 +898,13 @@ class SyncDashboard(DashboardParts, QDialog):
         if not total and not skipped_uploads:
             # Calibre zeigt info_dialog nur mit show=True an.
             info_dialog(self, "Nichts zu tun",
-                        _dashboard_plan.nothing_to_do_text(preparation),
+                        _planning.nothing_to_do_text(preparation),
                         show=True, show_copy_button=False)
             return
         if skipped_uploads and report_skipped_uploads(
                 self, skipped_uploads, nothing_else=not total):
             return
-        plan = _dashboard_plan.plan_text(preparation, len(jobs))
+        plan = _planning.plan_text(preparation, len(jobs))
         log_info("Sync geplant: %s" % plan)
         _apply_busy(self, True)
         self.progress.setRange(0, total)
@@ -888,10 +938,10 @@ class SyncDashboard(DashboardParts, QDialog):
             self.progress_label.setText("Synchronisierung läuft …")
 
     def cancel_sync(self):
-        snapshot = getattr(self, "snapshot_worker", None)
+        snapshot = self.snapshot_worker
         if snapshot is not None:
             snapshot.cancel()
-        prepare = getattr(self, "prepare_worker", None)
+        prepare = self.prepare_worker
         if prepare is not None:
             prepare.cancel()
         if self.worker:
@@ -907,6 +957,12 @@ class SyncDashboard(DashboardParts, QDialog):
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
         outcome, failures = _finish_sync(self, state, updates)
+        if _window_gone(self):
+            log_warning("Fenster geschlossen; Lauf beendet: %s"
+                        % sync_result_text(outcome, ""))
+            if failures:
+                log_warning("Nicht gespeichert: %s" % ", ".join(failures))
+            return
         if failures:
             error_dialog(self, "Speichern fehlgeschlagen",
                          "Nicht gespeichert: %s. Cloud-Änderungen bleiben "
@@ -937,6 +993,12 @@ class SyncDashboard(DashboardParts, QDialog):
         outcome, failures = _finish_sync(
             self, getattr(worker, "state", {}),
             getattr(worker, "updates", ()))
+        if _window_gone(self):
+            log_warning("Fenster geschlossen; Sync beendet: %s"
+                        % sync_result_text(outcome, ""))
+            if failures:
+                log_warning("Nicht gespeichert: %s" % ", ".join(failures))
+            return
         if cancelled and not failures:
             info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
                         show=True, show_copy_button=False)

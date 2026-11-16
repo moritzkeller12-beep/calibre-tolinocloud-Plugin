@@ -2,7 +2,7 @@
 import unittest
 
 from ..errors import TolinoAuthError
-from .secrets_support import (HARDWARE_ENV, MIN_TOKEN_LENGTH, TOKEN_ENV,
+from .secrets_support import (HARDWARE_ENV, TOKEN_ENV,
                               credentials_from_env)
 
 # Reine Platzhalter: kein echter Zugang, keine echte Geräte-ID.
@@ -19,26 +19,26 @@ class SecretResolutionTests(unittest.TestCase):
         self.assertEqual(DUMMY_TOKEN, token)
         self.assertEqual(DUMMY_HARDWARE, hardware)
 
-    def test_a_missing_token_names_the_missing_secret(self):
-        with self.assertRaises(TolinoAuthError) as caught:
-            credentials_from_env({HARDWARE_ENV: DUMMY_HARDWARE})
-        self.assertIn(TOKEN_ENV, str(caught.exception))
-        self.assertIn("Project-Secrets", str(caught.exception))
-        self.assertEqual("A01", caught.exception.code)
-
-    def test_a_blank_token_is_treated_as_missing(self):
-        with self.assertRaises(TolinoAuthError):
-            credentials_from_env({TOKEN_ENV: "   \n\t "})
-
-    def test_a_placeholder_token_is_rejected(self):
-        with self.assertRaises(TolinoAuthError) as caught:
-            credentials_from_env({TOKEN_ENV: "kurz"})
-        self.assertIn(TOKEN_ENV, str(caught.exception))
-        self.assertLess(len("kurz"), MIN_TOKEN_LENGTH)
-
-    def test_a_token_with_spaces_is_rejected(self):
-        with self.assertRaises(TolinoAuthError):
-            credentials_from_env({TOKEN_ENV: "zwei teile " + "x" * 40})
+    def test_invalid_credentials_are_rejected(self):
+        cases = (
+            ("missing token", {HARDWARE_ENV: DUMMY_HARDWARE}, TOKEN_ENV,
+             "Project-Secrets"),
+            ("blank token", {TOKEN_ENV: "   \n\t "}, TOKEN_ENV, None),
+            ("placeholder token", {TOKEN_ENV: "kurz"}, TOKEN_ENV, None),
+            ("token with spaces", {TOKEN_ENV: "zwei teile " + "x" * 40},
+             TOKEN_ENV, None),
+            ("invalid hardware", {TOKEN_ENV: DUMMY_TOKEN,
+                                  HARDWARE_ENV: "hw 0001!?#"}, HARDWARE_ENV,
+             None),
+        )
+        for label, env, mentioned, note in cases:
+            with self.subTest(label):
+                with self.assertRaises(TolinoAuthError) as caught:
+                    credentials_from_env(env)
+                self.assertIn(mentioned, str(caught.exception))
+                self.assertEqual("A01", caught.exception.code)
+                if note:
+                    self.assertIn(note, str(caught.exception))
 
     def test_a_missing_hardware_id_is_allowed(self):
         token, hardware = credentials_from_env({TOKEN_ENV: DUMMY_TOKEN})

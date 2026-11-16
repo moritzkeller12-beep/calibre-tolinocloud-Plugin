@@ -13,9 +13,10 @@ from ..library import (DEFAULT_LIBRARY_SCOPE, TOLINO_COLUMN,
 from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
-    CalibreDatabase,
-    FakeSignal, FakeText, _ReadingDb, dashboard_stub, start_cdp_stubs,
-    stop_cdp_stubs, ui_module_for)
+    CalibreDatabase, ComboStub,
+    FakeSignal, FakeText, _ReadingDb, dashboard_stub,
+    dashboard_with_widgets, jwt_token,
+    start_cdp_stubs, stop_cdp_stubs, ui_module_for)
 from unittest.mock import patch
 
 
@@ -31,75 +32,9 @@ class DashboardAccountSwitchTests(unittest.TestCase):
     nur bei mehr als einem Konto – sonst wäre sie nur Ballast.
     """
 
-    class Combo:
-        """Minimaler Qt-Nachbau für Kombobox, Eingabe und Label."""
-
-        def __init__(self, *_args, **_kwargs):
-            self.items = []
-            self.current_index = 0
-            self.visible = True
-            self.text_value = ""
-
-        def blockSignals(self, value):
-            self.blocked = value
-
-        def clear(self):
-            self.items = []
-
-        def addItem(self, text, data=None):
-            self.items.append((text, data))
-
-        def setCurrentIndex(self, index):
-            self.current_index = index
-
-        def currentData(self):
-            return self.itemData(self.current_index)
-
-        def findData(self, data):
-            return next((index for index, (_text, item) in enumerate(self.items)
-                         if item == data), -1)
-
-        def itemData(self, index):
-            if 0 <= index < len(self.items):
-                return self.items[index][1]
-            return None
-
-        def setVisible(self, value):
-            self.visible = value
-
-        def setText(self, text):
-            self.text_value = text
-
-        def text(self):
-            return self.text_value
-
-        def setToolTip(self, text):
-            self.tooltip = text
-
-        def setEnabled(self, value):
-            self.enabled = value
-
-        def setChecked(self, value):
-            self.checked = bool(value)
-
-        def isChecked(self):
-            return getattr(self, "checked", False)
-
-        def setRange(self, *_args):
-            pass
-
-        def setValue(self, _value):
-            pass
-
-    def _dashboard(self):
-        dashboard = dashboard_stub()
-        for name in ("account_select", "account_quick", "partner", "hardware",
-                     "refresh", "formats", "account_quick_label", "status",
-                     "progress", "progress_label", "primary", "covers",
-                     "deletions", "tolino_column"):
-            setattr(dashboard, name, self.Combo())
-        dashboard.thread = None
-        return dashboard
+    @staticmethod
+    def _dashboard():
+        return dashboard_with_widgets(ComboStub)
 
     @staticmethod
     def _accounts(count):
@@ -581,7 +516,7 @@ class TokenRotationWriteBackTests(unittest.TestCase):
     ueberschreiben; nur eine eigene Eingabe zaehlt.
     """
 
-    Combo = DashboardAccountSwitchTests.Combo
+    Combo = ComboStub
 
     def _ui(self, token="alt-token"):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
@@ -600,13 +535,7 @@ class TokenRotationWriteBackTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
 
         self.addCleanup(restore)
-        dashboard = dashboard_stub()
-        for name in ("account_select", "account_quick", "partner", "hardware",
-                     "refresh", "formats", "account_quick_label", "status",
-                     "progress", "progress_label", "primary", "covers",
-                     "deletions", "tolino_column"):
-            setattr(dashboard, name, self.Combo())
-        dashboard.thread = None
+        dashboard = dashboard_with_widgets(ComboStub)
         dashboard.partner.items = [(str(pid), pid)
                                    for pid in sorted(PARTNERS)]
         # Die ECHTEN Methoden an das gefaelschte Fenster binden.
@@ -641,30 +570,43 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         """Ein eingetippter Token gewinnt; ein leeres Feld aendert nichts."""
         _ui_module, dashboard = self._ui("alt-token")
         self._rotate("rotiert")
-        dashboard.refresh.setText("selbst-eingetragen")
-        self.assertEqual("selbst-eingetragen", dashboard._typed_refresh())
+        token = jwt_token()
+        dashboard.refresh.setText(token)
+        self.assertEqual(token, dashboard._typed_refresh())
         # `values()` traegt keine Zugangsdaten; gespeichert wird ausdruecklich.
         self.assertNotIn("refresh_token", dashboard.values())
-        dashboard.store_refresh("selbst-eingetragen")
-        self.assertEqual("selbst-eingetragen", self._stored())
+        dashboard.store_refresh(token)
+        self.assertEqual(token, self._stored())
         # Feld geleert: der gespeicherte Zugang bleibt -- abgemeldet wird
         # ausdruecklich ueber den Knopf.
         dashboard.refresh.setText("")
         self.assertNotIn("refresh_token", dashboard.values())
         dashboard._save_visible_account()
-        self.assertEqual("selbst-eingetragen", self._stored())
+        self.assertEqual(token, self._stored())
 
     def test_adopted_token_survives_a_later_rotation(self):
         """Ein uebernommener Token steht danach im Konto -- eine spaetere
         Rotation im Hintergrund darf ihn nicht ueberschreiben."""
         _ui_module, dashboard = self._ui("alt-token")
-        dashboard.store_refresh("frisch-gelesen")
-        self.assertEqual("frisch-gelesen", self._stored())
+        token = jwt_token()
+        dashboard.store_refresh(token)
+        self.assertEqual(token, self._stored())
         self._rotate("rotiert-2")
         self.assertEqual("rotiert-2", dashboard._effective_refresh())
         self.assertNotIn("refresh_token", dashboard.values())
         dashboard._save_visible_account()
         self.assertEqual("rotiert-2", self._stored())
+
+    def test_a_token_without_a_shop_is_refused_visibly(self):
+        """Ohne ``iss`` wird nichts gespeichert -- Meldung statt Rate-Shop."""
+        _ui_module, dashboard = self._ui("alt-token")
+        boxes = []
+        with patch("calibre_plugin.ui_dashboard.error_dialog",
+                   lambda *args, **kwargs: boxes.append(args)):
+            self.assertFalse(dashboard.store_refresh("kein-jwt"))
+        self.assertEqual("alt-token", self._stored())
+        self.assertEqual(1, len(boxes))
+        self.assertIn("Buchhändler", boxes[0][1])
 
     def test_logout_clears_the_stored_access(self):
         """Abmelden loescht den Zugang -- ohne das Feld zu benutzen."""
@@ -698,7 +640,7 @@ class TokenRotationWriteBackTests(unittest.TestCase):
         config.save_account("konto", {"hardware_id": "adopted"},
                             active="konto")
         dashboard.hardware.setText("hw-1")
-        dashboard.store_refresh("neu")
+        dashboard.store_refresh(jwt_token())
         self.assertEqual("adopted",
                          config.account_by_name("konto")["hardware_id"])
 
@@ -914,8 +856,8 @@ class LoginPreflightTests(unittest.TestCase):
                 pass
 
         class LoginWorker:
-            def __init__(self, account_name, partner_id, hardware):
-                self.arguments = (account_name, partner_id, hardware)
+            def __init__(self, account_name, hardware):
+                self.arguments = (account_name, hardware)
                 self.progress = Signal()
                 self.completed = Signal()
                 self.failed = Signal()
@@ -1003,7 +945,8 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertEqual("konto",
                          dashboard.login_worker.context.account_name)
-        self.assertEqual(4, dashboard.login_worker.context.partner_id)
+        # Der Buchhändler steht im Konto, nicht im Lauf-Kontext.
+        self.assertFalse(hasattr(dashboard.login_worker.context, "partner_id"))
         self.assertIs(dashboard.login_thread,
                       dashboard.login_worker.moved_to)
         self.assertIn("geprüft", dashboard.status.text())
@@ -1055,7 +998,7 @@ class LoginPreflightTests(unittest.TestCase):
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsNot(check_thread, dashboard.login_thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual(("konto", 4, "hw-1"),
+        self.assertEqual(("konto", "hw-1"),
                          dashboard.login_worker.arguments)
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
@@ -1103,7 +1046,7 @@ class LoginPreflightTests(unittest.TestCase):
             RunContext.from_values(dashboard.values()))
         self.assertIsInstance(dashboard.login_thread, Thread)
         self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual(("konto", 4, "hw-1"),
+        self.assertEqual(("konto", "hw-1"),
                          dashboard.login_worker.arguments)
         self.assertEqual(1, dashboard.login_thread.starts)
         self.assertFalse(dashboard.primary.enabled)
@@ -1147,7 +1090,7 @@ class LoginPreflightTests(unittest.TestCase):
         _worker, emitted, calls = self._run_check_worker(
             ui_module, ("valid", ""))
         args, kwargs = calls[0]
-        self.assertEqual(("konto", 4), args)
+        self.assertEqual(("konto",), args)
         self.assertEqual({}, kwargs)
         self.assertEqual([("valid",)], emitted)
 
@@ -1186,10 +1129,10 @@ class LoginMessageTests(unittest.TestCase):
     def _ui(self):
         return ui_module_for(self)
 
-    def test_completion_needs_no_modal_dialog(self):
+    def test_completion_reports_success_without_a_modal_warning(self):
+        """Erfolg steht in der Statuszeile; das Schliessen warnt der Grabber."""
         ui_module = self._ui()
         boxes = []
-
         dashboard = dashboard_stub()
         dashboard.status = FakeText()
         dashboard.hardware = FakeText()
@@ -1208,25 +1151,7 @@ class LoginMessageTests(unittest.TestCase):
             ui_module._restore_stubs_for_tests()
         self.assertEqual([], boxes)
         self.assertIn("Angemeldet.", dashboard.status.value)
-
-    def test_successful_login_leaves_the_close_warning_to_the_grabber(self):
-        """Das Schliessen samt Warnung liegt beim Grabber, nicht in der UI."""
-        ui_module = self._ui()
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-
-        dashboard = dashboard_stub()
-        dashboard.status = FakeText()
-        dashboard.hardware = FakeText()
-        dashboard.refresh = FakeText()
-        dashboard.update_status = lambda: None
-        dashboard._login_cleanup = lambda: None
-        dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
-            dashboard)
-
-        dashboard.login_completed("hw-neu")
-        # Keine Fenster-Warnung: die Statuszeile meldet nur den Erfolg.
         self.assertNotIn("offen", dashboard.status.value)
-        self.assertIn("Angemeldet.", dashboard.status.value)
 
     def test_the_primary_button_becomes_the_next_step(self):
         """Kein Dialog nach der Anmeldung -- der Hauptknopf ist der
@@ -1415,18 +1340,18 @@ class BrowserLoginPersistenceTests(unittest.TestCase):
         ui_module = ui_module_for(self)
         self.addCleanup(ui_module._restore_stubs_for_tests)
         events = []
-        worker = ui_module.auth_workers.BrowserLoginWorker("konto", 4, "hw")
+        worker = ui_module.auth_workers.BrowserLoginWorker("konto", "hw")
         for name in ("progress", "completed", "failed"):
             setattr(worker, name, type("Signal", (), {
                 "emit": lambda self, *args, _name=name:
                     events.append((_name,) + args)})())
         with patch.object(ui_module.auth_workers, "grab_live_refresh",
-                          lambda *args, **kwargs: ("tok", "hw")), \
+                          lambda *args, **kwargs: ("tok", "hw", 2)), \
              patch.object(ui_module.auth_workers, "save_credentials",
                           lambda *args: events.append(("save",) + args) or True):
             worker.run()
         self.assertEqual([
-            ("save", "konto", "tok", "hw"),
+            ("save", "konto", "tok", "hw", 2),
             ("completed", "hw"),
         ], events)
 
@@ -1636,45 +1561,30 @@ class SettingsSaveTests(unittest.TestCase):
         def setText(self, value):
             self.value = value
 
-    def test_closing_the_settings_keeps_a_typed_token(self):
-        calls = []
+    def test_closing_the_settings_stores_only_a_typed_token(self):
+        cases = ((" token-neu ", ["save", ("store", "token-neu"), "accept"]),
+                 ("", ["save", "accept"]))
+        for typed, expected in cases:
+            with self.subTest(typed=typed):
+                calls = []
 
-        class Dialog:
-            def accept(self):
-                calls.append("accept")
+                class Dialog:
+                    def accept(self):
+                        calls.append("accept")
 
-        dashboard = SimpleNamespace(
-            account_name="konto", refresh=self.Field(" token-neu "),
-            hardware=self.Field("hw-1"), settings_dialog=Dialog(),
-            _save_visible_account=lambda values=None: calls.append("save"),
-            store_refresh=lambda token, hardware="": calls.append(
-                ("store", token)),
-            update_status=lambda: None)
-        module = ui_module_for(self).dashboard
-        dashboard._typed_refresh = MethodType(
-            module.SyncDashboard._typed_refresh, dashboard)
-        module.SyncDashboard.close_settings(dashboard)
-        self.assertEqual(["save", ("store", "token-neu"), "accept"], calls)
-
-    def test_closing_the_settings_without_a_typed_token_stores_nothing(self):
-        calls = []
-
-        class Dialog:
-            def accept(self):
-                calls.append("accept")
-
-        dashboard = SimpleNamespace(
-            account_name="konto", refresh=self.Field(""),
-            hardware=self.Field("hw-1"), settings_dialog=Dialog(),
-            _save_visible_account=lambda values=None: calls.append("save"),
-            store_refresh=lambda token, hardware="": calls.append(
-                ("store", token)),
-            update_status=lambda: None)
-        module = ui_module_for(self).dashboard
-        dashboard._typed_refresh = MethodType(
-            module.SyncDashboard._typed_refresh, dashboard)
-        module.SyncDashboard.close_settings(dashboard)
-        self.assertEqual(["save", "accept"], calls)
+                dashboard = SimpleNamespace(
+                    account_name="konto", refresh=self.Field(typed),
+                    hardware=self.Field("hw-1"), settings_dialog=Dialog(),
+                    _save_visible_account=lambda values=None: calls.append(
+                        "save"),
+                    store_refresh=lambda token, hardware="": calls.append(
+                        ("store", token)),
+                    update_status=lambda: None)
+                module = ui_module_for(self).dashboard
+                dashboard._typed_refresh = MethodType(
+                    module.SyncDashboard._typed_refresh, dashboard)
+                module.SyncDashboard.close_settings(dashboard)
+                self.assertEqual(expected, calls)
 
 
 class PrepareFailureStatusTests(unittest.TestCase):
@@ -1707,17 +1617,16 @@ class PrepareFailureStatusTests(unittest.TestCase):
                 "Vergleich fehlgeschlagen: ")
         return status.value
 
-    def test_a_rejected_login_asks_for_a_new_login(self):
-        text = self._failed_text(
-            "tolino hat die Anmeldung abgelehnt. (Code A01)")
-        self.assertEqual("Anmeldung abgelehnt – bitte neu anmelden.", text)
-
-    def test_a_missing_browser_also_asks_for_a_new_login(self):
-        text = self._failed_text(
-            "Kein Chromium-Browser gefunden. (Code B01)")
-        self.assertEqual("Anmeldung abgelehnt – bitte neu anmelden.", text)
-
-    def test_a_server_error_keeps_the_login_status(self):
-        text = self._failed_text(
-            "tolino meldet einen Fehler (HTTP 500). (Code N03)")
-        self.assertEqual("Angemeldet.", text)
+    def test_the_status_follows_the_error_code(self):
+        cases = (
+            ("abgelehnte Anmeldung",
+             "tolino hat die Anmeldung abgelehnt. (Code A01)",
+             "Anmeldung abgelehnt – bitte neu anmelden."),
+            ("fehlender Browser", "Kein Chromium-Browser gefunden. (Code B01)",
+             "Anmeldung abgelehnt – bitte neu anmelden."),
+            ("Serverfehler", "tolino meldet einen Fehler (HTTP 500). (Code N03)",
+             "Angemeldet."),
+        )
+        for label, message, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(expected, self._failed_text(message))

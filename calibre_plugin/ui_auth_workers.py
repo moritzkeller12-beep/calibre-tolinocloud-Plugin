@@ -12,20 +12,19 @@ class BrowserLoginWorker(QObject):
     failed = pyqtSignal(object)
     progress = pyqtSignal(str)
 
-    def __init__(self, account_name, partner_id, hardware):
+    def __init__(self, account_name, hardware):
         QObject.__init__(self)
         self.account_name = account_name
-        self.partner_id = partner_id
         self.hardware = hardware
 
     def run(self):
         try:
-            refresh, hardware = grab_live_refresh(
-                int(self.partner_id), self.hardware, timeout=LOGIN_TIMEOUT,
+            refresh, hardware, partner_id = grab_live_refresh(
+                self.hardware, timeout=LOGIN_TIMEOUT,
                 progress=self.progress.emit)
             # Vor dem Signal speichern: das Dashboard darf vorher schliessen,
             # ohne dass der neue Single-Use-Token verloren geht.
-            save_credentials(self.account_name, refresh, hardware)
+            save_credentials(self.account_name, refresh, hardware, partner_id)
         except Exception as exc:
             self.failed.emit(exc)
             return
@@ -44,8 +43,7 @@ class SessionCheckWorker(QObject):
 
     def run(self):
         try:
-            status, detail = check_stored_login(
-                self.context.account_name, self.context.partner_id)
+            status, detail = check_stored_login(self.context.account_name)
         except Exception as exc:
             self.invalid.emit(report_error(
                 exc, "Zugangsprüfung", self.context.secrets()))

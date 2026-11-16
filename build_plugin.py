@@ -1,5 +1,4 @@
 """Build a deterministic Calibre plugin archive without Calibre installed."""
-import ast
 import io
 import sys
 import tokenize
@@ -13,79 +12,77 @@ ROOT_FILES = ("__init__.py", "README.md", "CHANGELOG.md")
 FILES = (*ROOT_FILES, *sorted(p.name for p in SOURCE.glob("*.py")
                               if p.name != "test_sync.py"), ICON, MARKER)
 DATE, MODE = (2026, 1, 1, 0, 0, 0), 0o644 << 16
+# Diese Token verschieben keine Anweisungsgrenze.
+_SKIPPED = frozenset((tokenize.NL, tokenize.COMMENT, tokenize.INDENT,
+                      tokenize.DEDENT))
+_BROKEN = (LookupError, SyntaxError, UnicodeDecodeError, tokenize.TokenError)
 
 
-def strip_comments(data):
-    """Kommentare entfernen, Zeilennummern und Kodierung aber behalten.
+def _docstring_spans(tokens):
+    """Spans aller Docstrings: ein String, der allein eine Anweisung bildet.
 
-    Docstrings bleiben in dieser Stufe stehen; strip_source entfernt sie
-    zusätzlich. Shebang und Kodierzeile bleiben erhalten. Lässt sich die
-    Datei nicht zerlegen, wird sie unverändert ausgeliefert.
+    Die Tokenfolge ist in jeder Python-Version gleich; ``ast`` fuehrt
+    Docstrings seit 3.14 nicht mehr als eigene Knoten.
     """
-    try:
-        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
-        text = data.decode(encoding)
-        columns = {}
-        for token in tokenize.generate_tokens(io.StringIO(text).readline):
-            if token.type == tokenize.COMMENT:
-                columns.setdefault(token.start[0], token.start[1])
-    except (LookupError, SyntaxError, UnicodeDecodeError, tokenize.TokenError):
-        return data
+    spans, previous = [], tokenize.ENCODING
+    for index, token in enumerate(tokens):
+        following = tokens[index + 1].type if index + 1 < len(tokens) else None
+        if (token.type == tokenize.STRING
+                and previous in (tokenize.NEWLINE, tokenize.ENCODING)
+                and following == tokenize.NEWLINE):
+            spans.append((token.start, token.end))
+        if token.type not in _SKIPPED:
+            previous = token.type
+    return spans
+
+
+def _strip_comments(text, tokens):
+    """Kommentare abschneiden; Shebang und Kodierzeile bleiben erhalten."""
     lines = text.splitlines(keepends=True)
-    for row, column in columns.items():
+    for token in tokens:
+        if token.type != tokenize.COMMENT:
+            continue
+        row, column = token.start
         line = lines[row - 1]
-        if column == 0 and row <= 2 and (
-                line.startswith("#!") or "coding" in line):
+        if row <= 2 and (line.startswith("#!") or "coding" in line):
             continue
         ending = "\r\n" if line.endswith("\r\n") else (
             "\n" if line.endswith("\n") else "")
         lines[row - 1] = line[:column].rstrip() + ending
-    return "".join(lines).encode(encoding)
+    return "".join(lines)
 
 
-def strip_docstrings(data):
-    """Docstrings entfernen, Zeilen und Spalten aber unverändert lassen."""
-    try:
-        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
-        text = data.decode(encoding)
-        tree = ast.parse(text)
-    except (LookupError, SyntaxError, UnicodeDecodeError, tokenize.TokenError):
-        return data
-    lines = text.splitlines(keepends=True)
+def _blank_docstrings(text, spans):
+    """Docstrings durch ``0`` ersetzen; die Zeilenzahl bleibt gleich.
+
+    Das ``0`` haelt eine Klasse am Leben, deren Rumpf nur ein Docstring war.
+    """
     starts, offset = [], 0
-    for line in lines:
+    for line in text.splitlines(keepends=True):
         starts.append(offset)
         offset += len(line)
-    spans = []
-    docstring_nodes = (ast.Module, ast.ClassDef, ast.FunctionDef,
-                       ast.AsyncFunctionDef)
-    for node in ast.walk(tree):
-        if not isinstance(node, docstring_nodes) or not node.body:
-            continue
-        first = node.body[0]
-        if (isinstance(first, ast.Expr)
-                and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)):
-            value = first.value
-            spans.append((value.lineno, value.col_offset,
-                          value.end_lineno, value.end_col_offset))
-    for start_line, start_col, end_line, end_col in sorted(spans, reverse=True):
-        start = starts[start_line - 1] + len(
-            lines[start_line - 1].encode("utf-8")[:start_col].decode("utf-8"))
-        end = starts[end_line - 1] + len(
-            lines[end_line - 1].encode("utf-8")[:end_col].decode("utf-8"))
-        segment = text[start:end]
-        text = (text[:start]
-                + "0" + "".join("\n" if char == "\n" else
-                                  "\r" if char == "\r" else " "
-                                  for char in segment[1:])
-                + text[end:])
-    return text.encode(encoding)
+    for (start_row, start_col), (end_row, end_col) in sorted(spans,
+                                                             reverse=True):
+        start = starts[start_row - 1] + start_col
+        end = starts[end_row - 1] + end_col
+        kept = "".join(char for char in text[start:end][1:] if char in "\r\n")
+        text = text[:start] + "0" + kept + text[end:]
+    return text
 
 
 def strip_source(data):
-    """Kommentare und Docstrings für das Release entfernen."""
-    return strip_comments(strip_docstrings(data))
+    """Kommentare und Docstrings entfernen; die Zeilenzahl bleibt gleich."""
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+        text = data.decode(encoding)
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        # Erst Kommentare (ihre Spalten gelten fuer den Originaltext), dann
+        # Docstrings (deren Spans aus denselben Tokens stammen).
+        text = _blank_docstrings(_strip_comments(text, tokens),
+                                 _docstring_spans(tokens))
+    except _BROKEN:
+        return data
+    return text.encode(encoding)
 
 
 def build_plugin(archive_path=ROOT / "tolino_cloud_sync.zip"):

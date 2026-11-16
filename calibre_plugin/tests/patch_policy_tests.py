@@ -79,7 +79,8 @@ def offenders():
     for filename in sorted(os.listdir(TESTS_DIR)):
         if not filename.endswith("_tests.py") or filename in SKIP_FILES:
             continue
-        tree = ast.parse(open(os.path.join(TESTS_DIR, filename)).read(), filename)
+        with open(os.path.join(TESTS_DIR, filename)) as handle:
+            tree = ast.parse(handle.read(), filename)
         functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
         for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
             functions.extend(n for n in cls.body if isinstance(n, ast.FunctionDef))

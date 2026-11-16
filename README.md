@@ -16,13 +16,21 @@ Voraussetzung: Calibre 6 oder neuer. Die automatische Anmeldung benötigt Chrome
 
 ## Benutzung
 
-Plugin öffnen, Buchhändler wählen und **Bei tolino anmelden**. Danach **Bibliothek vergleichen …** wählen, gewünschte Aktionen markieren und **Synchronisierung starten**.
+Plugin öffnen und **Bei tolino anmelden** – den Buchhändler erkennt das
+Plugin am Zugang. Danach **Bibliothek vergleichen …** wählen, gewünschte Aktionen markieren und **Synchronisierung starten**.
 
 Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste](docs/fehlercodes.md).
 
 ## Entwicklung
 
 Tests: `python3 -X dev -m unittest calibre_plugin.test_sync`
+
+Live-Tests gegen die echte Cloud: In den Project-Secrets `refresh_token`
+und `hardware_id` hinterlegen und `python3 -m unittest
+calibre_plugin.tests.live_tests` ausführen. Ohne Secrets werden sie
+übersprungen. Der Refresh-Token ist einmalig – nach einem Live-Lauf ist er
+verbraucht und muss neu hinterlegt werden; das Plugin selbst speichert den
+rotierten Token beim Anmelden im Konto.
 
 Release-ZIP: `python3 build_plugin.py`
 

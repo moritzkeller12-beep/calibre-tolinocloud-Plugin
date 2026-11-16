@@ -7,7 +7,7 @@ from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
                         QMenu, QPushButton, QTableWidget, QTableWidgetItem,
                         QVBoxLayout, QStyledItemDelegate, QEvent, Qt,
                         _set_enabled, gui_guard, start_call)
-from .planning_values import plural
+from .planning import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import comparison_sort_key, sort_comparison_rows
 from .library import TOLINO_IGNORE_COLUMN
@@ -431,7 +431,7 @@ class InventoryDialog(QDialog):
             "Überträgt die ausgewählten Änderungen.")
         cancel = QPushButton("Abbrechen")
         cancel.setToolTip(
-            "Schließt den Vergleich, ohne Änderungen.")
+            "Schliesst den Vergleich, ohne Änderungen.")
         confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
         self.confirm = confirm
@@ -494,7 +494,7 @@ class InventoryDialog(QDialog):
         if column in range(len(self.ACTION_COLUMNS)):
             self._choice_changed(item.row(), column)
 
-    def _clear_selection(self):
+    def clear_all_selection(self):
         """Auswahl und Löschmarkierungen in einem Schritt zurücksetzen."""
         for row in self.rows:
             row.pop("delete_cloud", None)
@@ -523,9 +523,6 @@ class InventoryDialog(QDialog):
     def apply_recommended(self):
         """Die vorgeschlagenen Aktionen für alle Zeilen auswählen."""
         self._set_selection(self.default_actions)
-
-    def clear_all_selection(self):
-        self._clear_selection()
 
     def automatic_actions_enabled(self):
         """Tun Automatiken ohne Auswahl WIRKLICH etwas?

@@ -4,9 +4,11 @@ from .identifiers import display_title
 from .library import COLUMN_KIND_NAMES, CUSTOM_COLUMNS, create_custom_columns
 from .partners import PARTNERS
 from .tolino import log_warning, sanitize_error
-from .ui_common import (QComboBox, QDialog, QFormLayout, QGroupBox,
-                        QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                        QProgressBar, QPushButton, QVBoxLayout, gui_guard)
+from .ui_common import (COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP, QComboBox,
+                        QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                        LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP, QLineEdit,
+                        QMessageBox, QProgressBar, QPushButton, QVBoxLayout,
+                        gui_guard)
 
 
 def _button(text, tip="", slot=None):
@@ -42,7 +44,7 @@ def _settings_dialog(dashboard):
         setattr(dialog, name + "_form", QFormLayout(group))
         layout.addWidget(group)
     dialog.close_button = _button(
-        "Speichern und schließen",
+        "Speichern und schliessen",
         "Speichert die Änderungen und schließt die Einstellungen.",
         dashboard.close_settings)
     row = QHBoxLayout()
@@ -74,11 +76,8 @@ def _default_buttons(login_button, primary, settings_button):
 @gui_guard
 def offer_next_step(dialog):
     """Nach der Anmeldung ist der Hauptknopf der naechste Schritt."""
-    primary = getattr(dialog, "primary", None)
-    if primary is None:
-        return
-    primary.setDefault(True)
-    primary.setFocus()
+    dialog.primary.setDefault(True)
+    dialog.primary.setFocus()
 
 
 def confirm_deletions(dialog, removals, titles=None):
@@ -99,8 +98,7 @@ def confirm_deletions(dialog, removals, titles=None):
 
 def confirm_replacements(dialog, jobs):
     """Ersetzen einer vorhandenen Cloud-Kopie vorher ansprechen."""
-    titles = ["- %s" % (job.label() if callable(getattr(job, "label", None))
-                        else "Buch") for job in jobs[:20]]
+    titles = ["- %s" % job.label() for job in jobs[:20]]
     count = len(jobs)
     if count == 1:
         text = ("Die Cloud-Kopie dieses Buchs wird ersetzt. Lesestatus, "
@@ -143,9 +141,6 @@ class DashboardParts:
         root.addWidget(_button("Schließen", slot=self.close))
 
     def _build_main_actions(self, root):
-        self.partner = _combo(
-            [(PARTNERS[pid]["name"], pid) for pid in sorted(PARTNERS)],
-            "Bei diesem Händler hast du dein tolino-Konto.")
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.account_quick = _combo(
@@ -155,12 +150,9 @@ class DashboardParts:
                 index, self.account_quick))
         self.account_quick_label = QLabel("Konto")
         self.login_button = _button(
-            "Bei tolino anmelden",
-            "Öffnet ein Browserfenster zur Anmeldung.", self.browser_login)
+            LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP, self.browser_login)
         self.primary = _button(
-            "Bibliothek vergleichen …",
-            "Vergleicht deine Calibre-Bibliothek mit tolino.",
-            self.primary_action)
+            COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP, self.primary_action)
         self.progress_label = QLabel("Bereit")
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -172,7 +164,6 @@ class DashboardParts:
         _default_buttons(self.login_button, self.primary, self.settings_button)
         form = QFormLayout()
         for label, widget in (
-                ("Buchhändler", self.partner),
                 (self.account_quick_label, self.account_quick),
                 ("", self.login_button), ("", self.primary),
                 ("", self.status), ("", self.progress_label),
@@ -217,8 +208,14 @@ class DashboardParts:
         self.logout_button = _button(
             "Abmelden", "Löscht den gespeicherten Zugang dieses Kontos.",
             self.logout)
+        self.partner = _combo(
+            [(PARTNERS[pid]["name"], pid) for pid in sorted(PARTNERS)],
+            "Nur nötig, wenn ein Zugang keinen Buchhändler nennt – sonst "
+            "wird er beim Anmelden aus dem Token gelesen.",
+            slot=self._partner_selected)
         for label, widget in (
                 ("Aktives Konto", self.account_select), ("", buttons),
+                ("Buchhändler (aus dem Token)", self.partner),
                 ("Geräte-ID (automatisch)", self.hardware),
                 ("Zugangstoken (nur bei Problemen ändern)", self.refresh),
                 ("", self.logout_button)):

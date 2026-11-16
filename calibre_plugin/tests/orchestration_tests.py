@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from . import ui_base_tests
 from .. import config
-from ..planning_values import SyncJob
+from ..planning import SyncJob
 from ..run_context import RunContext
 from ._support import (CalibreDatabase, compare_inventory, dashboard_stub, start_cdp_stubs,
                        stop_cdp_stubs)
@@ -16,6 +16,59 @@ from unittest.mock import patch
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
 setUpModule = start_cdp_stubs
 tearDownModule = stop_cdp_stubs
+
+
+def _job(title, book_id=1, old_id=""):
+    """Echter SyncJob: der Produktivcode liest book_id/old_id/label()."""
+    return SyncJob(book_id, "uuid-%s" % book_id, "EPUB", old_id,
+                   "/tmp/buch.epub", None, title)
+
+
+def _complete(dashboard):
+    """Felder, die der Produktivcode erwartet: Teil-Instanz ohne __init__ füllen."""
+    for name, value in (("account_name", "konto"), ("account_names", ()),
+                        ("_hardware_edited", False), ("_partner_chosen", False),
+                        ("login_button", None), ("refresh", None),
+                        ("hardware", None), ("snapshot_thread", None),
+                        ("snapshot_worker", None), ("prepare_worker", None)):
+        if not hasattr(dashboard, name):
+            setattr(dashboard, name, value)
+    return dashboard
+
+
+def _fresh_ui(test_case):
+    """UI-Modul laden; die Qt-/Calibre-Stubs danach wieder zurücknehmen."""
+    ui_module = StartSyncOrchestrationTests._ui_module()
+    test_case.addCleanup(ui_module._restore_stubs_for_tests)
+    return ui_module
+
+
+def _bare_dashboard(ui_module, settings):
+    """Nacktes Dashboard: Werte aus ``settings``, Qt-Felder als Attrappen."""
+    dashboard = _complete(
+        ui_module.dashboard.SyncDashboard.__new__(
+            ui_module.dashboard.SyncDashboard))
+    dashboard.thread = None
+    dashboard.values = lambda: settings
+    dashboard.gui = type("Gui", (), {
+        "current_db": type(
+            "Db", (), {"field_metadata": {}})()})()
+    dashboard.status = type(
+        "Status", (), {"setText": lambda self, _text: None})()
+    dashboard.columns = {}
+    return dashboard
+
+
+def _with_progress(dashboard):
+    """Fortschrittsbalken und Statuszeile als Attrappen nachrüsten."""
+    dashboard.progress = type("Bar", (), {
+        "setRange": lambda self, *args: None,
+        "setValue": lambda self, value: None,
+    })()
+    dashboard.progress_label = type("Label", (), {
+        "setText": lambda self, text: setattr(self, "text_value", text),
+    })()
+    return dashboard
 
 
 def _preparation(**overrides):
@@ -49,25 +102,17 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         }
 
     def _dashboard(self, ui_module, settings, thread=None):
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(ui_module.dashboard.SyncDashboard)
+        dashboard = _bare_dashboard(ui_module, settings)
         dashboard.thread = thread
         dashboard.prepare_thread = None
-        dashboard.prepare_worker = None
         dashboard.snapshot_thread = None
         dashboard.snapshot_worker = None
         dashboard.login_thread = None
         dashboard.login_worker = None
         dashboard.worker = None
-        dashboard.values = lambda: settings
         # Der Zugang liegt im Konto; der Stub sagt, welcher Token drin steht.
         dashboard._effective_refresh = lambda: str(
             (settings or {}).get("refresh_token") or "")
-        dashboard.gui = type("Gui", (), {
-            "current_db": type(
-                "Db", (), {"field_metadata": {}})()})()
-        dashboard.status = type(
-            "Status", (), {"setText": lambda self, _text: None})()
-        dashboard.columns = {}
         return dashboard
 
     @staticmethod
@@ -260,8 +305,9 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             StartSyncOrchestrationTests._install_fake_qt(ui_module)
             settings = self._settings()
             settings["account_name"] = "konto"
-            dashboard = ui_module.dashboard.SyncDashboard.__new__(
-                ui_module.dashboard.SyncDashboard)
+            dashboard = _complete(
+                ui_module.dashboard.SyncDashboard.__new__(
+                    ui_module.dashboard.SyncDashboard))
             dashboard.account_name = "konto"
             dashboard.thread = None
             dashboard.snapshot_thread = None
@@ -327,9 +373,10 @@ class StartSyncOrchestrationTests(unittest.TestCase):
             dashboard.update_status = lambda: status_updates.append(True)
             for name in ("progress_changed", "sync_completed", "sync_failed"):
                 setattr(dashboard, name, lambda *args: None)
-            jobs = ["job-1", "job-2"]
+            jobs = [_job("job-1"), _job("job-2", book_id=2)]
             preparation = {
-                "jobs": jobs, "removals": ["remove-1"],
+                "jobs": jobs,
+                "removals": [("c1111111-1111-4111-8111-111111111111", "t-weg")],
                 "meta_updates": [("b1111111-1111-4111-8111-111111111111", 7)],
                 "series_map": {"b2222222-2222-4222-8222-222222222222": "Reihe"}, "collections": 1,
                 "skipped_uploads": [],
@@ -346,7 +393,9 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         passed = dashboard.worker.arguments[0]
         self.assertFalse(hasattr(passed, "refresh_token"))
         self.assertEqual(jobs, dashboard.worker.arguments[1])
-        self.assertEqual(["remove-1"], dashboard.worker.arguments[2])
+        self.assertEqual(
+            [("c1111111-1111-4111-8111-111111111111", "t-weg")],
+            dashboard.worker.arguments[2])
         self.assertEqual([("b1111111-1111-4111-8111-111111111111", 7)], dashboard.worker.arguments[3])
         self.assertEqual({"b2222222-2222-4222-8222-222222222222": "Reihe"}, dashboard.worker.arguments[4])
         self.assertEqual([("t-read", None, True), ("t-unread", None, False)],
@@ -371,8 +420,9 @@ class StartSyncOrchestrationTests(unittest.TestCase):
         try:
             config.PREFERENCES = config.JSONConfig("test")
             settings = dict(self._settings(), account_name="konto")
-            dashboard = ui_module.dashboard.SyncDashboard.__new__(
-                ui_module.dashboard.SyncDashboard)
+            dashboard = _complete(
+                ui_module.dashboard.SyncDashboard.__new__(
+                    ui_module.dashboard.SyncDashboard))
             dashboard.account_name = "konto"
             dashboard.thread = None
             dashboard.prepare_thread = None
@@ -393,7 +443,7 @@ class StartSyncOrchestrationTests(unittest.TestCase):
                 self.assertFalse(hasattr(given, "refresh_token"))
                 return _preparation()
 
-            with patch.object(ui_module.dashboard._dashboard_plan,
+            with patch.object(ui_module.dashboard._planning,
                               "plan_actions", side_effect=plan):
                 dashboard._prepare_ready({
                     "context": RunContext.from_values(settings),
@@ -517,25 +567,14 @@ class NoSilentDeadEndTests(unittest.TestCase):
     # --- Dashboard: was nach dem Fenster passiert ------------------------
 
     def _ui_module(self):
-        ui_module = StartSyncOrchestrationTests._ui_module()
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        return ui_module
+        return _fresh_ui(self)
 
     @staticmethod
     def _dashboard(ui_module, settings):
         """Nacktes Dashboard mit den Feldern, die der Sync-Schritt anfasst."""
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(ui_module.dashboard.SyncDashboard)
-        dashboard.thread = None
-        dashboard.values = lambda: settings
-        dashboard.gui = type("Gui", (), {
-            "current_db": type(
-                "Db", (), {"field_metadata": {}})()})()
-        dashboard.status = type(
-            "Status", (), {"setText": lambda self, _text: None})()
-        dashboard.columns = {}
+        dashboard = _bare_dashboard(ui_module, settings)
         dashboard.account_name = "konto"
         dashboard.prepare_thread = None
-        dashboard.prepare_worker = None
         dashboard._finish_prepare = lambda: None
         return dashboard
 
@@ -543,13 +582,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         StartSyncOrchestrationTests._install_fake_qt(ui_module)
         dashboard = self._dashboard(ui_module,
                                    StartSyncOrchestrationTests._settings())
-        dashboard.progress = type("Bar", (), {
-            "setRange": lambda self, *args: None,
-            "setValue": lambda self, value: None,
-        })()
-        dashboard.progress_label = type("Label", (), {
-            "setText": lambda self, text: setattr(self, "text_value", text),
-        })()
+        _with_progress(dashboard)
         dashboard.update_status = lambda: None
         for name, value in extra.items():
             setattr(dashboard, name, value)
@@ -580,7 +613,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
             RunContext.from_values(settings),
-            _preparation(jobs=["job-1"]), {})
+            _preparation(jobs=[_job("job-1")]), {})
         self.assertEqual(1, dashboard.thread.starts)
         passed = dashboard.worker.arguments[0]
         self.assertFalse(hasattr(passed, "credentials"))
@@ -598,9 +631,9 @@ class NoSilentDeadEndTests(unittest.TestCase):
         with patch("calibre_plugin.token_vault.TolinoClient", FakeClient), \
                 patch("calibre_plugin.token_vault.account_summary",
                       lambda _name: {"refresh_token": "neu-token",
-                                     "hardware_id": "hw-neu"}):
-            ui_module.workers.TOKEN_VAULT.login(
-                passed.account_name, passed.partner_id)
+                                     "hardware_id": "hw-neu",
+                                     "partner_id": "thalia"}):
+            ui_module.workers.TOKEN_VAULT.login(passed.account_name)
         self.assertEqual([("thalia", "hw-neu", "neu-token")], seen)
 
     def test_the_started_run_shows_its_plan(self):
@@ -608,7 +641,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         dashboard = self._planning_dashboard(ui_module)
         dashboard._start_sync_worker(
             RunContext.from_values(dashboard.values()),
-            _preparation(jobs=["job-1", "job-2"]), {})
+            _preparation(jobs=[_job("job-1"), _job("job-2", book_id=2)]), {})
         self.assertIn("2", dashboard.progress_label.text_value)
         self.assertIn("Upload", dashboard.progress_label.text_value)
 
@@ -642,8 +675,8 @@ class NoSilentDeadEndTests(unittest.TestCase):
             tmp.write(b"EPUB")
             book_path = tmp.name
         self.addCleanup(os.unlink, book_path)
-        dashboard_plan = ui_module.dashboard._dashboard_plan
-        dashboard_plan.safe_format_path = (
+        planning = ui_module.dashboard._planning
+        planning.safe_format_path = (
             lambda _db, _book_id, _fmt: book_path)
         dialog = ui_module.dialogs.InventoryDialog(rows, options={})
         dialog.exec = lambda: 1  # der Nutzer drueckt «Synchronisierung starten»
@@ -656,17 +689,17 @@ class NoSilentDeadEndTests(unittest.TestCase):
         # Nur das fehlende Buch: die vorhandene Cloud-Kopie bleibt unberuehrt.
         self.assertEqual({1}, set(selection["uploads"]))
         self.assertEqual(set(), set(selection["metadata"]))
-        preparation = dashboard_plan.plan_actions(
+        preparation = planning.plan_actions(
             dashboard, RunContext.from_values(settings), metadata, state,
             selection)
         self.assertEqual(1, len(preparation["jobs"]))
         self.assertEqual([], preparation["skipped_uploads"])
-        self.assertEqual(1, ui_module.dashboard._dashboard_plan.plan_counts(
+        self.assertEqual(1, ui_module.dashboard._planning.plan_counts(
             preparation, 1)["steps"])
         # Und der geplante Lauf nennt den Upload auch im Fenster.
         self.assertIn(
             "1 Upload",
-            ui_module.dashboard._dashboard_plan.plan_text(preparation, 1))
+            ui_module.dashboard._planning.plan_text(preparation, 1))
         dashboard.progress = type("Bar", (), {
             "setRange": lambda self, *args: None,
             "setValue": lambda self, value: None,
@@ -830,41 +863,22 @@ class CloudCopyAssignmentPlanTests(unittest.TestCase):
         return selection
 
     def _ui(self):
-        ui_module = StartSyncOrchestrationTests._ui_module()
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        return ui_module
+        return _fresh_ui(self)
 
     def _dashboard(self, ui_module, settings):
         StartSyncOrchestrationTests._install_fake_qt(ui_module)
-        dashboard = ui_module.dashboard.SyncDashboard.__new__(
-            ui_module.dashboard.SyncDashboard)
-        dashboard.thread = None
-        dashboard.values = lambda: settings
-        dashboard.gui = type("Gui", (), {
-            "current_db": type(
-                "Db", (), {"field_metadata": {}})()})()
-        dashboard.status = type(
-            "Status", (), {"setText": lambda self, _text: None})()
-        dashboard.columns = {}
+        dashboard = _bare_dashboard(ui_module, settings)
         dashboard.account_name = "konto"
         dashboard.prepare_thread = None
-        dashboard.prepare_worker = None
         dashboard.update_status = lambda: None
-        dashboard.progress = type("Bar", (), {
-            "setRange": lambda self, *args: None,
-            "setValue": lambda self, value: None,
-        })()
-        dashboard.progress_label = type("Label", (), {
-            "setText": lambda self, text: setattr(self, "text_value", text),
-        })()
-        return dashboard
+        return _with_progress(dashboard)
 
     def test_assignment_plans_a_metadata_update_without_upload(self):
         ui_module = self._ui()
         settings = self._settings()
         dashboard = self._dashboard(ui_module, settings)
         state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t-9", "calibre_id": 1}}
-        preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+        preparation = ui_module.dashboard._planning.plan_actions(
             dashboard, RunContext.from_values(settings), self._metadata(),
             state, self._selection(metadata={1}))
         self.assertEqual([], preparation["jobs"])
@@ -881,9 +895,7 @@ class ReplacementConfirmationTests(unittest.TestCase):
     """
 
     def _ui(self):
-        ui_module = StartSyncOrchestrationTests._ui_module()
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        return ui_module
+        return _fresh_ui(self)
 
     @staticmethod
     def _job(ui_module, book_id, title, old_id):
@@ -968,7 +980,7 @@ class DroppedSelectionCountTests(unittest.TestCase):
         metadata = {1: {"uuid": "11111111-1111-4111-8111-111111111111", "title": "PDF only", "formats": ["PDF"]}}
         selection = {"uploads": {1}, "metadata": set(), "read_changes": [],
                      "cloud_deletions": []}
-        preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+        preparation = ui_module.dashboard._planning.plan_actions(
             dashboard, RunContext.from_values(settings), metadata, {},
             selection)
         self.assertEqual([], preparation["jobs"])
@@ -1033,15 +1045,13 @@ class EmptyRunAccountingTests(unittest.TestCase):
     """
 
     def _ui(self):
-        ui_module = StartSyncOrchestrationTests._ui_module()
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        return ui_module
+        return _fresh_ui(self)
 
 
     @staticmethod
     def _prepared(ui_module, series_map, state):
         """Wie `plan_actions`: die offenen Sammlungen einmal zählen."""
-        plan = ui_module.dashboard._dashboard_plan
+        plan = ui_module.dashboard._planning
         return _preparation(
             series_map=series_map,
             collections=len(plan.plan_collection_updates(series_map, state)))
@@ -1052,37 +1062,32 @@ class EmptyRunAccountingTests(unittest.TestCase):
                  "22222222-2222-4222-8222-222222222222": {"tolino_id": "t2", "collections": ["Reihe"]}}
         preparation = self._prepared(
             ui_module, {"11111111-1111-4111-8111-111111111111": "Reihe", "22222222-2222-4222-8222-222222222222": "Reihe"}, state)
-        self.assertEqual(0, ui_module.dashboard._dashboard_plan.plan_counts(
+        self.assertEqual(0, ui_module.dashboard._planning.plan_counts(
             preparation, 0)["steps"])
 
     def test_open_collections_still_count(self):
         ui_module = self._ui()
         preparation = self._prepared(
             ui_module, {"11111111-1111-4111-8111-111111111111": "Reihe"}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}})
-        self.assertEqual(1, ui_module.dashboard._dashboard_plan.plan_counts(
+        self.assertEqual(1, ui_module.dashboard._planning.plan_counts(
             preparation, 0)["steps"])
 
     def test_plan_text_does_not_promise_remembered_collections(self):
         ui_module = self._ui()
         state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "collections": ["Reihe"]}}
         preparation = self._prepared(ui_module, {"11111111-1111-4111-8111-111111111111": "Reihe"}, state)
-        text = ui_module.dashboard._dashboard_plan.plan_text(preparation, 0)
+        text = ui_module.dashboard._planning.plan_text(preparation, 0)
         self.assertNotIn("Serie", text)
 
     def test_selected_actions_without_a_plan_are_counted(self):
         ui_module = self._ui()
         dashboard = NoSilentDeadEndTests._dashboard(
             ui_module, StartSyncOrchestrationTests._settings())
-        dashboard.gui = type("Gui", (), {
-            "current_db": type(
-                "Db", (), {"field_metadata": {}})()})()
-        dashboard.status = type(
-            "Status", (), {"setText": lambda self, _text: None})()
         # Ohne UUID kann plan_sync das Buch nicht einplanen.
         metadata = {1: {"uuid": "", "title": "Kaputt", "formats": ["EPUB"]}}
         selection = {"uploads": {1}, "metadata": {1}, "read_changes": [],
                      "cloud_deletions": []}
-        preparation = ui_module.dashboard._dashboard_plan.plan_actions(
+        preparation = ui_module.dashboard._planning.plan_actions(
             dashboard,
             RunContext.from_values(StartSyncOrchestrationTests._settings()),
             metadata, {}, selection)

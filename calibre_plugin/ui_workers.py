@@ -7,15 +7,24 @@ from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED, QObject, pyqtSignal)
 from .token_vault import TOKEN_VAULT
 from .config import account_secrets, load_state, save_account
-from .plan import plan_collection_updates, remember_collection
+from .planning import (local_metadata, plan_collection_updates,
+                       remember_collection)
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint, reading_state,
                          store_reading_state)
-from .dashboard_plan import local_metadata
 from .identifiers import display_title, state_entry, valid_book_uuid
 from .library import image_suffix
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
+
+
+def _id_is_gone(client, deliverable_id):
+    """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten."""
+    try:
+        return all(record.get("tolino_id") != deliverable_id
+                   for record in client.inventory())
+    except TolinoError:
+        return False
 
 
 def _deferred(client, name, *args, **kwargs):
@@ -133,7 +142,7 @@ class SyncWorker(QObject):
         Zugangsdaten.
         """
         detail = sanitize_error(exc, account_secrets(self.account_name)
-                                + (getattr(client, "access", None),))
+                                + (client.access if client else None,))
         self._finish_operation(operation, OP_FAILED, error=detail)
         log_warning("Schritt gescheitert (%s): %s"
                     % ((operation or {}).get("label") or "?", detail))
@@ -187,13 +196,19 @@ class SyncWorker(QObject):
 
     @staticmethod
     def _delete_or_skip(client, deliverable_id):
-        """Return False when the delete endpoint explicitly reports HTTP 404."""
+        """Return False when the cloud copy is already gone.
+
+        Die Cloud meldet eine unbekannte Kennung je nach Endpunkt mit 404
+        oder mit 400 ohne Text. Der Bestand entscheidet: fehlt die Kopie,
+        war nichts zu loeschen; steht sie noch da, bleibt es ein Fehler.
+        """
         try:
             client.delete(deliverable_id)
             return True
         except TolinoApiError as exc:
-            text = (str(exc) + " " + str(getattr(exc, "detail", ""))).casefold()
-            if exc.code == "N03" and "http 404" in text:
+            text = (str(exc) + " " + str(exc.detail)).casefold()
+            if exc.code == "N03" and ("http 404" in text
+                                       or _id_is_gone(client, deliverable_id)):
                 return False
             raise
 
@@ -274,8 +289,8 @@ class SyncWorker(QObject):
                 self._persist_state()
             done += 1
             if deleted:
-                self.progress.emit(done, total,
-                                   "Erledigt: %s" % self._label(book_uuid))
+                self.progress.emit(done, total, "Erledigt: %s" % self._label(
+                    book_uuid, None, self.titles.get(str(tolino_id), "")))
         return done
 
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
@@ -297,8 +312,8 @@ class SyncWorker(QObject):
                 done, total)
             if ok:
                 stored = False
-                for _tolino, book_id, state, book_uuid in self.read_changes:
-                    if state is not finished:
+                for _tolino, book_id, wanted, book_uuid in self.read_changes:
+                    if wanted is not finished:
                         continue
                     if book_id is not None:
                         self.read_updates.append((book_id, finished))
@@ -478,8 +493,7 @@ class SyncWorker(QObject):
         state = self.state
         client = None
         try:
-            client = TOKEN_VAULT.login(self.account_name,
-                                       self.context.partner_id)
+            client = TOKEN_VAULT.login(self.account_name)
             (meta_ops, upload_ops, delete_ops, read_op, unread_op,
              total) = self._plan_operations()
             done = 0
@@ -516,7 +530,7 @@ class SyncWorker(QObject):
             message = (CANCEL_MESSAGE if str(exc) == CANCEL_MESSAGE
                        else report_error(exc, "Sync", (
                            account_secrets(self.account_name)
-                           + (getattr(client, "access", None),))))
+                           + (client.access if client else None,))))
             self.failed.emit(message)
 
 
@@ -619,10 +633,9 @@ class PrepareWorker(QObject):
         read_ids, read_known = self._load_optional(
             "Lesestatus", client.read_ids)
         progress_by_id, progress_known = None, False
-        loader = getattr(client, "progress_by_id", None)
-        if read_known and callable(loader):
+        if read_known:
             progress_by_id, progress_known = self._load_optional(
-                "Lesefortschritt", loader)
+                "Lesefortschritt", client.progress_by_id)
         return inventory, read_ids, read_known, progress_by_id, progress_known
 
     def _build_comparison(self, state, inventory, read_ids, progress_by_id):
@@ -653,8 +666,7 @@ class PrepareWorker(QObject):
             state, original_state = self._load_comparison_state()
             self.progress.emit("Verbinde mit tolino …")
             client = TOKEN_VAULT.login(self.account_name,
-                                       self.context.partner_id,
-                                       self.lock_timeout)
+                                       lock_timeout=self.lock_timeout)
             if self._stop_requested():
                 return
             self.progress.emit("Lade Cloud-Bestand …")
@@ -690,4 +702,4 @@ class PrepareWorker(QObject):
             self.failed.emit(report_error(
                 exc, "Vorbereitung",
                 self.context.secrets()
-                + (getattr(client, "access", None),)))
+                + (client.access if client else None,)))

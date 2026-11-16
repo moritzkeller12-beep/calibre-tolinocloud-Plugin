@@ -3,10 +3,12 @@
 ## 0.1.08
 
 - Nach einem abgelehnten Zugang (A01/B01/B02) steht in der Statuszeile «Anmeldung abgelehnt – bitte neu anmelden.» statt weiter «Angemeldet.».
-- «Speichern und schließen» übernimmt einen eingetippten Token; Enter speichert, statt die Browser-Anmeldung zu starten.
+- «Speichern und schliessen» übernimmt einen eingetippten Token; Enter speichert, statt die Browser-Anmeldung zu starten.
 - Jeder Spalten-Knopf prüft und meldet nur seine eigene Calibre-Spalte.
 - Nach einem Upload werden Lesestatus und Fortschritt der ersetzten Kopie geleert; beide werden getrennt geschrieben, damit ein Fehler den anderen nicht blockiert.
 - Alte `#tolino_id`- und `dbpath`-Migrationspfade entfallen; Config-Speicher, Konten und Tokens bleiben unverändert.
+- Änderungen an der Einstellungsdatei (zweites Calibre-Fenster, anderes Konto) sind im laufenden Programm sofort sichtbar; halb geschriebene oder leere Stände werden nie übernommen, und ein Schreibvorgang bricht dann ab, statt Daten zu verlieren.
+- Der Code ist gebündelt und gestrafft: eine Planungsdatei statt drei, gemeinsame Helfer statt kopierter Stubs in Produktion und Tests. Verhalten unverändert; die Suite prüft dasselbe Verhalten mit 624 Tests.
 
 ## 0.1.07
 

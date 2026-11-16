@@ -132,14 +132,12 @@ class ProgressState:
     das ist nicht dasselbe wie 0 Prozent.
     """
 
-    __slots__ = ("known", "percent", "current", "last", "position")
+    __slots__ = ("known", "percent", "current", "last")
 
-    def __init__(self, known=True, percent=None, current="", last="",
-                 position=""):
+    def __init__(self, known=True, percent=None, current="", last=""):
         self.known = bool(known)
         self.current = str(current or "").strip()
         self.last = str(last or "").strip()
-        self.position = str(position or "").strip()
         try:
             value = round(float(percent))
         except (TypeError, ValueError, OverflowError):
@@ -171,7 +169,7 @@ def _progress_state(tolino_id, progress_known, progress_by_id):
         return ProgressState()
     return ProgressState(
         percent=item.get("percent"), current=item.get("current", ""),
-        last=item.get("last", ""), position=item.get("position", ""))
+        last=item.get("last", ""))
 
 
 _READING_STATUSES = frozenset(("identical", "changed"))
@@ -312,10 +310,16 @@ def _remote_rows(inventory, read_known, read_ids, progress_known,
                  progress_by_id):
     """Normalisierte Cloud-Datensätze in Vergleichszeilen umwandeln."""
     rows = []
+    seen = set()
     for record in inventory:
         # Auch Datensätze ohne eindeutige Cloud-ID bleiben sichtbar;
         # andernfalls erschiene das Buch als neu und könnte ein Duplikat erzeugen.
         tolino_id = record["tolino_id"]
+        if tolino_id:
+            # Derselbe Cloud-Datensatz zweimal geliefert: einmal anzeigen.
+            if tolino_id in seen:
+                continue
+            seen.add(tolino_id)
         rows.append(_comparison_row(
             None, record["title"], record["authors"], record["isbn"],
             tolino_id, "only_tolino",

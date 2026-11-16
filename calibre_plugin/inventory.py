@@ -9,6 +9,10 @@ _INVENTORY_CONTAINERS = ("edata", "ebook")
 # die Kennung des Deliverables: ``identifier`` aus ``epubMetaData`` ist eine
 # ISBN/Verlagsnummer und taugt nicht fuer /deletecontent und /downloadinfo.
 _INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id")
+# Gekaufte Titel tragen kein ``deliverableId``; ihre Deliverables stehen als
+# Liste daneben. Deren ``identifier`` (z. B. ``DT0400.978…_A…``) adressiert
+# Download und Loeschen genauso -- live gegen die Cloud geprueft.
+_DELIVERABLE_KEYS = ("deliverableId", "identifier")
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
                             "ebook", "edata")
@@ -51,6 +55,38 @@ def _inventory_id_in(value, keys):
     return str(found).strip()
 
 
+def _deliverable_identifier(value, depth=0):
+    """Erste Deliverable-Kennung aus einer Liste bzw. einem Objekt."""
+    if depth > 3:
+        return ""
+    if isinstance(value, (list, tuple)):
+        for entry in value:
+            found = _deliverable_identifier(entry, depth + 1)
+            if found:
+                return found
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    for key in _DELIVERABLE_KEYS:
+        found = value.get(key)
+        if isinstance(found, (str, int)) and str(found).strip():
+            return str(found).strip()
+    return ""
+
+
+def _purchase_identifier(item):
+    """Kennung eines gekauften Titels (``epubMetaData.deliverable[]``)."""
+    meta = item.get("epubMetaData") if isinstance(item, dict) else None
+    return _deliverable_identifier(meta.get("deliverable")
+                                   if isinstance(meta, dict) else None)
+
+
+def _record_identifier(item):
+    """Kennung einer Cloud-Kopie -- ``deliverableId`` oder Kauf-Deliverable."""
+    return (_inventory_id_in(item, _INVENTORY_ID_KEYS)
+            or _purchase_identifier(item))
+
+
 def _inventory_author(value):
     if isinstance(value, dict):
         return str(value.get("name") or value.get("displayName") or "").strip()
@@ -71,9 +107,10 @@ def normalize_inventory_record(item):
     ``tolino_id`` bleibt leer, wenn nur ``identifier`` existiert: diese
     Kennung taugt weder fuer ``/downloadinfo`` noch fuer
     ``/deletecontent``. Eine in ``identifier`` eingebettete ISBN wird
-    dagegen für den Abgleich extrahiert.
+    dagegen für den Abgleich extrahiert. Gekaufte Titel liefern ihre
+    Kennung in ``epubMetaData.deliverable[]`` -- die zaehlt.
     """
-    deliverable = _inventory_id_in(item, _INVENTORY_ID_KEYS)
+    deliverable = _record_identifier(item)
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
     isbn = _nested_inventory_value(
@@ -118,7 +155,7 @@ def _collect_inventory(value, records, problems, container=""):
             value = {key: item for key, item in value.items()
                      if key not in _INVENTORY_CONTAINERS}
         records.append(value)
-        if not _inventory_id_in(value, _INVENTORY_ID_KEYS):
+        if not _record_identifier(value):
             problems.append("Datensatz ohne Kennung")
         return
     if isinstance(value, (list, tuple)):

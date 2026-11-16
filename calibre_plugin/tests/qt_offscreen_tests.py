@@ -2,26 +2,24 @@
 
 from ..comparison import ReadState
 from ._support import _read_ids
-import importlib.util
 import os
 import sys
 import types
 import unittest
 
-if importlib.util.find_spec("PyQt6") is None:  # die CI installiert PyQt6
-    raise unittest.SkipTest("PyQt6 ist nicht installiert")
-
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QThread, Qt, pyqtSignal
-from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
-                             QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-                             QHeaderView, QInputDialog, QLabel, QLineEdit,
-                             QMenu, QMessageBox, QProgressBar, QPushButton,
-                             QStyle, QStyledItemDelegate,
-                             QStyleOptionViewItem, QTableWidget,
-                             QTableWidgetItem, QVBoxLayout)
+try:
+    from PyQt6.QtCore import QEvent, QObject, QPoint, QThread, Qt, pyqtSignal
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import (
+        QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
+        QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+        QMenu, QMessageBox, QProgressBar, QPushButton, QStyle,
+        QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
+        QTableWidgetItem, QVBoxLayout)
+except ImportError as exc:  # auch Calibres Qt ohne QtTest-Bibliothek
+    raise unittest.SkipTest("PyQt6 mit QtTest fehlt: %s" % exc) from exc
 
 
 def _install_calibre_qt_shim():

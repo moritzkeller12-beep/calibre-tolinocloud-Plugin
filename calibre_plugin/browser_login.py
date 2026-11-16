@@ -2,6 +2,7 @@
 import time
 
 from . import cdp as cdp_module
+from .partners import UNKNOWN_SHOP, partner_from_token
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
                      TolinoClient, log_info, log_warning,
                      normalize_hardware_id, sanitize_error)
@@ -13,8 +14,12 @@ from .token_candidates import (
 LOGIN_TIMEOUT = 300
 
 
-def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
-    """Exchange the freshest grabbed candidate; returns (refresh, hardware)."""
+def _exchange_grabbed_token(hardware, grabbed, fresh):
+    """Tausche den frischesten Kandidaten; der Shop kommt aus ``iss``.
+
+    Returns (refresh, hardware, partner_id). Ohne erkennbaren Shop wird
+    nichts getauscht -- ein geratener Endpunkt verbrennt den Einmal-Token.
+    """
     # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sind
     # kurzlebig und haben denselben JWT-Aufbau -- ein Access-Token am
     # Token-Endpunkt "zu verbrauchen" hilft niemandem und der eigentliche
@@ -23,10 +28,13 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
         payload = _jwt_payload(token) or {}
         return str(payload.get("typ", "")).casefold() == "refresh"
 
-    candidate = min(
-        fresh,
-        key=lambda token: (not _is_refresh_typ(token),
-                           -_refresh_token_iat_sort_key(token)))
+    known = {token: partner_from_token(token) for token in fresh}
+    if not any(known.values()):
+        raise TolinoAuthError(UNKNOWN_SHOP + RELOGIN, code="B03")
+    candidate = min((token for token in fresh if known[token]),
+                    key=lambda token: (not _is_refresh_typ(token),
+                                       -_refresh_token_iat_sort_key(token)))
+    partner_id = known[candidate]
     hardware_candidates = [normalize_hardware_id(value)
                            for value in (grabbed.get("hardware") or ())]
     hardware_candidates = [value for value in hardware_candidates if value]
@@ -40,13 +48,36 @@ def _exchange_grabbed_token(partner_id, hardware, grabbed, fresh):
             "Tolino hat den Zugang aus dem Anmeldefenster abgelehnt. "
             + RELOGIN, code="A01", detail=str(exc)) from exc
     log_info("Tolino-Token-Tausch: HTTP (Plugin).")
-    return client.refresh or candidate, client.hardware or hardware_id
+    return (client.refresh or candidate, client.hardware or hardware_id,
+            partner_id)
 
 
 # The reader rotates tokens on its own; poll without replaying a rejected grant.
 _NEW_TOKEN_INTERVAL = 3
 _CLOSED_WINDOW_MISSES = 3
 _WINDOW_CHECK_INTERVAL = 5.0
+
+
+def _close_window(timeout=2):
+    """Anmeldefenster schliessen; ein Fehler wird geloggt, nicht geworfen."""
+    try:
+        return cdp_module.close_grabber_window(timeout=timeout)
+    except Exception as exc:
+        log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
+                    % sanitize_error(exc))
+        return False
+
+
+def _notify(progress, text):
+    """Statusmeldung an den optionalen Fortschritts-Callback."""
+    if progress:
+        progress(text)
+
+
+def _login_page_open(window):
+    """Fenster offen, aber noch kein Web-Reader-Tab: die Anmeldemaske."""
+    return bool(window and window.get("window")
+                and not window.get("reader_tab"))
 
 
 def _close_window_after_grab(progress=None):
@@ -58,47 +89,43 @@ def _close_window_after_grab(progress=None):
     weil der Reader ihn weiterrotieren wuerde (Reuse-Schutz).
     """
     for timeout in (2, 5):
-        try:
-            if cdp_module.close_grabber_window(timeout=timeout):
-                return True
-        except Exception as exc:
-            log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
-                        % sanitize_error(exc))
-    if progress:
-        progress("Zugang übernommen – das Anmeldefenster liess sich nicht "
-                 "automatisch schliessen. Bitte von Hand schliessen, damit "
-                 "der Zugang gültig bleibt.")
+        if _close_window(timeout):
+            return True
+    _notify(progress, "Zugang übernommen – das Anmeldefenster liess sich "
+                      "nicht automatisch schliessen. Bitte von Hand "
+                      "schliessen, damit der Zugang gültig bleibt.")
     return False
 
 
-def _exchange_live_grab(partner_id, hardware, grabbed, rejected, progress=None):
+def _exchange_live_grab(hardware, grabbed, rejected, progress=None):
     """Try the freshest live token; returns (result, error)."""
     fresh = [token for token in _filter_live_candidates(grabbed["refresh"])
              if token not in rejected]
     if not fresh:
         return None, ""
-    if progress:
-        progress("Prüfe den gelesenen Zugang bei Tolino …")
+    _notify(progress, "Prüfe den gelesenen Zugang bei Tolino …")
     try:
-        result = _exchange_grabbed_token(partner_id, hardware, grabbed, fresh)
+        result = _exchange_grabbed_token(hardware, grabbed, fresh)
     except TolinoAuthError as exc:
+        if getattr(exc, "code", "") == "B03":
+            # Ohne erkennbaren Shop gibt es nichts abzuwarten: Fenster zu,
+            # klare Meldung, kein verbranntes Token.
+            _close_window()
+            raise
         # A rejected single-use grant and its session siblings are spent.
         rejected.update(grabbed["refresh"])
-        if progress:
-            progress("Zugang abgelehnt – warte auf einen frischen "
-                     "Zugang aus dem Web Reader …")
+        _notify(progress, "Zugang abgelehnt – warte auf einen frischen "
+                          "Zugang aus dem Web Reader …")
         return None, str(exc)
-    if progress:
-        progress("Zugang übernommen – das Anmeldefenster "
-                 "wird geschlossen.")
+    _notify(progress, "Zugang übernommen – das Anmeldefenster "
+                      "wird geschlossen.")
     _close_window_after_grab(progress)
     return result, ""
 
 
 def _raise_grab_end(window, saw_reader, grabbed, rejected, last_error):
     """Raise the matching B02 error after the wait loop."""
-    login_page_open = (window and window.get("window")
-                       and not window.get("reader_tab"))
+    login_page_open = _login_page_open(window)
     if login_page_open and saw_reader:
         # Die Partner-Anmeldeseite bleibt offen, damit man sich anmelden kann.
         raise TolinoAuthError(
@@ -106,7 +133,7 @@ def _raise_grab_end(window, saw_reader, grabbed, rejected, last_error):
             "Bitte dort anmelden, bis die Bücherliste lädt. " + RELOGIN_THEN,
             code="B02", detail=last_error)
     if not login_page_open:
-        cdp_module.close_grabber_window()
+        _close_window()
         if saw_reader:
             details = []
             if last_error:
@@ -124,19 +151,19 @@ def _raise_grab_end(window, saw_reader, grabbed, rejected, last_error):
         + RELOGIN, code="B02", detail="kein Web-Reader-Tab")
 
 
-def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
+def grab_live_refresh(hardware, timeout=300, progress=None):
     """Read and exchange the Web Reader's CURRENT token in one wait loop.
 
     Das Zeitbudget beginnt vor dem ersten Grab und gilt fuer Fensterstart,
-    Lesen und Tausch. Returns (rotated_refresh, hardware_id). Raises
+    Lesen und Tausch. Returns (rotated_refresh, hardware_id, partner_id);
+    den Buchhändler bestimmt der ``iss``-Claim des gelesenen Tokens. Raises
     TolinoAuthError when no Chromium browser is installed – the caller
     reports that and offers the manual route instead.
     """
     deadline = time.monotonic() + max(0, timeout)
     cdp_module.launch_reader_window()
-    if progress:
-        progress("Anmeldefenster geöffnet – bitte anmelden und warten, "
-                 "bis die Bücherliste lädt.")
+    _notify(progress, "Anmeldefenster geöffnet – bitte anmelden und "
+                      "warten, bis die Bücherliste lädt.")
 
     grabbed = {"refresh": [], "hardware": []}
     rejected = set()
@@ -156,18 +183,14 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
         except Exception:
             # Auch ein fehlender Decoder darf Chromium und das Temp-Profil
             # nicht bis zum nächsten Calibre-Start offen lassen.
-            try:
-                cdp_module.close_grabber_window()
-            except Exception as exc:
-                log_warning("Anmeldefenster konnte nicht geschlossen werden: %s"
-                            % sanitize_error(exc))
+            _close_window()
             raise
         if more and more.get("refresh"):
             grabbed = more
             saw_reader = True
             endpoint_misses = 0
             result, error = _exchange_live_grab(
-                partner_id, hardware, grabbed, rejected, progress)
+                hardware, grabbed, rejected, progress)
             if result is not None:
                 return result
             if error:
@@ -188,15 +211,14 @@ def grab_live_refresh(partner_id, hardware, timeout=300, progress=None):
                     # wirklich vorzeitig verschwunden.
                     if saw_reader:
                         break
-                    if progress:
-                        progress("Anmeldefenster geschlossen – abgebrochen.")
+                    _notify(progress,
+                            "Anmeldefenster geschlossen – abgebrochen.")
                     raise TolinoAuthError(
                         "Das Anmeldefenster wurde geschlossen, bevor die "
                         "Übernahme fertig war. Bitte erneut versuchen und "
                         "es offen lassen.", code="B02")
 
-        if (progress and window and window.get("window")
-                and not window.get("reader_tab")):
+        if progress and _login_page_open(window):
             progress("Im Anmeldefenster anmelden, bis die Bücherliste "
                      "lädt – der Zugang wird automatisch übernommen …")
         elif progress and not saw_reader:

@@ -184,9 +184,8 @@ def _windows_browser_paths(winreg_module=None):
     app_paths = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
     roots = (winreg_module.HKEY_CURRENT_USER,
              winreg_module.HKEY_LOCAL_MACHINE)
-    views = tuple(dict.fromkeys((
-        0, getattr(winreg_module, "KEY_WOW64_64KEY", 0),
-        getattr(winreg_module, "KEY_WOW64_32KEY", 0))))
+    # Default-View plus die beiden WOW64-Views (auf 32-Bit-Windows ignoriert).
+    views = (0, winreg_module.KEY_WOW64_64KEY, winreg_module.KEY_WOW64_32KEY)
     found = []
     seen = set()
     for root in roots:

@@ -275,17 +275,24 @@ class TolinoClient:
         self.token_vault = None
         self._in_device_recovery = False
         self._hw_registered_now = False
+        # Eine uebernommene Geraete-ID wird erst gespeichert, wenn der
+        # Wiederholungsversuch bestaetigt, dass sie funktioniert.
+        self._hw_adopted = False
         self._login_lock = threading.Lock()
         # Ein Lesevorgang der sync-data reicht, bis etwas geschrieben wird:
         # Lese-Status und Sammlungen brauchen dieselben Daten.
         self._sync_cache = None
 
+    def _access_valid(self):
+        """Ein noch gueltiger Zugang erspart einen zweiten Token-Tausch."""
+        return bool(self.access) and time.time() < self.expires_at
+
     def login(self):
         # A valid access token avoids spending the rotating refresh token twice.
-        if self.access and time.time() < self.expires_at:
+        if self._access_valid():
             return self.refresh
         with self._login_lock:
-            if self.access and time.time() < self.expires_at:
+            if self._access_valid():
                 return self.refresh
             if self.token_vault is None:
                 return self._login()
@@ -312,16 +319,24 @@ class TolinoClient:
                     "Der erneuerte Zugang konnte nicht gespeichert werden. " + RELOGIN,
                     code="A01", detail=detail) from None
 
-        self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
+        try:
+            lifetime = int(data.get("expires_in") or 3600)
+        except (TypeError, ValueError):
+            lifetime = 3600
+        self.expires_at = time.time() + max(0, lifetime - 60)
         return self.refresh
 
     def _login(self):
         if not self.refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN, code="A01")
+        # Der Token, der hier wirklich eingeloest wird. Nur er darf bei einer
+        # Ablehnung geloescht werden -- der Vault kann inzwischen einen
+        # anderen (per `relogin` geladenen) gespeichert haben.
+        used_refresh = self.refresh
         payload = {
             "client_id": self.partner["client_id"],
             "grant_type": "refresh_token",
-            "refresh_token": self.refresh,
+            "refresh_token": used_refresh,
             "scope": self.partner["scope"],
         }
         try:
@@ -337,7 +352,7 @@ class TolinoClient:
                 # A stale refresh token must never be tried again.
                 self.refresh = self.access = None
                 self.expires_at = 0
-                self._notify_token_rejected()
+                self._notify_token_rejected(used_refresh)
             if session_ended:
                 raise TolinoAuthError(
                     "Die tolino-Sitzung ist beendet. " + RELOGIN,
@@ -346,18 +361,26 @@ class TolinoClient:
                 raise TolinoAuthError(
                     "tolino hat die gespeicherte Anmeldung abgelehnt. " + RELOGIN,
                     code="A01", detail=detail) from exc
+            if getattr(exc, "code", None) == "N01":
+                # Ein Netzfehler ist keine abgelehnte Anmeldung: der Token
+                # bleibt gültig und die Oberfläche verlangt keinen Neu-Login.
+                raise
             raise TolinoAuthError(
                 "Anmeldung bei tolino fehlgeschlagen: %s" % exc, code="A01",
                 short="Die Anmeldung bei tolino ist fehlgeschlagen.")
 
         return self._apply_token_response(data)
 
-    def _notify_token_rejected(self):
-        """Den abgelehnten Token aus der Config loeschen lassen."""
+    def _notify_token_rejected(self, rejected=""):
+        """Den abgelehnten Token aus der Config loeschen lassen.
+
+        ``rejected`` ist der in diesem Versuch verwendete Token; nur er darf
+        verschwinden, falls inzwischen ein anderer gespeichert ist.
+        """
         callback = self.token_rejected_callback
         if callback:
             try:
-                callback()
+                callback(rejected)
             except Exception as exc:
                 log_warning("Abgelehnter Token konnte nicht geloescht "
                             "werden: %s" % sanitize_error(exc))
@@ -389,7 +412,10 @@ class TolinoClient:
                 continue
             except OSError as exc:
                 _raise_transport_error(exc, (self.refresh, self.access))
-            return _decode_json(raw)
+            data = _decode_json(raw)
+            # Erst eine lesbare Antwort bestaetigt die uebernommene Geraete-ID.
+            self._confirm_adopted_hardware()
+            return data
 
     def _build_request(self, url, method, data, form, authenticated,
                        content_type, extra_headers):
@@ -646,9 +672,23 @@ class TolinoClient:
             raise TolinoApiError("Gerät ohne deviceId.", code="N02", short="Die Geräteliste von tolino ist unvollständig.")
         return str(hardware)
 
+    def _confirm_adopted_hardware(self):
+        """Eine uebernommene Geraete-ID erst nach einem geglueckten Aufruf sichern.
+
+        Die Wiederbelebung laeuft bei jedem HTTP 400 -- auch wenn der 400
+        gar nichts mit der Hardware zu tun hat (etwa ein abgelehnter
+        Metadaten-Patch). Wuerde die ID sofort gespeichert, tauschte ein
+        solcher Fehler die Geraete-ID im Konto, ohne dass die ID je
+        funktioniert hat.
+        """
+        if not self._hw_adopted:
+            return
+        self._hw_adopted = False
+        self._notify_hardware()
+
     def _notify_hardware(self):
         """Tell the UI about an adopted hardware id; never raises."""
-        callback = getattr(self, "hardware_callback", None)
+        callback = self.hardware_callback
         if callback:
             try:
                 callback(self.hardware)
@@ -688,7 +728,7 @@ class TolinoClient:
                     # cause -- do not mask it behind a pointless retry.
                     return False
                 self.hardware = registered
-                self._notify_hardware()
+                self._hw_adopted = True
                 return True
             registered_ok = self._register_hardware()
             self._hw_registered_now = bool(registered_ok)
@@ -729,9 +769,7 @@ class TolinoClient:
                 "reseller_id", self.partner["reseller_id"])
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                get_final_url = getattr(response, "geturl", None)
-                final_url = urlsplit(get_final_url() if callable(get_final_url)
-                                     else content_url)
+                final_url = urlsplit(response.geturl())
                 if final_url.scheme.casefold() != "https" or not final_url.hostname:
                     raise TolinoApiError(
                         "Der Download wurde auf eine unsichere URL umgeleitet.",

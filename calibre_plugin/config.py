@@ -1,5 +1,6 @@
 """Persistent settings and account state for tolino Cloud Sync."""
 import copy
+import json
 import threading
 
 from calibre.utils.config import JSONConfig
@@ -20,6 +21,72 @@ DEFAULT_ACCOUNT = {
 }
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
+# Rohinhalt des zuletzt uebernommenen, brauchbaren Standes (siehe `_reload`).
+_FILE_STATE = {"raw": _UNSET}
+
+
+def _read_raw():
+    """Rohinhalt der Einstellungsdatei; `None`, wenn es sie nicht gibt."""
+    path = getattr(PREFERENCES, "file_path", None)
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _parse(raw):
+    """Einstellungen aus dem Rohinhalt; `None`, wenn er unvollstaendig ist."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _reload():
+    """Cache und Datei angleichen; nur ein vollstaendiger Stand zaehlt.
+
+    Eine zweite Calibre-Instanz, der Keep-alive oder ein Kindprozess schreibt
+    in dieselbe Datei. Ohne Abgleich zeigt das offene Fenster bis zum Neustart
+    einen veralteten Kontostand. Verglichen wird der Rohinhalt (0,7 ms) statt
+    Zeitstempeln: deren Aufloesung ist je nach Dateisystem grob und schnelle
+    Schreibvorgaenge gleicher Groesse blieben unsichtbar. Eine halb
+    geschriebene Datei zaehlt nicht als Stand -- Calibres `refresh()` wuerde
+    sie uebernehmen und dabei alle Konten verlieren.
+
+    `False` heisst: die Datei ist gerade unbrauchbar. Lesen bleibt dann beim
+    letzten guten Stand, ein Schreibvorgang bricht ab, statt ihn zu ueberschreiben.
+    """
+    with _SETTINGS_LOCK:
+        raw = _read_raw()
+        if raw == _FILE_STATE["raw"]:
+            return True
+        if raw is None:
+            # Keine Datei: der Cache ist der Stand (frische Installation oder
+            # gerade geloescht). Ein spaeter angelegter Stand wird erkannt.
+            _FILE_STATE["raw"] = None
+            return True
+        data = _parse(raw)
+        if data is None:
+            # Kein Stand: `raw` bleibt der des letzten brauchbaren Standes.
+            # Dadurch versucht es jeder Lesevorgang erneut, und ein
+            # Schreibvorgang bricht ab, statt die halbe Datei zu ersetzen.
+            return False
+        # `clear`/`update` umgehen Calibres committendes `__setitem__`:
+        # ein Lesevorgang darf die Datei nicht schreiben.
+        dict.clear(PREFERENCES)
+        dict.update(PREFERENCES, data)
+        _FILE_STATE["raw"] = raw
+        return True
+
+
+def _commit():
+    """Schreiben abschliessen; der Cache gilt bis zum naechsten Abgleich."""
+    PREFERENCES.commit()
+    _FILE_STATE["raw"] = _UNSET
 
 
 def load_state(raw):
@@ -71,6 +138,7 @@ def _account_summaries(raw):
 def account_summary(name):
     """Nur Name, Zugang und Geräte-ID eines Kontos (ohne Buchzustand)."""
     with _SETTINGS_LOCK:
+        _reload()
         return next((item for item in _account_summaries(
             PREFERENCES.get("accounts", None))
             if item["name"] == name), {})
@@ -86,6 +154,7 @@ def _active_name(accounts):
 def settings():
     """Aktuelles Konto und Metadaten -- ohne Buchzustände zu kopieren."""
     with _SETTINGS_LOCK:
+        _reload()
         accounts = _account_summaries(PREFERENCES.get("accounts", None))
         active = _active_name(accounts)
         current = next(item for item in accounts if item["name"] == active)
@@ -108,6 +177,12 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
     """
     name = str(name or "").strip()
     if not name or not isinstance(values, dict):
+        return False
+    # Eine zweite Calibre-Instanz oder der Keep-alive kann inzwischen
+    # geschrieben haben. `JSONConfig` haelt den Stand im Speicher und
+    # schreibt beim naechsten Commit ALLES zurueck -- ohne diesen Abgleich
+    # loescht der eigene, gecachte Stand fremde Token.
+    if not _reload():
         return False
     raw = PREFERENCES.get("accounts", None)
     records = list(raw) if isinstance(raw, list) else []
@@ -132,16 +207,19 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
                        if key in values})
         records[index] = _account(record, name,
                                   copy_state="state" in values)
-    PREFERENCES["accounts"] = records
+    changes = {"accounts": records}
     if active is not _UNSET:
         names = {stored for stored, _source in _named_accounts(records)}
         chosen = str(active or previous_active or "").strip()
-        PREFERENCES["active_account"] = chosen if chosen in names else name
+        changes["active_account"] = chosen if chosen in names else name
     elif not PREFERENCES.get("active_account"):
-        PREFERENCES["active_account"] = name
+        changes["active_account"] = name
     if preferred_formats is not None:
-        PREFERENCES[PREFERRED_FORMATS] = list(preferred_formats)
-    PREFERENCES.commit()
+        changes[PREFERRED_FORMATS] = list(preferred_formats)
+    # `update` umgeht Calibres committendes `__setitem__`: alle Werte landen
+    # in EINEM Schreibvorgang, statt halb geschrieben auf der Platte zu stehen.
+    PREFERENCES.update(changes)
+    _commit()
     return True
 
 
@@ -165,6 +243,7 @@ def save_account(name, values, active=None, preferred_formats=None,
 def account_by_name(name):
     """Return one account without copying every other account's state."""
     with _SETTINGS_LOCK:
+        _reload()
         for stored, value in _named_accounts(
                 PREFERENCES.get("accounts", None)):
             if stored == name:
@@ -180,28 +259,38 @@ def _update_account(name, values, allow_virtual_default=False):
             allow_virtual_default=allow_virtual_default)
 
 
+def _stored_token(account_name):
+    """Der gespeicherte Refresh-Token eines Kontos, leer heisst «keiner»."""
+    return str(
+        account_summary(account_name).get("refresh_token") or "").strip()
+
+
 def set_active_account(name):
     """Switch the active account without touching any stored values."""
     with _SETTINGS_LOCK:
+        # Wie bei jedem Schreiben: erst den fremden Stand laden, sonst
+        # schreibt der eigene Cache fremde Token weg.
+        if not _reload():
+            return False
         names = [stored for stored, _ in _named_accounts(
             PREFERENCES.get("accounts", None))]
         if name not in names:
             return False
         PREFERENCES["active_account"] = name
-        PREFERENCES.commit()
+        _commit()
         return True
 
 
-def save_credentials(account_name, refresh_token, hardware):
-    """Persist a rotated refresh token and hardware ID for one account.
+def save_credentials(account_name, refresh_token, hardware, partner_id=None):
+    """Persist a rotated refresh token, hardware ID and detected shop.
 
     Das aktive Konto bleibt unberührt: der Keep-alive rotiert alle Konten,
     ein Token-Rotationsschritt darf die Auswahl nicht umschalten.
     """
-    return _update_account(account_name, {
-        "refresh_token": refresh_token,
-        "hardware_id": hardware,
-    }, allow_virtual_default=True)
+    values = {"refresh_token": refresh_token, "hardware_id": hardware}
+    if partner_id:
+        values["partner_id"] = partner_id
+    return _update_account(account_name, values, allow_virtual_default=True)
 
 
 def save_refresh_token(account_name, token):
@@ -224,6 +313,26 @@ def clear_refresh_token(account_name):
     return _update_account(account_name, {"refresh_token": ""})
 
 
+def clear_refresh_token_if_unchanged(account_name, rejected_token):
+    """Nur den wirklich abgelehnten Token loeschen.
+
+    Keep-alive, GUI und eine zweite Calibre-Instanz koennen denselben
+    Einmal-Token gleichzeitig einloesen. Verliert diese Anfrage das Rennen,
+    antwortet der Server mit ``invalid_grant`` -- ein blindes Loeschen wuerde
+    dann den frisch gespeicherten, gueltigen Token des Gewinners mitnehmen
+    und eine neue Anmeldung erzwingen. Steht inzwischen ein anderer Token im
+    Konto, bleibt er unangetastet.
+    """
+    rejected = str(rejected_token or "").strip()
+    # Vergleich und Loeschen in einem Lock: sonst kann zwischen beiden
+    # Schritten genau die Rotation stattfinden, die geschuetzt werden soll.
+    with _SETTINGS_LOCK:
+        current = _stored_token(account_name)
+        if rejected and current and current != rejected:
+            return False
+        return clear_refresh_token(account_name)
+
+
 def save_hardware_id(account_name, hardware):
     """Die Geraete-ID im Konto sichern -- die Config ist ihre einzige Quelle."""
     return _update_account(account_name,
@@ -233,13 +342,15 @@ def save_hardware_id(account_name, hardware):
 
 def account_secrets(account_name):
     """Bekannte Geheimnisse eines Kontos fuer die Log-Redaktion."""
-    token = str(account_summary(account_name).get("refresh_token") or "").strip()
+    token = _stored_token(account_name)
     return (token,) if token else ()
 
 
 def remove_account(name):
     """Remove one saved account and select a remaining account."""
     with _SETTINGS_LOCK:
+        if not _reload():
+            return False
         raw = PREFERENCES.get("accounts", None)
         named = list(_named_accounts(raw))
         remaining = [(stored, source) for stored, source in named
@@ -247,8 +358,9 @@ def remove_account(name):
         if not remaining or len(remaining) == len(named):
             return False
         active = _active_name([{"name": stored} for stored, _ in named])
-        PREFERENCES["accounts"] = [source for _stored, source in remaining]
-        PREFERENCES["active_account"] = (
-            active if active != name else remaining[0][0])
-        PREFERENCES.commit()
+        PREFERENCES.update({
+            "accounts": [source for _stored, source in remaining],
+            "active_account": (active if active != name else remaining[0][0]),
+        })
+        _commit()
         return True
