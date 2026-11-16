@@ -25,10 +25,11 @@ Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste]
 
 Tests: `python3 -X dev -m unittest calibre_plugin.test_sync`
 
-Live-Tests gegen die echte Cloud: In den Project-Secrets `refresh_token`
-und `hardware_id` hinterlegen und `python3 -m unittest
-calibre_plugin.tests.live_tests` ausführen. Ohne Secrets werden sie
-übersprungen. Der Refresh-Token ist einmalig – nach einem Live-Lauf ist er
+Live-Tests gegen die echte Cloud liegen nur lokal: `calibre_plugin/tests/live_tests.py`
+wird nicht im Repo geführt und ist von Git ignoriert. Datei lokal anlegen,
+`refresh_token` und `hardware_id` in der Umgebung setzen und `python3 -m
+unittest calibre_plugin.tests.live_tests` ausführen. Ohne diese Werte werden
+die Tests übersprungen. Der Refresh-Token ist einmalig – nach einem Live-Lauf ist er
 verbraucht und muss neu hinterlegt werden; das Plugin selbst speichert den
 rotierten Token beim Anmelden im Konto.
 

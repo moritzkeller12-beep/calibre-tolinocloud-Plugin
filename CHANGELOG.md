@@ -9,6 +9,8 @@
 - Alte `#tolino_id`- und `dbpath`-Migrationspfade entfallen; Config-Speicher, Konten und Tokens bleiben unverändert.
 - Änderungen an der Einstellungsdatei (zweites Calibre-Fenster, anderes Konto) sind im laufenden Programm sofort sichtbar; halb geschriebene oder leere Stände werden nie übernommen, und ein Schreibvorgang bricht dann ab, statt Daten zu verlieren.
 - Der Code ist gebündelt und gestrafft: eine Planungsdatei statt drei, gemeinsame Helfer statt kopierter Stubs in Produktion und Tests. Verhalten unverändert; die Suite prüft dasselbe Verhalten mit 624 Tests.
+- Pyflakes-Lint ist wieder grün: die Schleifenvariable in `plan_collection_updates` überschattet nicht mehr `book_uuid`, und der doppelte `progress_by_id`-Stub im Test entfällt.
+- Die Live-Tests gegen die echte tolino-Cloud liegen nur noch lokal und werden von Git ignoriert; sie laufen nicht mehr in der GitHub-Suite.
 
 ## 0.1.07
 

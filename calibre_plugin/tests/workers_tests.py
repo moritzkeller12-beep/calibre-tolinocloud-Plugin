@@ -2005,8 +2005,6 @@ class MultiAccountReadingStateTests(unittest.TestCase):
             def inventory(self):
                 return inventory
 
-            def progress_by_id(self):
-                return {}
             def read_ids(self):
                 if fail_read:
                     raise RuntimeError("Netz weg")

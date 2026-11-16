@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 .test-deps/
 
+# Live tests need real tolino credentials: keep them local only
+calibre_plugin/tests/live_tests.py
+
 # Editors and OS metadata
 .idea
 .DS_Store

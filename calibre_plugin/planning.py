@@ -178,10 +178,10 @@ def plan_collection_updates(series_map, state):
     if not isinstance(series_map, dict) or not isinstance(state, dict):
         return []
     pending = set()
-    for book_uuid, series in series_map.items():
+    for uuid, series in series_map.items():
         series = str(series or "").strip()
-        entry = state.get(book_uuid)
-        if not book_uuid or not series or not isinstance(entry, dict):
+        entry = state.get(uuid)
+        if not uuid or not series or not isinstance(entry, dict):
             continue
         tolino_id = str(entry.get("tolino_id") or "").strip()
         recorded = entry.get("collections")
@@ -190,7 +190,7 @@ def plan_collection_updates(series_map, state):
             if str(name or "").strip()
         } if isinstance(recorded, list) else set()
         if tolino_id and series not in recorded:
-            pending.add((str(book_uuid), tolino_id, series))
+            pending.add((str(uuid), tolino_id, series))
     return sorted(pending, key=lambda item: (item[1], item[2], item[0]))
 
 
