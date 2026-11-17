@@ -113,7 +113,8 @@ class PersistTests(OrchestrationCase):
         self.assertEqual({UUID: {"tolino_id": "d1"}},
                          config.account_by_name("A")["state"])
 
-    def test_the_thread_ends_even_when_saving_fails(self):
+    def test_the_cleanup_callback_runs_even_when_saving_fails(self):
+        """Geprueft wird `_finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
         outcome, failures = self.ui.dashboard._finish_sync(

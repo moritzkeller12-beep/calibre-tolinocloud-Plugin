@@ -178,5 +178,100 @@ class InventoryDialogTests(unittest.TestCase):
         self.assertEqual([], dialog.selected_read_changes())
 
 
+SECOND = "22222222-2222-4222-8222-222222222222"
+
+
+def two_books():
+    """Zwei eindeutig zugeordnete Buecher fuer Mehrfachauswahlen."""
+    first = {"uuid": UUID, "title": "Der Schwarm",
+             "authors": "Frank Schätzing", "isbn": "9780306406157",
+             "formats": ["EPUB"]}
+    second = {"uuid": SECOND, "title": "Zweites Buch",
+              "authors": "Autor Zwei", "isbn": "", "formats": ["EPUB"]}
+    cloud = [{"tolino_id": "d1", "title": "Der Schwarm",
+              "authors": "Frank Schätzing", "isbn": "9780306406157"},
+             {"tolino_id": "d2", "title": "Zweites Buch",
+              "authors": "Autor Zwei", "isbn": ""}]
+    return compare_inventory({1: first, 2: second}, {}, cloud, ["EPUB"])
+
+
+class DestructiveSelectionTests(unittest.TestCase):
+    """Loeschen ist destruktiv: nur ausgewaehlte, konkrete Cloud-Kopien."""
+
+    def setUp(self):
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
+
+    def dialog(self, rows=None):
+        return self.ui.dialogs.InventoryDialog(
+            two_books() if rows is None else rows)
+
+    def index_of(self, dialog, tolino_id):
+        return next(index for index, row in enumerate(dialog.rows)
+                    if row["tolino_id"] == tolino_id)
+
+    def test_only_the_marked_cloud_copy_is_scheduled_for_deletion(self):
+        dialog = self.dialog()
+        index = self.index_of(dialog, "d1")
+        select_rows(dialog.table, [index])
+        dialog.delete_marked_from_cloud()
+        self.assertEqual([(UUID, "d1", "Der Schwarm")],
+                         dialog.selected_cloud_deletions())
+        self.assertEqual((False, False),
+                         (dialog.rows[index]["upload"],
+                          dialog.rows[index]["metadata"]))
+        self.assertEqual((1, 1), (dialog._selection_counts()["deletions"],
+                                  dialog._selection_counts()["work"]))
+
+    def test_the_delete_mark_can_be_taken_back(self):
+        dialog = self.dialog()
+        index = self.index_of(dialog, "d1")
+        select_rows(dialog.table, [index])
+        dialog.delete_marked_from_cloud()
+        select_rows(dialog.table, [index])
+        dialog.clear_cloud_delete_for_marked_rows()
+        self.assertEqual([], dialog.selected_cloud_deletions())
+        self.assertEqual(0, dialog._selection_counts()["deletions"])
+
+    def test_a_book_outside_the_cloud_cannot_be_marked_for_deletion(self):
+        book = {"uuid": UUID, "title": "Nur lokal",
+                "authors": "Frank Schätzing", "isbn": "9780306406157",
+                "formats": ["EPUB"]}
+        dialog = self.dialog(compare_inventory({1: book}, {}, [], ["EPUB"]))
+        select_rows(dialog.table, [0])
+        dialog.delete_marked_from_cloud()
+        self.assertEqual([], dialog.selected_cloud_deletions())
+        self.assertIsNone(dialog.rows[0].get("delete_cloud"))
+        self.assertEqual("Nichts zu löschen",
+                         self.ui.common.QMessageBox.calls[-1][2])
+
+    def test_an_ignored_row_offers_no_action(self):
+        book = {"uuid": UUID, "title": "Der Schwarm",
+                "authors": "Frank Schätzing", "isbn": "9780306406157",
+                "formats": ["EPUB"], "ignored": True}
+        cloud = {"tolino_id": "d1", "title": "Der Schwarm",
+                 "authors": "Frank Schätzing", "isbn": "9780306406157"}
+        dialog = self.dialog(compare_inventory({1: book}, {}, [cloud],
+                                               ["EPUB"]))
+        caps = self.ui.dialogs.row_capabilities(dialog.rows[0])
+        self.assertEqual(
+            {"upload": False, "metadata": False, "read": False,
+             "delete": False},
+            {key: caps[key] for key in ("upload", "metadata", "read",
+                                        "delete")})
+
+    def test_clearing_a_multiple_selection_leaves_no_hidden_action(self):
+        dialog = self.dialog()
+        select_rows(dialog.table, [0, 1])
+        dialog.delete_marked_from_cloud()
+        self.assertEqual({"d1", "d2"},
+                         {entry[1] for entry in dialog.selected_cloud_deletions()})
+        dialog.clear_all_selection()
+        self.assertEqual([], dialog.selected_cloud_deletions())
+        self.assertEqual(0, dialog._selection_counts()["work"])
+        self.assertTrue(all(not row.get("upload") and not row.get("metadata")
+                            and not row.get("delete_cloud")
+                            for row in dialog.rows))
+
+
 if __name__ == "__main__":
     unittest.main()

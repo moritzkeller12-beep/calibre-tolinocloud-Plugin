@@ -2,17 +2,25 @@
 
 Diese Tests bilden die Entscheidungen ab, die der Nutzer im Vergleichsfenster
 sieht: was hochgeladen, was gepatcht, was als Prueffall stehen bleibt und was
-als identisch gilt.
+als identisch gilt. Die Auswahl des Nutzers wird zu echten Jobs.
 """
+import os
+import shutil
+import tempfile
+import types
 import unittest
 
-from ..comparison import compare_inventory, content_fingerprint
-from ..inventory import normalize_inventory_record
+from ..comparison import (compare_inventory, comparison_progress_updates,
+                          comparison_read_updates, content_fingerprint,
+                          store_reading_state)
+from ..inventory import normalize_inventory_record, parse_inventory
 from ..library import normalize_formats
 from ..matching import (authors_match, is_valid_isbn, isbn_from_identifier,
                         normalize_isbn)
-from ..planning import (metadata_update_fields, plan_collection_updates,
-                        plan_metadata_updates, plan_sync, remember_collection,
+from ..planning import (NOTHING_TO_DO_TEXT, metadata_update_fields,
+                        nothing_to_do_text, plan_actions, plan_collection_updates,
+                        plan_counts, plan_metadata_updates, plan_sync,
+                        plan_text, remember_collection,
                         series_map_from_metadata, syncable_metadata)
 
 UUID = "11111111-1111-4111-8111-111111111111"
@@ -187,6 +195,250 @@ class NormalizationTests(unittest.TestCase):
                             content_fingerprint(
                                 book(format_signatures={"EPUB": "1234:9999"}),
                                 "EPUB"))
+
+
+class UploadApi:
+    """Nur die Calibre-Schnittstelle, die `upload_jobs` benutzt."""
+
+    def __init__(self, paths, cover):
+        self.paths = paths
+        self.cover_data = cover
+
+    def has_id(self, book_id):
+        return any(key[0] == book_id for key in self.paths)
+
+    def format_abspath(self, book_id, format_name):
+        return self.paths.get((book_id, format_name), "")
+
+    def cover(self, _book_id, as_file=False):
+        return self.cover_data
+
+
+class UploadDatabase:
+    def __init__(self, paths=None, cover=b"\xff\xd8\xffJPEG"):
+        self.new_api = UploadApi(dict(paths or {}), cover)
+
+
+def selection(uploads=(), metadata=(), deletions=(), reads=()):
+    """Auswahl aus dem Vergleichsfenster -- nur die vier Listen."""
+    return {"uploads": set(uploads), "metadata": set(metadata),
+            "cloud_deletions": list(deletions), "read_changes": list(reads)}
+
+
+class PlanActionsTests(unittest.TestCase):
+    """Von der Auswahl zu konkreten Jobs -- ohne zusaetzliche Aktionen."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="plan-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = os.path.join(self.tmp, "book.epub")
+        with open(self.path, "wb") as handle:
+            handle.write(b"inhalt")
+        self.context = types.SimpleNamespace(preferred_formats=["EPUB"])
+
+    def plan(self, chosen, metadata, state=None, paths=None, cover=None):
+        database = UploadDatabase(
+            {(1, "EPUB"): self.path} if paths is None else paths,
+            **({} if cover is None else {"cover": cover}))
+        dialog = types.SimpleNamespace(
+            gui=types.SimpleNamespace(current_db=database))
+        return plan_actions(dialog, self.context, metadata, state or {},
+                            chosen)
+
+    def test_a_selected_book_with_a_preferred_format_becomes_one_upload(self):
+        result = self.plan(selection(uploads={1}), {1: book()})
+        self.assertEqual(1, len(result["jobs"]))
+        job = result["jobs"][0]
+        self.assertEqual((1, UUID, "EPUB", None),
+                         (job.book_id, job.book_uuid, job.format_name,
+                          job.old_id))
+        self.assertEqual(self.path, job.path)
+        self.assertEqual(b"\xff\xd8\xffJPEG", job.cover)
+        self.assertEqual([], result["skipped_uploads"])
+
+    def test_a_book_without_the_preferred_format_is_skipped_with_a_reason(self):
+        result = self.plan(selection(uploads={1}),
+                           {1: book(formats=["PDF"])})
+        self.assertEqual([], result["jobs"])
+        self.assertIn("kein Format EPUB", result["skipped_uploads"][0])
+        self.assertEqual(1, result["selected_without_action"]["uploads"])
+
+    def test_an_ignored_book_never_reaches_the_plan(self):
+        result = self.plan(selection(uploads={1}, metadata={1}),
+                           {1: book(ignored=True)})
+        self.assertEqual(([], []), (result["jobs"], result["meta_updates"]))
+
+    def test_an_uploaded_book_gets_no_additional_metadata_patch(self):
+        result = self.plan(selection(uploads={1}, metadata={1}), {1: book()},
+                           state={UUID: {"tolino_id": "d1"}})
+        self.assertEqual(1, len(result["jobs"]))
+        self.assertEqual([], result["meta_updates"])
+
+    def test_metadata_is_patched_only_for_a_selected_mapped_book(self):
+        result = self.plan(selection(metadata={1}), {1: book()},
+                           state={UUID: {"tolino_id": "d1"}})
+        self.assertEqual([], result["jobs"])
+        self.assertEqual([(1, "d1")], [(item.book_id, item.tolino_id)
+                                        for item in result["meta_updates"]])
+
+    def test_a_cloud_deletion_needs_a_concrete_deliverable_id(self):
+        result = self.plan(selection(deletions=[
+            (UUID, "d1", "Der Schwarm"), (UUID, "  ", "ohne ID")]),
+            {1: book()})
+        self.assertEqual([(UUID, "d1")], result["removals"])
+        self.assertEqual({"d1": "Der Schwarm"}, result["removal_titles"])
+
+    def test_read_changes_are_passed_through_unchanged(self):
+        changes = [("d1", 1, True, UUID)]
+        result = self.plan(selection(reads=changes), {1: book()})
+        self.assertEqual(changes, result["read_changes"])
+
+    def test_a_missing_local_file_is_skipped_without_a_cloud_action(self):
+        os.remove(self.path)
+        result = self.plan(selection(uploads={1}), {1: book()})
+        self.assertEqual([], result["jobs"])
+        self.assertIn("Datei nicht gefunden", result["skipped_uploads"][0])
+        self.assertEqual([], result["removals"])
+
+    def test_an_unknown_cover_does_not_block_the_upload(self):
+        result = self.plan(selection(uploads={1}), {1: book()},
+                           cover=b"kein-bild")
+        self.assertEqual(1, len(result["jobs"]))
+        self.assertIsNone(result["jobs"][0].cover)
+
+    def test_counts_and_texts_describe_the_same_plan(self):
+        preparation = {
+            "removals": [(UUID, "d1")],
+            "meta_updates": [(1, "d1")],
+            "collections": 2,
+            "read_changes": [("d1", 1, True, UUID), ("d2", 2, False, UUID)],
+            "selected_without_action": {"uploads": 2, "metadata": 0},
+        }
+        counts = plan_counts(preparation, uploads=1)
+        self.assertEqual({"uploads": 1, "removals": 1, "metadata": 1,
+                          "collections": 2, "read": 1, "unread": 1,
+                          "steps": 7}, counts)
+        text = plan_text(preparation, uploads=1)
+        for part in ("1 Upload", "1 Löschung", "1 Metadaten",
+                     "2 Sammlungen", "1 gelesen", "1 ungelesen"):
+            self.assertIn(part, text)
+        self.assertIn("2 ausgewählte Aktionen",
+                      nothing_to_do_text(preparation))
+        self.assertEqual(NOTHING_TO_DO_TEXT, nothing_to_do_text({}))
+
+
+class InventoryParsingTests(unittest.TestCase):
+    """Ein defektes Inventar ist kein leeres Konto."""
+
+    def test_a_valid_empty_library_is_empty_but_usable(self):
+        self.assertEqual(([], [], True),
+                         parse_inventory({"PublicationInventory":
+                                          {"edata": []}}))
+
+    def test_a_missing_or_unknown_container_is_not_an_empty_library(self):
+        cases = ({},
+                 {"PublicationInventory": {"unbekannt": []}},
+                 {"PublicationInventory": "kein Objekt"})
+        for data in cases:
+            with self.subTest(data=data):
+                records, problems, ok = parse_inventory(data)
+                self.assertEqual([], records)
+                self.assertTrue(problems)
+                self.assertFalse(ok)
+
+    def test_good_records_survive_a_broken_neighbour(self):
+        records, problems, ok = parse_inventory({"PublicationInventory": {
+            "edata": [{"deliverableId": "d1", "title": "Gut",
+                       "authors": "Autor"},
+                      {"title": "Ohne Kennung", "authors": "Autor"}]}})
+        # Der gute Datensatz bleibt sichtbar; der defekte Nachbar erscheint
+        # ohne Kennung, statt still zu verschwinden.
+        self.assertEqual(["d1", ""], [item["tolino_id"] for item in records])
+        self.assertIn("Datensatz ohne Kennung", problems)
+        self.assertTrue(ok)
+
+    def test_purchase_deliverables_provide_the_deletable_id(self):
+        for deliverable in ({"deliverableId": "d1"},
+                            {"identifier": "DT0400.9780306406157_A1"}):
+            with self.subTest(deliverable=deliverable):
+                record = normalize_inventory_record({"epubMetaData": {
+                    "deliverable": [deliverable], "title": "Gekauft"}})
+                self.assertEqual(deliverable.get("deliverableId")
+                                 or deliverable["identifier"],
+                                 record["tolino_id"])
+
+    def test_a_product_identifier_is_not_a_deletable_copy_id(self):
+        record = normalize_inventory_record({"epubMetaData": {
+            "identifier": "DT0400.9780306406157_A1", "title": "Gekauft"}})
+        self.assertEqual("", record["tolino_id"])
+        self.assertEqual("9780306406157", record["isbn"])
+
+    def test_an_author_is_normalized_from_text_object_or_list(self):
+        cases = (("Frank Schätzing", "Frank Schätzing"),
+                 ({"name": "Frank Schätzing"}, "Frank Schätzing"),
+                 ([{"name": "A"}, "B"], "A, B"))
+        for author, expected in cases:
+            with self.subTest(author=author):
+                record = normalize_inventory_record(
+                    {"deliverableId": "d1", "title": "T",
+                     "authors": author})
+                self.assertEqual(expected, record["authors"])
+
+
+class ReadingStateTests(unittest.TestCase):
+    """Lesestatus und Fortschritt: nur bekannte, bestaetigte Werte zaehlen."""
+
+    def rows(self, read_ids=None, progress_by_id=None, state=None):
+        return compare_inventory(
+            {1: book()}, state or {UUID: {"tolino_id": "d1"}}, [cloud()],
+            ["EPUB"], read_ids=read_ids, progress_by_id=progress_by_id)
+
+    def test_known_values_become_confirmed_updates(self):
+        rows = self.rows(read_ids={"d1"},
+                         progress_by_id={"d1": {"percent": 42, "current": "3",
+                                                 "last": "10"}})
+        self.assertEqual([(1, True)], comparison_read_updates(rows))
+        self.assertEqual([(1, 42)], comparison_progress_updates(rows))
+        self.assertEqual("42 % · 3/10", rows[0]["progress"].text)
+
+    def test_unknown_values_are_no_change_at_all(self):
+        rows = self.rows()
+        self.assertFalse(rows[0]["read"].changed)
+        self.assertFalse(rows[0]["progress"].known)
+        self.assertEqual("unbekannt", rows[0]["progress"].text)
+        self.assertEqual(([], []),
+                         (comparison_read_updates(rows),
+                          comparison_progress_updates(rows)))
+
+    def test_a_known_empty_bookmark_is_not_zero_progress(self):
+        rows = self.rows(read_ids=set(), progress_by_id={})
+        self.assertTrue(rows[0]["progress"].known)
+        self.assertIsNone(rows[0]["progress"].percent)
+        self.assertEqual("", rows[0]["progress"].text)
+
+    def test_a_failed_fetch_keeps_the_stored_progress(self):
+        state = {UUID: {"tolino_id": "d1",
+                        "reading": {"progress": {"percent": 42}}}}
+        store_reading_state(state, self.rows(state=state))
+        self.assertEqual({"percent": 42},
+                         state[UUID]["reading"]["progress"])
+
+    def test_a_successful_fetch_without_bookmark_clears_the_progress(self):
+        state = {UUID: {"tolino_id": "d1",
+                        "reading": {"progress": {"percent": 42}}}}
+        store_reading_state(state, self.rows(read_ids={"d1"},
+                                             progress_by_id={}, state=state))
+        self.assertIsNone(state[UUID]["reading"]["progress"]["percent"])
+
+    def test_confirmed_reading_state_is_stored_under_the_book_uuid(self):
+        state = {UUID: {"tolino_id": "d1"},
+                 "calibre-1-abc": {"tolino_id": "alt"}}
+        rows = self.rows(read_ids={"d1"},
+                         progress_by_id={"d1": {"percent": 10}}, state=state)
+        store_reading_state(state, rows)
+        self.assertTrue(state[UUID]["reading"]["read"])
+        self.assertEqual({"percent": 10}, state[UUID]["reading"]["progress"])
+        self.assertEqual({"tolino_id": "alt"}, state["calibre-1-abc"])
 
 
 if __name__ == "__main__":

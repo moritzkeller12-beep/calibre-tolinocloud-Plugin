@@ -26,23 +26,32 @@ Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste]
 Tests: `python3 -X dev -m unittest calibre_plugin.test_sync`
 
 Die Dialogtests laufen mit echtem PyQt6 im Offscreen-Modus
-(`QT_QPA_PLATFORM=offscreen`); ohne PyQt6 werden sie übersprungen.
+(`QT_QPA_PLATFORM=offscreen`); ohne PyQt6 werden sie übersprungen. Echte
+Qt-Threads laufen nicht in der Suite: Widgets und Tabellen sind echt, der
+QThread und die modalen Dialoge bleiben kontrollierte Doppel.
 Testabhängigkeiten: `pycryptodome`, `PyQt6`.
 
 Die Suite ist bewusst klein und prüft Nutzerabläufe statt Interna:
-Konten und Token-Rotation (`config_tests`), Calibre-Spalten und
-Bibliothekszuordnung (`library_tests`), Planung und Bestandsabgleich
-(`planning_tests`), den tolino-Client gegen einen lokalen HTTP-Server –
-Anmeldung, Token-Rotation und alle Schreibpfade wie Upload, Metadaten,
+Konten, Token-Rotation und externe Änderungen an der Einstellungsdatei
+(`config_tests`), Calibre-Spalten und Bibliothekszuordnung
+(`library_tests`), Auswahlplanung mit echten Job-Pfaden,
+Bestandsnormalisierung und Vergleichslogik (`planning_tests`), die
+Vorbereitung des Vergleichs samt optionalen Lesewerten (`prepare_tests`),
+den tolino-Client gegen einen lokalen HTTP-Server – Anmeldung,
+Token-Rotation und alle Schreibpfade wie Upload, Metadaten,
 Gelesen-Marken, Sammlungen, Löschen und Download (`tolino_client_tests`) –,
 die sync-data-Patches für Lesestatus und Tags (`sync_data_tests`), den
-Sync-Worker (`workers_tests`), die
-Dashboard-Aktionen und das Vergleichsfenster mit echter Qt-Tabelle
-(`ui_tests`) sowie die Fallbacks der Browser-Anmeldung, wenn kein Zugang
-gelesen werden kann (`browser_login_tests`), den gemeinsamen Token-Vault
-mit Rotation, Keep-alive und Relogin (`token_vault_tests`) sowie die
-Ergebnis-Sicherung und Rückmeldung nach einem Sync-Lauf
-(`dashboard_tests`).
+Sync-Worker inklusive Löschen, Ersetzen und sofort gespeichertem
+Kontostand (`workers_tests`), die Dashboard-Aktionen
+(`dashboard_tests`), die Thread-Referenzen der Oberfläche
+(`ui_thread_tests`) und das Vergleichsfenster mit echter Qt-Tabelle samt
+Löschmarkierung (`ui_tests`). Dazu kommen Browser-Erkennung
+(`browser_finder_tests`), der CDP-Lebenszyklus ohne echten Browser
+(`cdp_tests`), die Token-Auswahl der Browser-Anmeldung
+(`browser_login_tests`), die Entschlüsselung echter CryptoJS-Blöcke mit
+festen, unabhängig erzeugten Fixtures (`browser_crypto_tests`) sowie der
+gemeinsame Token-Vault mit Rotation, Keep-alive und Relogin
+(`token_vault_tests`).
 
 Live-Tests gegen die echte Cloud liegen nur lokal: `calibre_plugin/tests/live_tests.py`
 wird nicht im Repo geführt und ist von Git ignoriert. Datei lokal anlegen,

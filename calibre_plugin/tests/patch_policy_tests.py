@@ -36,6 +36,8 @@ ALLOWED_NAMES = frozenset((
     "save_refresh_token", "account_secrets",   # Calibre-Preferences
     "_refresh_library_view",                   # Qt-Ansicht
     "_aes",                                    # optionale Krypto-Abhaengigkeit
+    "grab_live_refresh",                       # Browser-Anmeldung (Netz)
+    "check_stored_login",                      # Zugangspruefung (Netz)
 ))
 
 SKIP_FILES = {"patch_policy_tests.py"}
@@ -52,17 +54,13 @@ def _targets(node):
             for arg in child.args:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     found.append(arg.value)
-        elif name == "patch.object":
-            parts = []
-            for arg in child.args[:2]:
-                if isinstance(arg, ast.Constant):
-                    parts.append(str(arg.value))
-                elif isinstance(arg, ast.Name):
-                    parts.append(arg.id)
-                elif isinstance(arg, ast.Attribute):
-                    parts.append(arg.attr)
-            if parts:
-                found.append(".".join(parts))
+        elif (name == "object" and isinstance(child.func, ast.Attribute)
+              and getattr(child.func.value, "id", None) == "patch"):
+            # ``patch.object(modul, "name")``: das gepatchte Attribut ist das
+            # Ziel. Frueher wurde diese Form gar nicht geprueft.
+            if (len(child.args) >= 2
+                    and isinstance(child.args[1], ast.Constant)):
+                found.append(str(child.args[1].value))
     return found
 
 

@@ -199,7 +199,16 @@ def launch_reader_window():
                      % port)
             return
         failures.append("%s: keine Antwort" % argv[0])
-        _stop_launched_process(process, timeout=2)
+        if not _stop_launched_process(process, timeout=2):
+            # Der Prozess lebt weiter und haelt den DevTools-Port. Ein
+            # weiterer Kandidat wuerde dessen Antwort als eigene lesen und
+            # denselben Port doppelt belegen. Der Besitzer bleibt vermerkt,
+            # damit ein erneutes Schliessen ihn noch beenden kann; das
+            # Profil bleibt, solange der Browser es benutzt.
+            raise TolinoAuthError(
+                "Das Anmeldefenster liess sich nicht beenden. Bitte den "
+                "Browser schliessen und es erneut versuchen.", code="B01",
+                short=_BROWSER_NOT_POSSIBLE, detail="; ".join(failures))
         shutil.rmtree(profile, ignore_errors=True)
     _LAUNCHED.update({"process": None, "port": None, "profile": ""})
     raise TolinoAuthError(

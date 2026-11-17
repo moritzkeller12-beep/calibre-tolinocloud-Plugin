@@ -21,20 +21,31 @@ DEFAULT_ACCOUNT = {
 }
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
+# Die Datei existiert, war aber gerade nicht lesbar (Rechte, Verzeichnis,
+# E/A-Fehler). Das ist NICHT dasselbe wie «es gibt sie nicht».
+_UNREADABLE = object()
 # Rohinhalt des zuletzt uebernommenen, brauchbaren Standes (siehe `_reload`).
 _FILE_STATE = {"raw": _UNSET}
 
 
 def _read_raw():
-    """Rohinhalt der Einstellungsdatei; `None`, wenn es sie nicht gibt."""
+    """Rohinhalt der Einstellungsdatei.
+
+    ``None`` heisst «Datei fehlt» (frische Installation, geloescht). Ein
+    anderer Lesefehler liefert ``_UNREADABLE``: die Datei kann existieren
+    und nur gerade gesperrt sein. ``_reload`` darf daraus keinen geloeschten
+    Stand machen und keinen Schreibvorgang darauf setzen.
+    """
     path = getattr(PREFERENCES, "file_path", None)
     if not path:
         return None
     try:
         with open(path, "rb") as handle:
             return handle.read()
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _UNREADABLE
 
 
 def _parse(raw):
@@ -62,6 +73,11 @@ def _reload():
     """
     with _SETTINGS_LOCK:
         raw = _read_raw()
+        if raw is _UNREADABLE:
+            # Datei existiert, ist aber nicht lesbar: Cache behalten und
+            # Schreibvorgaenge abbrechen, statt den alten Stand ueber einen
+            # fremden oder neueren zu schreiben.
+            return False
         if raw == _FILE_STATE["raw"]:
             return True
         if raw is None:

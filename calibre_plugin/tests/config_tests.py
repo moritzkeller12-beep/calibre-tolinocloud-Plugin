@@ -1,4 +1,8 @@
 """Konten und Tokens: Trennung, Rotation und verspaetete Rueckmeldungen."""
+import json
+import os
+import shutil
+import tempfile
 import unittest
 import uuid
 
@@ -54,6 +58,94 @@ class AccountTests(ConfigCase):
         self.assertFalse(config.save_refresh_token("A", "tok-neu"))
         self.assertFalse(config.save_credentials("A", "tok-neu", "hw"))
         self.assertEqual({}, config.account_by_name("A"))
+
+
+class ExternalChangeTests(ConfigCase):
+    """Die Datei gehoert mehreren Prozessen: fremde Staende bleiben erhalten.
+
+    Geprueft wird die beobachtbare Datei, nicht die Zahl der Schreibaufrufe:
+    ein zweites Calibre-Fenster oder der Keep-alive schreibt denselben Store.
+    """
+
+    def file_path(self):
+        return config.PREFERENCES.file_path
+
+    def write_externally(self, accounts, active=None):
+        """Eine andere Instanz schreibt den vollstaendigen Stand.
+
+        Bewusst direkt am Store vorbei: der eigene Cache muss die Datei
+        erneut lesen, statt seinen veralteten Stand zurueckzuschreiben.
+        """
+        data = {"accounts": accounts}
+        if active is not None:
+            data["active_account"] = active
+        with open(self.file_path(), "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    @staticmethod
+    def account(name, token, state=None):
+        return {"name": name, "partner_id": 1, "hardware_id": "",
+                "refresh_token": token, "state": state or {}}
+
+    def test_a_missing_settings_file_is_a_fresh_installation(self):
+        """Ohne Datei gibt es ein virtuelles Default-Konto, keinen Fehler."""
+        self.assertFalse(os.path.exists(self.file_path()))
+        self.assertEqual("default", config.settings()["active_account"])
+        self.assertEqual("", config.account_by_name("default")["refresh_token"])
+        self.assertTrue(config.save_account("A", {"refresh_token": "tok-A"}))
+        self.assertTrue(os.path.exists(self.file_path()))
+        self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
+
+    def test_a_file_changed_by_another_process_is_adopted(self):
+        config.save_account("A", {"refresh_token": "alt"}, active="A")
+        self.write_externally(
+            [self.account("A", "extern"), self.account("B", "tok-B")],
+            active="A")
+        self.assertEqual("extern",
+                         config.account_summary("A")["refresh_token"])
+        self.assertEqual("tok-B", config.account_summary("B")["refresh_token"])
+
+    def test_an_externally_added_account_survives_a_local_write(self):
+        config.save_account("A", {"refresh_token": "alt"}, active="A")
+        self.write_externally(
+            [self.account("A", "alt"), self.account("B", "tok-B")],
+            active="A")
+        self.assertTrue(config.save_refresh_token("A", "neu"))
+        self.assertEqual("neu", config.account_summary("A")["refresh_token"])
+        self.assertEqual("tok-B", config.account_summary("B")["refresh_token"])
+
+    def test_an_externally_selected_account_stays_active(self):
+        config.save_account("A", {"refresh_token": "alt"}, active="A")
+        self.write_externally(
+            [self.account("A", "alt"), self.account("B", "tok-B")],
+            active="B")
+        # Eine Token-Rotation darf die Auswahl nicht umschalten.
+        self.assertTrue(config.save_refresh_token("A", "neu"))
+        self.assertEqual("B", config.settings()["active_account"])
+
+    def test_an_unreadable_file_is_not_treated_as_deleted(self):
+        """Ein Lesefehler ist kein geloeschter Stand.
+
+        Als unlesbarer Speicherort dient ein Verzeichnis: das ist ein echter
+        E/A-Fehler (POSIX: ``IsADirectoryError``, Windows: ``PermissionError``)
+        und unterscheidet sich von «Datei fehlt».
+        """
+        config.save_account("A", {"refresh_token": "tok-A"})
+        path = self.file_path()
+        with open(path, "rb") as handle:
+            before = handle.read()
+        unreadable = tempfile.mkdtemp(prefix="tolino-unreadable-")
+        self.addCleanup(shutil.rmtree, unreadable, True)
+        config.PREFERENCES.file_path = unreadable
+        # Lesen bleibt beim letzten guten Stand ...
+        self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
+        # ... und ein Schreibvorgang bricht ab, statt zu ueberschreiben.
+        self.assertFalse(config.save_refresh_token("A", "tok-B"))
+        self.assertFalse(config.set_active_account("A"))
+        config.PREFERENCES.file_path = path
+        with open(path, "rb") as handle:
+            self.assertEqual(before, handle.read())
+        self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
 
 
 class TokenTests(ConfigCase):
