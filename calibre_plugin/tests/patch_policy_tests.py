@@ -38,7 +38,7 @@ ALLOWED_NAMES = frozenset((
     "_aes",                                    # optionale Krypto-Abhaengigkeit
 ))
 
-SKIP_FILES = {"patch_policy_tests.py", "real_calibre_tests.py"}
+SKIP_FILES = {"patch_policy_tests.py"}
 
 
 def _targets(node):

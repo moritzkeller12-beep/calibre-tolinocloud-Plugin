@@ -489,16 +489,14 @@ class InventoryDialogBuildTests(unittest.TestCase):
             self.assertEqual("Abbrechen", dialog.cancel.text())
             self.assertEqual("Synchronisierung starten (1)",
                              dialog.confirm.text())
-        finally:
-            ui_module._restore_stubs_for_tests()
-
-    def test_toggle_switches_the_technical_columns(self):
-        ui_module, dialog = self._build({"automatic": 1})
-        try:
+            # Derselbe Dialog: der Knopf blendet nur die technischen Spalten
+            # um und laesst die Zeilen stehen.
             dialog._toggle_technical_columns(True)
-            self.assertEqual({9: False, 10: False, 11: False}, dialog.table.hidden)
+            self.assertEqual({9: False, 10: False, 11: False},
+                             dialog.table.hidden)
             dialog._toggle_technical_columns(False)
-            self.assertEqual({9: True, 10: True, 11: True}, dialog.table.hidden)
+            self.assertEqual({9: True, 10: True, 11: True},
+                             dialog.table.hidden)
             self.assertIn("Sammlungen in tolino übernommen",
                           dialog.note.text())
             self.assertIn("1 offen", dialog.note.text())

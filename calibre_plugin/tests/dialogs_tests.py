@@ -8,11 +8,52 @@ import unittest
 from . import ui_base_tests
 from ..planning import normalize_removals
 from ..run_context import RunContext
-from ._support import (FakeMenu, FakeMessageBox, FakeSignal, FakeTableItem,
-                      _read_ids, compare_inventory, dashboard_stub,
-                      start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+from ._support import (FakeSignal, FakeTableItem, _read_ids, compare_inventory,
+                       dashboard_stub, start_cdp_stubs, stop_cdp_stubs,
+                       ui_module_for)
 from unittest.mock import patch
 import contextlib
+
+
+class FakeMenu:
+    """QMenu-Ersatz: sammelt Aktionen, wahlweise mit Auswahlprotokoll."""
+
+    def __init__(self, _parent=None, selected=None, pick=0):
+        self.actions = []
+        self.selected = selected
+        self.pick = pick
+
+    def addAction(self, label):
+        self.actions.append(label)
+        return label
+
+    def exec(self, _position=None):
+        if self.selected is not None:
+            self.selected.extend(self.actions)
+        if self.pick is None or not self.actions:
+            return None
+        return self.actions[self.pick]
+
+
+class FakeMessageBox:
+    """QMessageBox-Ersatz: sammelt die Argumente je Aufruf."""
+
+    Yes = 1
+    No = 0
+
+    def __init__(self, calls, question_result=0):
+        self.calls = calls
+        self.question_result = question_result
+
+    def information(self, *args, **_kwargs):
+        self.calls.append(args)
+
+    def warning(self, *args, **_kwargs):
+        self.calls.append(args)
+
+    def question(self, *args, **_kwargs):
+        self.calls.append(args)
+        return self.question_result
 
 
 class _SelectionTable:

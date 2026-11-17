@@ -344,8 +344,17 @@ class LibraryScopedKeyTests(unittest.TestCase):
         self.assertEqual(first, library_scope(
             type("Db", (), {"library_id": "a"})()))
         self.assertNotEqual(first, second)
-        self.assertEqual(DEFAULT_LIBRARY_SCOPE, library_scope(
-            type("Db", (), {"dbpath": "a"})()))
+        # library_id hat Vorrang vor dem dbpath.
+        self.assertEqual(first, library_scope(
+            type("Db", (), {"library_id": "a", "dbpath": "/x"})()))
+        # Ohne library_id unterscheidet der dbpath die Bibliotheken.
+        self.assertEqual(
+            library_scope(type("Db", (), {"dbpath": "/libs/a"})()),
+            library_scope(type("Db", (), {"dbpath": "/libs/a"})()))
+        self.assertNotEqual(
+            library_scope(type("Db", (), {"dbpath": "/libs/a"})()),
+            library_scope(type("Db", (), {"dbpath": "/libs/b"})()))
+        # Ohne beide Kennungen bleibt der feste Ersatz-Scope.
         self.assertEqual(DEFAULT_LIBRARY_SCOPE, library_scope(object()))
 
     def test_a_key_requires_a_scope(self):

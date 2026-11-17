@@ -12,10 +12,14 @@ import time
 import unittest
 from . import ui_base_tests
 from ..tolino import TolinoAuthError
-from ._support import (
-    _REAL_CLOSE_WINDOW, _full, start_cdp_stubs, stop_cdp_stubs)
+from ._support import _REAL_CLOSE_WINDOW, start_cdp_stubs, stop_cdp_stubs
 from unittest.mock import patch
 import contextlib
+
+
+def _full(exc):
+    """Nutzertext plus Log-Detail eines TolinoError."""
+    return "%s %s" % (exc, getattr(exc, "detail", ""))
 
 
 def _window():

@@ -8,16 +8,28 @@ from . import ui_base_tests
 from .. import config
 from ..partners import PARTNERS
 from ..identifiers import calibre_key
-from ..library import (DEFAULT_LIBRARY_SCOPE, TOLINO_COLUMN,
-                       TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN)
+from ..library import (DEFAULT_LIBRARY_SCOPE, TOLINO_PROGRESS_COLUMN,
+                       TOLINO_READ_COLUMN)
 from ..run_context import RunContext
 from ..tolino import TolinoAuthError
 from ._support import (
-    CalibreDatabase, ComboStub,
-    FakeSignal, FakeText, _ReadingDb, dashboard_stub,
-    dashboard_with_widgets, jwt_token,
-    start_cdp_stubs, stop_cdp_stubs, ui_module_for)
+    CalibreDatabase, ComboStub, FakeSignal, _ReadingDb, dashboard_stub,
+    dashboard_with_widgets, jwt_token, start_cdp_stubs, stop_cdp_stubs,
+    ui_module_for)
 from unittest.mock import patch
+
+
+class FakeText:
+    """QLabel/QLineEdit-Ersatz: merkt sich den angezeigten Text."""
+
+    def __init__(self, text=""):
+        self.value = text
+
+    def setText(self, text):
+        self.value = text
+
+    def text(self):
+        return self.value
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -1308,30 +1320,6 @@ class AccountStateBindingTests(unittest.TestCase):
                              config.account_by_name("beta")["state"])
         finally:
             config.PREFERENCES = original
-
-    def test_the_columns_are_used_exactly_when_calibre_knows_them(self):
-        """Nur die Spalte entscheidet -- keine Einstellung schaltet sie ab.
-
-        Die Spalte enthaelt pro Buch ein Mapping, daher bleibt sie bei
-        mehreren Konten nutzbar.
-        """
-        from ..library import column_state
-
-        class Db:
-            field_metadata = {TOLINO_COLUMN: {},
-                              "#tolino_read": {"datatype": "bool"},
-                              "#tolino_progress": {"datatype": "int"}}
-
-        class NoColumn:
-            field_metadata = {}
-
-        self.assertTrue(column_state(Db())["id"])
-        self.assertTrue(column_state(Db())["read"])
-        self.assertTrue(column_state(Db())["progress"])
-        self.assertFalse(column_state(NoColumn())["id"])
-        self.assertFalse(column_state(NoColumn())["read"])
-        self.assertFalse(column_state(NoColumn())["progress"])
-
 
 class BrowserLoginPersistenceTests(unittest.TestCase):
     """Der Browser-Token überlebt ein sofort geschlossenes Dashboard."""

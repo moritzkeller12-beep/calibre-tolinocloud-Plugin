@@ -52,11 +52,6 @@ def compare_inventory(metadata, state, inventory, preferred_formats=(),
         read_ids, read_column, progress_by_id=progress_by_id)
 
 
-def _full(exc):
-    """Nutzertext plus Log-Detail eines TolinoError."""
-    return "%s %s" % (exc, getattr(exc, "detail", ""))
-
-
 def _read_ids(dialog, finished):
     """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
     return [tolino_id for tolino_id, _book, state, _uuid
@@ -494,39 +489,6 @@ def stop_cdp_stubs():
 # --- Wiederverwendete GUI-Test-Doubles ---------------------------------
 
 
-class FakeText:
-    """QLabel/QLineEdit-Ersatz: merkt sich den angezeigten Text."""
-
-    def __init__(self, text=""):
-        self.value = text
-
-    def setText(self, text):
-        self.value = text
-
-    def text(self):
-        return self.value
-
-
-class FakeMenu:
-    """QMenu-Ersatz: sammelt Aktionen, wahlweise mit Auswahlprotokoll."""
-
-    def __init__(self, _parent=None, selected=None, pick=0):
-        self.actions = []
-        self.selected = selected
-        self.pick = pick
-
-    def addAction(self, label):
-        self.actions.append(label)
-        return label
-
-    def exec(self, _position=None):
-        if self.selected is not None:
-            self.selected.extend(self.actions)
-        if self.pick is None or not self.actions:
-            return None
-        return self.actions[self.pick]
-
-
 class LogRecorder(list):
     """Echter Ersatz fuer die Log-Naht: sammelt die geschriebenen Zeilen."""
 
@@ -642,27 +604,6 @@ def local_tolino_endpoints(origin, partner_ids=(1, 4, 5, 8)):
             PARTNERS[partner_id]["token_url"] = value
 
 
-class FakeMessageBox:
-    """QMessageBox-Ersatz: sammelt die Argumente je Aufruf."""
-
-    Yes = 1
-    No = 0
-
-    def __init__(self, calls, question_result=0):
-        self.calls = calls
-        self.question_result = question_result
-
-    def information(self, *args, **_kwargs):
-        self.calls.append(args)
-
-    def warning(self, *args, **_kwargs):
-        self.calls.append(args)
-
-    def question(self, *args, **_kwargs):
-        self.calls.append(args)
-        return self.question_result
-
-
 class CalibreApi:
     """Calibres new_api als Grenze: merkt Schreibvorgaenge, kann scheitern."""
 
@@ -686,10 +627,16 @@ class CalibreApi:
 
 
 class CalibreDatabase:
-    """Nur die Calibre-Schnittstelle, die das Plugin benutzt."""
+    """Nur die Calibre-Schnittstelle, die das Plugin benutzt.
 
-    def __init__(self, columns=None, fail=(), create_error=None):
+    ``create_custom_column`` speichert die Spalte wie Calibre, laesst
+    ``field_metadata`` aber unveraendert: dort erscheint sie erst nach
+    einem Neustart.
+    """
+
+    def __init__(self, columns=None, fail=(), create_error=None, dbpath=""):
         self.field_metadata = dict(columns or {})
+        self.dbpath = dbpath
         self.api = CalibreApi(fail)
         self.created = []
         self.create_error = create_error
@@ -703,8 +650,7 @@ class CalibreDatabase:
         if self.create_error is not None:
             raise self.create_error
         self.created.append(label)
-        self.field_metadata["#" + label] = {"datatype": datatype}
-        return len(self.field_metadata)
+        return len(self.created)
 
 
 def jwt_token(iat=None, iss="https://www.thalia.de/auth/oauth2/token"):

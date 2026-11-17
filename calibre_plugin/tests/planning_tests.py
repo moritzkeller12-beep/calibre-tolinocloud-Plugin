@@ -15,8 +15,8 @@ from .. import config
 from ..library import (TOLINO_COLUMN, TOLINO_IGNORE_COLUMN,
                        bool_column_available, column_state, cover_bytes,
                        create_custom_columns, metadata_ignored,
-                       metadata_tolino_id, normalize_formats,
-                       safe_format_path, update_tolino_ids)
+                       normalize_formats, safe_format_path,
+                       update_tolino_ids)
 from ..comparison import (content_fingerprint, metadata_fingerprint,
                           normalize_title)
 from ..planning import (metadata_update_fields, plan_collection_updates,
@@ -34,9 +34,10 @@ from ..tolino import (
     normalize_refresh_token, sanitize_error)
 from pathlib import Path
 from unittest.mock import patch
-from ._support import (LogRecorder, LocalHTTP, compare_inventory,
-                       local_tolino_endpoints, parsed_inventory,
-                       start_account_stub, stop_account_stub, ui_module_for)
+from ._support import (CalibreDatabase, LogRecorder, LocalHTTP,
+                       compare_inventory, local_tolino_endpoints,
+                       parsed_inventory, start_account_stub, stop_account_stub,
+                       ui_module_for)
 
 
 # Der Einzellauf stubbte CDP und das gespeicherte Konto selbst ein.
@@ -355,6 +356,7 @@ class SyncPlanTests(unittest.TestCase):
         self.addCleanup(library_module.CREATED_COLUMNS.clear)
 
         class Database:
+            dbpath = "/libs/eins/metadata.db"
             field_metadata = {"#tolino_id": {"datatype": "text"}}
 
             def __init__(self):
@@ -364,7 +366,6 @@ class SyncPlanTests(unittest.TestCase):
                                      is_multiple, editable=True, display=None):
                 self.calls.append((label, name, datatype, is_multiple,
                                    editable, display))
-                self.field_metadata["#" + label] = {"datatype": datatype}
                 return 1
 
         database = Database()
@@ -375,9 +376,13 @@ class SyncPlanTests(unittest.TestCase):
              ("tolino_progress", "tolino gelesen %", "int", False, True, {}),
              ("tolino_ignore", "Ignoriert (tolino)", "bool", False, True, {})],
             database.calls)
-        # Zweiter Klick: nichts doppelt anlegen, auch wenn Calibre die neue
-        # Spalte erst nach einem Neustart fuehrt.
+        # Calibre fuehrt die neue Spalte erst nach einem Neustart: bis dahin
+        # bleibt sie fuer das Plugin nicht vorhanden.
+        self.assertEqual({"id": True, "read": False, "progress": False},
+                         column_state(database))
+        # Zweiter Klick: nichts doppelt anlegen.
         self.assertEqual([], create_custom_columns(database))
+        self.assertEqual(3, len(database.calls))
 
     def test_a_single_column_can_be_created_on_its_own(self):
         """Je Spalte ein Knopf: nur die fehlende Spalte wird angelegt."""
@@ -386,6 +391,7 @@ class SyncPlanTests(unittest.TestCase):
         self.addCleanup(library_module.CREATED_COLUMNS.clear)
 
         class Database:
+            dbpath = "/libs/eins/metadata.db"
             field_metadata = {"#tolino_id": {"datatype": "text"}}
 
             def __init__(self):
@@ -394,7 +400,6 @@ class SyncPlanTests(unittest.TestCase):
             def create_custom_column(self, label, name, datatype,
                                      is_multiple, editable=True, display=None):
                 self.calls.append(label)
-                self.field_metadata["#" + label] = {"datatype": datatype}
                 return 1
 
         database = Database()
@@ -420,13 +425,13 @@ class SyncPlanTests(unittest.TestCase):
             def create_custom_column(self, label, name, datatype,
                                      is_multiple, editable=True, display=None):
                 self.calls.append(label)
-                self.field_metadata["#" + label] = {"datatype": datatype}
                 return 1
 
         first = Database("/libs/eins/metadata.db")
         second = Database("/libs/zwei/metadata.db")
         self.assertEqual(["tolino_read"],
                          create_custom_columns(first, ("tolino_read",)))
+        self.assertFalse(column_state(first)["read"])
         # Dieselbe Spalte in einer ANDEREN Bibliothek ist dort nicht vorhanden.
         self.assertEqual(["tolino_read"],
                          create_custom_columns(second, ("tolino_read",)))
@@ -452,6 +457,7 @@ class SyncPlanTests(unittest.TestCase):
         self.addCleanup(library_module.CREATED_COLUMNS.clear)
 
         class Database:
+            dbpath = "/libs/leer/metadata.db"
             field_metadata = {}
 
             def __init__(self):
@@ -460,7 +466,6 @@ class SyncPlanTests(unittest.TestCase):
             def create_custom_column(self, label, name, datatype,
                                      is_multiple, editable=True, display=None):
                 self.calls.append((label, datatype))
-                self.field_metadata["#" + label] = {"datatype": datatype}
                 return 1
 
         database = Database()
@@ -527,10 +532,6 @@ class SyncPlanTests(unittest.TestCase):
         self.assertEqual([(TOLINO_COLUMN,
                            {7: '{"Konto A":"bosh_8_new"}'})],
                          database.new_api.writes)
-        self.assertEqual("bosh_8_new", metadata_tolino_id(
-            {TOLINO_COLUMN: '{"Konto A":"bosh_8_new"}'}, "Konto A"))
-        self.assertEqual("", metadata_tolino_id(
-            {TOLINO_COLUMN: '{"Konto A":"bosh_8_new"}'}, "Konto B"))
 
     def test_custom_column_writes_only_when_available(self):
         """Geschrieben wird ueber set_field() -- nur bei vorhandener
@@ -609,19 +610,31 @@ class SyncPlanTests(unittest.TestCase):
 
         database = Database()
         update_tolino_ids(database, [(7, "id-a-new")], account_name="Konto A")
-        self.assertEqual("id-a-new", metadata_tolino_id(
-            {TOLINO_COLUMN: database.new_api.value}, "Konto A"))
-        self.assertEqual("id-b", metadata_tolino_id(
-            {TOLINO_COLUMN: database.new_api.value}, "Konto B"))
+        self.assertEqual({"Konto A": "id-a-new", "Konto B": "id-b"},
+                         json.loads(database.new_api.value))
         update_tolino_ids(database, [(7, "")], account_name="Konto A")
-        self.assertEqual("", metadata_tolino_id(
-            {TOLINO_COLUMN: database.new_api.value}, "Konto A"))
-        self.assertEqual("id-b", metadata_tolino_id(
-            {TOLINO_COLUMN: database.new_api.value}, "Konto B"))
+        self.assertEqual({"Konto B": "id-b"},
+                         json.loads(database.new_api.value))
 
-    def test_plain_column_id_is_ignored(self):
-        self.assertEqual("", metadata_tolino_id(
-            {TOLINO_COLUMN: " bosh_8_id "}, "Konto A"))
+    def test_a_plain_column_value_is_replaced_by_the_account_map(self):
+        """Ein blanker Alt-Wert laesst sich keinem Konto zuordnen."""
+        database = CalibreDatabase({TOLINO_COLUMN: {"datatype": "text"}})
+        database.api.values[(TOLINO_COLUMN, 7)] = " bosh_8_id "
+        self.assertEqual(1, update_tolino_ids(database, [(7, "neu")], "Konto A"))
+        self.assertEqual({TOLINO_COLUMN: {7: '{"Konto A":"neu"}'}},
+                         dict(database.api.writes))
+
+    def test_a_column_created_in_this_session_is_not_written_until_restart(self):
+        """Die frische Spalte bleibt bis zum Neustart unbekannt."""
+        from .. import library as library_module
+        library_module.CREATED_COLUMNS.clear()
+        self.addCleanup(library_module.CREATED_COLUMNS.clear)
+        database = CalibreDatabase({}, dbpath="/libs/frisch/metadata.db")
+        self.assertEqual(["tolino_id"],
+                         create_custom_columns(database, ("tolino_id",)))
+        self.assertFalse(column_state(database)["id"])
+        self.assertEqual(0, update_tolino_ids(database, [(7, "t")], "Konto A"))
+        self.assertEqual([], database.api.writes)
 
     def test_inventory_comparison_uses_isbn_and_reports_remote_only(self):
         metadata = {
@@ -2497,40 +2510,6 @@ class PreferencesNamespaceTests(unittest.TestCase):
         self.assertEqual("tok", saved["refresh_token"])
         self.assertEqual("hw", saved["hardware_id"])
 
-
-
-class SessionColumnGuardTests(unittest.TestCase):
-    """Fehlende optionale Calibre-APIs bleiben ein No-op, kein Absturz."""
-
-    def test_a_field_map_without_record_index_setter_is_left_alone(self):
-        from ..library import _assign_record_index
-        fields = {"#tolino_id": {"datatype": "text"}}
-        _assign_record_index(fields, "tolino_id")
-        self.assertEqual({"datatype": "text"}, fields["#tolino_id"])
-
-    def test_a_backend_without_execute_is_left_alone(self):
-        """Ohne Backend-Zugriff bleibt der Spalten-Cache unveraendert."""
-        from ..library import _register_session_columns
-
-        class Backend:
-            @staticmethod
-            def custom_table_names(_num):
-                return ("custom_columns",)
-
-            prefs = {"bools_are_tristate": False}
-
-        class Api:
-            backend = Backend()
-            fields = {}
-
-        class Database:
-            new_api = Api()
-            field_metadata = {"#tolino_id": {"datatype": "text"}}
-
-        metadata = dict(Database.field_metadata)
-        self.assertIsNone(_register_session_columns(Database(), ["tolino_id"]))
-        self.assertEqual(metadata, Database.field_metadata)
-        self.assertEqual({}, Api.fields)
 
 
 class PlanSelectionEdgeCaseTests(unittest.TestCase):

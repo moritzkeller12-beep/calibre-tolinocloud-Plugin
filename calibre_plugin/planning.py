@@ -9,8 +9,8 @@ from typing import NamedTuple
 from .identifiers import (book_uuid, calibre_key, display_title, state_entry,
                           valid_book_uuid)
 from .library import (TOLINO_READ_COLUMN, bool_column_value, cover_bytes,
-                      image_suffix, metadata_ignored, metadata_tolino_id,
-                      normalize_formats, safe_format_path)
+                      image_suffix, metadata_ignored, normalize_formats,
+                      safe_format_path)
 from .tolino import log_warning
 
 NOTHING_TO_DO_TEXT = "Es war nichts zu übertragen."
@@ -270,8 +270,6 @@ def local_metadata(database, context):
                 item, "authors", metadata_value(item, "author"))),
             "isbn": display_value(isbn),
             "formats": formats,
-            "tolino_id": (metadata_tolino_id(item, context.account_name)
-                          if context.columns.get("id") else ""),
             "series": str(metadata_value(item, "series") or "").strip(),
             "format_signatures": format_signatures(
                 database, book_id, preferred),

@@ -24,20 +24,18 @@ DEFAULT_LIBRARY_SCOPE = hashlib.sha256(
 def library_scope(database):
     """Return a stable short namespace for one Calibre library.
 
-    `library_id` is the stable scope. Hashing keeps the state key short and
-    avoids embedding a path in preferences. Without an ID, a fixed
-    placeholder keeps fallback keys namespaced instead of recreating the old
-    unscoped ``calibre-<id>`` form.
+    `library_id` is the stable scope; a library that has none is still
+    distinguished by its ``dbpath``. Hashing keeps the state key short and
+    avoids embedding a path in preferences. Without either identifier a
+    fixed placeholder keeps fallback keys namespaced instead of recreating
+    the old unscoped ``calibre-<id>`` form.
     """
     text = str(getattr(database, "library_id", "") or "").strip()
     if not text:
+        text = str(getattr(database, "dbpath", "") or "").strip()
+    if not text:
         return DEFAULT_LIBRARY_SCOPE
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-
-
-def _column_value(metadata):
-    """Read the raw Calibre custom-column value."""
-    return metadata.get(TOLINO_COLUMN, "") or ""
 
 
 def _decode_tolino_ids(value):
@@ -61,12 +59,6 @@ def _decode_tolino_ids(value):
 def _encode_tolino_ids(ids):
     return json.dumps(ids, ensure_ascii=False, sort_keys=True,
                       separators=(",", ":")) if ids else ""
-
-
-def metadata_tolino_id(metadata, account_name=None):
-    """Read this account's ID from its account-map column."""
-    account_ids = _decode_tolino_ids(_column_value(metadata))
-    return str(account_ids.get(str(account_name), "") or "").strip()
 
 
 def _column_available(database, column, datatypes):
@@ -118,11 +110,11 @@ CUSTOM_COLUMNS = (
 COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein",
                      "int": "Zahl", "float": "Zahl"}
 
-# In dieser Calibre-Sitzung angelegte Spalten. Calibre fuehrt eine neue
-# Spalte in `field_metadata` erst nach einem Neustart -- ohne diesen Merker
-# wollte ein zweiter Klick dieselben Spalten erneut anlegen.
-# Spalten, die dieses Plugin in DIESER Bibliothek angelegt hat -- je
+# Spalten, die dieses Plugin in DIESER Calibre-Sitzung angelegt hat -- je
 # Bibliothek, denn ein Bibliothekswechsel bringt eine andere field_metadata.
+# Calibre fuehrt eine neue Spalte erst nach einem Neustart in
+# `field_metadata`; ohne diesen Merker wollte ein zweiter Klick dieselbe
+# Spalte erneut anlegen.
 CREATED_COLUMNS = {}
 
 
@@ -142,123 +134,6 @@ def _column_present(database, label):
     return ("#" + label) in database.field_metadata
 
 
-def _live_field_metadata(database):
-    """Feldmetadaten der Sitzung; Cache und LibraryDatabase je eigene."""
-    views = []
-    for holder in (getattr(database, "new_api", None), database):
-        fields = getattr(holder, "field_metadata", None)
-        if fields is not None and all(fields is not seen for seen in views):
-            views.append(fields)
-    return views
-
-
-def _assign_record_index(fields, label):
-    """Feldindex nachtragen, den Calibre beim Start vergibt.
-
-    ``add_custom_field`` legt keinen ``rec_index`` an; ohne ihn scheitert
-    ``field_metadata.rec_index_for()``. Der naechste freie Index haelt die
-    vorhandenen Felder unveraendert.
-    """
-    key = "#" + label
-    setter = getattr(fields, "set_field_record_index", None)
-    if not callable(setter) or key not in fields:
-        return
-    if fields[key].get("rec_index") is not None:
-        return
-    used = 0
-    try:
-        for name in fields:
-            index = fields[name].get("rec_index")
-            if isinstance(index, int) and index > used:
-                used = index
-    except (KeyError, TypeError):
-        return
-    try:
-        setter(label, used + 1, prefer_custom=True)
-    except (KeyError, TypeError, ValueError):
-        return
-
-
-def _register_session_columns(database, labels):
-    """Neu angelegte Spalten in der laufenden Sitzung benutzbar machen.
-
-    ``Cache.create_custom_column`` reicht nur ans Backend weiter: Calibre
-    baut ``field_metadata``, die Tabellen und die Feldobjekte, mit denen
-    jedes ``set_field`` arbeitet, beim Start aus ``custom_columns``. Ohne
-    Nachtrag scheitert darum jedes Schreiben in eine gerade angelegte
-    Spalte mit ``KeyError``, bis Calibre neu startet. Hier wird genau das
-    nachgeholt, was Calibre beim Start selbst tut; schlaegt das fehl, bleibt
-    es beim bisherigen Verhalten (Spalte wirkt ab dem naechsten Start).
-    """
-    api = getattr(database, "new_api", None)
-    backend = getattr(api, "backend", None)
-    execute = getattr(backend, "execute", None)
-    table_names = getattr(backend, "custom_table_names", None)
-    if not callable(execute) or not callable(table_names):
-        return
-    try:
-        tristate = backend.prefs["bools_are_tristate"]
-    except (AttributeError, KeyError, TypeError):
-        tristate = True
-    tables = getattr(backend, "tables", None)
-    field_objects = getattr(api, "fields", None)
-    for label in labels:
-        row = execute("SELECT id, name, datatype, is_multiple, editable, "
-                      "display, normalized FROM custom_columns "
-                      "WHERE label = ?", (label,)).fetchone()
-        if not row:
-            continue
-        num, name, datatype, _is_multiple, editable, display, normalized = row
-        if isinstance(display, str):
-            try:
-                display = json.loads(display)
-            except (TypeError, ValueError):
-                display = None
-        key = "#" + label
-        table_name = table_names(num)[0]
-        for fields in _live_field_metadata(database):
-            add = getattr(fields, "add_custom_field", None)
-            if key not in fields:
-                if not callable(add):
-                    continue
-                try:
-                    add(label=label, table=table_name, column="value",
-                        datatype=datatype, colnum=num, name=name or label,
-                        display=display if isinstance(display, dict) else {},
-                        is_editable=bool(editable), is_multiple={},
-                        is_category=datatype in ("text", "comments", "series",
-                                                 "enumeration"))
-                except (KeyError, TypeError, ValueError):
-                    continue
-            _assign_record_index(fields, label)
-        if not isinstance(tables, dict) or not isinstance(field_objects, dict):
-            continue
-        if key in tables:
-            continue
-        try:
-            from calibre.db.fields import create_field
-            from calibre.db.tables import ManyToOneTable, OneToOneTable
-        except ImportError:
-            continue
-        try:
-            metadata = dict(api.field_metadata[key])
-            if normalized:
-                table = ManyToOneTable(key, metadata,
-                                       link_table=table_names(num)[1])
-            else:
-                table = OneToOneTable(key, metadata)
-            table.read(backend)
-            tables[key] = table
-            field_objects[key] = create_field(
-                key, table, tristate, backend.get_template_functions,
-                api.database_instance)
-        except Exception:
-            # Kalibre-Interna koennen sich zwischen Versionen aendern; das
-            # Anlegen der Spalte darf daran nicht scheitern.
-            tables.pop(key, None)
-            field_objects.pop(key, None)
-
-
 def create_custom_columns(database, labels=None):
     """Fehlende Plugin-Spalten anlegen; gibt die angelegten Labels zurueck.
 
@@ -271,8 +146,10 @@ def create_custom_columns(database, labels=None):
     legt so ein Knopf je Spalte nur SEINE Spalte an. Fehlt nichts, wird
     auch die Calibre-Schnittstelle nicht befragt.
 
-    Neu angelegte Spalten werden anschliessend in der laufenden Sitzung in
-    ``field_metadata`` nachgetragen, damit Schreiben ohne Neustart geht.
+    Calibre fuehrt eine neue Spalte erst nach einem Neustart in
+    ``field_metadata``; bis dahin bleibt sie fuer dieses Plugin unbekannt
+    und wird nicht beschrieben. Der Merker ``CREATED_COLUMNS`` verhindert
+    nur, dass ein zweiter Klick dieselbe Spalte erneut anlegen will.
     """
     wanted = None if labels is None else set(labels)
     selected = (CUSTOM_COLUMNS if wanted is None else
@@ -297,7 +174,6 @@ def create_custom_columns(database, labels=None):
         CREATED_COLUMNS.setdefault(
             _library_key(database), set()).add(label)
         created.append(label)
-    _register_session_columns(database, created)
     return created
 
 
@@ -373,10 +249,12 @@ def update_progress_status(database, updates):
 
 
 def update_tolino_ids(database, updates, account_name=None):
-    """Merge this account's IDs into the shared Calibre custom column.
+    """Spiegele die IDs dieses Kontos in die gemeinsame Calibre-Spalte.
 
-    The column stores only the account map; a plain value cannot be assigned
-    to an account safely and is replaced by this write.
+    Fuehrend fuer den Abgleich ist allein der Konto-State; ``#tolino_id``
+    zeigt nur, was dort steht. Die Spalte speichert ausschliesslich die
+    Konto-Zuordnung: ein blanker Wert liesse sich keinem Konto sicher
+    zuordnen und wird durch diesen Schreibvorgang ersetzt.
     """
     if not updates or TOLINO_COLUMN not in database.field_metadata:
         return 0

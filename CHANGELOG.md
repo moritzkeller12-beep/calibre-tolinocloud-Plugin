@@ -8,9 +8,13 @@
 - Nach einem Upload werden Lesestatus und Fortschritt der ersetzten Kopie geleert; beide werden getrennt geschrieben, damit ein Fehler den anderen nicht blockiert.
 - Alte `#tolino_id`- und `dbpath`-Migrationspfade entfallen; Config-Speicher, Konten und Tokens bleiben unverändert.
 - Änderungen an der Einstellungsdatei (zweites Calibre-Fenster, anderes Konto) sind im laufenden Programm sofort sichtbar; halb geschriebene oder leere Stände werden nie übernommen, und ein Schreibvorgang bricht dann ab, statt Daten zu verlieren.
-- Der Code ist gebündelt und gestrafft: eine Planungsdatei statt drei, gemeinsame Helfer statt kopierter Stubs in Produktion und Tests. Verhalten unverändert; die Suite prüft dasselbe Verhalten mit 624 Tests.
+- Der Code ist gebündelt und gestrafft: eine Planungsdatei statt drei, gemeinsame Helfer statt kopierter Stubs in Produktion und Tests. Verhalten unverändert; die Suite prüft dasselbe Verhalten mit 618 Tests (die frühere Angabe «624» war falsch).
 - Pyflakes-Lint ist wieder grün: die Schleifenvariable in `plan_collection_updates` überschattet nicht mehr `book_uuid`, und der doppelte `progress_by_id`-Stub im Test entfällt.
 - Die Live-Tests gegen die echte tolino-Cloud liegen nur noch lokal und werden von Git ignoriert; sie laufen nicht mehr in der GitHub-Suite.
+- Neue Calibre-Spalten entstehen nur noch über Calibres `create_custom_column`. Die Nachbildung der Calibre-internen Spalteninitialisierung ist entfernt; nach dem Anlegen fordert die Oberfläche zum Neustart auf, und ein zweiter Klick legt in derselben Bibliothek nichts doppelt an.
+- `library_scope()` unterscheidet Bibliotheken ohne `library_id` wieder über den `dbpath`; nur ohne beide Kennungen gilt der feste Ersatz-Scope.
+- `#tolino_id` ist eindeutig eine informative Spiegelspalte: führend für den Abgleich ist allein der Konto-State, der Leseweg aus der Spalte ist entfernt.
+- Die Testsuite ist kleiner: die echten Calibre-Prozess-Tests für das Schreiben ohne Neustart entfallen, Einmal-Helfer liegen bei ihrem Testmodul, und doppelt abgesicherte Prüfungen wurden zusammengeführt.
 
 ## 0.1.07
 

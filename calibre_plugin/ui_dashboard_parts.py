@@ -237,8 +237,7 @@ class DashboardParts:
             return
         info_dialog(
             self, "Calibre-Spalte angelegt",
-            "Angelegt: #%s.\n\nDer Abgleich schreibt sofort hinein; in der "
-            "Bibliotheksansicht erscheint die Spalte nach einem Neustart "
-            "von Calibre." % label,
+            "Angelegt: #%s. Calibre neu starten, damit die Spalte in der "
+            "Bibliothek nutzbar ist." % label,
             show=True, show_copy_button=False)
 
