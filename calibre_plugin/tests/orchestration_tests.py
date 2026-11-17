@@ -8,8 +8,7 @@ from . import ui_base_tests
 from .. import config
 from ..planning import SyncJob
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, compare_inventory, dashboard_stub, start_cdp_stubs,
-                       stop_cdp_stubs)
+from ._support import (CalibreDatabase, compare_inventory, dashboard_stub, real_qt_stub, start_cdp_stubs, stop_cdp_stubs)
 from unittest.mock import patch
 
 
@@ -45,9 +44,16 @@ def _fresh_ui(test_case):
 
 def _bare_dashboard(ui_module, settings):
     """Nacktes Dashboard: Werte aus ``settings``, Qt-Felder als Attrappen."""
-    dashboard = _complete(
-        ui_module.dashboard.SyncDashboard.__new__(
-            ui_module.dashboard.SyncDashboard))
+    dashboard = ui_module.dashboard.SyncDashboard.__new__(
+        ui_module.dashboard.SyncDashboard)
+    # Nur die Qt-Basis initialisieren: echtes PyQt6 verweigert Attributzugriffe,
+    # solange der C++-Teil nicht initialisiert ist; der Dashboard-Aufbau selbst
+    # bleibt aussen vor.
+    for base in ui_module.dashboard.SyncDashboard.__mro__[1:]:
+        if base.__module__.startswith("PyQt6."):
+            base.__init__(dashboard, None)
+            break
+    dashboard = _complete(dashboard)
     dashboard.thread = None
     dashboard.values = lambda: settings
     dashboard.gui = type("Gui", (), {
@@ -510,7 +516,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
         damit sichtbar wird, ob das Fenster wirklich schliesst.
         """
 
-        class BaseDialog(ui_base_tests.InventoryDialogBuildTests._qt_stub()["QDialog"]):
+        class BaseDialog(real_qt_stub()["QDialog"]):
             closed = []
 
             def accept(self):
@@ -530,7 +536,7 @@ class NoSilentDeadEndTests(unittest.TestCase):
                 messages.append(("question",) + args)
                 return 0
 
-        stub = ui_base_tests.InventoryDialogBuildTests._qt_stub()
+        stub = real_qt_stub()
         stub["QDialog"] = BaseDialog
         stub["QMessageBox"] = MessageBox
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(

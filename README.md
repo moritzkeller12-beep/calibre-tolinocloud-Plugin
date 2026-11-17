@@ -25,6 +25,10 @@ Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste]
 
 Tests: `python3 -X dev -m unittest calibre_plugin.test_sync`
 
+Die Dialogtests laufen mit echtem PyQt6 im Offscreen-Modus
+(`QT_QPA_PLATFORM=offscreen`); ohne PyQt6 werden sie übersprungen.
+Testabhängigkeiten: `pycryptodome`, `PyQt6`.
+
 Live-Tests gegen die echte Cloud liegen nur lokal: `calibre_plugin/tests/live_tests.py`
 wird nicht im Repo geführt und ist von Git ignoriert. Datei lokal anlegen,
 `refresh_token` und `hardware_id` in der Umgebung setzen und `python3 -m

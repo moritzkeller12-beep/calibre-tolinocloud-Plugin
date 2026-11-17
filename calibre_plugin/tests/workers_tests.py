@@ -27,9 +27,7 @@ from ..planning import MetaUpdateRecord, plan_sync
 from ..planning import SyncJob
 from ..run_context import RunContext
 from ..tolino import TolinoApiError, TolinoAuthError, TolinoClient
-from ._support import (CalibreDatabase, dashboard_stub, _ReadingDb,
-                       _read_ids, compare_inventory, parsed_inventory,
-                       start_account_stub, stop_account_stub, ui_module_for)
+from ._support import (CalibreDatabase, _ReadingDb, _read_ids, cell_text, compare_inventory, dashboard_stub, item_checked, parsed_inventory, real_qt_stub, start_account_stub, stop_account_stub, ui_module_for)
 from unittest.mock import patch
 
 
@@ -1886,7 +1884,7 @@ class ReadStatusUnknownTests(unittest.TestCase):
     def test_the_dialog_keeps_unknown_read_states_untouched(self):
         ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
             lambda *args, **kwargs: None,
-            qt_stub=ui_base_tests.InventoryDialogBuildTests._qt_stub())
+            qt_stub=real_qt_stub())
         try:
             dialog = ui_module.dialogs.InventoryDialog([
                 {"title": "Buch", "authors": "A", "status": "identical",
@@ -1895,10 +1893,10 @@ class ReadStatusUnknownTests(unittest.TestCase):
                  "explanation": "In beiden vorhanden."}], options={})
             self.assertFalse(dialog.table.item(0, 2).flags() &
                              ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-            self.assertFalse(dialog.table.item(0, 2).isChecked())
+            self.assertFalse(item_checked(dialog.table.item(0, 2)))
             self.assertIn("unbekannt", dialog.table.item(0, 2).toolTip())
             self.assertIn("Lesestatus unbekannt",
-                          dialog.table.items[(0, 7)])
+                          cell_text(dialog.table, 0, 7))
             self.assertIn("Lesestatus unbekannt", dialog.note.text())
             # Nichts wird als Änderung gezählt oder zurückgeschrieben.
             self.assertEqual([], _read_ids(dialog, True))

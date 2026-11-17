@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import types
+import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -484,6 +485,197 @@ def stop_cdp_stubs():
     if _CLOSE_WINDOW_PATCH is not None:
         _CLOSE_WINDOW_PATCH.stop()
         _CLOSE_WINDOW_PATCH = None
+
+
+# --- Echte Qt-Oberflaeche fuer die Dialogtests -------------------------
+
+_REAL_QT_APP = None
+
+
+class _QtObject:
+    """QObject-Ersatz: nur Thread-Zuordnung und deleteLater.
+
+    Signale laufen als Python-Signal, damit Worker ohne echten
+    Qt-Thread testbar bleiben.
+    """
+
+    def __init__(self, *args, **_kwargs):
+        pass
+
+    def moveToThread(self, thread):
+        self.thread = thread
+
+    def deleteLater(self):
+        pass
+
+
+class _SyncThread:
+    """Synchroner QThread-Ersatz: ``start()`` fuehrt den Worker aus."""
+
+    def __init__(self, parent=None):
+        self.started = FakeSignal()
+        self.finished = FakeSignal()
+
+    def start(self):
+        for slot in list(self.started.slots):
+            slot()
+
+    def quit(self, *_args):
+        self.stopped = True
+
+    def wait(self, *_args):
+        return True
+
+    def isRunning(self):
+        return False
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+class SignalDescriptor:
+    """pyqtSignal-Ersatz: je Instanz ein eigenes Python-Signal."""
+
+    def __init__(self, *args, **_kwargs):
+        self.name = None
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        store = instance.__dict__.setdefault("_signals", {})
+        return store.setdefault(self.name, FakeSignal())
+
+
+class RecordingMessageBox:
+    """QMessageBox-Ersatz: ein echter Dialog wuerde den Testlauf blockieren."""
+
+    calls = []
+    Yes = 1
+    No = 0
+    StandardButton = types.SimpleNamespace(Yes=1, No=0)
+
+    @classmethod
+    def information(cls, *args):
+        cls.calls.append(("information",) + args)
+
+    @classmethod
+    def warning(cls, *args):
+        cls.calls.append(("warning",) + args)
+
+    @classmethod
+    def question(cls, *args):
+        cls.calls.append(("question",) + args)
+        return cls.No
+
+
+class RecordingMenu:
+    """QMenu-Ersatz: sammelt Aktionen; ohne Auswahl liefert exec() None."""
+
+    def __init__(self, _parent=None):
+        self.actions = []
+
+    def addAction(self, label):
+        self.actions.append(label)
+        return label
+
+    def exec(self, *_args):
+        return None
+
+
+class RecordingFileDialog:
+    """QFileDialog-Ersatz: ohne Auswahl kommt kein Pfad zurueck."""
+
+    @staticmethod
+    def getSaveFileName(*_args, **_kwargs):
+        return "", ""
+
+
+def cell_text(table, row, column):
+    """Text einer Tabellenzelle; eine leere Zelle hat kein Item."""
+    item = table.item(row, column)
+    return item.text() if item is not None else ""
+
+
+def item_checked(item):
+    """Ob ein Tabellenelement angehakt ist (echtes Qt: checkState)."""
+    if item is None:
+        return False
+    from PyQt6.QtCore import Qt
+    return item.checkState() == Qt.CheckState.Checked
+
+
+def set_checked(item, value):
+    """Tabellenelement anhaken oder abwaehlen (echtes Qt: checkState)."""
+    from PyQt6.QtCore import Qt
+    item.setCheckState(Qt.CheckState.Checked if value
+                       else Qt.CheckState.Unchecked)
+
+
+def select_rows(table, rows):
+    """Zeilen einer echten QTableWidget markieren (ersetzt die Auswahl)."""
+    from PyQt6.QtCore import QItemSelectionModel
+    model = table.selectionModel()
+    model.clearSelection()
+    flags = (QItemSelectionModel.SelectionFlag.Select
+             | QItemSelectionModel.SelectionFlag.Rows)
+    for row in rows:
+        model.select(table.model().index(row, 0), flags)
+    return model
+
+
+def real_qt_stub():
+    """``qt.core``-Ersatz aus echtem PyQt6 (offscreen).
+
+    Widgets, Layouts, Tabellen, Delegates, Flags und Events kommen aus
+    PyQt6. Doubles bleiben nur dort, wo echtes Qt den Testlauf stoeren
+    wuerde: modale Dialoge (QMessageBox, QMenu, QFileDialog) blockieren,
+    ein echter QThread macht die Worker nebenlaeufig, und Signale laufen
+    als Python-Signal. Ohne PyQt6 ueberspringt der Test.
+    """
+    global _REAL_QT_APP
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from PyQt6.QtCore import QEvent, Qt
+        from PyQt6.QtWidgets import (
+            QApplication, QCheckBox, QComboBox, QDialog, QFormLayout,
+            QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+            QLineEdit, QProgressBar, QPushButton, QStyledItemDelegate,
+            QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
+            QVBoxLayout)
+    except ImportError as exc:
+        raise unittest.SkipTest("PyQt6 fehlt: %s" % exc) from exc
+    if _REAL_QT_APP is None:
+        _REAL_QT_APP = QApplication.instance() or QApplication([])
+    return {
+        "Qt": Qt,
+        "QEvent": QEvent,
+        "QObject": _QtObject,
+        "QThread": _SyncThread,
+        "pyqtSignal": SignalDescriptor,
+        "QDialog": QDialog,
+        "QVBoxLayout": QVBoxLayout,
+        "QHBoxLayout": QHBoxLayout,
+        "QFormLayout": QFormLayout,
+        "QLabel": QLabel,
+        "QPushButton": QPushButton,
+        "QCheckBox": QCheckBox,
+        "QComboBox": QComboBox,
+        "QGroupBox": QGroupBox,
+        "QProgressBar": QProgressBar,
+        "QLineEdit": QLineEdit,
+        "QHeaderView": QHeaderView,
+        "QTableWidget": QTableWidget,
+        "QTableWidgetItem": QTableWidgetItem,
+        "QStyledItemDelegate": QStyledItemDelegate,
+        "QStyleOptionViewItem": QStyleOptionViewItem,
+        "QInputDialog": QInputDialog,
+        "QMessageBox": RecordingMessageBox,
+        "QMenu": RecordingMenu,
+        "QFileDialog": RecordingFileDialog,
+    }
 
 
 # --- Wiederverwendete GUI-Test-Doubles ---------------------------------

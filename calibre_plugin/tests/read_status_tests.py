@@ -3,7 +3,7 @@
 from ..comparison import (ProgressState, ReadState, comparison_progress_updates,
                           comparison_read_updates)
 import unittest
-from ._support import _read_ids, compare_inventory
+from ._support import _read_ids, cell_text, compare_inventory, set_checked
 from .dialogs_tests import _QtDialogTest
 from ..library import (TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN,
                        bool_column_value, column_state,
@@ -321,8 +321,8 @@ class ReadColumnDialogTests(_QtDialogTest):
         other = next(i for i, row in enumerate(dialog.rows)
                      if row["title"] == "Cloud read")
         self.assertEqual("33 % · 192/590",
-                         dialog.table.items[(index, 8)])
-        self.assertEqual("unbekannt", dialog.table.items[(other, 8)])
+                         cell_text(dialog.table, index, 8))
+        self.assertEqual("unbekannt", cell_text(dialog.table, other, 8))
         self.assertEqual([], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
 
@@ -331,7 +331,7 @@ class ReadColumnDialogTests(_QtDialogTest):
         self._messages(ui_module)
         dialog = ui_module.dialogs.InventoryDialog(self._rows())
         _index, cell = self._cell(dialog, "Calibre only")
-        cell.setChecked(True)
+        set_checked(cell, True)
         self.assertEqual(["t-1"], _read_ids(dialog, True))
         self.assertEqual([], _read_ids(dialog, False))
         self.assertEqual(1, dialog._selection_counts()["work"])

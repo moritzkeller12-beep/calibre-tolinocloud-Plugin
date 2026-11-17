@@ -3,8 +3,8 @@
 from ..comparison import ReadState
 import os
 import unittest
-from ._support import (FakeSignal, FakeTableItem, load_ui_module,
-                       start_cdp_stubs, stop_cdp_stubs)
+from ._support import (FakeSignal, cell_text, item_checked, load_ui_module,
+                       real_qt_stub, start_cdp_stubs, stop_cdp_stubs)
 
 
 # Der Einzellauf richtet die CDP-Stubs selbst ein.
@@ -64,338 +64,15 @@ class ToolbarIconTests(unittest.TestCase):
 class InventoryDialogBuildTests(unittest.TestCase):
     """Der Aufbau des Bestandsvergleichs wird vollständig durchlaufen.
 
-    Qt wird dabei minimal, aber ehrlich nachgebildet (fehlende Methoden
-    fallen als AttributeError auf). Damit sind Tippfehler und falsche
-    Spaltenindizes sichtbar, auch ohne Calibre auf dem Rechner.
+    Qt ist echtes PyQt6 im Offscreen-Modus: Zellen, Flags, Breiten und
+    Delegates werden so geprüft, wie Calibre sie später sieht. Doubles
+    gibt es nur an den modalen Grenzen (siehe ``_support.real_qt_stub``).
     """
 
-    @staticmethod
-    def _qt_stub():
-        Signal = FakeSignal
-
-        class Widget:
-            def __init__(self, *args, **_kwargs):
-                self.args = args
-                self.tooltip = None
-
-            def setToolTip(self, text):
-                self.tooltip = text
-
-            def setAttribute(self, attribute, value):
-                self.attributes = getattr(self, "attributes", {})
-                self.attributes[attribute] = value
-
-            def setEnabled(self, value):
-                self.enabled = value
-
-            def setVisible(self, value):
-                self.visible = value
-
-            def isVisible(self):
-                return getattr(self, "visible", True)
-
-            def setWindowTitle(self, title):
-                self.window_title = title
-
-            def setMinimumSize(self, *args):
-                self.minimum_size = args
-
-            def setMinimumWidth(self, width):
-                self.minimum_width = width
-
-            def rect(self):
-                return type("Rect", (), {"bottomLeft": lambda _self: None})()
-
-            def mapToGlobal(self, position):
-                return position
-
-            def setWordWrap(self, value):
-                self.word_wrap = value
-
-            def setText(self, text):
-                self._text = text
-
-            def text(self):
-                """Text des Widgets – auch wenn er beim Bau kam."""
-                if hasattr(self, "_text"):
-                    return self._text
-                return self.args[0] if self.args else ""
-
-            def setLayout(self, layout):
-                self.layout = layout
-
-            def setChecked(self, value):
-                self.checked = bool(value)
-
-            def isChecked(self):
-                return getattr(self, "checked", False)
-
-            def setSelectionBehavior(self, value):
-                self.selection_behavior = value
-
-            def setRowCount(self, count):
-                self.row_count = count
-
-            def setItem(self, row, column, item):
-                self.items = getattr(self, "items", {})
-                self.items[(row, column)] = item.text
-                self.raw_items = getattr(self, "raw_items", {})
-                self.raw_items[(row, column)] = item
-                # Wie QTableWidget: Zustandsaenderungen melden itemChanged.
-                item._table = self
-                item._row = row
-                item._column = column
-
-            def item(self, row, column):
-                return getattr(self, "raw_items", {}).get((row, column))
-
-            def resizeColumnsToContents(self):
-                self.resized = True
-
-            def setColumnHidden(self, column, hidden):
-                self.hidden = getattr(self, "hidden", {})
-                self.hidden[column] = hidden
-
-            def setItemDelegateForColumn(self, column, delegate):
-                self.delegates = getattr(self, "delegates", {})
-                self.delegates[column] = delegate
-
-        class Layout:
-            def __init__(self, *args, **_kwargs):
-                self.children = []
-
-            def addWidget(self, *args):
-                self.children.append(args)
-
-            def addLayout(self, layout):
-                self.children.append(layout)
-
-            def addRow(self, *args):
-                self.children.append(args)
-
-            def addStretch(self, *args):
-                pass
-
-        class Header:
-            def __init__(self):
-                self.sectionClicked = Signal()
-                self.widths = {}
-
-            def setSortIndicatorShown(self, shown):
-                self.shown = shown
-
-            def setSortIndicator(self, column, order):
-                self.indicator = (column, order)
-
-            def setSectionResizeMode(self, column, mode):
-                self.section_modes = getattr(self, "section_modes", {})
-                self.section_modes[column] = mode
-
-            def resizeSection(self, column, width):
-                self.widths[column] = width
-
-        class Table(Widget):
-            def setSelectionMode(self, mode):
-                self.selection_mode = mode
-
-            def setUpdatesEnabled(self, value):
-                self.updates_enabled = value
-
-            def setRowHidden(self, index, hidden):
-                self.row_hidden = getattr(self, "row_hidden", {})
-                self.row_hidden[index] = hidden
-
-            def __init__(self, rows, columns):
-                Widget.__init__(self)
-                self.columns = columns
-                self.header_items = {}
-                self.itemChanged = Signal()
-
-            def setHorizontalHeaderLabels(self, labels):
-                self.headers = list(labels)
-
-            def horizontalHeader(self):
-                if not hasattr(self, "header"):
-                    self.header = Header()
-                return self.header
-
-            def horizontalHeaderItem(self, index):
-                return self.header_items.setdefault(index, Widget())
-
-        class Dialog(Widget):
-            DialogCode = type("DialogCode", (), {"Accepted": 1})
-
-            def __init__(self, parent=None):
-                Widget.__init__(self)
-                self.parent = parent
-
-            def resize(self, *_args):
-                pass
-
-            def exec(self):
-                return 0
-
-            def accept(self):
-                pass
-
-            def reject(self):
-                pass
-
-        class CheckBox(Widget):
-            def __init__(self, text=""):
-                Widget.__init__(self, text)
-                self.stateChanged = Signal()
-                self.toggled = Signal()
-                self._signals_blocked = False
-                # Wie in Qt: nach dem Umschalten kommt clicked.
-                self.clicked = Signal()
-
-            def setChecked(self, value):
-                value = bool(value)
-                changed = value != self.isChecked()
-                self.checked = value
-                if changed and not self._signals_blocked:
-                    self.stateChanged.emit(int(value))
-
-            def blockSignals(self, blocked):
-                previous = self._signals_blocked
-                self._signals_blocked = bool(blocked)
-                return previous
-
-        class Button(Widget):
-            def __init__(self, text=""):
-                Widget.__init__(self, text)
-                self.clicked = Signal()
-                self.auto_default = False
-                self.default = False
-
-            def setAutoDefault(self, value):
-                self.auto_default = value
-
-            def autoDefault(self):
-                return self.auto_default
-
-            def setDefault(self, value):
-                self.default = value
-
-            def isDefault(self):
-                return self.default
-
-        class ComboBox(Widget):
-            def __init__(self, *args, **_kwargs):
-                Widget.__init__(self)
-                self.currentIndexChanged = Signal()
-                self.items = []
-                self.index = 0
-
-            def addItem(self, label, key=None):
-                self.items.append((label, key))
-
-            def currentData(self):
-                return self.items[self.index][1] if self.items else None
-
-        # Qt6-Form: nur die skopierten Enums, keine unskopierten Aliase.
-        Table.SelectionBehavior = type(
-            "SelectionBehavior", (), {"SelectRows": "SelectRows"})
-        Table.SelectionMode = type(
-            "SelectionMode", (), {"ExtendedSelection": "ExtendedSelection"})
-
-        class Object:
-            def __init__(self, *args, **_kwargs):
-                pass
-
-            def moveToThread(self, thread):
-                self.thread = thread
-
-            def deleteLater(self):
-                pass
-
-        class Thread:
-            """Synchroner QThread-Ersatz: `start()` fuehrt den Worker aus.
-
-            So bleiben die Dialogtests ohne echtes Qt lesbar. Dass der
-            Aufruf im Betrieb in einem anderen Thread laeuft, belegt
-            `BackgroundCallTests` mit einer echten Thread-Fassung.
-            """
-
-            def __init__(self, parent=None):
-                self.started = Signal()
-                self.finished = Signal()
-
-            def start(self):
-                for slot in list(self.started.slots):
-                    slot()
-
-            def quit(self, *_args):
-                self.stopped = True
-
-            def wait(self, *_args):
-                return True
-
-            def isRunning(self):
-                return False
-
-            def deleteLater(self):
-                self.deleted = True
-
-        class SignalDescriptor:
-            """pyqtSignal-Ersatz: je Instanz ein eigenes Signal."""
-
-            def __init__(self, *args, **_kwargs):
-                self.name = None
-
-            def __set_name__(self, owner, name):
-                self.name = name
-
-            def __get__(self, instance, owner=None):
-                if instance is None:
-                    return self
-                store = instance.__dict__.setdefault("_signals", {})
-                return store.setdefault(self.name, Signal())
-
-        qt = type("Qt", (), {
-            "SortOrder": type("SortOrder", (),
-                              {"AscendingOrder": 0, "DescendingOrder": 1}),
-            "ItemFlag": type("ItemFlag", (), {
-                "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
-            "CheckState": type("CheckState", (),
-                               {"Checked": 2, "Unchecked": 0}),
-                "WidgetAttribute": type("WidgetAttribute", (),
-                                     {"WA_QuitOnClose": 55}),
-        })
-        return {
-            "Qt": qt,
-            "QDialog": Dialog,
-            "QVBoxLayout": Layout,
-            "QHBoxLayout": Layout,
-            "QLabel": Widget,
-            "QPushButton": Button,
-            "QCheckBox": CheckBox,
-            "QComboBox": ComboBox,
-            "QHeaderView": type("QHeaderView", (), {
-                "ResizeMode": type(
-                    "ResizeMode", (), {"Interactive": 0, "Stretch": 1,
-                                       "ResizeToContents": 2})}),
-            "QStyledItemDelegate": type(
-                "QStyledItemDelegate", (),
-                {"__init__": lambda self, *args, **kwargs: None}),
-            "QEvent": type("QEvent", (), {}),
-            "QGroupBox": Widget,
-            "QTableWidget": Table,
-            "QTableWidgetItem": FakeTableItem,
-            "QMenu": type("Menu", (), {
-                "__init__": lambda self, parent=None: setattr(self, "actions", []),
-                "addAction": lambda self, label: self.actions.append(label) or label,
-                "exec": lambda self, _position=None: None,
-            }),
-            "QObject": Object,
-            "QThread": Thread,
-            "pyqtSignal": SignalDescriptor,
-        }
-
     def _build(self, options):
+        """Echtes PyQt6 (offscreen): derselbe Aufbau wie im Betrieb."""
         ui_module = ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None, qt_stub=self._qt_stub())
+            lambda *args, **kwargs: None, qt_stub=real_qt_stub())
         rows = [
             {"title": "Zulu", "authors": "Z", "status": "identical",
              "book_id": 1, "tolino_id": "c1", "isbn": "111",
@@ -412,77 +89,76 @@ class InventoryDialogBuildTests(unittest.TestCase):
 
     def test_constructor_writes_every_column_in_the_right_order(self):
         ui_module, dialog = self._build({"automatic": 1})
+        dialogs, table = ui_module.dialogs, dialog.table
         try:
-            self.assertEqual(list(ui_module.dialogs.InventoryDialog.HEADERS),
-                             dialog.table.headers)
+            self.assertEqual(
+                list(dialogs.InventoryDialog.HEADERS),
+                [table.horizontalHeaderItem(index).text()
+                 for index in range(table.columnCount())])
             # Tooltips versprechen Strg-/Shift-Mehrfachauswahl.
-            self.assertEqual("ExtendedSelection",
-                             dialog.table.selection_mode)
+            self.assertEqual(
+                dialogs.QTableWidget.SelectionMode.ExtendedSelection,
+                table.selectionMode())
+            enabled = dialogs.Qt.ItemFlag.ItemIsEnabled
             for index, row in enumerate(dialog.rows):
                 in_cloud = bool(row["tolino_id"])
-                # Drei Auswahlfelder je Buch ...
-                # ... die zwei Orts-Spalten mit je einem Häkchen ...
+                # Die zwei Orts-Spalten mit je einem Häkchen ...
                 self.assertEqual("✓" if row["book_id"] is not None else "",
-                                 dialog.table.items[(index, 3)])
+                                 cell_text(table, index, 3))
                 self.assertEqual("✓" if in_cloud else "",
-                                 dialog.table.items[(index, 4)])
+                                 cell_text(table, index, 4))
                 # ... und danach die Textspalten.
-                self.assertEqual(row["title"], dialog.table.items[(index, 5)])
-                self.assertEqual(row["authors"], dialog.table.items[(index, 6)])
+                self.assertEqual(row["title"], cell_text(table, index, 5))
+                self.assertEqual(row["authors"], cell_text(table, index, 6))
                 self.assertEqual(row["explanation"],
-                                 dialog.table.items[(index, 7)])
-                self.assertEqual("", dialog.table.items[(index, 8)])
-                self.assertEqual(row["isbn"], dialog.table.items[(index, 9)])
+                                 cell_text(table, index, 7))
+                self.assertEqual("", cell_text(table, index, 8))
+                self.assertEqual(row["isbn"], cell_text(table, index, 9))
                 self.assertEqual(row["tolino_id"],
-                                 dialog.table.items[(index, 10)])
+                                 cell_text(table, index, 10))
                 self.assertEqual(row.get("uuid", ""),
-                                 dialog.table.items[(index, 11)])
+                                 cell_text(table, index, 11))
                 # Metadaten und Lese-Marke gehen nur für Bücher, die schon in
                 # der Cloud liegen; Hochladen nur mit Calibre-Buch.
-                upload = dialog.table.item(index, 0)
-                metadata = dialog.table.item(index, 1)
-                mark_read = dialog.table.item(index, 2)
-                self.assertTrue(upload.flags() & ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled)
-                self.assertEqual(in_cloud, bool(metadata.flags() &
-                                                ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
-                self.assertEqual(in_cloud, bool(mark_read.flags() &
-                                                ui_module.dialogs.Qt.ItemFlag.ItemIsEnabled))
+                upload = table.item(index, 0)
+                metadata = table.item(index, 1)
+                mark_read = table.item(index, 2)
+                self.assertTrue(upload.flags() & enabled)
+                self.assertEqual(in_cloud,
+                                 bool(metadata.flags() & enabled))
+                self.assertEqual(in_cloud,
+                                 bool(mark_read.flags() & enabled))
                 # Vorbelegt ist, was der Vergleich vorschlägt; die Lese-Marke
                 # bleibt unangetastet.
-                self.assertEqual(bool(row["upload"]), upload.isChecked())
-                self.assertEqual(bool(row["metadata"]), metadata.isChecked())
-                self.assertFalse(mark_read.isChecked())
+                self.assertEqual(bool(row["upload"]), item_checked(upload))
+                self.assertEqual(bool(row["metadata"]),
+                                 item_checked(metadata))
+                self.assertFalse(item_checked(mark_read))
             self.assertIsInstance(dialog._check_delegate,
-                                  ui_module.dialogs._CellCheckDelegate)
-            self.assertEqual({0: dialog._check_delegate,
-                              1: dialog._check_delegate,
-                              2: dialog._check_delegate},
-                             dialog.table.delegates)
+                                  dialogs._CellCheckDelegate)
+            for column in (0, 1, 2):
+                self.assertIs(dialog._check_delegate,
+                              table.itemDelegateForColumn(column))
             self.assertEqual({0: 80, 1: 100, 2: 80, 3: 80, 4: 80},
-                             {column: dialog.table.header.widths[column]
+                             {column: table.columnWidth(column)
                               for column in (0, 1, 2, 3, 4)})
-            self.assertEqual(
-                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
-                dialog.table.header.section_modes[0])
-            self.assertEqual(
-                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
-                dialog.table.header.section_modes[3])
-            self.assertEqual(
-                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
-                dialog.table.header.section_modes[5])
-            self.assertEqual(160, dialog.table.header.widths[5])
-            self.assertEqual(
-                ui_module.dialogs.QHeaderView.ResizeMode.Interactive,
-                dialog.table.header.section_modes[6])
-            self.assertEqual(90, dialog.table.header.widths[6])
-            self.assertFalse(dialog.attributes[55])
+            header = table.horizontalHeader()
+            interactive = dialogs.QHeaderView.ResizeMode.Interactive
+            for column in (0, 3, 5, 6):
+                self.assertEqual(interactive,
+                                 header.sectionResizeMode(column))
+            self.assertEqual(160, table.columnWidth(5))
+            self.assertEqual(90, table.columnWidth(6))
+            self.assertFalse(dialog.testAttribute(
+                dialogs.Qt.WidgetAttribute.WA_QuitOnClose))
             # Nur die technischen Spalten sind zunächst verborgen.
-            self.assertEqual({9: True, 10: True, 11: True}, dialog.table.hidden)
+            self.assertEqual({9: True, 10: True, 11: True},
+                             {column: table.isColumnHidden(column)
+                              for column in (9, 10, 11)})
             self.assertIn("Sammlungen in tolino übernommen",
                           dialog.note.text())
             self.assertIn("1 offen", dialog.note.text())
-            self.assertNotIn("Zusätzliche Aktionen:",
-                              dialog.note.text())
+            self.assertNotIn("Zusätzliche Aktionen:", dialog.note.text())
             self.assertIn("1 Upload", dialog.summary.text())
             self.assertIn("0 Metadaten", dialog.summary.text())
             self.assertIn("0 Lesestatus", dialog.summary.text())
@@ -493,35 +169,23 @@ class InventoryDialogBuildTests(unittest.TestCase):
             # um und laesst die Zeilen stehen.
             dialog._toggle_technical_columns(True)
             self.assertEqual({9: False, 10: False, 11: False},
-                             dialog.table.hidden)
+                             {column: table.isColumnHidden(column)
+                              for column in (9, 10, 11)})
             dialog._toggle_technical_columns(False)
             self.assertEqual({9: True, 10: True, 11: True},
-                             dialog.table.hidden)
+                             {column: table.isColumnHidden(column)
+                              for column in (9, 10, 11)})
             self.assertIn("Sammlungen in tolino übernommen",
                           dialog.note.text())
             self.assertIn("1 offen", dialog.note.text())
         finally:
             ui_module._restore_stubs_for_tests()
 
-
     def test_download_asks_for_the_path_before_fetching(self):
         """Ein Abbruch im Dateidialog darf keinen Download ausloesen."""
         ui_module, dialog = self._build({})
         events = []
         path = "/tmp/tolino-download-test.epub"
-
-        row_index = next(index for index, row in enumerate(dialog.rows)
-                         if row.get("tolino_id"))
-
-        class Index:
-            @staticmethod
-            def row():
-                return row_index
-
-        class Selection:
-            @staticmethod
-            def selectedRows():
-                return [Index()]
 
         class Client:
             @staticmethod
@@ -535,10 +199,13 @@ class InventoryDialogBuildTests(unittest.TestCase):
                 events.append("save")
                 return path, ""
 
-        dialog.table.selectionModel = lambda: Selection()
+        row_index = next(index for index, row in enumerate(dialog.rows)
+                         if row.get("tolino_id"))
+        dialog.table.selectRow(row_index)
         dialog.client_factory = lambda: Client()
         ui_module.dialogs.QFileDialog = FileDialog
-        ui_module.dialogs.info_dialog = lambda *args, **kwargs: events.append("info")
+        ui_module.dialogs.info_dialog = (
+            lambda *args, **kwargs: events.append("info"))
         try:
             dialog.download_selected()
             self.assertEqual(["save", ("download", {}), "info"], events)
@@ -552,16 +219,16 @@ class InventoryDialogBuildTests(unittest.TestCase):
     def test_zero_actions_disable_the_start_button(self):
         """Ohne Auswahl und ohne Automatik gibt es nichts zu starten."""
         ui_module = ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None, qt_stub=self._qt_stub())
+            lambda *args, **kwargs: None, qt_stub=real_qt_stub())
         row = {"title": "Zulu", "authors": "Z", "status": "identical",
                "book_id": 1, "tolino_id": "c1", "isbn": "111",
                "read": ReadState(), "explanation": "Gleich."}
         try:
             dialog = ui_module.dialogs.InventoryDialog([dict(row)], options={})
-            self.assertFalse(dialog.confirm.enabled)
+            self.assertFalse(dialog.confirm.isEnabled())
             dialog = ui_module.dialogs.InventoryDialog(
                 [dict(row)], options={"automatic": 1})
-            self.assertTrue(dialog.confirm.enabled)
+            self.assertTrue(dialog.confirm.isEnabled())
         finally:
             ui_module._restore_stubs_for_tests()
 
@@ -572,14 +239,12 @@ class InventoryDialogBuildTests(unittest.TestCase):
             groups = [row["group"] for row in dialog.rows]
             self.assertIn("action", groups)
             self.assertIn("unchanged", groups)
-            hidden = {}
-            dialog.table.setRowHidden = (
-                lambda index, value: hidden.__setitem__(index, value))
             dialog.group_filter = type(
                 "Combo", (), {"currentData": lambda self: "action"})()
             dialog._apply_group_filter()
             self.assertEqual(len(groups), len(dialog.rows))
             for index, group in enumerate(groups):
-                self.assertEqual(group != "action", hidden[index])
+                self.assertEqual(group != "action",
+                                 dialog.table.isRowHidden(index))
         finally:
             ui_module._restore_stubs_for_tests()
