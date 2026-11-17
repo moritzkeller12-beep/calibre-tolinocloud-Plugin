@@ -33,8 +33,10 @@ Die Suite ist bewusst klein und prüft Nutzerabläufe statt Interna:
 Konten und Token-Rotation (`config_tests`), Calibre-Spalten und
 Bibliothekszuordnung (`library_tests`), Planung und Bestandsabgleich
 (`planning_tests`), den tolino-Client gegen einen lokalen HTTP-Server
-(`tolino_client_tests`), den Sync-Worker (`workers_tests`) und die
-Dashboard-Aktionen (`ui_tests`).
+(`tolino_client_tests`), den Sync-Worker (`workers_tests`), die
+Dashboard-Aktionen und das Vergleichsfenster mit echter Qt-Tabelle
+(`ui_tests`) sowie die Fallbacks der Browser-Anmeldung, wenn kein Zugang
+gelesen werden kann (`browser_login_tests`).
 
 Live-Tests gegen die echte Cloud liegen nur lokal: `calibre_plugin/tests/live_tests.py`
 wird nicht im Repo geführt und ist von Git ignoriert. Datei lokal anlegen,
