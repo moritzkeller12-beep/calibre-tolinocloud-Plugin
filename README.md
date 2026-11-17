@@ -32,8 +32,11 @@ Testabhängigkeiten: `pycryptodome`, `PyQt6`.
 Die Suite ist bewusst klein und prüft Nutzerabläufe statt Interna:
 Konten und Token-Rotation (`config_tests`), Calibre-Spalten und
 Bibliothekszuordnung (`library_tests`), Planung und Bestandsabgleich
-(`planning_tests`), den tolino-Client gegen einen lokalen HTTP-Server
-(`tolino_client_tests`), den Sync-Worker (`workers_tests`), die
+(`planning_tests`), den tolino-Client gegen einen lokalen HTTP-Server –
+Anmeldung, Token-Rotation und alle Schreibpfade wie Upload, Metadaten,
+Gelesen-Marken, Sammlungen, Löschen und Download (`tolino_client_tests`) –,
+die sync-data-Patches für Lesestatus und Tags (`sync_data_tests`), den
+Sync-Worker (`workers_tests`), die
 Dashboard-Aktionen und das Vergleichsfenster mit echter Qt-Tabelle
 (`ui_tests`) sowie die Fallbacks der Browser-Anmeldung, wenn kein Zugang
 gelesen werden kann (`browser_login_tests`).
