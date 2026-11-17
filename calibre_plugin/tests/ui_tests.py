@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from ..comparison import compare_inventory
+from ..errors import TolinoError
 from ..run_context import RunContext
 from ._support import (CalibreDatabase, dashboard_stub, real_qt_stub,
                        ui_module_for)
@@ -376,6 +377,79 @@ class ConfirmationTests(unittest.TestCase):
                 self.ask(answer)
                 self.assertEqual(
                     expected, self.parts.confirm_replacements(None, [job]))
+
+    def test_the_deletion_confirmation_accepts_with_yes(self):
+        self.ask(self.box.Yes)
+        self.assertTrue(self.parts.confirm_deletions(
+            None, [(UUID, "d1"), ("zweite", "d2")],
+            {"d1": "Der Schwarm", "d2": "Zweites Buch"}))
+        text = self.question_text()
+        self.assertIn("2 Bücher", text)
+        self.assertIn("Zweites Buch", text)
+
+    def sync_stub(self):
+        """Dashboard-Doppel mit genau den Widgets, die der Start anfasst."""
+        stub = dashboard_stub()
+        stub.status_text = ""
+        stub.plan_text = ""
+        stub.failure = ""
+        stub.status = types.SimpleNamespace(
+            setText=lambda text: setattr(stub, "status_text", text))
+        stub.progress = types.SimpleNamespace(
+            setRange=lambda *args: None, setValue=lambda *args: None)
+        stub.progress_label = types.SimpleNamespace(
+            setText=lambda text: setattr(stub, "plan_text", text))
+        stub.update_status = lambda: None
+        stub.progress_changed = lambda *args: None
+        stub.sync_completed = lambda *args: None
+        stub.sync_failed = lambda message: setattr(stub, "failure", message)
+        stub._start_sync_worker = (
+            self.ui.dashboard.SyncDashboard._start_sync_worker.__get__(stub))
+        return stub
+
+    def start_sync(self, stub, preparation):
+        """Echten Startpfad ausfuehren; nur der Netzzugang ist blockiert."""
+        common = self.ui.common
+        threads, workers = list(common._THREADS), list(common._WORKERS)
+
+        def restore():
+            common._THREADS[:] = threads
+            common._WORKERS[:] = workers
+
+        self.addCleanup(restore)
+        context = RunContext.from_values(
+            {"account_name": "A", "preferred_formats": ["EPUB"]})
+        with patch("calibre_plugin.ui_workers.TOKEN_VAULT.login",
+                   side_effect=TolinoError("offline")):
+            stub._start_sync_worker(context, preparation, {})
+        return stub
+
+    def test_the_confirmed_deletions_reach_the_sync_worker(self):
+        stub = self.start_sync(self.sync_stub(), {
+            "jobs": [], "removals": [(UUID, "d1")],
+            "meta_updates": [], "series_map": {}, "skipped_uploads": []})
+        self.assertIsNotNone(stub.thread)
+        self.assertEqual([(UUID, "d1")], stub.worker.removals)
+        self.assertEqual([], stub.worker.jobs)
+        self.assertIn("1 Löschung", stub.plan_text)
+
+    def test_an_accepted_replacement_confirmation_starts_the_same_jobs(self):
+        self.ask(self.box.Yes)
+
+        def job(label, old_id=None):
+            return types.SimpleNamespace(label=lambda: label, old_id=old_id)
+
+        jobs = [job("Der Schwarm", "d1"), job("Nur in Calibre")]
+        stub = self.start_sync(self.sync_stub(), {
+            "jobs": jobs, "removals": [], "meta_updates": [],
+            "series_map": {}, "skipped_uploads": []})
+        self.assertIsNotNone(stub.thread)
+        self.assertEqual(jobs, stub.worker.jobs)
+        # Der Worker laeuft wirklich an (hier scheitert nur der Netzzugang).
+        self.assertTrue(stub.failure)
+        text = self.question_text()
+        self.assertIn("Der Schwarm", text)
+        self.assertNotIn("Nur in Calibre", text)
 
     def test_a_cancelled_replacement_confirmation_starts_no_worker(self):
         self.ask(self.box.No)

@@ -1,6 +1,7 @@
 """Dependency-free websocket and DevTools HTTP transport helpers."""
 import base64
 from http.client import HTTPException
+import hashlib
 import json
 import secrets
 import socket
@@ -11,6 +12,15 @@ import time
 # Eine DevTools-Nachricht ist klein; ein Riesenframe ist ein Fehler, kein
 # Grund, beliebig viel Speicher zu belegen.
 _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
+# RFC 6455: der Server bestaetigt den Handshake mit diesem Digest.
+_WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _accept_value(key):
+    """Der erwartete ``Sec-WebSocket-Accept``-Wert zu einem Client-Key."""
+    return base64.b64encode(
+        hashlib.sha1(key.encode("ascii") + _WS_GUID).digest()).decode("ascii")
 
 
 # ---------------------------------------------------------------- WebSocket
@@ -49,10 +59,24 @@ class _Ws:
             sock.close()
             raise
         head, _, rest = data.partition(b"\r\n\r\n")
-        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+        lines = [line.strip() for line in head.split(b"\r\n") if line.strip()]
+        status_line = lines[0] if lines else b""
+        headers = {}
+        for line in lines[1:]:
+            name, separator, value = line.partition(b":")
+            if separator:
+                headers[name.strip().lower()] = value.strip()
+        # Nur eine echte 101-Antwort mit den Upgrade-Headern und dem
+        # richtigen Accept-Digest ist ein WebSocket. Ohne diese Pruefung
+        # wuerde auch eine fremde HTTP-Antwort als Verbindung gelten.
+        if (b" 101 " not in status_line
+                or headers.get(b"upgrade", b"").lower() != b"websocket"
+                or b"upgrade" not in headers.get(b"connection", b"").lower()
+                or headers.get(b"sec-websocket-accept", b"").decode(
+                    "latin-1") != _accept_value(key)):
             sock.close()
             raise OSError("websocket handshake rejected: %s"
-                          % head[:120].decode("ascii", "replace"))
+                          % status_line[:120].decode("ascii", "replace"))
         ws = _Ws(sock)
         ws.buf = rest
         return ws
