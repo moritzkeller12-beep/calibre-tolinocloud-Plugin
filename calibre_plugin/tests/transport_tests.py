@@ -31,6 +31,54 @@ class DevToolsHttpTests(unittest.TestCase):
                 _http_get_json("http://127.0.0.1:1")
 
 
+class FakeSocket:
+    """Socket-Doppel fuer den Upgrade-Handshake (kein echter Server)."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.sent = b""
+        self.closed = False
+
+    def sendall(self, data):
+        self.sent += data
+
+    def settimeout(self, value):
+        self.timeout = value
+
+    def recv(self, size):
+        chunk, self.reply = self.reply[:size], self.reply[size:]
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class HandshakeTests(unittest.TestCase):
+    """Der Upgrade muss bestaetigt werden, sonst ist die Verbindung kaputt."""
+
+    def handshake(self, reply):
+        self.sock = FakeSocket(reply)
+        with patch("calibre_plugin.cdp_transport.socket.create_connection",
+                   return_value=self.sock):
+            return _Ws.connect("127.0.0.1", 9222, "/devtools/page/x",
+                               timeout=2)
+
+    def test_a_101_handshake_opens_the_connection(self):
+        ws = self.handshake(b"HTTP/1.1 101 Switching Protocols\r\n"
+                            b"Upgrade: websocket\r\n\r\n")
+        self.assertIsInstance(ws, _Ws)
+        self.assertIn(b"GET /devtools/page/x HTTP/1.1", self.sock.sent)
+        self.assertIn(b"Sec-WebSocket-Key: ", self.sock.sent)
+        self.assertIn(b"Sec-WebSocket-Version: 13", self.sock.sent)
+        self.assertFalse(self.sock.closed)
+
+    def test_a_rejected_handshake_is_closed(self):
+        with self.assertRaises(OSError) as caught:
+            self.handshake(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+        self.assertIn("handshake rejected", str(caught.exception))
+        self.assertTrue(self.sock.closed)
+
+
 class WebSocketTransportTests(unittest.TestCase):
     def test_recv_json_reassembles_a_two_frame_text_message(self):
         left, right = socket.socketpair()

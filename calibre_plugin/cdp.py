@@ -30,7 +30,10 @@ def _start_port():
 
 # Ownership is deliberately process-local: this module records only the
 # ephemeral profile, loopback port and Popen handle created by this plugin.
-_LAUNCHED = {"process": None, "port": None, "profile": ""}
+# Die Prozessgruppe wird beim Start festgehalten: der Wrapper eines
+# Flatpak-/Snap-Pakets kann vor seinem Browserkind enden, danach laesst
+# sich die Gruppe nicht mehr ueber os.getpgid(pid) finden.
+_LAUNCHED = {"process": None, "port": None, "profile": "", "pgid": None}
 
 
 def _verified_owner(require_endpoint=True):
@@ -41,7 +44,7 @@ def _verified_owner(require_endpoint=True):
     if process is None or not actual_port or not profile:
         return None
     record = {"process": process, "port": int(actual_port),
-              "profile": profile}
+              "profile": profile, "pgid": _LAUNCHED.get("pgid")}
     if require_endpoint and not _endpoint_answers(record):
         return None
     return record
@@ -191,7 +194,9 @@ def launch_reader_window():
             failures.append("%s: %s" % (argv[0], exc))
             continue
         _LAUNCHED.update({"process": process, "port": port,
-                          "profile": profile})
+                          "profile": profile,
+                          "pgid": (process.pid if os.name == "posix"
+                                   else None)})
         if _wait_for_debug_port(port, _START_TIMEOUT, process):
             # Der Port gehört ins Log: nur so lässt sich die CDP-Verbindung
             # von aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
@@ -199,7 +204,8 @@ def launch_reader_window():
                      % port)
             return
         failures.append("%s: keine Antwort" % argv[0])
-        if not _stop_launched_process(process, timeout=2):
+        if not _stop_launched_process(process, timeout=2,
+                                      pgid=_LAUNCHED["pgid"], port=port):
             # Der Prozess lebt weiter und haelt den DevTools-Port. Ein
             # weiterer Kandidat wuerde dessen Antwort als eigene lesen und
             # denselben Port doppelt belegen. Der Besitzer bleibt vermerkt,
@@ -210,33 +216,53 @@ def launch_reader_window():
                 "Browser schliessen und es erneut versuchen.", code="B01",
                 short=_BROWSER_NOT_POSSIBLE, detail="; ".join(failures))
         shutil.rmtree(profile, ignore_errors=True)
-    _LAUNCHED.update({"process": None, "port": None, "profile": ""})
+    _LAUNCHED.update({"process": None, "port": None, "profile": "",
+                      "pgid": None})
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
         "und es erneut versuchen.", code="B01", short=_BROWSER_NOT_POSSIBLE,
         detail="; ".join(failures) or "kein Kandidat")
 
 
-def _process_group(process):
+def _process_group(process, pgid=None):
     """Die eigene Prozessgruppe des Fensters, falls es eine hat.
 
-    Gestartet wird mit ``start_new_session``; nur dann ist die pid auch die
-    Gruppen-ID und ein Signal erreicht das Browserkind hinter dem Wrapper.
+    Gestartet wird mit ``start_new_session``; die pid des Wrappers ist dann
+    die Gruppen-ID. Sie wird bevorzugt, weil die Gruppe auch dann noch
+    laufen kann, wenn der Wrapper bereits beendet ist.
     """
+    if os.name != "posix":
+        return None
+    if pgid:
+        return int(pgid)
     pid = getattr(process, "pid", None)
     try:
-        own_group = os.name == "posix" and pid and os.getpgid(pid) == pid
+        own_group = bool(pid) and os.getpgid(pid) == pid
     except OSError:
         own_group = False
     return pid if own_group else None
 
 
-def _stop_launched_process(process, timeout=2):
-    """Den gestarteten Browser beenden; True, wenn er danach weg ist."""
-    for hard in (False, True):  # erst hoeflich, dann bestimmt.
-        if process.poll() is not None:
+def _stop_launched_process(process, timeout=2, pgid=None, port=None):
+    """Den gestarteten Browser samt Gruppe beenden; True, wenn er weg ist.
+
+    Das Ende des Wrapper-Prozesses beweist nicht, dass das Browserkind weg
+    ist. Solange der DevTools-Port dieses Fensters antwortet, gilt die
+    Gruppe als lebendig und wird mit der beim Start gemerkten Gruppen-ID
+    hart beendet -- sonst bliebe der Port fuer den naechsten Kandidaten
+    belegt.
+    """
+    group = _process_group(process, pgid)
+    record = {"port": int(port)} if port else None
+
+    def leftover():
+        if process.poll() is None:
             return True
-        group = _process_group(process)
+        return bool(record and _endpoint_answers(record, 0.2))
+
+    for hard in (False, True):  # erst hoeflich, dann bestimmt.
+        if not leftover():
+            return True
         try:
             if group:
                 os.killpg(group, signal.SIGKILL if hard else signal.SIGTERM)
@@ -247,7 +273,12 @@ def _stop_launched_process(process, timeout=2):
             process.wait(timeout=max(0.2, timeout))
         except (OSError, subprocess.TimeoutExpired):
             pass
-    return process.poll() is not None
+    if leftover() and record and group:
+        # Nach SIGKILL braucht der Port einen Moment, bis er geschlossen ist.
+        deadline = time.time() + 0.3
+        while leftover() and time.time() < deadline:
+            time.sleep(0.05)
+    return not leftover()
 
 
 def read_idb_tokens(target, db_names, timeout=10):
@@ -421,7 +452,8 @@ def _shutdown(record, timeout=2):
         if target:
             _send_browser_close(*target, timeout=timeout)
         _wait_for_endpoint_exit(record, timeout)
-    if not _stop_launched_process(process, timeout):
+    if not _stop_launched_process(process, timeout,
+                                  pgid=record.get("pgid"), port=port):
         return False
     _wait_for_endpoint_exit(record, timeout)
     if _endpoint_answers(record, 0.2):
@@ -432,7 +464,8 @@ def _shutdown(record, timeout=2):
     if os.path.exists(record["profile"]):
         return False
     if _LAUNCHED["process"] is process:
-        _LAUNCHED.update({"process": None, "port": None, "profile": ""})
+        _LAUNCHED.update({"process": None, "port": None, "profile": "",
+                          "pgid": None})
     return True
 
 

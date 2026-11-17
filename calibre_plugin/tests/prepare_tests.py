@@ -8,7 +8,7 @@ import uuid
 from unittest.mock import patch
 
 from .. import config
-from ..errors import TolinoError
+from ..errors import TolinoAuthError, TolinoError
 from ..run_context import RunContext
 from ._support import real_qt_stub, ui_module_for
 
@@ -128,6 +128,24 @@ class OptionalDataTests(PrepareCase):
         self.assertFalse(payload["comparison"][0]["progress"].known)
         self.assertNotIn("progress", payload["state"].get(UUID, {})
                          .get("reading", {}))
+
+    def test_a_rejected_login_while_reading_the_status_fails_the_run(self):
+        """Ein abgelehnter Token ist kein «unbekannter» Lesewert."""
+        config.save_account("A", {"refresh_token": "tok-A"})
+        _worker, emitted = self.prepare(FakeClient(
+            [CLOUD], read_error=TolinoAuthError("abgelehnt", code="A01")))
+        self.assertNotIn("ready", emitted)
+        self.assertIn("abgelehnt", emitted["failed"])
+        self.assertEqual({}, config.account_by_name("A")["state"])
+
+    def test_a_rejected_login_while_reading_the_progress_fails_the_run(self):
+        config.save_account("A", {"refresh_token": "tok-A"})
+        _worker, emitted = self.prepare(FakeClient(
+            [CLOUD], progress_error=TolinoAuthError("abgelehnt",
+                                                    code="A01")))
+        self.assertNotIn("ready", emitted)
+        self.assertIn("abgelehnt", emitted["failed"])
+        self.assertEqual({}, config.account_by_name("A")["state"])
 
     def test_progress_is_not_requested_while_the_read_status_is_unknown(self):
         client = FakeClient([CLOUD], read_error=TolinoError("weg"))

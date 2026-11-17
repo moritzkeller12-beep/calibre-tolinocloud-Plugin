@@ -31,6 +31,13 @@ Qt-Threads laufen nicht in der Suite: Widgets und Tabellen sind echt, der
 QThread und die modalen Dialoge bleiben kontrollierte Doppel.
 Testabhängigkeiten: `pycryptodome`, `PyQt6`.
 
+Die Einstellungsdatei wird bei jedem Lese- und Schreibzugriff erneut geprüft:
+ein abgeschlossener Schreibvorgang eines zweiten Calibre-Fensters wird
+übernommen, halb geschriebene oder nicht lesbare Stände nie. Gleichzeitige
+Schreibvorgänge zweier Calibre-Prozesse sind dagegen nicht serialisiert –
+der Lock ist prozesslokal, ein echter Schreibwettlauf lässt sich damit nicht
+ausschliessen.
+
 Die Suite ist bewusst klein und prüft Nutzerabläufe statt Interna:
 Konten, Token-Rotation und externe Änderungen an der Einstellungsdatei
 (`config_tests`), Calibre-Spalten und Bibliothekszuordnung
@@ -39,7 +46,8 @@ Bestandsnormalisierung und Vergleichslogik (`planning_tests`), die
 Vorbereitung des Vergleichs samt optionalen Lesewerten (`prepare_tests`),
 den tolino-Client gegen einen lokalen HTTP-Server – Anmeldung,
 Token-Rotation und alle Schreibpfade wie Upload, Metadaten,
-Gelesen-Marken, Sammlungen, Löschen und Download (`tolino_client_tests`) –,
+Gelesen-Marken, Sammlungen, Löschen und Download samt geprüfter
+Inhaltsbytes (`tolino_client_tests`) –,
 die sync-data-Patches für Lesestatus und Tags (`sync_data_tests`), den
 Sync-Worker inklusive Löschen, Ersetzen und sofort gespeichertem
 Kontostand (`workers_tests`), die Dashboard-Aktionen
@@ -47,7 +55,8 @@ Kontostand (`workers_tests`), die Dashboard-Aktionen
 (`ui_thread_tests`) und das Vergleichsfenster mit echter Qt-Tabelle samt
 Löschmarkierung (`ui_tests`). Dazu kommen Browser-Erkennung
 (`browser_finder_tests`), der CDP-Lebenszyklus ohne echten Browser
-(`cdp_tests`), die Token-Auswahl der Browser-Anmeldung
+(`cdp_tests`, inklusive Token-Auslesen aus dem Reader-Tab), die
+Token-Auswahl der Browser-Anmeldung
 (`browser_login_tests`), die Entschlüsselung echter CryptoJS-Blöcke mit
 festen, unabhängig erzeugten Fixtures (`browser_crypto_tests`) sowie der
 gemeinsame Token-Vault mit Rotation, Keep-alive und Relogin

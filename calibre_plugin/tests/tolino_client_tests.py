@@ -10,11 +10,13 @@ import contextlib
 import json
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..sync_data import READ_TAG
 from ..tolino import TolinoClient, _download_token, sanitize_error
+from ..tolino import urlopen as REAL_URLOPEN
 from ._support import LocalHTTP, local_tolino_endpoints
 
 HARDWARE = "11111111-1111-4111-8111-111111111111"
@@ -282,6 +284,83 @@ class MetadataTests(unittest.TestCase):
         self.assertIn("keine Metadaten", str(caught.exception))
 
 
+class FakeResponse:
+    """urlopen-Antwort an der Netznaht; liefert die fertigen Bytes."""
+
+    def __init__(self, url, data):
+        self.url = url
+        self.data = data
+
+    def geturl(self):
+        return self.url
+
+    def read(self):
+        return self.data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def download_backend(content_url):
+    backend = Backend()
+    backend.download_info = {"DownloadInfo": {"contentUrl": content_url}}
+    return backend
+
+
+def credentials(request):
+    return {name.lower() for name in request.unredirected_hdrs}
+
+
+def content_opener(payload, final_url=None):
+    """urlopen-Doppel nur fuer den Inhalt; die lokale Cloud bleibt echt."""
+    seen = []
+
+    def opener(request, timeout=None, **_kwargs):
+        url = getattr(request, "full_url", str(request))
+        if "/cloud/downloadinfo" in url:
+            return REAL_URLOPEN(request, timeout=timeout)
+        seen.append(request)
+        return FakeResponse(final_url or url, payload)
+
+    return opener, seen
+
+
+class DownloadContentTests(unittest.TestCase):
+    """Der Inhalt kommt als Bytes -- Zugangsdaten nur an pageplace."""
+
+    def test_the_downloaded_bytes_are_returned(self):
+        backend = download_backend("https://cdn.pageplace.de/buch.epub")
+        opener, seen = content_opener(b"EPUB-INHALT")
+        with write_client(backend) as client, patch(
+                "calibre_plugin.tolino.urlopen", opener):
+            self.assertEqual(b"EPUB-INHALT", client.download("d1"))
+        request = seen[0]
+        self.assertEqual("https://cdn.pageplace.de/buch.epub",
+                         request.full_url)
+        self.assertIn("t_auth_token", credentials(request))
+
+    def test_a_foreign_cdn_gets_no_credentials(self):
+        backend = download_backend("https://cdn.example.test/buch.epub")
+        opener, seen = content_opener(b"PDF")
+        with write_client(backend) as client, patch(
+                "calibre_plugin.tolino.urlopen", opener):
+            self.assertEqual(b"PDF", client.download("d1"))
+        self.assertEqual(set(), credentials(seen[0]))
+
+    def test_a_redirect_to_plain_http_is_rejected(self):
+        backend = download_backend("https://cdn.pageplace.de/buch.epub")
+        opener, _seen = content_opener(
+            b"HTML", final_url="http://cdn.example.test/buch.epub")
+        with write_client(backend) as client, patch(
+                "calibre_plugin.tolino.urlopen", opener):
+            with self.assertRaises(TolinoApiError) as caught:
+                client.download("d1")
+        self.assertIn("umgeleitet", str(caught.exception))
+
+
 class ReadMarkTests(unittest.TestCase):
     """Gelesen-Marken: ein PATCH mit der aktuellen Revision, nie doppelt."""
 
@@ -292,11 +371,11 @@ class ReadMarkTests(unittest.TestCase):
         body = backend.patch_bodies[-1]
         self.assertEqual(7, body["revision"])
         self.assertEqual([read_tag_path("d1"), read_tag_path("d2")],
-                         [patch["path"] for patch in body["patches"]])
-        for patch in body["patches"]:
-            self.assertEqual("add", patch["op"])
-            self.assertEqual(READ_TAG, patch["value"]["name"])
-            self.assertEqual("system", patch["value"]["category"])
+                         [entry["path"] for entry in body["patches"]])
+        for entry in body["patches"]:
+            self.assertEqual("add", entry["op"])
+            self.assertEqual(READ_TAG, entry["value"]["name"])
+            self.assertEqual("system", entry["value"]["category"])
 
     def test_unreading_removes_only_the_mark_that_exists(self):
         backend = Backend()
@@ -311,12 +390,12 @@ class ReadMarkTests(unittest.TestCase):
             client.mark_read_many(["d1", "d2"], finished=False)
         body = backend.patch_bodies[-1]
         self.assertEqual(1, len(body["patches"]))
-        patch = body["patches"][0]
+        entry = body["patches"][0]
         self.assertEqual(("remove", read_tag_path("d1", "tag-9")),
-                         (patch["op"], patch["path"]))
+                         (entry["op"], entry["path"]))
         self.assertEqual(("system", 3),
-                         (patch["value"]["category"],
-                          patch["value"]["revision"]))
+                         (entry["value"]["category"],
+                          entry["value"]["revision"]))
 
     def test_an_already_read_book_causes_no_write(self):
         backend = Backend()

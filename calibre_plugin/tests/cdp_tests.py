@@ -5,14 +5,16 @@ Verzeichnisse; die Zustandsuebergaenge (starten, warten, besitzen,
 schliessen) laufen im Produktivcode.
 """
 import itertools
+import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from .. import cdp
+from .. import cdp, cdp_scripts
 from ..errors import TolinoAuthError
 
 PID = 4194304  # existiert nicht: os.getpgid() scheitert, keine Prozessgruppe
@@ -53,7 +55,8 @@ class LaunchCase(unittest.TestCase):
 
     def setUp(self):
         self._saved = dict(cdp._LAUNCHED)
-        cdp._LAUNCHED.update({"process": None, "port": None, "profile": ""})
+        cdp._LAUNCHED.update({"process": None, "port": None, "profile": "",
+                              "pgid": None})
         self.created = []
         self.addCleanup(self._restore)
 
@@ -103,7 +106,7 @@ class StartTests(LaunchCase):
                                side_effect=[dead, alive])
         with patches[0], patches[1], patches[2], \
                 patch("calibre_plugin.cdp._http_get_json",
-                      side_effect=[None, {"ok": 1}]):
+                      side_effect=[None, None, {"ok": 1}]):
             cdp.launch_reader_window()
         self.assertIs(alive, cdp._LAUNCHED["process"])
 
@@ -114,8 +117,8 @@ class StartTests(LaunchCase):
             with self.assertRaises(TolinoAuthError) as caught:
                 cdp.launch_reader_window()
         self.assertEqual("B01", caught.exception.code)
-        self.assertEqual({"process": None, "port": None, "profile": ""},
-                         cdp._LAUNCHED)
+        self.assertEqual({"process": None, "port": None, "profile": "",
+                          "pgid": None}, cdp._LAUNCHED)
         self.assertTrue(self.created)
         self.assertFalse(any(os.path.exists(path) for path in self.created))
 
@@ -135,6 +138,36 @@ class StartTests(LaunchCase):
         # Der laufende Prozess bleibt als eigener Besitzer vermerkt und sein
         # Profil bleibt, solange er es benutzt.
         self.assertIs(stuck, cdp._LAUNCHED["process"])
+        self.assertTrue(os.path.isdir(cdp._LAUNCHED["profile"]))
+
+    def test_a_wrapper_that_exits_without_its_browser_stops_the_start(self):
+        """Ein beendeter Flatpak-Wrapper sagt nichts ueber Chromium.
+
+        Der Gruppenfuehrer ist weg, der DevTools-Port antwortet aber noch:
+        die gemerkte Gruppen-ID muss den Port freigeben, sonst startete der
+        naechste Kandidat auf einem belegten Port und dessen Antwort wuerde
+        als eigene gelesen.
+        """
+        wrapper = FakeProcess(exits_on=("terminate",))
+        patches = self.isolate([["/flatpak-run"], ["/usr/bin/chromium"]],
+                               return_value=wrapper)
+        with patches[0], patches[1] as popen, patches[2], \
+                patch("calibre_plugin.cdp._wait_for_debug_port",
+                      return_value=False), \
+                patch("calibre_plugin.cdp._endpoint_answers",
+                      return_value=True), \
+                patch("calibre_plugin.cdp.os.killpg") as killpg:
+            with self.assertRaises(TolinoAuthError) as caught:
+                cdp.launch_reader_window()
+        self.assertIn("nicht beenden", str(caught.exception))
+        self.assertEqual(1, popen.call_count)
+        # Erst hoeflich an die GEMERKTE Gruppe (nicht mehr per getpgid), dann
+        # hart -- obwohl der Wrapper schon beendet ist.
+        self.assertEqual([(wrapper.pid, signal.SIGTERM),
+                          (wrapper.pid, signal.SIGKILL)],
+                         [call.args for call in killpg.call_args_list])
+        self.assertIs(wrapper, cdp._LAUNCHED["process"])
+        self.assertEqual(wrapper.pid, cdp._LAUNCHED["pgid"])
         self.assertTrue(os.path.isdir(cdp._LAUNCHED["profile"]))
 
 
@@ -165,8 +198,8 @@ class OwnershipTests(LaunchCase):
                               "profile": profile})
         with patch("calibre_plugin.cdp._http_get_json", return_value=None):
             self.assertTrue(cdp.close_grabber_window())
-        self.assertEqual({"process": None, "port": None, "profile": ""},
-                         cdp._LAUNCHED)
+        self.assertEqual({"process": None, "port": None, "profile": "",
+                          "pgid": None}, cdp._LAUNCHED)
         self.assertFalse(os.path.exists(profile))
         self.assertTrue(os.path.isdir(other))
 
@@ -182,6 +215,160 @@ class OwnershipTests(LaunchCase):
             self.assertFalse(cdp.close_grabber_window(timeout=0.3))
         self.assertTrue(os.path.isdir(profile))
         self.assertIs(process, cdp._LAUNCHED["process"])
+
+
+class GroupStopTests(unittest.TestCase):
+    """Das Ende des Wrappers beendet nicht automatisch die Prozessgruppe."""
+
+    def test_a_dead_wrapper_still_gets_the_saved_group_killed(self):
+        wrapper = FakeProcess()
+        signals, alive = [], {"orphan": False}
+
+        def killpg(group, sig):
+            signals.append((group, sig))
+            if sig == signal.SIGTERM:
+                wrapper.alive = False   # der Wrapper gibt auf ...
+                alive["orphan"] = True  # ... sein Browserkind haelt den Port
+            else:
+                alive["orphan"] = False
+
+        with patch("calibre_plugin.cdp.os.killpg", side_effect=killpg), \
+                patch("calibre_plugin.cdp._endpoint_answers",
+                      side_effect=lambda *args, **kwargs: alive["orphan"]):
+            self.assertTrue(cdp._stop_launched_process(
+                wrapper, timeout=1, pgid=wrapper.pid, port=5555))
+        self.assertEqual([(wrapper.pid, signal.SIGTERM),
+                          (wrapper.pid, signal.SIGKILL)], signals)
+
+    def test_an_endpoint_that_keeps_answering_is_not_reported_as_stopped(self):
+        wrapper = FakeProcess(exits_on=("terminate",))
+        with patch("calibre_plugin.cdp.os.killpg"), \
+                patch("calibre_plugin.cdp._endpoint_answers",
+                      return_value=True), \
+                patch("calibre_plugin.cdp.time.time",
+                      side_effect=itertools.count(0, 100).__next__):
+            self.assertFalse(cdp._stop_launched_process(
+                wrapper, timeout=0.2, pgid=wrapper.pid, port=5555))
+
+
+class FakeWs:
+    """WebSocket-Doppel: liefert die vorbereiteten CDP-Antworten in Folge."""
+
+    def __init__(self, messages=()):
+        self.messages = list(messages)
+        self.sent = []
+        self.closed = False
+
+    def send_json(self, obj):
+        self.sent.append(obj)
+
+    def recv_json(self, timeout=10):
+        return self.messages.pop(0) if self.messages else {"id": -1}
+
+    def close(self):
+        self.closed = True
+
+
+def value_message(message_id, value):
+    return {"id": message_id,
+            "result": {"result": {"value": value}}}
+
+
+class EvaluateTests(unittest.TestCase):
+    """Runtime.evaluate: fremde IDs, CDP-Fehler und Seitenfehler."""
+
+    def test_a_foreign_message_is_ignored_before_the_answer(self):
+        ws = FakeWs([{"id": 9, "result": {"result": {"value": "fremd"}}},
+                     value_message(1, "42")])
+        self.assertEqual({"ok": True, "value": "42", "exception": None},
+                         cdp._evaluate_message(ws, "1+1", 1, False, 1))
+
+    def test_cdp_errors_and_page_exceptions_are_no_value(self):
+        cases = (
+            ("cdp", {"id": 1, "error": {"message": "Method not found"}},
+             "Method not found"),
+            ("seite", {"id": 1, "result": {"exceptionDetails": {
+                "exception": {"description": "ReferenceError: x"}}}},
+             "ReferenceError: x"),
+            ("ohne wert", {"id": 1, "result": {"result": {}}},
+             "no value returned"),
+        )
+        for label, message, expected in cases:
+            with self.subTest(label):
+                result = cdp._evaluate_message(
+                    FakeWs([message]), "x", 1, False, 1)
+                self.assertFalse(result["ok"])
+                self.assertIsNone(result["value"])
+                self.assertIn(expected, result["exception"])
+
+    def test_only_the_own_answer_counts_until_the_timeout(self):
+        with patch("calibre_plugin.cdp.time.time",
+                   side_effect=itertools.count(0, 100).__next__):
+            result = cdp._evaluate_message(FakeWs(), "x", 1, False, 1)
+        self.assertEqual("evaluate timeout", result["exception"])
+
+    def test_the_target_connection_closes_even_on_a_page_error(self):
+        ws = FakeWs([{"id": 1, "result": {"exceptionDetails": {
+            "text": "boom"}}}])
+        with patch("calibre_plugin.cdp._open_target", return_value=ws):
+            self.assertIsNone(
+                cdp._evaluate_in_target((5555, "/devtools/page/x"), "x", 1))
+        self.assertTrue(ws.closed)
+
+    def test_a_json_object_is_returned_and_junk_is_none(self):
+        ws = FakeWs([value_message(1, json.dumps({"refresh": ["r"]}))])
+        with patch("calibre_plugin.cdp._open_target", return_value=ws):
+            self.assertEqual({"refresh": ["r"]}, cdp._evaluate_in_target(
+                (5555, "/devtools/page/x"), "x", 1))
+        for payload in ("kein json", "[1, 2]", None):
+            with self.subTest(payload):
+                ws = FakeWs([value_message(1, payload)])
+                with patch("calibre_plugin.cdp._open_target", return_value=ws):
+                    self.assertIsNone(cdp._evaluate_in_target(
+                        (5555, "/devtools/page/x"), "x", 1))
+                self.assertTrue(ws.closed)
+
+
+class IdbTokenTests(unittest.TestCase):
+    """IndexedDB: mehrere Datenbanken, Duplikate, eine kaputte Datenbank."""
+
+    def test_databases_are_merged_and_duplicates_removed(self):
+        ws = FakeWs([
+            value_message(1, json.dumps({"refresh": ["r1", "r2"],
+                                         "hardware": ["h1"]})),
+            {"id": 2, "error": {"message": "DB kaputt"}},
+            value_message(3, json.dumps({"refresh": ["r2"],
+                                         "hardware": ["h1", "h2"]})),
+        ])
+        with patch("calibre_plugin.cdp._open_target", return_value=ws):
+            merged = cdp.read_idb_tokens((5555, "/devtools/page/x"),
+                                         ["db1", "db2", "db3"])
+        self.assertEqual({"refresh": ["r1", "r2"],
+                          "hardware": ["h1", "h2"]}, merged)
+        self.assertTrue(ws.closed)
+        self.assertEqual(3, len(ws.sent))
+
+    def test_without_database_names_no_connection_is_opened(self):
+        with patch("calibre_plugin.cdp._open_target") as opened:
+            self.assertEqual({"refresh": [], "hardware": []},
+                             cdp.read_idb_tokens((5555, "/x"), ["", "  "]))
+        opened.assert_not_called()
+
+    def test_the_full_grab_merges_local_storage_and_idb(self):
+        with patch("calibre_plugin.cdp._evaluate_in_target",
+                   return_value={"refresh": ["r1"], "idb": ["db1"]}), \
+                patch("calibre_plugin.cdp.read_idb_tokens",
+                      return_value={"refresh": ["r1", "r2"],
+                                    "hardware": []}):
+            grabbed = cdp._grab_page_tokens((5555, "/x"), 5)
+        self.assertEqual({"refresh": ["r1", "r2"], "hardware": [],
+                          "idb": ["db1"]}, grabbed)
+
+    def test_a_database_name_is_embedded_as_a_json_string(self):
+        name = 'db"); alert(1); ("'
+        expression = cdp_scripts.idb_expression(name)
+        self.assertIn(json.dumps(name), expression)
+        self.assertNotIn("__DB_NAME__", expression)
 
 
 class ReaderTargetTests(unittest.TestCase):

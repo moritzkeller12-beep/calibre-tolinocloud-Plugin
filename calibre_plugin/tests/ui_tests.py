@@ -3,10 +3,15 @@
 Alle Tests laufen mit echtem PyQt6 (offscreen); Doppel gibt es nur fuer
 modale Dialoge und die Calibre-Datenbankgrenze.
 """
+import os
+import shutil
+import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
 from ..comparison import compare_inventory
+from ..run_context import RunContext
 from ._support import (CalibreDatabase, dashboard_stub, real_qt_stub,
                        ui_module_for)
 
@@ -271,6 +276,131 @@ class DestructiveSelectionTests(unittest.TestCase):
         self.assertTrue(all(not row.get("upload") and not row.get("metadata")
                             and not row.get("delete_cloud")
                             for row in dialog.rows))
+
+
+class DownloadSaveTests(unittest.TestCase):
+    """Eine Cloud-Antwort wird nur als echte EPUB-/PDF-Datei gespeichert."""
+
+    def setUp(self):
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
+        self.tmp = tempfile.mkdtemp(prefix="download-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def save(self, name, data):
+        path = os.path.join(self.tmp, name)
+        dialog = self.ui.dialogs.InventoryDialog(comparison_rows())
+        dialog._download_path = path
+        messages = []
+        with patch("calibre_plugin.ui_dialogs.info_dialog",
+                   lambda *args, **kwargs: messages.append(("info", args))), \
+                patch("calibre_plugin.ui_dialogs.error_dialog",
+                      lambda *args, **kwargs: messages.append(("error", args))):
+            dialog._download_finished(data)
+        return path, messages
+
+    def test_an_epub_is_saved_under_the_chosen_name(self):
+        path, messages = self.save("buch.epub", b"PK\x03\x04EPUB-DATEN")
+        with open(path, "rb") as handle:
+            self.assertEqual(b"PK\x03\x04EPUB-DATEN", handle.read())
+        self.assertEqual("info", messages[0][0])
+        self.assertIn("buch.epub", messages[0][1][2])
+
+    def test_a_pdf_is_saved_as_pdf_even_when_epub_was_chosen(self):
+        path, messages = self.save("buch.epub", b"%PDF-1.7")
+        self.assertFalse(os.path.exists(path))
+        with open(path[:-5] + ".pdf", "rb") as handle:
+            self.assertEqual(b"%PDF-1.7", handle.read())
+        self.assertEqual("info", messages[0][0])
+
+    def test_html_and_empty_bodies_are_not_saved(self):
+        for label, data in (("html", b"<html>Fehler</html>"),
+                            ("leer", b"")):
+            with self.subTest(label):
+                path, messages = self.save("%s.epub" % label, data)
+                self.assertFalse(os.path.exists(path))
+                self.assertEqual("error", messages[0][0])
+
+
+class ConfirmationTests(unittest.TestCase):
+    """Vor Löschen und Ersetzen nennt das Plugin die Folgen."""
+
+    def setUp(self):
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
+        self.parts = self.ui.dashboard_parts
+        self.box = self.parts.QMessageBox
+        self.box.calls = []
+
+    def ask(self, answer):
+        """Antwort des modalen Dialogs festlegen und die Aufrufe sammeln."""
+        cls = self.box
+        cls.calls = []
+        original = cls.__dict__["question"]
+
+        def question(_cls, *args):
+            cls.calls.append(("question",) + args)
+            return answer
+
+        cls.question = classmethod(question)
+        self.addCleanup(setattr, cls, "question", original)
+
+    def question_text(self, index=0):
+        return self.box.calls[index][3]
+
+    def test_the_deletion_confirmation_names_the_books(self):
+        self.ask(self.box.No)
+        self.assertFalse(self.parts.confirm_deletions(
+            None, [(UUID, "d1")], {"d1": "Der Schwarm"}))
+        text = self.question_text()
+        self.assertIn("Der Schwarm", text)
+        self.assertIn("in Calibre bleibt", text)
+
+    def test_replacing_more_than_twenty_books_names_the_rest(self):
+        def job(label):
+            return types.SimpleNamespace(label=lambda: label, old_id="d1")
+
+        self.ask(self.box.Yes)
+        jobs = [job("Buch %d" % number) for number in range(22)]
+        self.assertTrue(self.parts.confirm_replacements(None, jobs))
+        text = self.question_text()
+        self.assertIn("Lesestatus", text)
+        self.assertIn("Lesefortschritt", text)
+        self.assertIn("Sammlungen", text)
+        self.assertIn("und 2 weitere", text)
+        self.assertNotIn("Buch 20", text)
+
+    def test_no_returns_false_and_yes_returns_true(self):
+        job = types.SimpleNamespace(label=lambda: "Der Schwarm", old_id="d1")
+        for answer, expected in ((self.box.No, False),
+                                 (self.box.Yes, True)):
+            with self.subTest(answer=answer):
+                self.ask(answer)
+                self.assertEqual(
+                    expected, self.parts.confirm_replacements(None, [job]))
+
+    def test_a_cancelled_replacement_confirmation_starts_no_worker(self):
+        self.ask(self.box.No)
+
+        def job(label, old_id=None):
+            return types.SimpleNamespace(label=lambda: label, old_id=old_id)
+
+        context = RunContext.from_values(
+            {"account_name": "A", "preferred_formats": ["EPUB"]})
+        stub = dashboard_stub()
+        stub.status_text = ""
+        stub.status = types.SimpleNamespace(
+            setText=lambda text: setattr(stub, "status_text", text))
+        stub._start_sync_worker = (
+            self.ui.dashboard.SyncDashboard._start_sync_worker.__get__(stub))
+        stub._start_sync_worker(context, {
+            "jobs": [job("Der Schwarm", "d1"), job("Ohne Kopie")],
+            "removals": [], "meta_updates": [], "skipped_uploads": []}, {})
+        self.assertIn("Abgebrochen", stub.status_text)
+        # Kein Worker, kein Thread: die bestätigte Auswahl bleibt ungenutzt.
+        self.assertIsNone(stub.thread)
+        self.assertIsNone(stub.worker)
+        text = self.question_text()
+        self.assertIn("Der Schwarm", text)
+        self.assertNotIn("Ohne Kopie", text)
 
 
 if __name__ == "__main__":

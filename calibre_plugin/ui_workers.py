@@ -617,9 +617,17 @@ class PrepareWorker(QObject):
         return working, original
 
     def _load_optional(self, label, loader):
-        """Optionale Cloud-Daten laden; ein Fehler bleibt «unbekannt»."""
+        """Optionale Cloud-Daten laden; ein Fehler bleibt «unbekannt».
+
+        Eine abgelehnte Anmeldung ist kein fehlender Lesewert: der Token
+        kann dabei geloescht worden sein, der Nutzer muss sich neu anmelden.
+        Sie wird deshalb weitergeworfen und der Vergleich scheitert -- sonst
+        meldete die Vorbereitung «bereit» mit einem ungueltigen Zugang.
+        """
         try:
             return loader(), True
+        except TolinoAuthError:
+            raise
         except Exception as exc:
             log_warning("%s konnte nicht geladen werden: %s"
                         % (label, sanitize_error(
