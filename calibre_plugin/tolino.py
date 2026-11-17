@@ -519,16 +519,11 @@ class TolinoClient:
         if self._retry_http_hardware(exc, url, authenticated, retry):
             return
 
-        # Ein 403 ausserhalb des Token-Endpunkts ist meist eine Rechte- oder
-        # Quotabeschränkung. Nur der Token-Endpunkt spricht von Anmeldung;
-        # ein einzelner Upload darf deshalb nicht den ganzen Lauf beenden.
-        if exc.code == 403 and url != self.partner.get("token_url"):
-            raise TolinoApiError(
-                "tolino-Fehler (HTTP 403): %s" % self.last_error_text,
-                code="N03",
-                short="tolino meldet einen Fehler (HTTP 403).")
-
-        if exc.code in (401, 403):
+        # Nur 401 und ein 403 am Token-Endpunkt sind eine Anmeldefrage. Ein
+        # 403 anderswo ist meist eine Rechte- oder Quotabeschränkung; ein
+        # einzelner Upload darf deshalb nicht den ganzen Lauf beenden.
+        if exc.code in (401, 403) and (exc.code == 401
+                                       or url == self.partner.get("token_url")):
             if self._retry_http_waf(exc, url, retry):
                 return
             self._raise_http_auth_error(exc)

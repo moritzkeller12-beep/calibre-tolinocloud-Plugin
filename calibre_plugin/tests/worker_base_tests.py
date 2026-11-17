@@ -152,18 +152,15 @@ class SyncWorkerCollectionTests(unittest.TestCase):
         self.assertIsNotNone(calls["completed"])
         self.assertIsNone(calls["failed"])
 
-    def test_confirmed_unmark_reaches_the_calibre_column(self):
-        """Gelesen -> ungelesen muss die Spalte auf Nein setzen."""
-        calls = self._run_worker(
-            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "calibre_id": 7}}, set(),
-            read_changes=[("t1", 7, False)])
-        self.assertEqual([(7, False)], calls["worker"].read_updates)
-
-    def test_confirmed_mark_reaches_the_calibre_column(self):
-        calls = self._run_worker(
-            {}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1", "calibre_id": 7}}, set(),
-            read_changes=[("t1", 7, True)])
-        self.assertEqual([(7, True)], calls["worker"].read_updates)
+    def test_a_confirmed_read_change_reaches_the_calibre_column(self):
+        """Bestaetigt gelesen bzw. ungelesen setzt die Spalte entsprechend."""
+        for read in (True, False):
+            with self.subTest(read=read):
+                calls = self._run_worker(
+                    {}, {"11111111-1111-4111-8111-111111111111":
+                         {"tolino_id": "t1", "calibre_id": 7}}, set(),
+                    read_changes=[("t1", 7, read)])
+                self.assertEqual([(7, read)], calls["worker"].read_updates)
 
     def test_marking_and_unmarking_are_two_separate_calls(self):
         calls = self._run_worker(

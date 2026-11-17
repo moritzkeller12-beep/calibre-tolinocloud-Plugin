@@ -2240,40 +2240,29 @@ class MultiAccountReadingStateTests(unittest.TestCase):
         self.assertEqual(37, config.account_by_name("A")["state"]
                          [self.UUID]["reading"]["progress"]["percent"])
 
-    def test_read_error_does_not_block_progress_write(self):
+    def test_a_failing_column_does_not_block_the_other_write(self):
+        """Lesestatus und Fortschritt werden unabhaengig geschrieben."""
         from ..ui_dashboard import _write_reading_updates
-        refreshed = []
-        database = CalibreDatabase(
-            {"#tolino_read": {"datatype": "bool"},
-             "#tolino_progress": {"datatype": "int"}},
-            fail={"#tolino_read"})
-        dashboard = dashboard_stub(
-            gui=type("Gui", (), {"current_db": database})())
-        with patch("calibre_plugin.ui_dashboard._refresh_library_view",
-                   lambda _dashboard, book_ids: refreshed.append(set(book_ids))):
-            written = _write_reading_updates(
-                dashboard, [(1, True)], [(2, 42)], "Test")
-        self.assertEqual(1, written)
-        self.assertEqual([("#tolino_progress", {2: 42})],
-                         database.api.writes)
-        self.assertEqual([{1, 2}], refreshed)
-
-    def test_progress_error_does_not_block_read_write(self):
-        from ..ui_dashboard import _write_reading_updates
-        refreshed = []
-        database = CalibreDatabase(
-            {"#tolino_read": {"datatype": "bool"},
-             "#tolino_progress": {"datatype": "int"}},
-            fail={"#tolino_progress"})
-        dashboard = dashboard_stub(
-            gui=type("Gui", (), {"current_db": database})())
-        with patch("calibre_plugin.ui_dashboard._refresh_library_view",
-                   lambda _dashboard, book_ids: refreshed.append(set(book_ids))):
-            written = _write_reading_updates(
-                dashboard, [(1, True)], [(2, 42)], "Test")
-        self.assertEqual(1, written)
-        self.assertEqual([("#tolino_read", {1: True})], database.api.writes)
-        self.assertEqual([{1, 2}], refreshed)
+        for failing, expected in (
+                ("#tolino_read", [("#tolino_progress", {2: 42})]),
+                ("#tolino_progress", [("#tolino_read", {1: True})])):
+            with self.subTest(failing=failing):
+                refreshed = []
+                database = CalibreDatabase(
+                    {"#tolino_read": {"datatype": "bool"},
+                     "#tolino_progress": {"datatype": "int"}},
+                    fail={failing})
+                dashboard = dashboard_stub(
+                    gui=type("Gui", (), {"current_db": database})())
+                with patch(
+                        "calibre_plugin.ui_dashboard._refresh_library_view",
+                        lambda _dashboard, book_ids:
+                        refreshed.append(set(book_ids))):
+                    written = _write_reading_updates(
+                        dashboard, [(1, True)], [(2, 42)], "Test")
+                self.assertEqual(1, written)
+                self.assertEqual(expected, database.api.writes)
+                self.assertEqual([{1, 2}], refreshed)
 
 
 class ReadingUpdateEdgeCaseTests(unittest.TestCase):
@@ -2311,12 +2300,14 @@ class ReadingUpdateEdgeCaseTests(unittest.TestCase):
         self.assertEqual([], failures)
         return [column for column, _values in database.api.writes]
 
-    def test_the_account_of_the_run_gets_its_reading_state(self):
-        self.assertEqual(["#tolino_read", "#tolino_progress"],
-                         self._persist("A", "A"))
-
-    def test_a_dialog_for_another_account_gets_no_reading_state(self):
-        self.assertEqual([], self._persist("A", "B"))
+    def test_only_the_account_of_the_run_gets_its_reading_state(self):
+        """Der Dialog des Laufs schreibt; ein Dialog eines anderen Kontos nicht."""
+        for worker_name, dialog_name, expected in (
+                ("A", "A", ["#tolino_read", "#tolino_progress"]),
+                ("A", "B", [])):
+            with self.subTest(dialog=dialog_name):
+                self.assertEqual(expected,
+                                 self._persist(worker_name, dialog_name))
 
     def test_a_planned_title_wins_over_the_state_map(self):
         """Der Titel aus dem Plan gilt, auch wenn der Zustand ihn nicht kennt."""

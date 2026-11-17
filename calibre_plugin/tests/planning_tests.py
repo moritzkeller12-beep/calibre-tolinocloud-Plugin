@@ -1453,21 +1453,17 @@ class MetadataUpdatePlanTests(unittest.TestCase):
                 self.assertEqual(1, len(updates))
                 self.assertEqual("d1", updates[0][2])
 
-    def test_state_without_fingerprints_is_updated_when_selected(self):
-        """Ohne gespeicherte Fingerabdrücke ist der Cloud-Stand unbekannt --
-        wer auswählt, bekommt den Abgleich."""
+    def test_a_selected_book_is_reconciled_with_or_without_fingerprints(self):
+        """Wer auswaehlt, bekommt den Abgleich -- auch ohne gespeicherte
+        Fingerabdruecke oder wenn sie unveraendert passen."""
         book = self._book()
-        state = {"11111111-1111-4111-8111-111111111111": {"tolino_id": "d1"}}
-        updates = plan_metadata_updates({1: book}, state, [], {1})
-        self.assertEqual(1, len(updates))
-        self.assertEqual((1, "d1"), (updates[0][0], updates[0][2]))
-
-    def test_selected_metadata_update_reconciles_even_if_fingerprint_matches(self):
-        book = self._book()
-        state = self._state(book)
-        updates = plan_metadata_updates({1: book}, state, [], {1})
-        self.assertEqual(1, len(updates))
-        self.assertEqual((1, "d1"), (updates[0][0], updates[0][2]))
+        for stored in (None, self._state(book)):
+            with self.subTest(fingerprints=bool(stored)):
+                state = stored or {"11111111-1111-4111-8111-111111111111":
+                                   {"tolino_id": "d1"}}
+                updates = plan_metadata_updates({1: book}, state, [], {1})
+                self.assertEqual(1, len(updates))
+                self.assertEqual((1, "d1"), (updates[0][0], updates[0][2]))
 
     def test_comparison_detected_metadata_difference_is_not_filtered_by_fp(self):
         """Ein Upload kann die Tolino-ID und den lokalen Fingerabdruck bereits

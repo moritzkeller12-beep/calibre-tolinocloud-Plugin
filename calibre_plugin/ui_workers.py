@@ -268,11 +268,11 @@ class SyncWorker(QObject):
     def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
         """Execute only the deletions explicitly selected by the user."""
         for book_uuid, tolino_id, operation in delete_ops:
+            label = self._label(book_uuid, None,
+                                self.titles.get(str(tolino_id), ""))
             ok, deleted = self._step(
                 client, checkpoint, operation,
-                "Lösche aus tolino: %s"
-                % self._label(book_uuid, None,
-                              self.titles.get(str(tolino_id), "")),
+                "Lösche aus tolino: %s" % label,
                 _deferred(self, "_delete_or_skip", client, tolino_id),
                 done, total,
                 finish=partial(self._finish_delete, operation))
@@ -289,8 +289,7 @@ class SyncWorker(QObject):
                 self._persist_state()
             done += 1
             if deleted:
-                self.progress.emit(done, total, "Erledigt: %s" % self._label(
-                    book_uuid, None, self.titles.get(str(tolino_id), "")))
+                self.progress.emit(done, total, "Erledigt: %s" % label)
         return done
 
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,

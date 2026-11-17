@@ -292,41 +292,31 @@ class ColumnSetupButtonTests(unittest.TestCase):
         dashboard.create_columns = cls.create_columns.__get__(dashboard)
         return dashboard
 
-    def test_one_button_creates_only_its_own_column(self):
+    def test_one_button_creates_only_its_own_column_or_says_it_exists(self):
+        """Ein Klick legt genau eine Spalte an bzw. meldet die vorhandene."""
         from unittest.mock import patch
-        ui_module = self._ui()
-        calls, boxes = [], []
-        dashboard = self._dashboard(ui_module, calls)
-        database = CalibreDatabase({"#tolino_id": {"datatype": "text"}})
-        dashboard.gui = type("Gui", (), {"current_db": database})()
-        try:
-            with patch("calibre_plugin.ui_dashboard_parts.info_dialog",
-                       lambda *args, **kwargs: boxes.append(args)):
-                dashboard.create_columns("tolino_ignore")
-        finally:
-            ui_module._restore_stubs_for_tests()
-        # Springt die echte create_custom_columns an: nur diese eine Spalte.
-        self.assertEqual(["tolino_ignore"], database.created)
-        self.assertIn("#tolino_ignore", boxes[0][2])
-        self.assertEqual([], calls)
-
-    def test_an_existing_column_says_so_and_changes_nothing(self):
-        from unittest.mock import patch
-        ui_module = self._ui()
-        calls, boxes = [], []
-        dashboard = self._dashboard(ui_module, calls)
-        database = CalibreDatabase({"#tolino_read": {"datatype": "bool"}})
-        dashboard.gui = type("Gui", (), {"current_db": database})()
-        try:
-            with patch("calibre_plugin.ui_dashboard_parts.info_dialog",
-                       lambda *args, **kwargs: boxes.append(args)):
-                dashboard.create_columns("tolino_read")
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual([], database.created)
-        self.assertIn("schon vorhanden", boxes[0][2])
-        self.assertIn("#tolino_read", boxes[0][2])
-        self.assertEqual([], calls)
+        for requested, columns, created, exists in (
+                ("tolino_ignore", {"#tolino_id": {"datatype": "text"}},
+                 ["tolino_ignore"], False),
+                ("tolino_read", {"#tolino_read": {"datatype": "bool"}},
+                 [], True)):
+            with self.subTest(requested=requested):
+                ui_module = self._ui()
+                calls, boxes = [], []
+                dashboard = self._dashboard(ui_module, calls)
+                database = CalibreDatabase(columns)
+                dashboard.gui = type("Gui", (), {"current_db": database})()
+                try:
+                    with patch("calibre_plugin.ui_dashboard_parts.info_dialog",
+                               lambda *args, **kwargs: boxes.append(args)):
+                        dashboard.create_columns(requested)
+                finally:
+                    ui_module._restore_stubs_for_tests()
+                # Springt die echte create_custom_columns an: nur diese Spalte.
+                self.assertEqual(created, database.created)
+                self.assertIn("#%s" % requested, boxes[0][2])
+                self.assertEqual(exists, "schon vorhanden" in boxes[0][2])
+                self.assertEqual([], calls)
 
     def test_a_refused_creation_is_reported_instead_of_crashing(self):
         from unittest.mock import patch

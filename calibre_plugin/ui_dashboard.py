@@ -166,9 +166,8 @@ def _persist_sync_result(dialog, state, updates):
     Schreibvorgänge noch den Abschluss des Laufs verhindern.
     """
     worker = getattr(dialog, "worker", None)
-    account_name = str(
-        getattr(worker, "account_name", None)
-        or getattr(dialog, "account_name", "") or "")
+    dialog_account = str(getattr(dialog, "account_name", "") or "")
+    account_name = str(getattr(worker, "account_name", None) or dialog_account)
     columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
     failures = []
     try:
@@ -183,8 +182,7 @@ def _persist_sync_result(dialog, state, updates):
          lambda db: update_tolino_ids(
              db, updates, account_name=account_name)),
     ]
-    if account_name and account_name == str(
-            getattr(dialog, "account_name", "") or ""):
+    if account_name and account_name == dialog_account:
         writers.extend([
             ("read", "Lesestatus",
              lambda db: update_read_status(

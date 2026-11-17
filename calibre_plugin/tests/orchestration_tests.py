@@ -551,24 +551,20 @@ class NoSilentDeadEndTests(unittest.TestCase):
                  "read": ReadState(),
                  "explanation": "Noch nicht in der Cloud."}]
 
-    def test_a_selected_upload_still_closes_the_dialog(self):
-        messages = []
-        ui_module = self._ui_with_messages(messages)
-        dialog = ui_module.dialogs.InventoryDialog(self._rows(), options={})
-        self.assertEqual(1, dialog._selection_counts()["work"])
-        dialog.accept()
-        self.assertEqual([True], ui_module.common.QDialog.closed)
-        self.assertEqual([], messages)
-
-    def test_activated_automatics_may_close_without_a_selection(self):
-        messages = []
-        ui_module = self._ui_with_messages(messages)
-        dialog = ui_module.dialogs.InventoryDialog(self._rows(),
-                                           options={"automatic": 1})
-        dialog.clear_all_selection()
-        dialog.accept()
-        self.assertEqual([True], ui_module.common.QDialog.closed)
-        self.assertEqual([], messages)
+    def test_accept_closes_only_with_a_selection_or_automatics(self):
+        """Arbeit oder aktivierte Automatik schliesst ohne Rueckfrage."""
+        for automatic, work in ((0, 1), (1, 0)):
+            with self.subTest(automatic=automatic):
+                messages = []
+                ui_module = self._ui_with_messages(messages)
+                dialog = ui_module.dialogs.InventoryDialog(
+                    self._rows(), options={"automatic": automatic})
+                if automatic:
+                    dialog.clear_all_selection()
+                self.assertEqual(work, dialog._selection_counts()["work"])
+                dialog.accept()
+                self.assertEqual([True], ui_module.common.QDialog.closed)
+                self.assertEqual([], messages)
 
     # --- Dashboard: was nach dem Fenster passiert ------------------------
 
