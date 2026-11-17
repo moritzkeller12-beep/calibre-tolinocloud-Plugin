@@ -39,7 +39,10 @@ die sync-data-Patches für Lesestatus und Tags (`sync_data_tests`), den
 Sync-Worker (`workers_tests`), die
 Dashboard-Aktionen und das Vergleichsfenster mit echter Qt-Tabelle
 (`ui_tests`) sowie die Fallbacks der Browser-Anmeldung, wenn kein Zugang
-gelesen werden kann (`browser_login_tests`).
+gelesen werden kann (`browser_login_tests`), den gemeinsamen Token-Vault
+mit Rotation, Keep-alive und Relogin (`token_vault_tests`) sowie die
+Ergebnis-Sicherung und Rückmeldung nach einem Sync-Lauf
+(`dashboard_tests`).
 
 Live-Tests gegen die echte Cloud liegen nur lokal: `calibre_plugin/tests/live_tests.py`
 wird nicht im Repo geführt und ist von Git ignoriert. Datei lokal anlegen,
