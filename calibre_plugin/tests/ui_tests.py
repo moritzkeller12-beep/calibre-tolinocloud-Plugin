@@ -25,6 +25,16 @@ def comparison_rows(**kwargs):
                              [cloud], ["EPUB"], **kwargs)
 
 
+def click_cell(table, row, column):
+    """Echten Linksklick der Maus auf eine Zelle der Tabelle schicken."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    table.scrollToItem(table.item(row, column))
+    rect = table.visualRect(table.model().index(row, column))
+    QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton,
+                     pos=rect.center())
+
+
 def select_rows(table, rows):
     """Zeilen der echten Tabelle markieren (wie Strg-/Shift-Klick)."""
     from PyQt6.QtCore import QItemSelectionModel
@@ -124,6 +134,30 @@ class InventoryDialogTests(unittest.TestCase):
         dialog.set_column_for_marked_rows("read", False,
                                          "sind bereits ungelesen")
         dialog.clear_all_selection()
+        self.assertEqual([], dialog.selected_read_changes())
+        self.assertEqual(0, dialog._selection_counts()["work"])
+
+    def test_a_click_on_a_choice_cell_matches_the_menu_action(self):
+        clicked = self._dialog()
+        clicked.show()
+        click_cell(clicked.table, 0, clicked.ACTION_KEYS.index("read"))
+        self.assertEqual([("d1", 1, False, UUID)],
+                         clicked.selected_read_changes())
+        self.assertEqual(1, clicked._selection_counts()["unread"])
+
+        chosen = self._dialog()
+        select_rows(chosen.table, [0])
+        chosen.set_column_for_marked_rows("read", False,
+                                          "sind bereits ungelesen")
+        self.assertEqual(chosen.selected_read_changes(),
+                         clicked.selected_read_changes())
+
+    def test_a_second_click_takes_the_choice_back(self):
+        dialog = self._dialog()
+        dialog.show()
+        column = dialog.ACTION_KEYS.index("read")
+        click_cell(dialog.table, 0, column)
+        click_cell(dialog.table, 0, column)
         self.assertEqual([], dialog.selected_read_changes())
         self.assertEqual(0, dialog._selection_counts()["work"])
 
