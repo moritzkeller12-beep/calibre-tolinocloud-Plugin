@@ -17,11 +17,12 @@ from ..inventory import normalize_inventory_record, parse_inventory
 from ..library import normalize_formats
 from ..matching import (authors_match, is_valid_isbn, isbn_from_identifier,
                         normalize_isbn)
-from ..planning import (NOTHING_TO_DO_TEXT, metadata_update_fields,
+from ..planning import (NOTHING_TO_DO_TEXT, local_metadata, metadata_update_fields,
                         nothing_to_do_text, plan_actions, plan_collection_updates,
                         plan_counts, plan_metadata_updates, plan_sync,
                         plan_text, remember_collection,
                         series_map_from_metadata, syncable_metadata)
+from ..run_context import RunContext
 
 UUID = "11111111-1111-4111-8111-111111111111"
 
@@ -195,6 +196,88 @@ class NormalizationTests(unittest.TestCase):
                             content_fingerprint(
                                 book(format_signatures={"EPUB": "1234:9999"}),
                                 "EPUB"))
+
+
+class MetadataApi:
+    """Die lesende Calibre-Schnittstelle von `local_metadata`."""
+
+    def __init__(self, books, paths):
+        self.books = books
+        self.paths = paths
+
+    def all_book_ids(self):
+        return list(self.books)
+
+    def get_metadata(self, book_id):
+        return dict(self.books[book_id])
+
+    def has_id(self, book_id):
+        return book_id in self.books
+
+    def format_abspath(self, book_id, format_name):
+        return self.paths.get((book_id, format_name), "")
+
+
+class MetadataDatabase:
+    def __init__(self, books, paths=None):
+        self.new_api = MetadataApi(books, dict(paths or {}))
+
+
+class LocalMetadataTests(unittest.TestCase):
+    """Der Calibre-Snapshot, aus dem der Vergleich entsteht."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="metadata-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.epub = os.path.join(self.tmp, "buch.epub")
+        self.pdf = os.path.join(self.tmp, "buch.pdf")
+        for path in (self.epub, self.pdf):
+            with open(path, "wb") as handle:
+                handle.write(b"inhalt")
+        self.books = {
+            1: {"uuid": UUID, "title": "Der Schwarm",
+                "authors": ["Frank", "Schätzing"],
+                "identifiers": {"isbn": "9780306406157"},
+                "formats": "EPUB, PDF", "series": "Grenzwelten",
+                "#tolino_ignore": "ja", "#tolino_read": "nein"},
+            2: {"uuid": "keine-uuid", "title": "Ohne UUID",
+                "authors": "Autor Zwei", "isbn": 4711,
+                "formats": ["PDF"]},
+        }
+        self.paths = {(1, "EPUB"): self.epub, (1, "PDF"): self.pdf,
+                      (2, "PDF"): os.path.join(self.tmp, "fehlt.pdf")}
+
+    def metadata(self, columns=None):
+        context = RunContext.from_values(
+            {"preferred_formats": ["EPUB", "PDF"]},
+            columns={"read": True} if columns is None else columns,
+            library_scope="abcdef123456")
+        return local_metadata(MetadataDatabase(self.books, self.paths), context)
+
+    def test_the_snapshot_carries_formats_isbn_series_and_flags(self):
+        metadata = self.metadata()
+        first = metadata[1]
+        self.assertEqual("Der Schwarm", first["title"])
+        self.assertEqual("Frank, Schätzing", first["authors"])
+        # ISBN kommt aus den identifiers, wenn das Feld selbst leer ist.
+        self.assertEqual("9780306406157", first["isbn"])
+        self.assertEqual(["EPUB", "PDF"], first["formats"])
+        self.assertEqual("Grenzwelten", first["series"])
+        self.assertTrue(first["ignored"])
+        self.assertFalse(first["calibre_read"])
+        self.assertEqual({"EPUB", "PDF"}, set(first["format_signatures"]))
+        self.assertIn(":", first["format_signatures"]["EPUB"])
+
+        second = metadata[2]
+        self.assertTrue(second["uuid"].startswith("calibre-abcdef123456-"))
+        self.assertEqual("4711", second["isbn"])
+        self.assertFalse(second["ignored"])
+        # Fehlende Datei: keine Signatur, aber das Buch bleibt im Snapshot.
+        self.assertEqual({}, second["format_signatures"])
+
+    def test_the_read_column_is_only_read_when_it_is_configured(self):
+        metadata = self.metadata(columns={})
+        self.assertNotIn("calibre_read", metadata[1])
 
 
 class UploadApi:

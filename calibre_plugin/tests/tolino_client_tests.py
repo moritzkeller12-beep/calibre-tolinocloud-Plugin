@@ -125,6 +125,7 @@ class Backend:
         self.ignore_put = False
         self.hide_metadata = False
         self.deleted = []
+        self.cover_posts = []
         self.server = LocalHTTP(self.respond)
 
     def respond(self, method, path, headers, payload):
@@ -150,6 +151,9 @@ class Backend:
                 self.revision += 1
             return json_reply({"revision": self.revision,
                                "patches": self.patches})
+        if path.startswith("/bosh/rest/cover"):
+            self.cover_posts.append({"headers": headers, "body": payload})
+            return json_reply({})
         if path.startswith("/bosh/rest/deletecontent"):
             self.deleted.append(path)
             return json_reply({})
@@ -210,6 +214,27 @@ class UploadTests(unittest.TestCase):
         path = pathlib.Path(directory.name, "Buch.epub")
         path.write_bytes(b"EPUB-DATEN")
         return contextlib.nullcontext(str(path))
+
+
+class CoverTests(unittest.TestCase):
+    """Cover-Upload: Control-Block und Deliverable-ID wie vom Server erwartet."""
+
+    def test_the_cover_is_sent_with_control_block_and_deliverable(self):
+        backend = Backend()
+        data = b"\x89PNG\r\n\x1a\nCOVERDATEN"
+        with write_client(backend) as client:
+            client.upload_cover("d1", data, ".png")
+        self.assertEqual(1, len(backend.cover_posts))
+        post = backend.cover_posts[0]
+        body = post["body"]
+        self.assertIn("multipart/form-data; boundary=",
+                      post["headers"]["content-type"])
+        self.assertIn(b'name="deliverableId"', body)
+        self.assertIn(b"d1", body)
+        self.assertIn(b'name="control"', body)
+        self.assertIn(b'"filesize":%d' % len(data), body)
+        self.assertIn(b'filename="cover.png"', body)
+        self.assertIn(data, body)
 
 
 class MetadataTests(unittest.TestCase):
