@@ -29,6 +29,13 @@ Die Dialogtests laufen mit echtem PyQt6 im Offscreen-Modus
 (`QT_QPA_PLATFORM=offscreen`); ohne PyQt6 werden sie übersprungen.
 Testabhängigkeiten: `pycryptodome`, `PyQt6`.
 
+Die Suite ist bewusst klein und prüft Nutzerabläufe statt Interna:
+Konten und Token-Rotation (`config_tests`), Calibre-Spalten und
+Bibliothekszuordnung (`library_tests`), Planung und Bestandsabgleich
+(`planning_tests`), den tolino-Client gegen einen lokalen HTTP-Server
+(`tolino_client_tests`), den Sync-Worker (`workers_tests`) und die
+Dashboard-Aktionen (`ui_tests`).
+
 Live-Tests gegen die echte Cloud liegen nur lokal: `calibre_plugin/tests/live_tests.py`
 wird nicht im Repo geführt und ist von Git ignoriert. Datei lokal anlegen,
 `refresh_token` und `hardware_id` in der Umgebung setzen und `python3 -m

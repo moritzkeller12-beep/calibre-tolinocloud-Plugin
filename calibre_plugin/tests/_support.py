@@ -1,62 +1,17 @@
-"""Gemeinsame Basis der aufgeteilten Testmodule.
+"""Gemeinsame Basis der Testmodule.
 
-Enthaelt nur, was mehrere Module brauchen: die Chromium-/Close-Stubs fuer
-die ganze Suite, den Quelltext der Oberflaechenmodule, den UI-Loader mit
-Qt-/Calibre-Stubs und kleine Helfer.
-Die Testklassen selbst liegen thematisch in ``tests/*_tests.py``;
-``calibre_plugin/test_sync.py`` sammelt sie wieder ein.
+Enthaelt nur, was die Suite wirklich braucht: der UI-Loader mit Qt-/Calibre-
+Stubs, ein echtes PyQt6-Offscreen-Fenster, ein Loopback-HTTP-Server, die
+Calibre-Datenbankgrenze und das Dashboard-Doppel.
 """
 import contextlib
-import glob
 import importlib
 import os
-import shutil
 import sys
-import tempfile
 import threading
 import types
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
-
-import calibre_plugin.cdp as cdp_module
-from calibre_plugin.comparison import compare_inventory as _compare_inventory
-from calibre_plugin.inventory import normalize_inventory_record, parse_inventory
-from calibre_plugin.library import TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
-
-# setUpModule() stubs close_grabber_window; real close tests keep this.
-_REAL_CLOSE_WINDOW = cdp_module.close_grabber_window
-
-
-def parsed_inventory(value):
-    """Return canonical inventory records from a raw fixture or record list.
-
-    Ein bereits normalisierter Datensatz wird unverändert übernommen:
-    Produktivcode normalisiert genau einmal.
-    """
-    if isinstance(value, list):
-        return [item if "tolino_id" in item
-                else normalize_inventory_record(item)
-                for item in value if isinstance(item, dict)]
-    records, problems, valid_envelope = parse_inventory(value)
-    if not valid_envelope:
-        raise ValueError("Invalid inventory fixture: %s"
-                         % "; ".join(problems))
-    return records
-
-
-def compare_inventory(metadata, state, inventory, preferred_formats=(),
-                      read_ids=(), read_column=False, progress_by_id=None):
-    """Comparison test helper: normalize raw Tolino fixtures at the boundary."""
-    return _compare_inventory(
-        metadata, state, parsed_inventory(inventory), preferred_formats,
-        read_ids, read_column, progress_by_id=progress_by_id)
-
-
-def _read_ids(dialog, finished):
-    """tolino-IDs der gewählten Lesestatus-Änderungen (True = gelesen)."""
-    return [tolino_id for tolino_id, _book, state, _uuid
-            in dialog.selected_read_changes() if state is finished]
 
 
 class FakeSignal:
@@ -80,20 +35,12 @@ _WORKER_FIELDS = ("thread", "worker", "prepare_thread", "prepare_worker",
                   "login_worker")
 
 
-class _Button:
-    """Steht für einen Qt-Knopf; die Aufrufe selbst werden nicht geprüft."""
-
-    def setDefault(self, _value):
-        pass
-
-    def setFocus(self):
-        pass
-
-
 # Felder, die der Produktivcode ohne Wächter liest: das Double ist vollständig.
 _DASHBOARD_FIELDS = {"account_name": "", "account_names": [],
                      "_hardware_edited": False, "_partner_chosen": False,
-                     "login_button": None, "gui": None, "primary": _Button()}
+                     "login_button": None, "gui": None,
+                     "primary": types.SimpleNamespace(
+                         setDefault=lambda *_a: None, setFocus=lambda: None)}
 
 
 def dashboard_stub(**attrs):
@@ -104,136 +51,7 @@ def dashboard_stub(**attrs):
 
 
 # Felder, die der Produktivcode als Widgets anspricht.
-_WIDGET_FIELDS = ("account_select", "account_quick", "partner", "hardware",
-                  "refresh", "formats", "account_quick_label", "status",
-                  "progress", "progress_label", "primary", "covers",
-                  "deletions", "tolino_column")
-
-
-class ComboStub:
-    """Minimaler Qt-Nachbau für Kombobox, Eingabe und Label."""
-
-    def __init__(self, *_args, **_kwargs):
-        self.items = []
-        self.current_index = 0
-        self.visible = True
-        self.text_value = ""
-
-    def blockSignals(self, value):
-        self.blocked = value
-
-    def clear(self):
-        self.items = []
-
-    def addItem(self, text, data=None):
-        self.items.append((text, data))
-
-    def setCurrentIndex(self, index):
-        self.current_index = index
-
-    def currentData(self):
-        return self.itemData(self.current_index)
-
-    def findData(self, data):
-        return next((index for index, (_text, item) in enumerate(self.items)
-                     if item == data), -1)
-
-    def itemData(self, index):
-        if 0 <= index < len(self.items):
-            return self.items[index][1]
-        return None
-
-    def setVisible(self, value):
-        self.visible = value
-
-    def setText(self, text):
-        self.text_value = text
-
-    def text(self):
-        return self.text_value
-
-    def setToolTip(self, text):
-        self.tooltip = text
-
-    def setEnabled(self, value):
-        self.enabled = value
-
-    def setChecked(self, value):
-        self.checked = bool(value)
-
-    def isChecked(self):
-        return getattr(self, "checked", False)
-
-    def setRange(self, *_args):
-        pass
-
-    def setValue(self, _value):
-        pass
-
-
-def dashboard_with_widgets(widget_factory):
-    """Dashboard-Stub, dessen Widget-Felder der Qt-Nachbau besetzt."""
-    dashboard = dashboard_stub()
-    for name in _WIDGET_FIELDS:
-        setattr(dashboard, name, widget_factory())
-    return dashboard
-
-
 _ACCOUNT_PATCH = None
-
-
-def start_account_stub():
-    """Jeder Test sieht ein gespeichertes Konto (Vault-Stub)."""
-    global _ACCOUNT_PATCH
-    start_cdp_stubs()
-    _ACCOUNT_PATCH = patch(
-        "calibre_plugin.token_vault.account_summary",
-        lambda _name: {"refresh_token": "tok", "hardware_id": "hw"})
-    _ACCOUNT_PATCH.start()
-
-
-def stop_account_stub():
-    global _ACCOUNT_PATCH
-    if _ACCOUNT_PATCH is not None:
-        _ACCOUNT_PATCH.stop()
-        _ACCOUNT_PATCH = None
-    stop_cdp_stubs()
-
-
-class _ReadingDb:
-    """Minimale Calibre-DB: UUID -> aktuelle Buchnummer plus Lesespalten."""
-
-    def __init__(self, books, read=None, progress=None):
-        self.books = dict(books)
-        self.field_metadata = {
-            TOLINO_READ_COLUMN: {"datatype": "bool"},
-            TOLINO_PROGRESS_COLUMN: {"datatype": "int"},
-        }
-        self.values = {
-            TOLINO_READ_COLUMN: dict(read or {}),
-            TOLINO_PROGRESS_COLUMN: dict(progress or {}),
-        }
-        self.writes = []
-        self.new_api = self
-
-    def all_book_ids(self):
-        return list(self.books)
-
-    def all_field_for(self, _field, book_ids):
-        return {book_id: self.books[book_id] for book_id in book_ids}
-
-    def get_metadata(self, book_id):
-        return {"uuid": self.books[book_id]}
-
-    def has_id(self, book_id):
-        return book_id in self.books
-
-    def field_for(self, column, book_id):
-        return self.values.get(column, {}).get(book_id)
-
-    def set_field(self, column, values):
-        self.values.setdefault(column, {}).update(values)
-        self.writes.append((column, dict(values)))
 
 
 class FakeTableItem:
@@ -448,45 +266,6 @@ def ui_module_for(test_case, qt_stub=None):
 # talks to a DevTools endpoint on 127.0.0.1:9223 and must never close
 # a developer's open grabber window while the suite runs. Tests that
 # care about the close patch the name again with their own mock.
-_PICK_CHROMIUM_PATCH = None
-_CLOSE_WINDOW_PATCH = None
-_GRAB_PROFILE_SNAPSHOT = None
-
-
-def start_cdp_stubs():
-    """Browser-Start und echtes Fenster-Schliessen fuer die Suite stilllegen."""
-    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH, _GRAB_PROFILE_SNAPSHOT
-    _GRAB_PROFILE_SNAPSHOT = set(glob.glob(os.path.join(
-        tempfile.gettempdir(), "tolino-grab-*")))
-    if _PICK_CHROMIUM_PATCH is None:
-        _PICK_CHROMIUM_PATCH = patch(
-            "calibre_plugin.browser_finder.find_browsers",
-            return_value=([], ""))
-        _PICK_CHROMIUM_PATCH.start()
-    if _CLOSE_WINDOW_PATCH is None:
-        _CLOSE_WINDOW_PATCH = patch("calibre_plugin.cdp.close_grabber_window",
-                                    return_value=False)
-        _CLOSE_WINDOW_PATCH.start()
-
-
-def stop_cdp_stubs():
-    """Die Stubs wieder entfernen (auch nach einem Abbruch)."""
-    global _PICK_CHROMIUM_PATCH, _CLOSE_WINDOW_PATCH, _GRAB_PROFILE_SNAPSHOT
-    # Der gestubbte Browser schliesst nie, also raeumt auch niemand sein
-    # Profil weg. Nur die in DIESEM Lauf entstandenen Verzeichnisse loeschen.
-    for path in glob.glob(os.path.join(tempfile.gettempdir(),
-                                       "tolino-grab-*")):
-        if path not in (_GRAB_PROFILE_SNAPSHOT or set()):
-            shutil.rmtree(path, ignore_errors=True)
-    _GRAB_PROFILE_SNAPSHOT = None
-    if _PICK_CHROMIUM_PATCH is not None:
-        _PICK_CHROMIUM_PATCH.stop()
-        _PICK_CHROMIUM_PATCH = None
-    if _CLOSE_WINDOW_PATCH is not None:
-        _CLOSE_WINDOW_PATCH.stop()
-        _CLOSE_WINDOW_PATCH = None
-
-
 # --- Echte Qt-Oberflaeche fuer die Dialogtests -------------------------
 
 _REAL_QT_APP = None
@@ -593,39 +372,6 @@ class RecordingFileDialog:
         return "", ""
 
 
-def cell_text(table, row, column):
-    """Text einer Tabellenzelle; eine leere Zelle hat kein Item."""
-    item = table.item(row, column)
-    return item.text() if item is not None else ""
-
-
-def item_checked(item):
-    """Ob ein Tabellenelement angehakt ist (echtes Qt: checkState)."""
-    if item is None:
-        return False
-    from PyQt6.QtCore import Qt
-    return item.checkState() == Qt.CheckState.Checked
-
-
-def set_checked(item, value):
-    """Tabellenelement anhaken oder abwaehlen (echtes Qt: checkState)."""
-    from PyQt6.QtCore import Qt
-    item.setCheckState(Qt.CheckState.Checked if value
-                       else Qt.CheckState.Unchecked)
-
-
-def select_rows(table, rows):
-    """Zeilen einer echten QTableWidget markieren (ersetzt die Auswahl)."""
-    from PyQt6.QtCore import QItemSelectionModel
-    model = table.selectionModel()
-    model.clearSelection()
-    flags = (QItemSelectionModel.SelectionFlag.Select
-             | QItemSelectionModel.SelectionFlag.Rows)
-    for row in rows:
-        model.select(table.model().index(row, 0), flags)
-    return model
-
-
 def real_qt_stub():
     """``qt.core``-Ersatz aus echtem PyQt6 (offscreen).
 
@@ -679,13 +425,6 @@ def real_qt_stub():
 
 
 # --- Wiederverwendete GUI-Test-Doubles ---------------------------------
-
-
-class LogRecorder(list):
-    """Echter Ersatz fuer die Log-Naht: sammelt die geschriebenen Zeilen."""
-
-    def __call__(self, message):
-        self.append(str(message))
 
 
 class LocalHTTP:
@@ -845,14 +584,3 @@ class CalibreDatabase:
         return len(self.created)
 
 
-def jwt_token(iat=None, iss="https://www.thalia.de/auth/oauth2/token"):
-    """Kleines Refresh-JWT mit ``iss`` -- zum Testen der Shop-Ableitung."""
-    import base64
-    import json
-    import time as _time
-
-    payload = {"iat": int(_time.time() if iat is None else iat),
-               "typ": "Refresh", "iss": iss}
-    head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
-    body = base64.urlsafe_b64encode(json.dumps(payload).encode())
-    return "%s.%s.sig" % (head.decode().rstrip("="), body.decode().rstrip("="))
