@@ -24,7 +24,6 @@ class FakeClient:
     """Antwortet wie der tolino-Client, ohne Netz."""
 
     access = "acc"
-    hardware = "hw"
 
     def __init__(self, fail_paths=(), upload_results=(), delete_fail=(),
                  inventory_rows=(), inventory_error=None, read_error=None,
@@ -56,12 +55,6 @@ class FakeClient:
         if self.upload_results:
             return self.upload_results.pop(0)
         return "neu-%d" % len(self.uploads)
-
-    def read_ids(self):
-        return set()
-
-    def progress_by_id(self):
-        return {}
 
     def inventory(self):
         self.inventory_calls += 1
@@ -215,6 +208,21 @@ class StatePersistenceTests(WorkerCase):
         self.assertEqual("neu-1", worker.state[UUID]["tolino_id"])
         self.assertIn("Zwischenstand", str(emitted.get("failed")))
         self.assertNotIn("completed", emitted)
+
+    def test_a_cancelled_run_signals_once_even_when_saving_fails(self):
+        worker = self.ui.workers.SyncWorker(
+            self.context, [self.job(1, UUID, "/erst.epub"),
+                           self.job(2, OTHER, "/zweit.epub")], [], state={})
+        events = []
+        worker.completed.connect(lambda *args: events.append("completed"))
+        worker.failed.connect(lambda *args: events.append("failed"))
+        client = FakeClient(upload_results=["neu-1"],
+                            on_upload=worker.cancel)
+        self.break_settings()
+        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
+                          return_value=client):
+            worker.run()
+        self.assertEqual(["failed"], events)
 
 
 class ReadingAndMetadataTests(WorkerCase):
@@ -404,6 +412,7 @@ class FailureTests(WorkerCase):
         self.assertEqual([(1, "neu-1")], worker.updates)
         self.assertEqual("not_started", worker.operations[1]["status"])
         self.assertIn("completed", emitted)
+        self.assertNotIn("failed", emitted)
 
     def test_a_failed_read_change_is_not_reported_or_stored_as_done(self):
         state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
@@ -455,45 +464,6 @@ class PersistenceTests(WorkerCase):
         self.assertTrue(config.remove_account("A"))
         self.run_worker(FakeClient(),
                         jobs=[self.job(1, UUID, "/buch.epub")])
-        self.assertEqual({}, config.account_by_name("A"))
-
-
-class PrepareTests(WorkerCase):
-    """Die Vorbereitung meldet nur «bereit», wenn der Stand gesichert ist."""
-
-    metadata = {1: {"uuid": UUID, "title": "Titel", "authors": "Autor",
-                    "isbn": "", "formats": ["EPUB"]}}
-
-    def prepare(self, client):
-        worker = self.ui.workers.PrepareWorker(self.context, self.metadata)
-        emitted = {}
-        worker.ready.connect(
-            lambda payload: emitted.setdefault("ready", payload))
-        worker.failed.connect(
-            lambda message: emitted.setdefault("failed", message))
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
-        return emitted
-
-    def client(self):
-        return FakeClient(inventory_rows=[
-            {"tolino_id": "d1", "title": "Titel", "authors": "Autor",
-             "isbn": ""}])
-
-    def test_an_unsaved_comparison_is_not_reported_as_ready(self):
-        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
-        self.addCleanup(shutil.rmtree, broken, True)
-        config.PREFERENCES.file_path = broken
-        emitted = self.prepare(self.client())
-        self.assertNotIn("ready", emitted)
-        self.assertIn("gespeichert", str(emitted.get("failed")))
-
-    def test_a_removed_account_still_reports_ready(self):
-        config.save_account("B", {"refresh_token": "tok-B"})
-        self.assertTrue(config.remove_account("A"))
-        emitted = self.prepare(self.client())
-        self.assertIn("ready", emitted)
         self.assertEqual({}, config.account_by_name("A"))
 
 

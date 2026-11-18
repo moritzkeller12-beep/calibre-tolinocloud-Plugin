@@ -7,7 +7,8 @@ from qt.core import QObject, pyqtSignal
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED)
 from .token_vault import TOKEN_VAULT
-from .config import account_by_name, account_secrets, load_state, save_account
+from .config import (account_by_name, account_secrets, load_state,
+                     save_state)
 from .planning import (local_metadata, plan_collection_updates,
                        remember_collection)
 from .comparison import (compare_inventory, content_fingerprint,
@@ -60,11 +61,11 @@ class SyncWorker(QObject):
         self.cancelled = False
         # Cloud-Bestand für die Löschprüfung: einmal je Lauf gelesen.
         self._cloud_ids = None
-        # Der Worker ändert und speichert eine private Zustandskopie.
-        self.state = copy.deepcopy(state) if isinstance(state, dict) else {}
-        # Nur diese Einträge hat der Lauf geändert; sie überschreiben beim
-        # Speichern den inzwischen fremd geänderten Kontostand.
-        self._dirty = set()
+        # Der Worker ändert eine private Zustandskopie; `_state_base` ist der
+        # Ausgangsstand, gegen den nur Änderungen gespeichert werden.
+        snapshot = state if isinstance(state, dict) else {}
+        self.state = copy.deepcopy(snapshot)
+        self._state_base = copy.deepcopy(snapshot)
         self.updates = []
         # (Calibre-Nummer, gelesen?) je bestätigter Cloud-Änderung;
         # ``None`` leert die Spalte für eine neue Kopie.
@@ -167,36 +168,16 @@ class SyncWorker(QObject):
     def _persist_state(self):
         """Den Zustand des Kontos sofort sichern.
 
-        Nach einem Upload, der eine alte Kopie ersetzt, ist die Tolino-ID
-        nicht mehr rueckgaengig zu machen; deshalb schreibt der Worker den
-        vollen Konto-Zustand, statt ein separates Journal zu fuehren.
-        Uebernommen werden nur die Eintraege dieses Laufs: ein zweiter Lauf
-        kann inzwischen eigene Zuordnungen gespeichert haben, die eine alte
-        Zustandskopie sonst wieder ueberschriebe.
-        `save_account()` meldet einen unlesbaren Speicher mit ``False`` statt
-        einer Ausnahme: ohne gesicherten Zustand darf der Lauf nicht
-        weitergehen, sonst wuerde die ersetzte Kopie geloescht, obwohl die
-        neue ID nirgends steht.
+        Nach jedem Upload ist die Tolino-ID nicht mehr rueckgaengig zu
+        machen; ohne gesicherten Zustand darf der Lauf nicht weitergehen,
+        sonst wuerde die ersetzte Kopie geloescht, obwohl die neue ID
+        nirgends steht.
         """
         if not self.account_name:
             return
-        current = account_by_name(self.account_name).get("state")
-        if isinstance(current, dict) and current != self.state:
-            merged = dict(current)
-            for key in self._dirty:
-                if key in self.state:
-                    merged[key] = self.state[key]
-                else:
-                    merged.pop(key, None)
-            # Eintraege, die nur diese Kopie kennt, bleiben erhalten.
-            for key, entry in self.state.items():
-                merged.setdefault(key, entry)
-            # In place: der Aufrufer haelt dieselbe Zustandskopie.
-            self.state.clear()
-            self.state.update(merged)
         try:
-            stored = save_account(self.account_name, {"state": self.state},
-                                  create=False)
+            stored = save_state(self.account_name, self.state,
+                                self._state_base)
             detail = ""
         except Exception as exc:
             stored, detail = False, sanitize_error(
@@ -210,9 +191,6 @@ class SyncWorker(QObject):
                        "Cloud-Änderungen bleiben bestehen; bitte den Bestand "
                        "vor einem erneuten Lauf prüfen."),
                 detail=detail or "Einstellungen konnten nicht geschrieben werden.")
-        # Gesichert: der naechste Schreibvorgang muss diese Eintraege nicht
-        # erneut uebernehmen.
-        self._dirty.clear()
 
     def _copy_is_gone(self, client, deliverable_id):
         """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten.
@@ -324,7 +302,6 @@ class SyncWorker(QObject):
                 if isinstance(entry, dict) and entry.get("calibre_id") is not None:
                     self.updates.append((entry.get("calibre_id"), ""))
                 state.pop(book_uuid, None)
-                self._dirty.add(book_uuid)
                 self._persist_state()
             done += 1
             if deleted:
@@ -403,7 +380,6 @@ class SyncWorker(QObject):
         if reading.get("read") is bool(finished):
             return False
         reading["read"] = bool(finished)
-        self._dirty.add(key)
         return True
 
     def _load_collection_pairs(self, client, collection_ops, done, total):
@@ -451,7 +427,6 @@ class SyncWorker(QObject):
             if (tolino_id, series) in known:
                 checkpoint()  # Skip-Zweig läuft nicht durch _step().
                 remember_collection(self.state, book_uuid, series)
-                self._dirty.add(book_uuid)
                 self._finish_operation(operation, OP_SKIPPED,
                                        reason="schon in der Cloud")
                 changed = True
@@ -473,7 +448,6 @@ class SyncWorker(QObject):
             revision = new_revision
             known.add((tolino_id, series))
             remember_collection(self.state, book_uuid, series)
-            self._dirty.add(book_uuid)
             changed = True
             done += 1
         if changed:
@@ -500,7 +474,6 @@ class SyncWorker(QObject):
             metadata = self.metadata_by_uuid.get(record.book_uuid)
             if isinstance(entry, dict) and metadata:
                 entry["meta_verified_fp"] = metadata_fingerprint(metadata)
-                self._dirty.add(record.book_uuid)
             self.updates.append((record.book_id, record.tolino_id))
             changed = True
             done += 1
@@ -510,17 +483,7 @@ class SyncWorker(QObject):
         return done
 
     def _run_uploads(self, client, operations, checkpoint, done, total):
-        """Uploads ausfuehren; einmal je Phase sichern statt je Buch."""
-        try:
-            return self._upload_all(client, operations, checkpoint, done,
-                                    total)
-        finally:
-            # Auch ein Abbruch oder Fehler nach einem Upload darf die neue
-            # ID nicht nur im Speicher lassen.
-            if self._dirty:
-                self._persist_state()
-
-    def _upload_all(self, client, operations, checkpoint, done, total):
+        """Upload selected books and preserve each successful partial result."""
         for job, operation in operations:
             ok, new_id = self._step(
                 client, checkpoint, operation,
@@ -538,7 +501,6 @@ class SyncWorker(QObject):
             entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
             entry.pop("collections", None)
             self.state[job.book_uuid] = entry
-            self._dirty.add(job.book_uuid)
             metadata = self.metadata_by_uuid.get(job.book_uuid)
             if metadata:
                 entry["content_fp"] = content_fingerprint(
@@ -550,12 +512,10 @@ class SyncWorker(QObject):
             # der ersetzten Kopie; beide Calibre-Spalten werden geleert.
             self.read_updates.append((job.book_id, None))
             self.progress_updates.append((job.book_id, None))
-            # Nur ein Ersetzen loescht danach die alte Kopie: erst dann muss
-            # die neue ID im Konto stehen. Sonst genuegt ein Schreibvorgang
-            # am Ende der Phase.
+            # Der Upload ist nicht rueckgaengig zu machen: die neue ID muss
+            # sofort im Konto stehen, nicht erst am Ende der Phase.
+            self._persist_state()
             replaced = bool(job.old_id) and str(job.old_id) != str(new_id)
-            if replaced:
-                self._persist_state()
             if job.cover:
                 try:
                     client.upload_cover(new_id, job.cover,
@@ -583,13 +543,10 @@ class SyncWorker(QObject):
             done = 0
 
             def checkpoint():
-                if not self.cancelled:
-                    return
-                # Alle geplanten Operationen, die noch nicht gestartet sind,
-                # bleiben «nicht begonnen» -- der Bericht weist sie aus.
-                self._refresh_counts()
-                self.completed.emit(state, self.updates)
-                raise _SyncCancelled()
+                # Abbruch nur intern signalisieren: genau EIN terminales
+                # Signal sendet `run()`, nachdem der Zustand gesichert ist.
+                if self.cancelled:
+                    raise _SyncCancelled()
 
             done = self._run_metadata_updates(
                 client, meta_ops, checkpoint, done, total)
@@ -606,7 +563,9 @@ class SyncWorker(QObject):
             self._refresh_counts()
             self.completed.emit(state, self.updates)
         except _SyncCancelled:
-            return
+            # Nicht erreichte Operationen bleiben «nicht begonnen».
+            self._refresh_counts()
+            self.completed.emit(state, self.updates)
         except Exception as exc:
             # Alle nicht erreichten Operationen bleiben ausdruecklich
             # "not_started" -- der Bericht unterscheidet sie von Fehlern.
@@ -780,8 +739,8 @@ class PrepareWorker(QObject):
                 # und bleibt damit ein erlaubter Sonderfall. Ein echter
                 # Schreibfehler darf dagegen nicht als «bereit» gelten.
                 try:
-                    stored = save_account(self.account_name,
-                                          {"state": state}, create=False)
+                    stored = save_state(self.account_name, state,
+                                        original_state)
                 except Exception:
                     stored = False
                 if not stored and account_by_name(self.account_name):

@@ -74,8 +74,8 @@ def active_tags(patches, category, name=None):
 def read_tag_patches(patches):
     """Aktive Gelesen-Marken je (Buch, Kategorie) in beiden Schreibweisen.
 
-    Ein Buch kann beide Marken gleichzeitig tragen; `active_read_tags`
-    reduziert sie auf eine, dieses Mapping haelt beide fuer das Entfernen.
+    Ein Buch kann beide Marken gleichzeitig tragen; dieses Mapping haelt
+    beide fuer das Entfernen.
     """
     return {(book_id, category): item
             for category in READ_TAG_CATEGORIES
@@ -83,16 +83,9 @@ def read_tag_patches(patches):
             in active_tags(patches, category, READ_TAG).items()}
 
 
-def active_read_tags(patches):
-    """Eine aktive Gelesen-Marke je Buch (erste gefundene Schreibweise)."""
-    active = {}
-    for (book_id, _category), item in read_tag_patches(patches).items():
-        active.setdefault((book_id, READ_TAG), item)
-    return active
-
-
 def read_ids(patches):
-    return {book_id for book_id, _name in active_read_tags(patches)}
+    """Buecher mit aktiver Gelesen-Marke -- in beiden Schreibweisen."""
+    return {book_id for book_id, _category in read_tag_patches(patches)}
 
 
 def bookmark_path_parts(path):

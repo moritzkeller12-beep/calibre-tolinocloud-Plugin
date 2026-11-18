@@ -12,12 +12,14 @@ import uuid
 from unittest.mock import patch
 
 from .. import config
+from ..comparison import compare_inventory
 from ..library import TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
 from ..run_context import RunContext
 from ._support import (CalibreDatabase, dashboard_stub, real_qt_stub,
                        ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
+OTHER = "22222222-2222-4222-8222-222222222222"
 
 
 class OrchestrationCase(unittest.TestCase):
@@ -75,27 +77,13 @@ def full_database(fail=()):
 
 
 class PersistTests(OrchestrationCase):
-    """Gespeichert wird unter dem Konto des Laufs, Spalten nur sichtbar."""
-
-    def test_the_state_is_saved_under_the_account_of_the_run(self):
-        config.save_account("A", {"refresh_token": "tok-A",
-                                  "state": {"alt": {}}})
-        config.save_account("B", {"refresh_token": "tok-B"})
-        worker = self.worker(account="B")
-        dashboard = self.dashboard(worker, full_database())
-        failures = self.ui.sync_results.persist_sync_result(
-            dashboard, {UUID: {"tolino_id": "d1"}}, worker.updates)
-        self.assertEqual([], failures)
-        self.assertEqual({UUID: {"tolino_id": "d1"}},
-                         config.account_by_name("B")["state"])
-        self.assertEqual({"alt": {}}, config.account_by_name("A")["state"])
+    """Calibre-Spalten schreiben nur unter dem Konto des Laufs."""
 
     def test_reading_columns_only_for_the_displayed_account(self):
         worker = self.worker(account="B")
         database = full_database()
         failures = self.ui.sync_results.persist_sync_result(
-            self.dashboard(worker, database, account="A"),
-            {UUID: {"tolino_id": "d1"}}, worker.updates)
+            self.dashboard(worker, database, account="A"), worker.updates)
         self.assertEqual([], failures)
         self.assertEqual([TOLINO_COLUMN],
                          [column for column, _values in database.api.writes])
@@ -103,29 +91,24 @@ class PersistTests(OrchestrationCase):
         database = full_database()
         worker = self.worker(account="A")
         self.ui.sync_results.persist_sync_result(
-            self.dashboard(worker, database), {UUID: {"tolino_id": "d1"}},
-            worker.updates)
+            self.dashboard(worker, database), worker.updates)
         self.assertEqual([TOLINO_COLUMN, TOLINO_READ_COLUMN,
                           TOLINO_PROGRESS_COLUMN],
                          [column for column, _values in database.api.writes])
 
-    def test_a_failing_column_is_named_but_the_state_is_saved(self):
-        # Ein gelaufenes Konto existiert; `save_account` legt keines neu an.
-        config.save_account("A", {"refresh_token": "tok-A"})
+    def test_a_failing_column_is_named(self):
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
         failures = self.ui.sync_results.persist_sync_result(
-            dashboard, {UUID: {"tolino_id": "d1"}}, worker.updates)
+            dashboard, worker.updates)
         self.assertEqual(["tolino-IDs"], failures)
-        self.assertEqual({UUID: {"tolino_id": "d1"}},
-                         config.account_by_name("A")["state"])
 
-    def test_the_cleanup_callback_runs_even_when_saving_fails(self):
+    def test_the_cleanup_callback_runs_even_when_a_column_fails(self):
         """Geprueft wird `finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
         outcome, failures = self.ui.sync_results.finish_sync(
-            dashboard, {UUID: {"tolino_id": "d1"}}, worker.updates)
+            dashboard, worker.updates)
         self.assertEqual({"uploaded": 1}, outcome)
         self.assertEqual(["tolino-IDs"], failures)
         self.assertTrue(dashboard.finished)
@@ -134,30 +117,51 @@ class PersistTests(OrchestrationCase):
         worker = self.worker()
         database = CalibreDatabase({TOLINO_COLUMN: {"datatype": "text"}})
         failures = self.ui.sync_results.persist_sync_result(
-            self.dashboard(worker, database), {}, worker.updates)
+            self.dashboard(worker, database), worker.updates)
         self.assertEqual([], failures)
         self.assertEqual([TOLINO_COLUMN],
                          [column for column, _values in database.api.writes])
 
 
 class MirrorTests(OrchestrationCase):
-    """Unbekannte Cloud-Werte leeren keine vorhandene Calibre-Spalte."""
+    """Kontowechsel zeigt genau ein Konto; unklare Werte leeren nichts."""
 
-    def test_an_account_without_progress_keeps_the_column(self):
-        other = "22222222-2222-4222-8222-222222222222"
-        config.save_account("A", {"refresh_token": "tok-A",
-                                  "state": {UUID: {"tolino_id": "d1"}}})
+    def reading_database(self):
         database = CalibreDatabase(
             {TOLINO_READ_COLUMN: {"datatype": "bool"},
              TOLINO_PROGRESS_COLUMN: {"datatype": "int"}}, books=[1, 2])
         database.api.values[("uuid", 1)] = UUID
-        database.api.values[("uuid", 2)] = other
-        database.api.values[(TOLINO_PROGRESS_COLUMN, 2)] = 42
+        database.api.values[("uuid", 2)] = OTHER
+        return database
+
+    def test_an_account_switch_clears_the_progress_of_the_previous_one(self):
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            UUID: {"tolino_id": "d1",
+                   "reading": {"progress": {"percent": 42}}}}})
+        config.save_account("B", {"refresh_token": "tok-B", "state": {}})
+        database = self.reading_database()
         dashboard = self.dashboard(self.worker(), database)
+
         self.ui.sync_results.mirror_account_reading(dashboard, "A")
-        # Das Konto kennt keinen Fortschritt: der Calibre-Wert bleibt stehen.
         self.assertEqual(42,
-                         database.api.values[(TOLINO_PROGRESS_COLUMN, 2)])
+                         database.api.values[(TOLINO_PROGRESS_COLUMN, 1)])
+        self.ui.sync_results.mirror_account_reading(dashboard, "B")
+        self.assertIsNone(
+            database.api.values[(TOLINO_PROGRESS_COLUMN, 1)])
+
+    def test_an_unknown_comparison_progress_keeps_the_column(self):
+        database = self.reading_database()
+        database.api.values[(TOLINO_PROGRESS_COLUMN, 1)] = 42
+        dashboard = self.dashboard(self.worker(), database)
+        rows = compare_inventory(
+            {1: {"uuid": UUID, "title": "T", "authors": "A",
+                 "isbn": "", "formats": ["EPUB"]}},
+            {UUID: {"tolino_id": "d1"}},
+            [{"tolino_id": "d1", "title": "T", "authors": "A",
+              "isbn": ""}], ["EPUB"])
+        self.ui.sync_results.mirror_comparison_reading(dashboard, rows)
+        self.assertEqual(42,
+                         database.api.values[(TOLINO_PROGRESS_COLUMN, 1)])
 
 
 class ReportTests(OrchestrationCase):
@@ -252,13 +256,6 @@ class SettingsSaveTests(OrchestrationCase):
         broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
         self.addCleanup(shutil.rmtree, broken, True)
         config.PREFERENCES.file_path = broken
-
-    def test_a_failed_state_save_is_reported_as_a_failure(self):
-        dashboard = self.dashboard(self.worker(), full_database())
-        self.break_settings()
-        failures = self.ui.sync_results.persist_sync_result(
-            dashboard, {UUID: {"tolino_id": "neu-1"}}, [(1, "neu-1")])
-        self.assertIn("Sync-Zustand", failures)
 
     def test_a_token_that_cannot_be_saved_stays_in_the_field(self):
         config.save_account("A", {"refresh_token": ""})

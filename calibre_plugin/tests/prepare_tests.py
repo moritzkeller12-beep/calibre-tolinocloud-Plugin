@@ -3,6 +3,8 @@
 Der Client ist ein Doppel an der Netznaht; Vergleich, Zustandsfuehrung und
 Kontospeicherung laufen im Produktivcode.
 """
+import shutil
+import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
@@ -13,6 +15,7 @@ from ..run_context import RunContext
 from ._support import real_qt_stub, ui_module_for
 
 UUID = "11111111-1111-4111-8111-111111111111"
+OTHER = "22222222-2222-4222-8222-222222222222"
 BOOK = {"uuid": UUID, "title": "Der Schwarm", "authors": "Frank Schätzing",
         "isbn": "9780306406157", "formats": ["EPUB"], "ignored": False}
 CLOUD = {"tolino_id": "d1", "title": "Der Schwarm",
@@ -107,6 +110,32 @@ class ComparisonTests(PrepareCase):
         _worker, emitted = self.prepare(FakeClient([CLOUD]))
         self.assertIn("ready", emitted)
         self.assertEqual({}, config.account_by_name("A"))
+
+    def test_a_failed_comparison_save_is_not_reported_as_ready(self):
+        config.save_account("A", {"refresh_token": "tok-A"})
+        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
+        self.addCleanup(shutil.rmtree, broken, True)
+        config.PREFERENCES.file_path = broken
+        _worker, emitted = self.prepare(FakeClient([CLOUD]))
+        self.assertNotIn("ready", emitted)
+        self.assertIn("gespeichert", str(emitted.get("failed")))
+
+    def test_a_concurrent_assignment_survives_the_comparison(self):
+        config.save_account("A", {"refresh_token": "tok-A"})
+
+        class ConcurrentClient(FakeClient):
+            """Speichert waehrend des Bestandsabrufs eine fremde Zuordnung."""
+
+            def inventory(self):
+                config.save_account(
+                    "A", {"state": {OTHER: {"tolino_id": "b"}}})
+                return [CLOUD]
+
+        _worker, emitted = self.prepare(ConcurrentClient([CLOUD]))
+        self.assertIn("ready", emitted)
+        stored = config.account_by_name("A")["state"]
+        self.assertEqual("b", stored[OTHER]["tolino_id"])
+        self.assertEqual("d1", stored[UUID]["tolino_id"])
 
 
 class OptionalDataTests(PrepareCase):

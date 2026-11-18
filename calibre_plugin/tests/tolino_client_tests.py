@@ -266,6 +266,7 @@ class Backend:
         self.download_info = {"DownloadInfo": {
             "contentUrl": "https://example.invalid/buch.epub"}}
         self.inventory = {"PublicationInventory": {"edata": []}}
+        self.sync_response = None
         self.ignore_put = False
         self.hide_metadata = False
         self.deleted = []
@@ -293,6 +294,8 @@ class Backend:
         if path.startswith("/bosh/rest/sync-data"):
             body = json.loads(payload or b"{}")
             self.patch_bodies.append(body)
+            if self.sync_response is not None:
+                return json_reply(self.sync_response)
             if body.get("patches"):
                 self.revision += 1
             return json_reply({"revision": self.revision,
@@ -429,14 +432,10 @@ class MetadataTests(unittest.TestCase):
 
 
 class FakeResponse:
-    """urlopen-Antwort an der Netznaht; liefert die fertigen Bytes."""
+    """Opener-Antwort an der Netznaht; liefert die fertigen Bytes."""
 
-    def __init__(self, url, data):
-        self.url = url
+    def __init__(self, data):
         self.data = data
-
-    def geturl(self):
-        return self.url
 
     def read(self):
         return self.data
@@ -458,14 +457,13 @@ def credentials(request):
     return {name.lower() for name in request.unredirected_hdrs}
 
 
-def content_opener(payload, final_url=None):
+def content_opener(payload):
     """Opener-Doppel nur fuer den Inhalt; die lokale Cloud bleibt echt."""
     seen = []
 
     def open_(request, timeout=None, **_kwargs):
-        url = getattr(request, "full_url", str(request))
         seen.append(request)
-        return FakeResponse(final_url or url, payload)
+        return FakeResponse(payload)
 
     return types.SimpleNamespace(open=open_), seen
 
@@ -492,19 +490,15 @@ class DownloadContentTests(unittest.TestCase):
             self.assertEqual(b"PDF", client.download("d1"))
         self.assertEqual(set(), credentials(seen[0]))
 
-    def test_a_redirect_to_plain_http_is_rejected(self):
-        backend = download_backend("https://cdn.pageplace.de/buch.epub")
-        opener, _seen = content_opener(
-            b"HTML", final_url="http://cdn.example.test/buch.epub")
-        with write_client(backend) as client, patch(
-                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
-            with self.assertRaises(TolinoApiError) as caught:
-                client.download("d1")
-        self.assertIn("umgeleitet", str(caught.exception))
+    
 
 
 class RedirectTests(unittest.TestCase):
-    """Eine unsichere Weiterleitung wird abgelehnt, bevor sie kontaktiert wird."""
+    """Eine unsichere Weiterleitung wird abgelehnt, bevor sie kontaktiert wird.
+
+    Der Handler sitzt in `_DOWNLOAD_OPENER`; `download` folgt jeder
+    Weiterleitung nur ueber ihn.
+    """
 
     def handler(self):
         return tolino_module._SafeRedirects()
@@ -592,6 +586,27 @@ class ReadMarkTests(unittest.TestCase):
             [(entry["op"], entry["value"]["category"],
               entry["path"].rsplit("/", 1)[-1])
              for entry in body["patches"]])
+
+    def test_an_empty_revision_passed_on_is_refused(self):
+        backend = Backend()
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.add_to_collection("d1", "Serie", revision="")
+        self.assertEqual("N02", caught.exception.code)
+        self.assertEqual([], backend.patch_bodies)
+
+    def test_a_malformed_snapshot_is_not_an_empty_read_state(self):
+        backend = Backend()
+        backend.sync_response = {}
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.read_ids()
+            with self.assertRaises(TolinoApiError):
+                client.mark_read_many(["d1"])
+        self.assertEqual("N02", caught.exception.code)
+        # Nur lesende PATCHes, kein Schreibvorgang mit leerem Bestand.
+        self.assertTrue(all(body["patches"] == []
+                            for body in backend.patch_bodies))
 
     def test_an_already_read_book_causes_no_write(self):
         backend = Backend()

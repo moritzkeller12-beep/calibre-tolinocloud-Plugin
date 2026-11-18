@@ -7,9 +7,8 @@ sieht.
 import unittest
 
 from ..errors import TolinoApiError
-from ..sync_data import (READ_TAG, active_read_tags, active_tags,
-                         collection_pairs, read_ids, reading_progress,
-                         tag_id_from_patch, tag_patch)
+from ..sync_data import (READ_TAG, active_tags, collection_pairs, read_ids,
+                         reading_progress, tag_id_from_patch, tag_patch)
 
 
 def tag(book_id, name, category, tag_id=None, op="add", revision=None):
@@ -93,7 +92,6 @@ class ActiveTagTests(unittest.TestCase):
                    tag("d2", READ_TAG, "collection"),
                    tag("d3", "Grenzwelten", "collection")]
         self.assertEqual({"d1", "d2"}, set(read_ids(patches)))
-        self.assertEqual(2, len(active_read_tags(patches)))
 
     def test_collections_are_pairs_of_book_and_name(self):
         patches = [tag("d1", "Grenzwelten", "collection"),

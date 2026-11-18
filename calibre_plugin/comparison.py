@@ -408,9 +408,12 @@ def _matched_status(metadata, remote, old, selected_format,
     # ueberstimmen. Bewusster Kompromiss: aendert die Cloud den Titel spaeter,
     # gilt die Zeile weiter als gleich -- sonst wuerde jede externe Aenderung
     # beim naechsten Sync sofort wieder ueberschrieben.
+    # Eine Bestaetigung gilt nur fuer die Kopie, fuer die sie geschrieben
+    # wurde: nach einem Wechsel der Cloud-ID ist sie wertlos.
     verified_metadata_matches = (
         bool(old.get("meta_verified_fp"))
-        and old.get("meta_verified_fp") == current_meta_fp)
+        and old.get("meta_verified_fp") == current_meta_fp
+        and str(old.get("tolino_id") or "").strip() == remote["tolino_id"])
     unchanged = (verified_metadata_matches or same_fields) and not file_changed
     return ("identical" if unchanged else "changed"), "", file_changed
 
@@ -433,9 +436,11 @@ def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
         state[book_uuid] = entry
     previous = str(entry.get("tolino_id") or "").strip()
     if previous and previous != str(tolino_id):
-        # Lesestatus und Sammlungen gehoerten zur alten Cloud-Kopie.
+        # Lesestatus, Sammlungen und Metadaten-Bestaetigung gehoerten zur
+        # alten Cloud-Kopie.
         entry.pop("reading", None)
         entry.pop("collections", None)
+        entry.pop("meta_verified_fp", None)
     entry["tolino_id"] = tolino_id
     entry.setdefault("calibre_id", book_id)
 

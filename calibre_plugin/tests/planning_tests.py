@@ -12,7 +12,7 @@ import unittest
 
 from ..comparison import (compare_inventory, comparison_progress_updates,
                           comparison_read_updates, content_fingerprint,
-                          store_reading_state)
+                          metadata_fingerprint, store_reading_state)
 from ..inventory import normalize_inventory_record, parse_inventory
 from ..library import normalize_formats
 from ..matching import (authors_match, is_valid_isbn, isbn_from_identifier,
@@ -182,6 +182,16 @@ class ComparisonTests(unittest.TestCase):
         # bekommt keinen zweiten Anspruch auf dieselbe Kopie.
         self.assertEqual("d1", by_book[2]["tolino_id"])
         self.assertEqual("", by_book[1]["tolino_id"])
+
+    def test_a_new_cloud_id_does_not_inherit_the_metadata_confirmation(self):
+        state = {UUID: {"tolino_id": "gone",
+                        "meta_verified_fp": metadata_fingerprint(book())}}
+        rows = compare_inventory({1: book()}, state,
+                                 [cloud(title="Ein anderer Titel")],
+                                 ["EPUB"])
+        self.assertEqual("d1", rows[0]["tolino_id"])
+        self.assertEqual("changed", rows[0]["status"])
+        self.assertNotIn("meta_verified_fp", state[UUID])
 
     def test_a_new_cloud_id_drops_the_values_of_the_old_copy(self):
         state = {UUID: {"tolino_id": "alt", "reading": {"read": True},

@@ -800,14 +800,9 @@ class TolinoClient:
             request.add_unredirected_header(
                 "reseller_id", self.partner["reseller_id"])
         try:
+            # `_SafeRedirects` prueft jede Weiterleitung, bevor sie folgt.
             with _DOWNLOAD_OPENER.open(request,
                                        timeout=self.timeout) as response:
-                final_url = urlsplit(response.geturl())
-                if final_url.scheme.casefold() != "https" or not final_url.hostname:
-                    raise TolinoApiError(
-                        "Der Download wurde auf eine unsichere URL umgeleitet.",
-                        code="N02",
-                        short="tolino hat einen unsicheren Download-Link geliefert.")
                 content = response.read()
         except OSError as exc:
             if isinstance(exc, HTTPError):
@@ -836,8 +831,16 @@ class TolinoClient:
         """
         if self._sync_cache is None:
             data = self._sync_patch({"revision": None, "patches": []})
-            self._sync_cache = (data.get("revision"),
-                                data.get("patches") or [])
+            revision, patches = data.get("revision"), data.get("patches")
+            # Eine unvollstaendige Antwort ist kein leerer Lesestand: sonst
+            # gaelte jedes Buch als ungelesen. Der Aufrufer behandelt den
+            # Fehler als «unbekannt».
+            if revision in (None, "") or not isinstance(patches, (list, tuple)):
+                raise TolinoApiError(
+                    "Die Cloud-Antwort zu den Markierungen ist unvollständig.",
+                    code="N02",
+                    short="Die Antwort von tolino ist unvollständig.")
+            self._sync_cache = (revision, list(patches))
         return self._sync_cache
 
     def read_ids(self):
@@ -866,9 +869,8 @@ class TolinoClient:
         damit fremde Marken (Lese-Status, andere Sammlungen) verlieren.
         Die Revision wird deshalb gelesen und mitgeschickt.
         """
-        if revision is not None:
-            return revision
-        revision, _patches = self.sync_snapshot()
+        if revision is None:
+            revision, _patches = self.sync_snapshot()
         if revision in (None, ""):
             # Ein PATCH ohne Revision kann vorhandene Marken ersetzen.
             raise TolinoApiError(
@@ -907,12 +909,15 @@ class TolinoClient:
                 "Gelesen-Markierung ohne Buch.", code="E99",
                 short="Es wurde kein Buch ausgewählt.")
         revision, patches = self.sync_snapshot()
-        revision = self._current_revision(revision)
         active = _sync_data.read_tag_patches(patches)
         updates = []
         for book_id in ids:
-            marks = [(category, item) for (book, category), item
-                     in active.items() if book == str(book_id)]
+            # Beide Schreibweisen direkt nachschlagen: das Mapping ist schon
+            # nach (Buch, Kategorie) indiziert.
+            book = str(book_id)
+            marks = [(category, active.get((book, category)))
+                     for category in _sync_data.READ_TAG_CATEGORIES]
+            marks = [(category, item) for category, item in marks if item]
             if finished:
                 if not marks:
                     updates.append(_sync_data.tag_patch(

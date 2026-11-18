@@ -607,7 +607,8 @@ class SyncDashboard(DashboardParts, QDialog):
         active_name = str(self.account_name or "")
         is_active = active_name == account_name
         if is_active:
-            mirror_account_reading(self, account_name)
+            # Nur bekannte Cloud-Werte spiegeln; die vollstaendige Anzeige des
+            # Kontos stellt bereits der Kontowechsel her.
             mirror_comparison_reading(self, payload.get("comparison"))
 
         # Den rotierten Token speichert bereits der Client-Callback.
@@ -743,13 +744,13 @@ class SyncDashboard(DashboardParts, QDialog):
         self.primary.setEnabled(False)
 
     @gui_guard
-    def sync_completed(self, state, updates):
+    def sync_completed(self, _state, updates):
         """Erfolgreicher Lauf (auch nach regulaerem Abbruch).
 
-        Persistiert wird unter dem KONTO DES LAUFS. UI-Felder werden nur
+        Die tolino-IDs landen unter dem KONTO DES LAUFS; Lesewerte werden nur
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
-        report_sync(self, *finish_sync(self, state, updates))
+        report_sync(self, *finish_sync(self, updates))
 
     @gui_guard
     def sync_failed(self, message):
@@ -757,8 +758,7 @@ class SyncDashboard(DashboardParts, QDialog):
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
         outcome, failures = finish_sync(
-            self, getattr(worker, "state", {}),
-            getattr(worker, "updates", ()))
+            self, getattr(worker, "updates", ()))
         report_sync(
             self, outcome, failures,
             str(message or "Synchronisierung fehlgeschlagen."),

@@ -248,15 +248,48 @@ def save_account(name, values, active=None, preferred_formats=None,
             allow_virtual_default=True)
 
 
+def save_state(account_name, state, base):
+    """Zustand eines Kontos sichern: nur Aenderungen gegenueber `base`.
+
+    `base` ist der Ausgangsstand des Aufrufers. Inzwischen von einem anderen
+    Lauf gespeicherte Zuordnungen bleiben erhalten, weil nur geaenderte
+    Schluessel uebernommen werden; ein hier entfernter Eintrag verschwindet
+    auch dann, wenn er in `base` noch steht.
+    """
+    with _SETTINGS_LOCK:
+        if not _reload():
+            return False
+        source = _account_record(account_name)
+        if source is None:
+            return False
+        stored = source.get("state")
+        stored = stored if isinstance(stored, dict) else {}
+        merged = dict(stored)
+        for key in set(base) - set(state):
+            merged.pop(key, None)
+        merged.update({key: value for key, value in state.items()
+                       if base.get(key) != value})
+        if merged == stored:
+            # Nichts geaendert: kein vollstaendiger Schreibvorgang.
+            return True
+        return _write_account(account_name, {"state": merged}, create=False,
+                              allow_virtual_default=True)
+
+
+def _account_record(name):
+    """Rohdatensatz eines Kontos aus dem geladenen Stand (ohne Kopie)."""
+    for stored, source in _named_accounts(PREFERENCES.get("accounts", None)):
+        if stored == name:
+            return source
+    return None
+
+
 def account_by_name(name):
     """Return one account without copying every other account's state."""
     with _SETTINGS_LOCK:
         _reload()
-        for stored, value in _named_accounts(
-                PREFERENCES.get("accounts", None)):
-            if stored == name:
-                return _account(dict(value, name=stored), stored)
-    return {}
+        source = _account_record(name)
+    return _account(dict(source, name=name), name) if source is not None else {}
 
 
 def _update_account(name, values, allow_virtual_default=False):
