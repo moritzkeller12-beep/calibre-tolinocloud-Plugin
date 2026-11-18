@@ -11,11 +11,11 @@ import uuid
 from urllib.parse import parse_qs
 
 from .. import config
-from ..errors import TolinoAuthError
+from ..errors import TolinoAuthError, TolinoError
 from ..token_vault import (TOKEN_VAULT, check_stored_login,
                            start_token_keepalive, stop_token_keepalive)
 from ..tolino import BUSY_MESSAGE
-from ._support import LocalHTTP, local_tolino_endpoints
+from ._support import LocalHTTP, break_settings, local_tolino_endpoints
 
 JSON_HEADERS = {"Content-Type": "application/json"}
 
@@ -84,6 +84,16 @@ class LoginTests(VaultCase):
         stored = config.account_summary("A")["hardware_id"]
         self.assertTrue(stored)
         self.assertEqual(client.hardware, stored)
+
+    def test_a_generated_hardware_id_that_cannot_be_stored_stops_the_login(self):
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "start"})
+        break_settings(self)
+        with self.vault(server):
+            with self.assertRaises(TolinoError) as caught:
+                TOKEN_VAULT.login("A")
+        self.assertIn("Geräte-ID", str(caught.exception))
+        self.assertEqual([], server.server.requests)
 
     def test_an_account_without_a_token_never_calls_the_server(self):
         server = TokenServer()

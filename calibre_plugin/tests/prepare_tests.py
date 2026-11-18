@@ -202,11 +202,18 @@ class CancelAndStaleTests(PrepareCase):
 
     def test_a_stale_cloud_id_is_removed_after_a_successful_comparison(self):
         state = {UUID: {"tolino_id": "weg", "calibre_id": 1,
-                        "reading": {"read": True, "progress": {"percent": 42}}}}
+                        "reading": {"read": True, "progress": {"percent": 42}},
+                        "collections": ["Serie"],
+                        "meta_verified_fp": "fp-alt", "content_fp": "fp-lokal"}}
         _worker, emitted = self.prepare(FakeClient([]), state=state)
         entry = emitted["ready"]["state"][UUID]
         self.assertNotIn("tolino_id", entry)
-        self.assertNotIn("reading", entry)
+        # Alles Kopiegebundene faellt weg, damit eine spaeter per ISBN
+        # gefundene Kopie nichts davon erbt.
+        for field in ("reading", "collections", "meta_verified_fp"):
+            self.assertNotIn(field, entry)
+        # Der Fingerabdruck beschreibt die lokale Datei, nicht die Kopie.
+        self.assertEqual("fp-lokal", entry["content_fp"])
 
     def test_an_inventory_error_keeps_the_stale_mapping(self):
         state = {UUID: {"tolino_id": "weg", "calibre_id": 1}}

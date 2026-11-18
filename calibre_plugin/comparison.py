@@ -428,6 +428,20 @@ def _title_only_match(remote, title_key, matched, disputed):
     return ("review", "ambiguous" if len(free_titles) > 1 else "title_only")
 
 
+def reset_copy_state(entry):
+    """Kopiegebundene Werte eines Zustandseintrags entfernen (in place).
+
+    Lesestand, Sammlungen und Metadaten-Bestaetigung gehoeren zu EINER
+    Cloud-Kopie und sind nach einem Kopiewechsel wertlos. `content_fp`
+    bleibt: er beschreibt die zuletzt hochgeladene lokale Datei und
+    beantwortet nur «hat sich meine Datei geaendert?».
+    """
+    if isinstance(entry, dict):
+        for field in ("reading", "collections", "meta_verified_fp"):
+            entry.pop(field, None)
+    return entry
+
+
 def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
     """Persist a confirmed assignment under the Calibre UUID."""
     entry = state.get(book_uuid)
@@ -436,11 +450,7 @@ def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
         state[book_uuid] = entry
     previous = str(entry.get("tolino_id") or "").strip()
     if previous and previous != str(tolino_id):
-        # Lesestatus, Sammlungen und Metadaten-Bestaetigung gehoerten zur
-        # alten Cloud-Kopie.
-        entry.pop("reading", None)
-        entry.pop("collections", None)
-        entry.pop("meta_verified_fp", None)
+        reset_copy_state(entry)
     entry["tolino_id"] = tolino_id
     entry.setdefault("calibre_id", book_id)
 

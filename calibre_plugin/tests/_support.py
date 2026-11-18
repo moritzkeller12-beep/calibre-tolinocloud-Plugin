@@ -7,11 +7,27 @@ Calibre-Datenbankgrenze und das Dashboard-Doppel.
 import contextlib
 import importlib
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import types
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def break_settings(case):
+    """Einstellungs-Speicherort unschreibbar machen: ein Verzeichnis als Pfad.
+
+    Lesen und Schreiben scheitern dann mit einem echten E/A-Fehler (kein
+    ``FileNotFoundError``) -- das ist der Fall «Datei existiert, ist aber
+    nicht benutzbar». ``case`` traegt das Aufraeumen.
+    """
+    from .. import config
+
+    broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
+    case.addCleanup(shutil.rmtree, broken, True)
+    config.PREFERENCES.file_path = broken
 
 
 class FakeSignal:

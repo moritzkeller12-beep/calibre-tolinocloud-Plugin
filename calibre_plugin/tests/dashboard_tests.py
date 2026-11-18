@@ -4,8 +4,6 @@ Der Lauf ist vorbei (Client und Thread), geprüft werden Ergebnis-Sicherung,
 Konto-Zuordnung der Spalten und die Rückmeldung je Ausgang. Worker und
 Dashboard sind echte Objekte bzw. das vorhandene Dashboard-Doppel.
 """
-import shutil
-import tempfile
 import types
 import unittest
 import uuid
@@ -15,8 +13,8 @@ from .. import config
 from ..comparison import compare_inventory
 from ..library import TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, dashboard_stub, real_qt_stub,
-                       ui_module_for)
+from ._support import (CalibreDatabase, break_settings, dashboard_stub,
+                       real_qt_stub, ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -251,12 +249,6 @@ class FakeField:
 class SettingsSaveTests(OrchestrationCase):
     """Ein nicht gespeicherter Stand meldet keinen Erfolg."""
 
-    def break_settings(self):
-        """Ein Verzeichnis als Speicherort: Schreiben scheitert ohne Ausnahme."""
-        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
-        self.addCleanup(shutil.rmtree, broken, True)
-        config.PREFERENCES.file_path = broken
-
     def test_a_token_that_cannot_be_saved_stays_in_the_field(self):
         config.save_account("A", {"refresh_token": ""})
         field = FakeField("tok-neu")
@@ -266,7 +258,7 @@ class SettingsSaveTests(OrchestrationCase):
             _partner_chosen=True, _hardware_edited=False,
             hardware=types.SimpleNamespace(text=lambda: "hw"),
             update_status=lambda: None)
-        self.break_settings()
+        break_settings(self)
         store = self.ui.dashboard.SyncDashboard.store_refresh.__get__(dashboard)
         with patch("calibre_plugin.ui_dashboard.error_dialog") as shown:
             self.assertFalse(store("tok-neu"))
@@ -277,22 +269,100 @@ class SettingsSaveTests(OrchestrationCase):
         config.save_account("A", {"refresh_token": "tok-A"}, active="A")
         config.save_account("B", {"refresh_token": "tok-B"})
         loaded = []
-        dashboard = types.SimpleNamespace(
+        dashboard = self.dashboard_for_save(
             account_name="A", account_names=["A", "B"], login_thread=None,
             _hardware_edited=False,
             values=lambda: {"account_name": "A", "hardware_id": "hw",
                             config.PREFERRED_FORMATS: ["EPUB"]},
             load_values=lambda: loaded.append(True))
-        dashboard._save_visible_account = (
-            self.ui.dashboard.SyncDashboard._save_visible_account
-            .__get__(dashboard))
-        switch = self.ui.dashboard.SyncDashboard.switch_account.__get__(
-            dashboard)
-        self.break_settings()
-        self.assertFalse(switch("B"))
+        # Der echte Speicherpfad scheitert; nur `_save_visible_account`
+        # bleibt hier echt, damit Wertaufbereitung und Commit geprueft sind.
+        dashboard._save_visible_account = self.method(
+            "_save_visible_account")(dashboard)
+        break_settings(self)
+        with patch.object(self.ui.dashboard, "error_dialog"):
+            self.assertFalse(dashboard.switch_account("B"))
         self.assertEqual("A", dashboard.account_name)
         self.assertEqual([], loaded)
         self.assertEqual("A", config.settings()["active_account"])
+
+    def method(self, name):
+        """Echte Dashboard-Methode an ein Doppel binden."""
+        return self.ui.dashboard.SyncDashboard.__dict__[name].__get__
+
+    def dashboard_for_save(self, **attrs):
+        """Doppel mit den echten Speicher-Methoden; `_save_visible_account`
+        bleibt stubbar (die echten Pfade decken die Tests oben ab)."""
+        dashboard = types.SimpleNamespace(**attrs)
+        dashboard._save_visible_account = lambda: attrs.get("saved", True)
+        for name in ("_save_failed", "_save_settings", "close_settings",
+                     "new_account", "switch_account", "_partner_selected",
+                     "logout"):
+            setattr(dashboard, name, self.method(name)(dashboard))
+        return dashboard
+
+    def test_a_failed_save_keeps_the_settings_window_open(self):
+        accepted = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", saved=False, _typed_refresh=lambda: "",
+            settings_dialog=types.SimpleNamespace(
+                accept=lambda: accepted.append(True)))
+        with patch.object(self.ui.dashboard, "error_dialog") as shown:
+            dashboard.close_settings()
+        self.assertTrue(shown.called)
+        self.assertEqual([], accepted)
+
+    def test_a_new_account_is_not_created_when_the_save_fails(self):
+        loaded = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", account_names=["A"], saved=True,
+            load_values=lambda: loaded.append(True))
+        break_settings(self)
+        with patch.object(self.ui.dashboard.QInputDialog, "getText",
+                          lambda *_a: ("Neu", True)), \
+                patch.object(self.ui.dashboard, "error_dialog") as shown:
+            dashboard.new_account()
+        self.assertTrue(shown.called)
+        self.assertEqual([], loaded)
+
+    def test_a_partner_choice_that_cannot_be_saved_is_reported(self):
+        config.save_account("A", {"refresh_token": "tok-A"})
+        dashboard = self.dashboard_for_save(
+            account_name="A", _partner_chosen=False,
+            partner=types.SimpleNamespace(currentData=lambda: 2))
+        break_settings(self)
+        with patch.object(self.ui.dashboard, "error_dialog") as shown:
+            dashboard._partner_selected(1)
+        self.assertTrue(shown.called)
+        self.assertTrue(dashboard._partner_chosen)
+
+    def test_a_switch_that_cannot_be_stored_reloads_the_stored_account(self):
+        config.save_account("A", {"refresh_token": "tok-A"}, active="A")
+        loaded = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", account_names=["A", "Weg"], saved=True,
+            _hardware_edited=False, login_thread=None,
+            values=lambda: {"account_name": "A", "hardware_id": "hw",
+                            config.PREFERRED_FORMATS: ["EPUB"]},
+            load_values=lambda: loaded.append(True))
+        # «Weg» steht nur in der Liste der Oberflaeche: die Auswahl scheitert.
+        with patch.object(self.ui.dashboard, "error_dialog") as shown:
+            self.assertFalse(dashboard.switch_account("Weg"))
+        self.assertTrue(shown.called)
+        self.assertEqual([True], loaded)
+
+    def test_a_logout_that_cannot_be_stored_keeps_the_token(self):
+        shown = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", refresh=FakeField("tok-A"),
+            update_status=lambda: shown.append("status"))
+        break_settings(self)
+        with patch.object(self.ui.dashboard, "error_dialog") as reported:
+            dashboard.logout()
+        self.assertTrue(reported.called)
+        # Nicht gesichert heisst: der Token gilt weiter, nichts meldet Erfolg.
+        self.assertEqual("tok-A", dashboard.refresh.value)
+        self.assertEqual([], shown)
 
 
 if __name__ == "__main__":

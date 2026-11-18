@@ -719,14 +719,25 @@ class TolinoClient:
         self._notify_hardware()
 
     def _notify_hardware(self):
-        """Tell the UI about an adopted hardware id; never raises."""
+        """Tell the UI about an adopted hardware id; never raises.
+
+        ``False`` vom Callback heisst «nicht gespeichert»: die uebernommene ID
+        waere dann nur im Speicher und der naechste Lauf erzeugte wieder eine
+        neue. Das ist ein Fehlschlag und kein stiller Erfolg.
+        """
         callback = self.hardware_callback
-        if callback:
-            try:
-                callback(self.hardware)
-            except Exception as exc:
-                log_warning("Geräte-ID konnte nicht gespeichert werden: %s"
-                            % sanitize_error(exc, (self.refresh, self.access)))
+        if not callback:
+            return
+        try:
+            stored = callback(self.hardware)
+            detail = ""
+        except Exception as exc:
+            stored, detail = False, sanitize_error(
+                exc, (self.refresh, self.access))
+        if stored is False:
+            log_warning("Geräte-ID konnte nicht gespeichert werden: %s"
+                        % (detail or "Einstellungen konnten nicht "
+                           "geschrieben werden."))
 
     def _register_hardware(self):
         """Register this hardware id at the BOSH service (reference flow)."""

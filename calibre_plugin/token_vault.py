@@ -11,8 +11,8 @@ from .config import (account_secrets, account_summary,
                      clear_refresh_token_if_unchanged, save_hardware_id,
                      save_refresh_token, settings)
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
-                     log_info, log_warning, normalize_refresh_token,
-                     sanitize_error)
+                     TolinoError, log_info, log_warning,
+                     normalize_refresh_token, sanitize_error)
 
 
 def _lock_busy(exc):
@@ -44,9 +44,16 @@ class TokenVault:
             client.token_rejected_callback = (
                 lambda rejected: clear_refresh_token_if_unchanged(
                     account_name, rejected))
-            if not values["hardware_id"]:
-                # Die erzeugte ID gehoert ins Konto, sonst wechselt sie je Lauf.
-                save_hardware_id(account_name, client.hardware)
+            if not values["hardware_id"] and not save_hardware_id(
+                    account_name, client.hardware):
+                # Die erzeugte ID gehoert ins Konto, sonst wechselt sie je Lauf
+                # und tolino zaehlt jedes Mal ein neues Geraet.
+                raise TolinoError(
+                    "Die Geräte-ID konnte nicht gespeichert werden. Ohne sie "
+                    "gilt jeder Lauf als neues Gerät; bitte die "
+                    "Einstellungsdatei prüfen und erneut anmelden.",
+                    short="Die Geräte-ID konnte nicht gespeichert werden.",
+                    detail="Einstellungen konnten nicht geschrieben werden.")
             # Erst anmelden, dann den Vault einhaengen: `login()` wuerde
             # sonst ueber `relogin()` den bereits gehaltenen Lock anfordern.
             client.login()

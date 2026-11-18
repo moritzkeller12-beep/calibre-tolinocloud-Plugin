@@ -87,6 +87,20 @@ class SyncDashboard(DashboardParts, QDialog):
         self._hardware_edited = False
         return True
 
+    def _save_failed(self, title):
+        """Meldung, wenn die Einstellungsdatei nicht geschrieben wurde."""
+        error_dialog(
+            self, title,
+            "Die Einstellungsdatei konnte nicht geschrieben werden. Die "
+            "Eingaben bleiben stehen; bitte erneut versuchen.", show=True)
+
+    def _save_settings(self):
+        """Sichtbare Einstellungen sichern; bei Fehler das Schliessen verhindern."""
+        if self._save_visible_account():
+            return True
+        self._save_failed("Einstellungen nicht gespeichert")
+        return False
+
     def _mark_hardware_edited(self, _text=""):
         """Merken, dass die Geräte-ID von Hand geändert wurde."""
         self._hardware_edited = True
@@ -119,16 +133,20 @@ class SyncDashboard(DashboardParts, QDialog):
             except Exception:
                 pass
             return False
-        if not self._save_visible_account():
+        if not self._save_settings():
             # Ein nicht gesicherter Stand darf keinen Kontowechsel auslösen:
             # sonst überschreibt der nächste Schreibvorgang ihn endgültig.
             return False
-        set_active_account(name)
+        if not set_active_account(name):
+            self._save_failed("Konto nicht gewechselt")
+            self.load_values()
+            return False
         self.load_values()
         return True
 
     def new_account(self):
-        self._save_visible_account()
+        if not self._save_settings():
+            return
         base, accepted = QInputDialog.getText(
             self, "Neues Konto", "Name:")
         base = str(base).strip()
@@ -139,7 +157,9 @@ class SyncDashboard(DashboardParts, QDialog):
         while name in names:
             name = "%s-%d" % (base, number)
             number += 1
-        save_account(name, {"name": name}, active=name)
+        if not save_account(name, {"name": name}, active=name):
+            self._save_failed("Konto nicht angelegt")
+            return
         self.load_values()
         self.account_select.setCurrentIndex(self.account_select.findData(name))
 
@@ -197,7 +217,8 @@ class SyncDashboard(DashboardParts, QDialog):
     def close_settings(self):
         """Einstellungen schliessen -- ohne den eingetippten Token zu verlieren."""
         typed = self._typed_refresh()
-        self._save_visible_account()
+        if not self._save_settings():
+            return
         # Ein eingetippter Zugangstoken ist eine Eingabe wie jede andere:
         # «Speichern und schliessen» darf ihn nicht still verwerfen. Ohne
         # erkannten Buchhändler bleibt das Fenster offen, damit die Eingabe
@@ -277,8 +298,9 @@ class SyncDashboard(DashboardParts, QDialog):
         """Buchhändler von Hand wählen – nur für Zugänge ohne ``iss``."""
         self._partner_chosen = True
         partner_id = self.partner.currentData()
-        if self.account_name and partner_id:
-            save_account(self.account_name, {"partner_id": partner_id})
+        if (self.account_name and partner_id and not save_account(
+                self.account_name, {"partner_id": partner_id})):
+            self._save_failed("Buchhändler nicht gespeichert")
 
     def store_refresh(self, refresh):
         """Token im Konto speichern -- der einzige Ort fuer Zugangsdaten.
@@ -322,8 +344,11 @@ class SyncDashboard(DashboardParts, QDialog):
         """Nur den gespeicherten Zugang löschen – Konto und ID bleiben."""
         if not self.account_name:
             return
-        save_account(self.account_name, {"refresh_token": ""},
-                     active=self.account_name)
+        if not save_account(self.account_name, {"refresh_token": ""},
+                            active=self.account_name):
+            # Nicht gesichert: der Token gilt weiter, das Feld bleibt stehen.
+            self._save_failed("Abmeldung nicht gespeichert")
+            return
         self.refresh.setText("")
         self.update_status()
 

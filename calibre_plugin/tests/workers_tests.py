@@ -3,8 +3,6 @@
 Der Worker wird mit einem Client-Doppel an der Netznaht ausgeführt; alles
 andere (Planung, Zustand, Signale, Bericht) ist Produktivcode.
 """
-import shutil
-import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
@@ -14,7 +12,7 @@ from ..comparison import content_fingerprint
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..planning import MetaUpdateRecord, SyncJob
 from ..run_context import RunContext
-from ._support import real_qt_stub, ui_module_for
+from ._support import break_settings, real_qt_stub, ui_module_for
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -125,17 +123,19 @@ class UploadTests(WorkerCase):
 
     def test_a_successful_upload_confirms_the_new_copy(self):
         state = {UUID: {"tolino_id": "alt", "reading": {"read": True},
-                        "collections": ["Serie"]}}
+                        "collections": ["Serie"],
+                        "meta_verified_fp": "fp-alt"}}
         worker, emitted = self.run_worker(
             FakeClient(), jobs=[self.job(1, UUID, "/buch.epub", old_id="alt")],
             state=state)
         self.assertEqual([(1, "neu-1")], worker.updates)
         self.assertEqual("neu-1", worker.state[UUID]["tolino_id"])
-        # Die neue Kopie startet ungelesen; der alte Lesestand gehoert zur
-        # ersetzten Kopie.
+        # Die neue Kopie startet ungelesen; Lesestand, Sammlungen und
+        # Metadaten-Bestaetigung gehoerten zur ersetzten Kopie.
         self.assertEqual([(1, None)], worker.read_updates)
         self.assertEqual([(1, None)], worker.progress_updates)
-        self.assertNotIn("reading", worker.state[UUID])
+        for field in ("reading", "collections", "meta_verified_fp"):
+            self.assertNotIn(field, worker.state[UUID])
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertIn("completed", emitted)
         self.assertNotIn("failed", emitted)
@@ -186,18 +186,12 @@ class UploadTests(WorkerCase):
 class StatePersistenceTests(WorkerCase):
     """Ohne gesicherten Zwischenstand bleibt die alte Kopie stehen."""
 
-    def break_settings(self):
-        """Ein Verzeichnis als Speicherort: Schreiben scheitert ohne Ausnahme."""
-        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
-        self.addCleanup(shutil.rmtree, broken, True)
-        config.PREFERENCES.file_path = broken
-
     def test_a_failed_state_save_stops_before_the_old_copy_is_deleted(self):
         config.save_account("A", {"refresh_token": "tok-A",
                                   "hardware_id": "hw"})
         state = {UUID: {"tolino_id": "alt", "calibre_id": 7}}
         client = FakeClient(upload_results=["neu-1"])
-        self.break_settings()
+        break_settings(self)
         worker, emitted = self.run_worker(
             client, jobs=[self.job(1, UUID, "/buch.epub", old_id="alt")],
             state=state)
@@ -218,7 +212,7 @@ class StatePersistenceTests(WorkerCase):
         worker.failed.connect(lambda *args: events.append("failed"))
         client = FakeClient(upload_results=["neu-1"],
                             on_upload=worker.cancel)
-        self.break_settings()
+        break_settings(self)
         with patch.object(self.ui.workers.TOKEN_VAULT, "login",
                           return_value=client):
             worker.run()
@@ -457,6 +451,26 @@ class PersistenceTests(WorkerCase):
         stored = config.account_by_name("A")["state"]
         self.assertEqual("fremd", stored[OTHER]["tolino_id"])
         self.assertEqual("neu-1", stored[UUID]["tolino_id"])
+
+    def test_a_later_save_keeps_a_foreign_change_to_an_earlier_book(self):
+        config.save_account("A", {"refresh_token": "tok-A"})
+        uploads = []
+
+        def foreign_change():
+            # Eine andere Instanz schreibt, nachdem der erste Upload gesichert
+            # ist: derselbe Eintrag, ein anderes Feld.
+            uploads.append(True)
+            if len(uploads) < 2:
+                return
+            stored = config.account_by_name("A")["state"]
+            stored[UUID]["tolino_id"] = "extern"
+            config.save_account("A", {"state": stored})
+
+        jobs = [self.job(1, UUID, "/erst.epub"),
+                self.job(2, OTHER, "/zweit.epub")]
+        self.run_worker(FakeClient(on_upload=foreign_change), jobs=jobs)
+        self.assertEqual("extern",
+                         config.account_by_name("A")["state"][UUID]["tolino_id"])
 
     def test_a_removed_account_is_not_created_by_a_late_callback(self):
         # Das letzte Konto laesst sich nicht entfernen: ein zweites muss her.

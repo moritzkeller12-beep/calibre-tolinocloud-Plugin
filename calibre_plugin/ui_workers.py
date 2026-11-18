@@ -13,7 +13,7 @@ from .planning import (local_metadata, plan_collection_updates,
                        remember_collection)
 from .comparison import (compare_inventory, content_fingerprint,
                          metadata_fingerprint, reading_state,
-                         store_reading_state)
+                         reset_copy_state, store_reading_state)
 from .identifiers import display_title, state_entry, valid_book_uuid
 from .library import image_suffix
 from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
@@ -191,6 +191,10 @@ class SyncWorker(QObject):
                        "Cloud-Änderungen bleiben bestehen; bitte den Bestand "
                        "vor einem erneuten Lauf prüfen."),
                 detail=detail or "Einstellungen konnten nicht geschrieben werden.")
+        # Alles, was jetzt im Zustand steht, ist gesichert: der naechste
+        # Schreibvorgang uebernimmt nur noch neue Aenderungen und laesst
+        # fremde Aenderungen an denselben Feldern stehen.
+        self._state_base = copy.deepcopy(self.state)
 
     def _copy_is_gone(self, client, deliverable_id):
         """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten.
@@ -494,19 +498,16 @@ class SyncWorker(QObject):
                 self.progress.emit(done, total, "Fehlgeschlagen: %s"
                                    % job.label())
                 continue
-            entry = dict(state_entry(self.state, job.book_uuid))
-            # Die neue Cloud-Kopie startet ungelesen; der alte Lesestand
-            # gehört zur ersetzten Kopie und darf nicht gespiegelt werden.
-            entry.pop("reading", None)
+            # Die neue Cloud-Kopie startet ungelesen und ohne Sammlungen;
+            # alles Kopiegebundene der ersetzten Kopie faellt weg.
+            entry = reset_copy_state(
+                dict(state_entry(self.state, job.book_uuid)))
             entry.update({"tolino_id": new_id, "calibre_id": job.book_id})
-            entry.pop("collections", None)
             self.state[job.book_uuid] = entry
             metadata = self.metadata_by_uuid.get(job.book_uuid)
             if metadata:
                 entry["content_fp"] = content_fingerprint(
                     metadata, job.format_name)
-                # Ein Upload bestätigt die Metadaten nicht per Read-back.
-                entry.pop("meta_verified_fp", None)
             self.updates.append((job.book_id, new_id))
             # Die neue Kopie hat weder den Lesestatus noch den Fortschritt
             # der ersetzten Kopie; beide Calibre-Spalten werden geleert.
@@ -704,10 +705,11 @@ class PrepareWorker(QObject):
                 entry = state.get(book_uuid)
                 if isinstance(entry, dict) and str(
                         entry.get("tolino_id") or "").strip() == stale_id:
-                    # Cloud-Kopie weg: Zuordnung und alter Lesestand dieses
-                    # Kontos dürfen nicht weiter angezeigt werden.
+                    # Cloud-Kopie weg: Zuordnung und alle kopiegebundenen
+                    # Werte dieses Kontos duerfen nicht weiter gelten -- sonst
+                    # erbte eine spaeter per ISBN gefundene Kopie sie.
                     entry.pop("tolino_id", None)
-                    entry.pop("reading", None)
+                    reset_copy_state(entry)
         return comparison
 
     def run(self):

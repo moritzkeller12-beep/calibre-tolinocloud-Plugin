@@ -32,6 +32,7 @@ ALLOWED_NAMES = frozenset((
     "urlopen", "_http_get_json",       # HTTP
     "Popen", "which", "find_browsers", "in_flatpak_sandbox",  # Browser
     "info_dialog", "error_dialog",     # modale Qt-Dialoge
+    "getText",                         # modaler Eingabedialog (Qt)
     "_aes",                            # optionale Krypto-Abhaengigkeit
     "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL",  # Anmelde-Zeitfenster
 ))

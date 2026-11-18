@@ -177,11 +177,13 @@ def settings():
 
 
 def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
-                   create=True, allow_virtual_default=False):
+                   create=True, allow_virtual_default=False, reload=True):
     """Persist one account and optionally the active/format settings.
 
     ``active`` ist ein Sentinel: Wird es übergeben (auch als ``None``), wird
     das aktive Konto neu bestimmt. Fehlt es, bleibt die Auswahl unberührt.
+    ``reload=False`` nur für Aufrufer, die den Stand gerade selbst gelesen und
+    zusammengefuehrt haben: sie schreiben genau diesen Stand.
     """
     name = str(name or "").strip()
     if not name or not isinstance(values, dict):
@@ -190,7 +192,7 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
     # geschrieben haben. `JSONConfig` haelt den Stand im Speicher und
     # schreibt beim naechsten Commit ALLES zurueck -- ohne diesen Abgleich
     # loescht der eigene, gecachte Stand fremde Token.
-    if not _reload():
+    if reload and not _reload():
         return False
     raw = PREFERENCES.get("accounts", None)
     records = list(raw) if isinstance(raw, list) else []
@@ -248,13 +250,50 @@ def save_account(name, values, active=None, preferred_formats=None,
             allow_virtual_default=True)
 
 
+def _merged_entry(before, entry, current):
+    """Ein Buch feldweise zusammenfuehren: nur eigene Aenderungen setzen."""
+    merged = dict(current) if isinstance(current, dict) else {}
+    if not isinstance(before, dict):
+        # Neues Buch: was inzwischen dazukam, bleibt stehen.
+        merged.update(entry)
+        return merged
+    for field in set(before) | set(entry):
+        if before.get(field) == entry.get(field):
+            continue  # lokal unveraendert: der gespeicherte Wert gilt
+        if field in entry:
+            merged[field] = entry[field]
+        else:
+            merged.pop(field, None)
+    return merged
+
+
+def _merge_state(stored, base, state):
+    """Drei-Wege-Merge des Zustands gegen den gespeicherten Stand.
+
+    Nur was sich gegenueber `base` geaendert hat, setzt sich durch; alles
+    andere -- auch Felder desselben Buchs -- bleibt, wie es inzwischen
+    gespeichert wurde.
+    """
+    merged = dict(stored)
+    for key in set(base) - set(state):
+        merged.pop(key, None)  # in diesem Lauf entfernt
+    for key, entry in state.items():
+        current = merged.get(key)
+        if isinstance(entry, dict):
+            entry = _merged_entry(base.get(key), entry, current)
+            if current is None and not entry:
+                continue  # fremd geloescht und lokal unveraendert
+        merged[key] = entry
+    return merged
+
+
 def save_state(account_name, state, base):
     """Zustand eines Kontos sichern: nur Aenderungen gegenueber `base`.
 
-    `base` ist der Ausgangsstand des Aufrufers. Inzwischen von einem anderen
-    Lauf gespeicherte Zuordnungen bleiben erhalten, weil nur geaenderte
-    Schluessel uebernommen werden; ein hier entfernter Eintrag verschwindet
-    auch dann, wenn er in `base` noch steht.
+    `base` ist der Ausgangsstand des Aufrufers. Ein anderer Lauf kann
+    inzwischen andere Felder desselben Buchs geschrieben haben; gespeichert
+    werden deshalb nur geaenderte Felder. Ein hier entfernter Eintrag oder
+    ein entferntes Feld verschwindet auch dann, wenn `base` es noch nennt.
     """
     with _SETTINGS_LOCK:
         if not _reload():
@@ -264,16 +303,14 @@ def save_state(account_name, state, base):
             return False
         stored = source.get("state")
         stored = stored if isinstance(stored, dict) else {}
-        merged = dict(stored)
-        for key in set(base) - set(state):
-            merged.pop(key, None)
-        merged.update({key: value for key, value in state.items()
-                       if base.get(key) != value})
+        merged = _merge_state(stored, base, state)
         if merged == stored:
             # Nichts geaendert: kein vollstaendiger Schreibvorgang.
             return True
+        # Der Stand ist gelesen und zusammengefuehrt: nicht noch einmal
+        # einlesen, sonst schriebe der Merge auf einem anderen Stand.
         return _write_account(account_name, {"state": merged}, create=False,
-                              allow_virtual_default=True)
+                              allow_virtual_default=True, reload=False)
 
 
 def _account_record(name):

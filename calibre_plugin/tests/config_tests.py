@@ -179,6 +179,35 @@ class TokenTests(ConfigCase):
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
         self.assertFalse(config.save_refresh_token("A", "tok-B"))
 
+    def test_a_state_save_keeps_a_foreign_change_to_another_field(self):
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "alt", "reading": {"read": True}}}})
+        # Ausgangsstand des Laufs: derselbe Eintrag, aber anderer Lesestand.
+        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "neu", "reading": {"read": False}}},
+            base))
+        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
+                         config.account_by_name("A")["state"]["b1"])
+
+    def test_a_field_removed_locally_disappears_from_the_stored_state(self):
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "alt", "collections": ["Serie"]}}})
+        base = {"b1": {"tolino_id": "alt", "collections": ["Serie"]}}
+        self.assertTrue(config.save_state("A", {"b1": {"tolino_id": "alt"}},
+                                          base))
+        self.assertEqual({"tolino_id": "alt"},
+                         config.account_by_name("A")["state"]["b1"])
+
+    def test_a_new_book_keeps_fields_a_foreign_run_already_stored(self):
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "extern", "reading": {"read": True}}}})
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "neu", "calibre_id": 7}}, {}))
+        self.assertEqual({"tolino_id": "neu", "calibre_id": 7,
+                          "reading": {"read": True}},
+                         config.account_by_name("A")["state"]["b1"])
+
 
 if __name__ == "__main__":
     unittest.main()

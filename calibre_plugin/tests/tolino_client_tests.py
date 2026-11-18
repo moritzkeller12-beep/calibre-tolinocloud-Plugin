@@ -233,6 +233,18 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(["adopted"], saved)
         self.assertFalse(client._hw_adopted)
 
+    def test_a_hardware_callback_that_returns_false_is_reported(self):
+        with LocalHTTP(token_and(devices_reply)) as server, \
+                local_tolino_endpoints(server.origin), patch(
+                    "calibre_plugin.tolino.log_warning") as warned:
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  hardware_callback=lambda _hardware: False)
+            client.hardware = "adopted"
+            client._hw_adopted = True
+            client.fetch_hardware_id()
+        self.assertEqual(1, warned.call_count)
+        self.assertIn("Geräte-ID", str(warned.call_args[0][0]))
+
     def test_a_failed_call_keeps_the_adopted_id_unsaved(self):
         def refuse(_method, _path, _headers, _payload):
             return 500, {}, b""
