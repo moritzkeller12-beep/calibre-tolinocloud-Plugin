@@ -69,9 +69,14 @@ class _Ws:
         # Nur eine echte 101-Antwort mit den Upgrade-Headern und dem
         # richtigen Accept-Digest ist ein WebSocket. Ohne diese Pruefung
         # wuerde auch eine fremde HTTP-Antwort als Verbindung gelten.
+        # `Connection` ist eine Kommaliste: nur ein eigener Eintrag zaehlt,
+        # nicht die Zeichenfolge irgendwo im Header.
+        connection_tokens = {
+            token.strip().lower()
+            for token in headers.get(b"connection", b"").split(b",")}
         if (b" 101 " not in status_line
                 or headers.get(b"upgrade", b"").lower() != b"websocket"
-                or b"upgrade" not in headers.get(b"connection", b"").lower()
+                or b"upgrade" not in connection_tokens
                 or headers.get(b"sec-websocket-accept", b"").decode(
                     "latin-1") != _accept_value(key)):
             sock.close()

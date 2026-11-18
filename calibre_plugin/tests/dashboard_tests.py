@@ -4,6 +4,8 @@ Der Lauf ist vorbei (Client und Thread), geprüft werden Ergebnis-Sicherung,
 Konto-Zuordnung der Spalten und die Rückmeldung je Ausgang. Worker und
 Dashboard sind echte Objekte bzw. das vorhandene Dashboard-Doppel.
 """
+import shutil
+import tempfile
 import types
 import unittest
 import uuid
@@ -25,6 +27,10 @@ class OrchestrationCase(unittest.TestCase):
         self._original = config.PREFERENCES
         config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
         self.addCleanup(setattr, config, "PREFERENCES", self._original)
+        # Ein Sync-Lauf setzt gespeicherte Konten voraus; nur so kann der
+        # Zustand am Ende auch geschrieben werden.
+        for name in ("A", "B"):
+            config.save_account(name, {"refresh_token": "tok-%s" % name})
         self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def worker(self, account="A", outcome=None, updates=((1, "neu-1"),)):
@@ -203,6 +209,73 @@ class ReportTests(OrchestrationCase):
         self.assertIn("Die Verbindung ist fehlgeschlagen",
                       recorded["error"][0][2])
         self.assertTrue(dashboard.finished)
+
+
+class FakeField:
+    """Ein minimales Eingabefeld: merkt sich, ob es geleert wurde."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def text(self):
+        return self.value
+
+    def setText(self, value):
+        self.value = value
+
+
+class SettingsSaveTests(OrchestrationCase):
+    """Ein nicht gespeicherter Stand meldet keinen Erfolg."""
+
+    def break_settings(self):
+        """Ein Verzeichnis als Speicherort: Schreiben scheitert ohne Ausnahme."""
+        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
+        self.addCleanup(shutil.rmtree, broken, True)
+        config.PREFERENCES.file_path = broken
+
+    def test_a_failed_state_save_is_reported_as_a_failure(self):
+        dashboard = self.dashboard(self.worker(), full_database())
+        self.break_settings()
+        failures = self.ui.sync_results.persist_sync_result(
+            dashboard, {UUID: {"tolino_id": "neu-1"}}, [(1, "neu-1")])
+        self.assertIn("Sync-Zustand", failures)
+
+    def test_a_token_that_cannot_be_saved_stays_in_the_field(self):
+        config.save_account("A", {"refresh_token": ""})
+        field = FakeField("tok-neu")
+        dashboard = types.SimpleNamespace(
+            account_name="A", refresh=field,
+            partner=types.SimpleNamespace(currentData=lambda: 1),
+            _partner_chosen=True, _hardware_edited=False,
+            hardware=types.SimpleNamespace(text=lambda: "hw"),
+            update_status=lambda: None)
+        self.break_settings()
+        store = self.ui.dashboard.SyncDashboard.store_refresh.__get__(dashboard)
+        with patch("calibre_plugin.ui_dashboard.error_dialog") as shown:
+            self.assertFalse(store("tok-neu"))
+        self.assertTrue(shown.called)
+        self.assertEqual("tok-neu", field.value)
+
+    def test_a_failed_settings_save_does_not_switch_the_account(self):
+        config.save_account("A", {"refresh_token": "tok-A"}, active="A")
+        config.save_account("B", {"refresh_token": "tok-B"})
+        loaded = []
+        dashboard = types.SimpleNamespace(
+            account_name="A", account_names=["A", "B"], login_thread=None,
+            _hardware_edited=False,
+            values=lambda: {"account_name": "A", "hardware_id": "hw",
+                            config.PREFERRED_FORMATS: ["EPUB"]},
+            load_values=lambda: loaded.append(True))
+        dashboard._save_visible_account = (
+            self.ui.dashboard.SyncDashboard._save_visible_account
+            .__get__(dashboard))
+        switch = self.ui.dashboard.SyncDashboard.switch_account.__get__(
+            dashboard)
+        self.break_settings()
+        self.assertFalse(switch("B"))
+        self.assertEqual("A", dashboard.account_name)
+        self.assertEqual([], loaded)
+        self.assertEqual("A", config.settings()["active_account"])
 
 
 if __name__ == "__main__":

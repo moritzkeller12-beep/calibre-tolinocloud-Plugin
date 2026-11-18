@@ -66,21 +66,26 @@ class SyncDashboard(DashboardParts, QDialog):
         `save_account()` merged ihn aus dem Konto, statt ihn zu ersetzen.
         """
         if not self.account_name:
-            return
+            return True
         values = dict(values or self.values())
         name = str(values.get("account_name") or "")
         if not name:
             # Fehlende Konten dürfen keinen fremden Zustand überschreiben.
             log_warning("Das sichtbare Konto existiert nicht mehr; "
                         "Änderungen wurden nicht gespeichert.")
-            return
+            return True
         # Ein unverändertes Feld darf eine vom Worker übernommene Geräte-ID
         # nicht mit einem veralteten Anzeigewert überschreiben.
         if not self._hardware_edited:
             values.pop("hardware_id", None)
-        save_account(name, values, active=name,
-                     preferred_formats=values[PREFERRED_FORMATS])
+        # ``False`` statt Ausnahme: der Speicher ist unlesbar oder das Konto
+        # fehlt. Ein Aufrufer, der den Zustand braucht, muss abbrechen.
+        if not save_account(name, values, active=name,
+                            preferred_formats=values[PREFERRED_FORMATS]):
+            log_warning("Die Einstellungen konnten nicht gespeichert werden.")
+            return False
         self._hardware_edited = False
+        return True
 
     def _mark_hardware_edited(self, _text=""):
         """Merken, dass die Geräte-ID von Hand geändert wurde."""
@@ -114,7 +119,10 @@ class SyncDashboard(DashboardParts, QDialog):
             except Exception:
                 pass
             return False
-        self._save_visible_account()
+        if not self._save_visible_account():
+            # Ein nicht gesicherter Stand darf keinen Kontowechsel auslösen:
+            # sonst überschreibt der nächste Schreibvorgang ihn endgültig.
+            return False
         set_active_account(name)
         self.load_values()
         return True
@@ -293,11 +301,19 @@ class SyncDashboard(DashboardParts, QDialog):
         if not self._hardware_edited:
             account = account_summary(self.account_name) or {}
             hardware = str(account.get("hardware_id") or "")
-        save_credentials(
-            self.account_name, token,
-            hardware or normalize_hardware_id(self.hardware.text())
-            or hardware_id(),
-            partner_id)
+        if not save_credentials(
+                self.account_name, token,
+                hardware or normalize_hardware_id(self.hardware.text())
+                or hardware_id(),
+                partner_id):
+            # Nicht gespeichert: die Eingabe bleibt stehen, damit sie nicht
+            # verloren geht, und der Aufrufer meldet keinen Erfolg.
+            error_dialog(self, "Token nicht gespeichert",
+                         "Der Token konnte nicht gespeichert werden. Die "
+                         "Einstellungsdatei ist möglicherweise nicht lesbar. "
+                         "Bitte die Eingabe stehen lassen und erneut "
+                         "versuchen.", show=True)
+            return False
         self.refresh.setText("")
         self.update_status()
         return True

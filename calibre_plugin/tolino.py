@@ -311,13 +311,22 @@ class TolinoClient:
         self.refresh = new_refresh
         if new_refresh != previous_refresh and self.token_callback:
             try:
-                self.token_callback(self.refresh)
+                # Rueckgabe ``False`` heisst: nicht gespeichert. ``None`` ist
+                # bei allgemeinen Callbacks dagegen ein normaler Erfolg.
+                stored = self.token_callback(self.refresh)
+                detail = ""
             except Exception as exc:
-                detail = sanitize_error(exc, (previous_refresh, new_refresh, self.access))
+                stored, detail = False, sanitize_error(
+                    exc, (previous_refresh, new_refresh, self.access))
+            if stored is False:
+                # Ein nicht gespeicherter Einmal-Token ist verloren: die
+                # Anmeldung darf nicht als gelungen gelten.
                 self.access = None
                 raise TolinoAuthError(
                     "Der erneuerte Zugang konnte nicht gespeichert werden. " + RELOGIN,
-                    code="A01", detail=detail) from None
+                    code="A01",
+                    detail=detail or "Einstellungen konnten nicht geschrieben werden."
+                ) from None
 
         try:
             lifetime = int(data.get("expires_in") or 3600)

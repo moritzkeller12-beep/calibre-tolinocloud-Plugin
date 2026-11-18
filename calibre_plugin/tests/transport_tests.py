@@ -95,6 +95,16 @@ class HandshakeTests(unittest.TestCase):
         self.assertIn(b"Sec-WebSocket-Version: 13", self.sock.sent)
         self.assertFalse(self.sock.closed)
 
+    def test_a_connection_header_with_several_tokens_is_accepted(self):
+        # `Connection` ist eine Kommaliste; `Upgrade` ist ein eigener Eintrag.
+        ws = self.handshake(connection=b"keep-alive, Upgrade")
+        self.assertIsInstance(ws, _Ws)
+
+    def test_a_connection_token_must_match_exactly(self):
+        # Die Zeichenfolge irgendwo im Header genuegt nicht.
+        with self.assertRaises(OSError):
+            self.handshake(connection=b"notupgrade")
+
     def test_an_incomplete_handshake_is_rejected(self):
         cases = {
             "falscher Accept": {"accept": b"falscher-digest"},

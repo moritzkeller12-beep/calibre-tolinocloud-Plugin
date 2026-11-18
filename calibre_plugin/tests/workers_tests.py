@@ -3,6 +3,8 @@
 Der Worker wird mit einem Client-Doppel an der Netznaht ausgeführt; alles
 andere (Planung, Zustand, Signale, Bericht) ist Produktivcode.
 """
+import shutil
+import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
@@ -93,6 +95,9 @@ class WorkerCase(unittest.TestCase):
         config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
         self.addCleanup(setattr, config, "PREFERENCES",
                         self._original_preferences)
+        # Der Lauf sichert seinen Zwischenstand in genau diesem Konto.
+        config.save_account("A", {"refresh_token": "tok-A",
+                                  "hardware_id": "hw"})
         self.ui = ui_module_for(self, qt_stub=real_qt_stub())
         self.context = RunContext.from_values(
             {"account_name": "A", "preferred_formats": ["EPUB"]},
@@ -176,6 +181,33 @@ class UploadTests(WorkerCase):
         self.assertTrue(worker.outcome["cancelled"])
         self.assertEqual("not_started", worker.operations[0]["status"])
         self.assertIn("completed", emitted)
+
+
+class StatePersistenceTests(WorkerCase):
+    """Ohne gesicherten Zwischenstand bleibt die alte Kopie stehen."""
+
+    def break_settings(self):
+        """Ein Verzeichnis als Speicherort: Schreiben scheitert ohne Ausnahme."""
+        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
+        self.addCleanup(shutil.rmtree, broken, True)
+        config.PREFERENCES.file_path = broken
+
+    def test_a_failed_state_save_stops_before_the_old_copy_is_deleted(self):
+        config.save_account("A", {"refresh_token": "tok-A",
+                                  "hardware_id": "hw"})
+        state = {UUID: {"tolino_id": "alt", "calibre_id": 7}}
+        client = FakeClient(upload_results=["neu-1"])
+        self.break_settings()
+        worker, emitted = self.run_worker(
+            client, jobs=[self.job(1, UUID, "/buch.epub", old_id="alt")],
+            state=state)
+        # Der Upload ist durch, die neue ID steht nur im Speicher: deshalb
+        # darf die ersetzte Kopie nicht geloescht werden.
+        self.assertEqual(["/buch.epub"], client.uploads)
+        self.assertEqual([], client.deleted)
+        self.assertEqual("neu-1", worker.state[UUID]["tolino_id"])
+        self.assertIn("Zwischenstand", str(emitted.get("failed")))
+        self.assertNotIn("completed", emitted)
 
 
 class ReadingAndMetadataTests(WorkerCase):
@@ -401,6 +433,9 @@ class PersistenceTests(WorkerCase):
                          config.account_by_name("A")["state"][UUID]["tolino_id"])
 
     def test_a_removed_account_is_not_created_by_a_late_callback(self):
+        # Das letzte Konto laesst sich nicht entfernen: ein zweites muss her.
+        config.save_account("B", {"refresh_token": "tok-B"})
+        self.assertTrue(config.remove_account("A"))
         self.run_worker(FakeClient(),
                         jobs=[self.job(1, UUID, "/buch.epub")])
         self.assertEqual({}, config.account_by_name("A"))

@@ -164,12 +164,18 @@ def persist_sync_result(dialog, state, updates):
     columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
     failures = []
     try:
-        if account_name:
-            save_account(account_name, {"state": state}, create=False)
+        # ``False`` statt Ausnahme: Speicher unlesbar oder Konto entfernt.
+        stored = (not account_name
+                  or bool(save_account(account_name, {"state": state},
+                                       create=False)))
+        detail = ""
     except Exception as exc:
+        stored, detail = False, sanitize_error(exc)
+    if not stored:
         failures.append("Sync-Zustand")
         log_warning("Ergebnis der Synchronisierung konnte nicht "
-                    "gespeichert werden: %s" % sanitize_error(exc))
+                    "gespeichert werden: %s"
+                    % (detail or "Einstellungen konnten nicht geschrieben werden."))
     writers = [
         ("id", "tolino-IDs",
          lambda db: update_tolino_ids(

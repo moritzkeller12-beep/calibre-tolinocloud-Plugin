@@ -166,14 +166,21 @@ class SyncWorker(QObject):
 
         Nach jedem Upload ist die Tolino-ID nicht mehr rueckgaengig zu
         machen; deshalb schreibt der Worker den vollen Konto-Zustand, statt
-        ein separates Journal zu fuehren.
+        ein separates Journal zu fuehren. `save_account()` meldet einen
+        unlesbaren Speicher mit ``False`` statt einer Ausnahme: ohne
+        gesicherten Zustand darf der Lauf nicht weitergehen, sonst wuerde die
+        ersetzte Kopie geloescht, obwohl die neue ID nirgends steht.
         """
         if not self.account_name:
             return
         try:
-            save_account(self.account_name, {"state": self.state},
-                         create=False)
+            stored = save_account(self.account_name, {"state": self.state},
+                                  create=False)
+            detail = ""
         except Exception as exc:
+            stored, detail = False, sanitize_error(
+                exc, account_secrets(self.account_name))
+        if not stored:
             raise TolinoError(
                 "Der Sync-Zwischenstand konnte nicht gespeichert werden. "
                 "Bereits durchgeführte Cloud-Änderungen bleiben bestehen; "
@@ -181,7 +188,7 @@ class SyncWorker(QObject):
                 short=("Der Sync-Zwischenstand konnte nicht gespeichert werden. "
                        "Cloud-Änderungen bleiben bestehen; bitte den Bestand "
                        "vor einem erneuten Lauf prüfen."),
-                detail=sanitize_error(exc, account_secrets(self.account_name))) from exc
+                detail=detail or "Einstellungen konnten nicht geschrieben werden.")
 
     def _copy_is_gone(self, client, deliverable_id):
         """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten.

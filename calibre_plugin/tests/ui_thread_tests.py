@@ -163,6 +163,14 @@ class AuthWorkerTests(unittest.TestCase):
         self.assertEqual("failed", events[0][0])
         self.assertNotIn("completed", [name for name, _value in events])
 
+    def test_a_save_that_returns_false_is_reported_and_not_completed(self):
+        worker, events = self.worker(
+            grab_live_refresh={"return_value": ("neu", "hw", 1)},
+            save_credentials={"return_value": False})
+        worker.run()
+        self.assertEqual("failed", events[0][0])
+        self.assertNotIn("completed", [name for name, _value in events])
+
     def test_the_session_check_maps_each_status_to_its_signal(self):
         cases = (("valid", ""), ("busy", "Keep-alive"),
                  ("invalid", "Token abgelehnt"))

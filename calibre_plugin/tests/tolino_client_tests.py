@@ -210,6 +210,15 @@ class RetryTests(unittest.TestCase):
         self.assertEqual("A01", caught.exception.code)
         self.assertIsNone(client.access)
 
+    def test_a_token_callback_that_returns_false_stops_the_login(self):
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  token_callback=lambda _token: False)
+            with self.assertRaises(TolinoAuthError) as caught:
+                client.login()
+        self.assertEqual("A01", caught.exception.code)
+        self.assertIsNone(client.access)
+
     def test_an_adopted_id_is_saved_once_after_a_successful_call(self):
         saved = []
         with LocalHTTP(token_and(devices_reply)) as server, \
