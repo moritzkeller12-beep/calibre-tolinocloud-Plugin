@@ -15,7 +15,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..sync_data import READ_TAG
-from ..tolino import TolinoClient, _download_token, sanitize_error
+from ..tolino import (TolinoClient, _download_token, report_error,
+                       sanitize_error)
 from ..tolino import urlopen as REAL_URLOPEN
 from ._support import LocalHTTP, local_tolino_endpoints
 
@@ -111,6 +112,135 @@ JSON_HEADERS = {"Content-Type": "application/json"}
 
 def json_reply(payload):
     return 200, JSON_HEADERS, json.dumps(payload).encode()
+
+
+DEVICES_BODY = json.dumps({"deviceListResponse": {"devices": [
+    {"deviceId": HARDWARE, "deviceLastUsage": "2026-01-01"}]}}).encode()
+
+
+def devices_reply(_method, _path, _headers, _payload):
+    return 200, JSON_HEADERS, DEVICES_BODY
+
+
+def token_and(devices):
+    """Server: Token-Endpunkt normal, jeder andere Pfad an `devices`."""
+
+    def responder(method, path, headers, payload):
+        if path.startswith("/token/"):
+            return 200, JSON_HEADERS, TOKEN_BODY
+        return devices(method, path, headers, payload)
+
+    return responder
+
+
+class ReportErrorTests(unittest.TestCase):
+    """Die Meldung im Dialog ist eine Zeile -- mit Code, ohne Zugangsdaten."""
+
+    def test_the_short_text_and_the_code_form_the_user_message(self):
+        exc = TolinoApiError(
+            "Serverfehler", code="N03",
+            short="tolino meldet einen Fehler (HTTP 400).",
+            detail="Body mit tok-123")
+        self.assertEqual(
+            "tolino meldet einen Fehler (HTTP 400). (Code N03)",
+            report_error(exc, "Sync", ("tok-123",)))
+
+    def test_an_unexpected_error_gets_the_generic_code(self):
+        self.assertEqual("Unerwarteter Fehler: kaputt (Code E99)",
+                         report_error(RuntimeError("kaputt"), "Lauf"))
+
+
+class RetryTests(unittest.TestCase):
+    """Einmal nutzbare Tokens: jede Wiederholung laeuft genau einmal."""
+
+    def test_a_401_renews_the_access_token_and_repeats_the_call(self):
+        calls = {"token": 0, "devices": 0}
+
+        def responder(method, path, headers, payload):
+            if path.startswith("/token/"):
+                calls["token"] += 1
+                return 200, JSON_HEADERS, json.dumps({
+                    "access_token": "acc-%d" % calls["token"],
+                    "refresh_token": "rot-%d" % calls["token"],
+                    "expires_in": 3600}).encode()
+            calls["devices"] += 1
+            if calls["devices"] == 1:
+                return 401, {}, b'{"error": "expired"}'
+            return devices_reply(method, path, headers, payload)
+
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            self.assertEqual(HARDWARE, client.fetch_hardware_id())
+            sent = [request["headers"].get("t_auth_token")
+                    for request in server.requests
+                    if request["path"].endswith("/handshake/devices/list")]
+        self.assertEqual(2, calls["token"])
+        self.assertEqual(["acc-1", "acc-2"], sent)
+
+    def test_a_403_at_the_token_endpoint_waits_and_retries(self):
+        calls = {"token": 0}
+
+        def responder(_method, path, _headers, _payload):
+            if not path.startswith("/token/"):
+                return 404, {}, b""
+            calls["token"] += 1
+            if calls["token"] == 1:
+                # Nur eine echte Bot-Prüfung rechtfertigt die Wartezeit.
+                return 403, {}, b"<html><body>captcha</body></html>"
+            return 200, JSON_HEADERS, TOKEN_BODY
+
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            self.assertEqual("rot-1", client.login())
+        self.assertEqual(2, calls["token"])
+        self.assertEqual([2.0], [call.args[0] for call in slept.call_args_list])
+
+    def test_a_failing_token_callback_stops_the_login(self):
+        def fail(_token):
+            raise OSError("Platte voll")
+
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  token_callback=fail)
+            with self.assertRaises(TolinoAuthError) as caught:
+                client.login()
+        self.assertEqual("A01", caught.exception.code)
+        self.assertIsNone(client.access)
+
+    def test_an_adopted_id_is_saved_once_after_a_successful_call(self):
+        saved = []
+        with LocalHTTP(token_and(devices_reply)) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  hardware_callback=saved.append)
+            client.hardware = "adopted"
+            client._hw_adopted = True
+            client.fetch_hardware_id()
+        self.assertEqual(["adopted"], saved)
+        self.assertFalse(client._hw_adopted)
+
+    def test_a_failed_call_keeps_the_adopted_id_unsaved(self):
+        def refuse(_method, _path, _headers, _payload):
+            return 500, {}, b""
+
+        saved = []
+        with LocalHTTP(token_and(refuse)) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  hardware_callback=saved.append)
+            client.hardware = "adopted"
+            client._hw_adopted = True
+            # Gueltiger Zugang: der Fehler kommt aus dem Geraete-Aufruf, nicht
+            # aus einer Anmeldung (die wuerde die ID schon bestaetigen).
+            client.access = "acc-1"
+            client.expires_at = time.time() + 3600
+            with self.assertRaises(TolinoError):
+                client.fetch_hardware_id()
+        self.assertEqual([], saved)
+        self.assertTrue(client._hw_adopted)
 
 
 class Backend:
@@ -300,7 +430,7 @@ class FakeResponse:
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc_info):
+    def __exit__(self, *_exc):
         return False
 
 

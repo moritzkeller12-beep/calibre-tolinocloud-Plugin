@@ -8,6 +8,7 @@ import uuid
 from unittest.mock import patch
 
 from .. import config
+from ..comparison import content_fingerprint
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..planning import MetaUpdateRecord, SyncJob
 from ..run_context import RunContext
@@ -133,6 +134,18 @@ class UploadTests(WorkerCase):
         self.assertEqual(1, worker.outcome["uploaded"])
         self.assertIn("completed", emitted)
         self.assertNotIn("failed", emitted)
+
+    def test_an_upload_records_the_content_fingerprint_of_the_new_copy(self):
+        metadata = {1: {"uuid": UUID, "title": "Titel",
+                        "format_signatures": {"EPUB": "10:20"}}}
+        worker, _emitted = self.run_worker(
+            FakeClient(), jobs=[self.job(1, UUID, "/buch.epub")],
+            metadata=metadata)
+        entry = worker.state[UUID]
+        self.assertEqual(content_fingerprint(metadata[1], "EPUB"),
+                         entry["content_fp"])
+        # Ein Upload ist kein Read-back: die Metadaten gelten nicht als geprueft.
+        self.assertNotIn("meta_verified_fp", entry)
 
     def test_a_partial_failure_keeps_the_successful_upload(self):
         jobs = [self.job(1, UUID, "/gut.epub", "Gut"),

@@ -99,7 +99,7 @@ class ReadingMirrorTests(unittest.TestCase):
             fail={"#tolino_read"})
         dashboard = dashboard_stub(
             gui=type("Gui", (), {"current_db": database})())
-        written = self.ui.dashboard._write_reading_updates(
+        written = self.ui.sync_results.write_reading_updates(
             dashboard, [(1, True)], [(2, 42)], "Test")
         self.assertEqual(1, written)
         self.assertEqual([("#tolino_progress", {2: 42})], database.api.writes)

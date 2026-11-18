@@ -128,6 +128,16 @@ class ComparisonTests(unittest.TestCase):
                                  ["EPUB"])
         self.assertEqual("changed", rows[0]["status"])
 
+    def test_a_changed_file_is_reported_as_changed(self):
+        before = book(format_signatures={"EPUB": "10:20"})
+        state = {UUID: {"tolino_id": "d1",
+                        "content_fp": content_fingerprint(before, "EPUB")}}
+        rows = compare_inventory(
+            {1: book(format_signatures={"EPUB": "30:40"})}, state,
+            [cloud()], ["EPUB"])
+        # Gleiche Metadaten, andere Datei: der Upload wird empfohlen.
+        self.assertEqual("changed", rows[0]["status"])
+
     def test_isbn_or_title_and_author_match_without_stored_id(self):
         for metadata, reason in ((book(uuid="a" * 8 + "-1111-4111-8111-111111111111"), "isbn"),
                                  (book(isbn=""), "title_author")):

@@ -77,7 +77,7 @@ class PersistTests(OrchestrationCase):
         config.save_account("B", {"refresh_token": "tok-B"})
         worker = self.worker(account="B")
         dashboard = self.dashboard(worker, full_database())
-        failures = self.ui.dashboard._persist_sync_result(
+        failures = self.ui.sync_results.persist_sync_result(
             dashboard, {UUID: {"tolino_id": "d1"}}, worker.updates)
         self.assertEqual([], failures)
         self.assertEqual({UUID: {"tolino_id": "d1"}},
@@ -87,7 +87,7 @@ class PersistTests(OrchestrationCase):
     def test_reading_columns_only_for_the_displayed_account(self):
         worker = self.worker(account="B")
         database = full_database()
-        failures = self.ui.dashboard._persist_sync_result(
+        failures = self.ui.sync_results.persist_sync_result(
             self.dashboard(worker, database, account="A"),
             {UUID: {"tolino_id": "d1"}}, worker.updates)
         self.assertEqual([], failures)
@@ -96,7 +96,7 @@ class PersistTests(OrchestrationCase):
 
         database = full_database()
         worker = self.worker(account="A")
-        self.ui.dashboard._persist_sync_result(
+        self.ui.sync_results.persist_sync_result(
             self.dashboard(worker, database), {UUID: {"tolino_id": "d1"}},
             worker.updates)
         self.assertEqual([TOLINO_COLUMN, TOLINO_READ_COLUMN,
@@ -108,17 +108,17 @@ class PersistTests(OrchestrationCase):
         config.save_account("A", {"refresh_token": "tok-A"})
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
-        failures = self.ui.dashboard._persist_sync_result(
+        failures = self.ui.sync_results.persist_sync_result(
             dashboard, {UUID: {"tolino_id": "d1"}}, worker.updates)
         self.assertEqual(["tolino-IDs"], failures)
         self.assertEqual({UUID: {"tolino_id": "d1"}},
                          config.account_by_name("A")["state"])
 
     def test_the_cleanup_callback_runs_even_when_saving_fails(self):
-        """Geprueft wird `_finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
+        """Geprueft wird `finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
-        outcome, failures = self.ui.dashboard._finish_sync(
+        outcome, failures = self.ui.sync_results.finish_sync(
             dashboard, {UUID: {"tolino_id": "d1"}}, worker.updates)
         self.assertEqual({"uploaded": 1}, outcome)
         self.assertEqual(["tolino-IDs"], failures)
@@ -127,7 +127,7 @@ class PersistTests(OrchestrationCase):
     def test_an_unknown_column_is_simply_skipped(self):
         worker = self.worker()
         database = CalibreDatabase({TOLINO_COLUMN: {"datatype": "text"}})
-        failures = self.ui.dashboard._persist_sync_result(
+        failures = self.ui.sync_results.persist_sync_result(
             self.dashboard(worker, database), {}, worker.updates)
         self.assertEqual([], failures)
         self.assertEqual([TOLINO_COLUMN],
@@ -141,9 +141,9 @@ class ReportTests(OrchestrationCase):
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database())
         recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.ui_dashboard.info_dialog",
+        with patch("calibre_plugin.sync_results.info_dialog",
                    lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.ui_dashboard.error_dialog",
+                patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
             self.sync_completed(dashboard, {UUID: {"tolino_id": "d1"}},
                                 worker.updates)
@@ -156,9 +156,9 @@ class ReportTests(OrchestrationCase):
         worker = self.worker(outcome={"cancelled": True})
         dashboard = self.dashboard(worker, full_database())
         recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.ui_dashboard.info_dialog",
+        with patch("calibre_plugin.sync_results.info_dialog",
                    lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.ui_dashboard.error_dialog",
+                patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
             self.sync_completed(dashboard, {}, worker.updates)
         self.assertIn("Abgebrochen", recorded["info"][0][2])
@@ -168,9 +168,9 @@ class ReportTests(OrchestrationCase):
         worker = self.worker(outcome={"uploaded": 1, "failed": 1})
         dashboard = self.dashboard(worker, full_database())
         recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.ui_dashboard.info_dialog",
+        with patch("calibre_plugin.sync_results.info_dialog",
                    lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.ui_dashboard.error_dialog",
+                patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
             self.sync_completed(dashboard, {}, worker.updates)
         self.assertEqual("Teilweise fehlgeschlagen", recorded["error"][0][1])
@@ -180,9 +180,9 @@ class ReportTests(OrchestrationCase):
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(), visible=False)
         recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.ui_dashboard.info_dialog",
+        with patch("calibre_plugin.sync_results.info_dialog",
                    lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.ui_dashboard.error_dialog",
+                patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
             self.sync_completed(dashboard, {}, worker.updates)
         self.assertEqual(([], []), (recorded["info"], recorded["error"]))
@@ -193,9 +193,9 @@ class ReportTests(OrchestrationCase):
         database = full_database()
         dashboard = self.dashboard(worker, database)
         recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.ui_dashboard.info_dialog",
+        with patch("calibre_plugin.sync_results.info_dialog",
                    lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.ui_dashboard.error_dialog",
+                patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
             self.sync_failed(dashboard, "Die Verbindung ist fehlgeschlagen.")
         self.assertIn(TOLINO_COLUMN,

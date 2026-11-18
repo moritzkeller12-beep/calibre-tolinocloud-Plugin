@@ -19,11 +19,6 @@ from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
 
 
-def _deferred(client, name, *args, **kwargs):
-    """Call a client method only when the action runs, after the checkpoint."""
-    return lambda: getattr(client, name)(*args, **kwargs)
-
-
 class SyncWorker(QObject):
     progress = pyqtSignal(int, int, str)
     completed = pyqtSignal(object, object)
@@ -285,7 +280,7 @@ class SyncWorker(QObject):
             ok, deleted = self._step(
                 client, checkpoint, operation,
                 "Lösche aus tolino: %s" % label,
-                _deferred(self, "_delete_or_skip", client, tolino_id),
+                partial(self._delete_or_skip, client, tolino_id),
                 done, total,
                 finish=partial(self._finish_delete, operation))
             if not ok:
@@ -347,8 +342,7 @@ class SyncWorker(QObject):
                 continue
             ok, _result = self._step(
                 client, checkpoint, operation, start_text,
-                _deferred(client, "mark_read_many", book_ids,
-                          finished=finished),
+                partial(client.mark_read_many, book_ids, finished=finished),
                 done, total)
             if ok:
                 stored = False
@@ -433,8 +427,8 @@ class SyncWorker(QObject):
             ok, new_revision = self._step(
                 client, checkpoint, operation,
                 "Serie in der Cloud: %s" % series,
-                _deferred(client, "add_to_collection", tolino_id, series,
-                          revision=revision),
+                partial(client.add_to_collection, tolino_id, series,
+                        revision=revision),
                 done, total)
             if not ok:
                 # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
@@ -461,8 +455,8 @@ class SyncWorker(QObject):
                 "Metadaten: %s" % self._label(
                     record.book_uuid, record.book_id,
                     (record.fields or {}).get("title")),
-                _deferred(client, "update_metadata", record.tolino_id,
-                          record.fields),
+                partial(client.update_metadata, record.tolino_id,
+                        record.fields),
                 done, total)
             if not ok:
                 done += 1
@@ -485,7 +479,7 @@ class SyncWorker(QObject):
             ok, new_id = self._step(
                 client, checkpoint, operation,
                 "Lade hoch: %s (%s)" % (job.label(), job.format_name),
-                _deferred(client, "upload", job.path), done, total)
+                partial(client.upload, job.path), done, total)
             if not ok:
                 done += 1
                 self.progress.emit(done, total, "Fehlgeschlagen: %s"

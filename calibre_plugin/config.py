@@ -316,11 +316,6 @@ def save_refresh_token(account_name, token):
     return False
 
 
-def clear_refresh_token(account_name):
-    """Einen eindeutig abgelehnten Refresh-Token aus dem Konto loeschen."""
-    return _update_account(account_name, {"refresh_token": ""})
-
-
 def clear_refresh_token_if_unchanged(account_name, rejected_token):
     """Nur den wirklich abgelehnten Token loeschen.
 
@@ -338,7 +333,7 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
         current = _stored_token(account_name)
         if rejected and current and current != rejected:
             return False
-        return clear_refresh_token(account_name)
+        return _update_account(account_name, {"refresh_token": ""})
 
 
 def save_hardware_id(account_name, hardware):

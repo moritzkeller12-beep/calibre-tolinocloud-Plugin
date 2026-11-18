@@ -111,7 +111,8 @@ def load_ui_module(get_icons_result, qt_stub):
                         "calibre_plugin.ui_workers",
                         "calibre_plugin.ui_auth_workers",
                         "calibre_plugin.ui_dashboard",
-                        "calibre_plugin.ui_dashboard_parts"):
+                        "calibre_plugin.ui_dashboard_parts",
+                        "calibre_plugin.sync_results"):
         sys.modules.pop(module_name, None)
     import calibre_plugin
     # Das Paket hält sonst die Referenz auf das zuvor geladene
@@ -120,7 +121,7 @@ def load_ui_module(get_icons_result, qt_stub):
     for attribute in ("ui", "ui_common", "ui_dialogs", "cdp_transport",
                       "ui_workers",
                       "ui_auth_workers", "ui_dashboard",
-                      "ui_dashboard_parts", "planning"):
+                      "ui_dashboard_parts", "planning", "sync_results"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
     modules_before_entry = set(sys.modules)
@@ -134,6 +135,7 @@ def load_ui_module(get_icons_result, qt_stub):
         "calibre_plugin.ui_dashboard_parts")
     ui_module.dialogs = importlib.import_module("calibre_plugin.ui_dialogs")
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
+    ui_module.sync_results = importlib.import_module("calibre_plugin.sync_results")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")
     ui_module._loaded_by_entry_for_tests = loaded_by_entry
     # Stubs stay active until restore_stubs() so that function-level

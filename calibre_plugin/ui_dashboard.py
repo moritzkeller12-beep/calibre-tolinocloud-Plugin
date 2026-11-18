@@ -4,8 +4,7 @@ from .ui_common import (CANCEL_MESSAGE, COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP,
                         LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP,
                         LOGIN_NEXT_STEP, _active_work_thread, _apply_busy,
                         _dialog_busy, _login_failure_guidance, _stop_thread,
-                        gui_guard, start_worker, sync_result_detail,
-                        sync_result_text)
+                        gui_guard, start_worker)
 from calibre.gui2 import error_dialog, info_dialog
 from .token_vault import TOKEN_VAULT
 from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
@@ -13,13 +12,10 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
                      save_account, save_credentials,
                      set_active_account, settings)
 from .run_context import RunContext
-from .comparison import (comparison_progress_updates,
-                         comparison_read_updates)
-from .identifiers import book_uuid, calibre_key
-from .library import (TOLINO_IGNORE_COLUMN, column_state, library_scope,
-                      bool_column_available, normalize_formats,
-                      update_progress_status, update_read_status,
-                      update_tolino_ids)
+from .library import (TOLINO_IGNORE_COLUMN, bool_column_available,
+                      column_state, library_scope, normalize_formats)
+from .sync_results import (finish_sync, mirror_account_reading,
+                           mirror_comparison_reading, report, report_sync)
 
 from . import planning as _planning
 from .errors import needs_new_login
@@ -37,218 +33,6 @@ from .ui_workers import LocalMetadataWorker, PrepareWorker, SyncWorker
 
 # Statuszeile nach einem abgelehnten Zugang (A01/B01/B02).
 NEEDS_LOGIN_STATUS = "Anmeldung abgelehnt – bitte neu anmelden."
-
-
-def _window_gone(dialog):
-    """Modale Rueckmeldung nur, solange das Fenster noch offen ist.
-
-    Wird das Dashboard waehrend eines Laufs geschlossen, melden die Worker
-    danach «Abgebrochen.» oder einen Fehler. Ein Dialog auf einem
-    geschlossenen Fenster sieht niemand, blockiert aber den GUI-Thread und
-    haelt einen eigenstaendig gestarteten Prozess am Leben. Protokolliert
-    wird der Ausgang trotzdem.
-
-    Test-Doubles ohne `isVisible` gelten als offen -- dort bleibt alles beim
-    alten Verhalten.
-    """
-    visible = getattr(dialog, "isVisible", None)
-    return visible is not None and not visible()
-
-
-def _book_key_index(dashboard):
-    """Return all book ids and every key that maps to one of them.
-
-    Calibre UUIDs are authoritative when present. The library-scoped
-    fallback is only mapped for books whose UUID field contains a title or
-    another non-UUID value; it never shadows a real UUID.
-    """
-    database = getattr(getattr(dashboard, "gui", None), "current_db", None)
-    api = getattr(database, "new_api", None)
-    if api is None:
-        return [], {}
-    book_ids = list(api.all_book_ids())
-    uuids = api.all_field_for("uuid", book_ids) or {}
-    scope = library_scope(database)
-    mapping = {}
-    for book_id in book_ids:
-        key = book_uuid(uuids.get(book_id))
-        if key:
-            mapping[key] = book_id
-        else:
-            mapping.setdefault(calibre_key(book_id, scope), book_id)
-    return book_ids, mapping
-
-
-def _write_reading_updates(dashboard, read_updates, progress_updates,
-                           error_label):
-    """Write confirmed values and refresh the affected rows once.
-
-    Lesestatus und Fortschritt sind getrennte Spalten: ein Fehler in einer
-    Spalte darf die andere nicht blockieren.
-    """
-    if not (read_updates or progress_updates):
-        return 0
-    try:
-        database = dashboard.gui.current_db
-    except Exception as exc:
-        log_warning("%s: %s" % (error_label, sanitize_error(exc)))
-        return 0
-    written = 0
-    for write, updates in ((update_read_status, read_updates),
-                           (update_progress_status, progress_updates)):
-        if not updates:
-            continue
-        try:
-            written += write(database, updates)
-        except Exception as exc:
-            log_warning("%s: %s" % (error_label, sanitize_error(exc)))
-    if written:
-        book_ids = {book_id for book_id, _value
-                    in read_updates + progress_updates}
-        _refresh_library_view(dashboard, book_ids)
-    return written
-
-
-def _mirror_account_reading(dashboard, account_name=None):
-    """Gespeicherte Lesewerte des angezeigten Kontos in Calibre spiegeln."""
-    try:
-        account = account_by_name(
-            account_name or getattr(dashboard, "account_name", "")) or {}
-        state = load_state(account.get("state"))
-        book_ids, book_ids_by_key = _book_key_index(dashboard)
-        if not book_ids:
-            return 0
-        # Erst alle Bücher auf unbekannt setzen, dann die Werte des Kontos
-        # darüberlegen: kein Wert eines anderen Kontos bleibt stehen.
-        read_updates = dict.fromkeys(book_ids)
-        progress_updates = dict.fromkeys(book_ids)
-        for key, entry in state.items():
-            if not isinstance(entry, dict):
-                continue
-            book_id = book_ids_by_key.get(str(key))
-            reading = entry.get("reading")
-            if book_id is None or not isinstance(reading, dict):
-                continue
-            if isinstance(reading.get("read"), bool):
-                read_updates[book_id] = reading["read"]
-            progress = reading.get("progress")
-            if isinstance(progress, dict) and "percent" in progress:
-                progress_updates[book_id] = progress.get("percent")
-        return _write_reading_updates(
-            dashboard, list(read_updates.items()),
-            list(progress_updates.items()),
-            "Lese-Spalten konnten nicht aktualisiert werden")
-    except Exception as exc:
-        log_warning("Lese-Spalten konnten nicht aktualisiert werden: %s"
-                    % sanitize_error(exc))
-        return 0
-
-
-def _mirror_comparison_reading(dashboard, comparison):
-    """Bekannte Cloud-Lesewerte direkt nach dem Vergleich spiegeln.
-
-    Der Konto-State bleibt die Quelle für den Konto-Wechsel; dieser direkte
-    Weg stellt sicher, dass auch ein bereits vor dem Vergleich vorhandener
-    Cloud-Stand in den Spalten ankommt.
-    """
-    return _write_reading_updates(
-        dashboard, comparison_read_updates(comparison),
-        comparison_progress_updates(comparison),
-        "Lesewerte konnten nicht nach Calibre gespiegelt werden")
-
-
-def _persist_sync_result(dialog, state, updates):
-    """Sync-Zustand, Tolino-IDs, Lesestatus und Fortschritt sichern.
-
-    Die Calibre-Schreibvorgänge laufen getrennt und sind einzeln
-    abgesichert: ein Fehler in einer Spalte darf weder die anderen
-    Schreibvorgänge noch den Abschluss des Laufs verhindern.
-    """
-    worker = getattr(dialog, "worker", None)
-    dialog_account = str(getattr(dialog, "account_name", "") or "")
-    account_name = str(getattr(worker, "account_name", None) or dialog_account)
-    columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
-    failures = []
-    try:
-        if account_name:
-            save_account(account_name, {"state": state}, create=False)
-    except Exception as exc:
-        failures.append("Sync-Zustand")
-        log_warning("Ergebnis der Synchronisierung konnte nicht "
-                    "gespeichert werden: %s" % sanitize_error(exc))
-    writers = [
-        ("id", "tolino-IDs",
-         lambda db: update_tolino_ids(
-             db, updates, account_name=account_name)),
-    ]
-    if account_name and account_name == dialog_account:
-        writers.extend([
-            ("read", "Lesestatus",
-             lambda db: update_read_status(
-                 db, list(getattr(worker, "read_updates", ()) or ()))),
-            ("progress", "Lesefortschritt",
-             lambda db: update_progress_status(
-                 db, list(getattr(worker, "progress_updates", ()) or ()))),
-        ])
-    for key, label, write in writers:
-        if not columns.get(key):
-            continue
-        try:
-            write(dialog.gui.current_db)
-        except Exception as exc:
-            failures.append(label)
-            log_warning("%s: Schreiben in Calibre fehlgeschlagen: %s"
-                        % (label, sanitize_error(exc)))
-    return failures
-
-
-def _finish_sync(dialog, state, updates):
-    """Laufergebnis sichern und den Thread in jedem Fall beenden."""
-    outcome = dict(getattr(dialog.worker, "outcome", None) or {})
-    try:
-        return outcome, _persist_sync_result(dialog, state, updates)
-    finally:
-        # Auch ein unerwarteter Fehler beim Schreiben in Calibre darf
-        # den Dialog nicht im Zustand «läuft» zurücklassen.
-        dialog.finish_thread()
-
-
-def _refresh_library_view(dashboard, book_ids):
-    """Geänderte Calibre-Zeilen sichtbar machen, ohne die Bibliothek neu zu laden."""
-    view = getattr(getattr(dashboard, "gui", None), "library_view", None)
-    model = getattr(view, "model", None)
-    if callable(model):
-        model = model()
-    refresh = getattr(model, "refresh_ids", None)
-    if callable(refresh):
-        try:
-            refresh(tuple(book_ids))
-        except Exception as exc:
-            log_warning("Calibre-Ansicht konnte nicht aktualisiert werden: %s"
-                        % sanitize_error(exc))
-
-
-def _sync_cancelled_text(outcome):
-    """Abschlusstext eines regulären Abbruchs -- auch mit Teilerfolgen."""
-    result = sync_result_text(outcome, "")
-    if result:
-        return "Abgebrochen. " + result
-    return "Abgebrochen. Es wurde nichts übertragen."
-
-
-def _sync_failure_heading(outcome):
-    """Titel und Vorsatz eines fehlerhaften Laufs.
-
-    «Teilweise fehlgeschlagen» heisst: mindestens eine Aktion wurde wirklich
-    übertragen. Der Unterschied gehört in Titel und Text; die beiden Handler
-    bleiben getrennt, weil sich ihre Ergebnisfälle unterscheiden.
-    """
-    succeeded = sum(int(outcome.get(key) or 0) for key in (
-        "uploaded", "metadata", "read_marked", "read_unmarked",
-        "collections", "deleted"))
-    if succeeded:
-        return "Teilweise fehlgeschlagen", "Teilweise abgeschlossen: "
-    return "Fehlgeschlagen", "Fehlgeschlagen: "
 
 
 class SyncDashboard(DashboardParts, QDialog):
@@ -396,19 +180,22 @@ class SyncDashboard(DashboardParts, QDialog):
         self.refresh.setText("")
         self.formats.setText(", ".join(values["preferred_formats"]))
         self.update_status()
-        _mirror_account_reading(self, self.account_name)
+        mirror_account_reading(self, self.account_name)
 
     def open_settings(self):
         """Einstellungen öffnen – speichert beim Schliessen."""
         self.settings_dialog.exec()
 
     def close_settings(self):
+        """Einstellungen schliessen -- ohne den eingetippten Token zu verlieren."""
         typed = self._typed_refresh()
         self._save_visible_account()
-        if typed:
-            # Ein eingetippter Zugangstoken ist eine Eingabe wie jede andere:
-            # «Speichern und schliessen» darf ihn nicht still verwerfen.
-            self.store_refresh(typed)
+        # Ein eingetippter Zugangstoken ist eine Eingabe wie jede andere:
+        # «Speichern und schliessen» darf ihn nicht still verwerfen. Ohne
+        # erkannten Buchhändler bleibt das Fenster offen, damit die Eingabe
+        # nicht verloren geht -- die Meldung nennt den Grund.
+        if typed and self.account_name and not self.store_refresh(typed):
+            return
         self.settings_dialog.accept()
 
     def primary_action(self):
@@ -656,8 +443,7 @@ class SyncDashboard(DashboardParts, QDialog):
         code = error.code if isinstance(error, TolinoError) else "E99"
         title = "%s (Code %s)" % (_login_failure_guidance(error), code)
         self.status.setText("Anmeldung fehlgeschlagen.")
-        if not _window_gone(self):
-            QMessageBox.warning(self, title, LOGIN_NEXT_STEP)
+        report(self, "warnung", title, LOGIN_NEXT_STEP, "Anmeldefenster")
 
     @gui_guard
     def _login_progress(self, text):
@@ -677,12 +463,9 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _show_prepare_error(self, exc, context):
         """Nur den kurzen Fehlertext zeigen; technische Details protokollieren."""
-        secrets = context.secrets()
-        message = report_error(exc, "Vorbereitung", secrets)
-        if _window_gone(self):
-            return
-        error_dialog(self, "Vergleich fehlgeschlagen",
-                     message + " Es wurde nichts geändert.", show=True)
+        message = report_error(exc, "Vorbereitung", context.secrets())
+        report(self, "fehler", "Vergleich fehlgeschlagen",
+               message + " Es wurde nichts geändert.", "Vorbereitung")
 
     def start_sync(self):
         """Bibliothek vergleichen: lokaler Snapshot und Netz im Hintergrund.
@@ -754,18 +537,14 @@ class SyncDashboard(DashboardParts, QDialog):
         worker = getattr(self, worker_name, None)
         cancelled = bool(getattr(worker, "cancelled", False))
         finish()
-        if _window_gone(self):
-            log_warning("Fenster geschlossen; Ergebnis nur im Log: %s"
-                        % sanitize_error(message))
-            return
         if cancelled or str(message) == CANCEL_MESSAGE:
-            info_dialog(
-                self, "Abgebrochen", "Abgebrochen. Es wurde nichts geändert.",
-                show=True, show_copy_button=False)
+            report(self, "info", "Abgebrochen",
+                   "Abgebrochen. Es wurde nichts geändert.", log_text)
             return
         log_warning(log_text + sanitize_error(message))
-        error_dialog(self, "Vergleich fehlgeschlagen", str(message), show=True)
-        if needs_new_login(message):
+        shown = report(self, "fehler", "Vergleich fehlgeschlagen",
+                       str(message), log_text.rstrip(": "))
+        if shown and needs_new_login(message):
             # Ein abgelehnter Zugang darf nicht als «Angemeldet.» stehen
             # bleiben: sonst sieht der Nutzer keinen Grund, sich neu
             # anzumelden, und der Vergleich scheitert immer wieder.
@@ -812,8 +591,8 @@ class SyncDashboard(DashboardParts, QDialog):
         active_name = str(self.account_name or "")
         is_active = active_name == account_name
         if is_active:
-            _mirror_account_reading(self, account_name)
-            _mirror_comparison_reading(self, payload.get("comparison"))
+            mirror_account_reading(self, account_name)
+            mirror_comparison_reading(self, payload.get("comparison"))
 
         # Den rotierten Token speichert bereits der Client-Callback.
         hardware = self.hardware
@@ -954,64 +733,20 @@ class SyncDashboard(DashboardParts, QDialog):
         Persistiert wird unter dem KONTO DES LAUFS. UI-Felder werden nur
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
-        outcome, failures = _finish_sync(self, state, updates)
-        if _window_gone(self):
-            log_warning("Fenster geschlossen; Lauf beendet: %s"
-                        % sync_result_text(outcome, ""))
-            if failures:
-                log_warning("Nicht gespeichert: %s" % ", ".join(failures))
-            return
-        if failures:
-            error_dialog(self, "Speichern fehlgeschlagen",
-                         "Nicht gespeichert: %s. Cloud-Änderungen bleiben "
-                         "bestehen; bitte den Bestand prüfen.\n\n%s"
-                         % (", ".join(failures), sync_result_text(outcome, "")),
-                         show=True)
-            return
-        if outcome.get("cancelled"):
-            info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
-                        show=True, show_copy_button=False)
-            return
-        if outcome.get("failed"):
-            title, prefix = _sync_failure_heading(outcome)
-            error_dialog(self, title, prefix + sync_result_text(outcome, ""),
-                         det_msg=sync_result_detail(outcome), show=True)
-            return
-        info_dialog(self, "Fertig",
-                    sync_result_text(outcome, "Fertig"), show=True,
-                    show_copy_button=False)
+        report_sync(self, *finish_sync(self, state, updates))
 
     @gui_guard
     def sync_failed(self, message):
         worker = self.worker
-        cancelled = bool(getattr(worker, "cancelled", False)) or \
-            str(message) == CANCEL_MESSAGE
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
-        outcome, failures = _finish_sync(
+        outcome, failures = finish_sync(
             self, getattr(worker, "state", {}),
             getattr(worker, "updates", ()))
-        if _window_gone(self):
-            log_warning("Fenster geschlossen; Sync beendet: %s"
-                        % sync_result_text(outcome, ""))
-            if failures:
-                log_warning("Nicht gespeichert: %s" % ", ".join(failures))
-            return
-        if cancelled and not failures:
-            info_dialog(self, "Abgebrochen", _sync_cancelled_text(outcome),
-                        show=True, show_copy_button=False)
-            return
-        result = sync_result_text(outcome, "")
-        text = str(message or "Synchronisierung fehlgeschlagen.")
-        if failures:
-            text += ("\n\nNicht gespeichert: %s. Cloud-Änderungen bleiben "
-                     "bestehen; bitte den Bestand prüfen." % ", ".join(failures))
-        if outcome.get("failed") and result:
-            text += "\n\n" + result
-
-        error_dialog(
-            self, _sync_failure_heading(outcome)[0], text,
-            det_msg=sync_result_detail(outcome), show=True)
+        report_sync(
+            self, outcome, failures,
+            str(message or "Synchronisierung fehlgeschlagen."),
+            cancelled=bool(getattr(worker, "cancelled", False)))
 
     def finish_thread(self):
         thread = self.thread

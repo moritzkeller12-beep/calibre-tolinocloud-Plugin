@@ -522,8 +522,9 @@ class TolinoClient:
         # Nur 401 und ein 403 am Token-Endpunkt sind eine Anmeldefrage. Ein
         # 403 anderswo ist meist eine Rechte- oder Quotabeschränkung; ein
         # einzelner Upload darf deshalb nicht den ganzen Lauf beenden.
-        if exc.code in (401, 403) and (exc.code == 401
-                                       or url == self.partner.get("token_url")):
+        if (exc.code == 401
+                or (exc.code == 403
+                    and url == self.partner.get("token_url"))):
             if self._retry_http_waf(exc, url, retry):
                 return
             self._raise_http_auth_error(exc)
