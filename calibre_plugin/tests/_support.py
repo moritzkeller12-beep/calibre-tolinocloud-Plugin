@@ -50,10 +50,6 @@ def dashboard_stub(**attrs):
     return types.SimpleNamespace(**values)
 
 
-# Felder, die der Produktivcode als Widgets anspricht.
-_ACCOUNT_PATCH = None
-
-
 class FakeTableItem:
     """QTableWidgetItem-Ersatz fuer alle Tabellentests."""
 
@@ -256,16 +252,6 @@ def ui_module_for(test_case, qt_stub=None):
     return module
 
 
-# The login helpers must not open a REAL browser window during tests.
-# On machines that have Chrome/Chromium installed (CI runners do),
-# find_browsers() would succeed and launch_reader_window() would spawn a
-# browser the tests never asked for -- every login test that asserts the
-# no-Chromium fallback would then fail or hang. Tests that need a
-# browser patch calibre_plugin.browser_finder.find_browsers themselves.
-# close_grabber_window() is stubbed as well: the real one
-# talks to a DevTools endpoint on 127.0.0.1:9223 and must never close
-# a developer's open grabber window while the suite runs. Tests that
-# care about the close patch the name again with their own mock.
 # --- Echte Qt-Oberflaeche fuer die Dialogtests -------------------------
 
 _REAL_QT_APP = None

@@ -38,6 +38,7 @@ class FakeClient:
         self.collections = []
         self.read_marks = []
         self.deleted = []
+        self.inventory_calls = 0
 
     def login(self):
         return "rot"
@@ -53,6 +54,7 @@ class FakeClient:
         return "neu-%d" % len(self.uploads)
 
     def inventory(self):
+        self.inventory_calls += 1
         if self.inventory_error is not None:
             raise self.inventory_error
         return list(self.inventory_rows)
@@ -209,6 +211,19 @@ class DeleteTests(WorkerCase):
         self.assertEqual([(7, "")], worker.updates)
         self.assertEqual(1, worker.outcome["deleted"])
 
+    def test_many_rejected_deletions_read_the_cloud_inventory_once(self):
+        state = {UUID: {"tolino_id": "d1", "calibre_id": 1},
+                 OTHER: {"tolino_id": "d2", "calibre_id": 2}}
+        client = FakeClient(delete_fail={"d1", "d2"},
+                            inventory_rows=[{"tolino_id": "d1"}])
+        worker, _emitted = self.run_worker(
+            client, state=state,
+            removals=[(UUID, "d1"), (OTHER, "d2")])
+        # d2 fehlt im Bestand und ist damit erledigt, d1 steht noch da.
+        self.assertEqual(1, client.inventory_calls)
+        self.assertEqual((1, 1), (worker.outcome["failed"],
+                                  worker.outcome["skipped"]))
+
     def test_a_copy_already_gone_from_the_cloud_counts_as_skipped(self):
         state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
         client = FakeClient(delete_fail={"d1"}, inventory_rows=[])
@@ -273,6 +288,21 @@ class ReplaceTests(WorkerCase):
             state=state)
         self.assertEqual([], client.deleted)
         self.assertEqual("d1", worker.state[UUID]["tolino_id"])
+
+    def test_a_read_mark_never_targets_the_replaced_copy(self):
+        state = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
+        client = FakeClient(upload_results=["neu-1"])
+        worker, _emitted = self.run_worker(
+            client, jobs=[self.job(1, UUID, "/buch.epub", old_id="alt")],
+            state=state, read_changes=[("alt", 1, True, UUID)])
+        # Die Marke ginge an die gelöschte Kopie: sie entfällt, und die
+        # Spalte bleibt auf dem Stand der neuen Kopie (ungelesen).
+        self.assertEqual([], client.read_marks)
+        self.assertEqual([(1, None)], worker.read_updates)
+        self.assertNotIn("reading", worker.state[UUID])
+        self.assertEqual(0, worker.outcome["read_marked"])
+        read_op = [op for op in worker.operations if op["kind"] == "read"][0]
+        self.assertEqual(("skipped", 0), (read_op["status"], read_op["count"]))
 
     def test_a_failing_old_copy_delete_keeps_the_new_upload(self):
         state = {UUID: {"tolino_id": "alt", "calibre_id": 1}}

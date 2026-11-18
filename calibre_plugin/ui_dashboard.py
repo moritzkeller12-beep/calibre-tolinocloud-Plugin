@@ -36,7 +36,7 @@ from .ui_dialogs import InventoryDialog
 from .ui_workers import LocalMetadataWorker, PrepareWorker, SyncWorker
 
 
-# Statuszeile nach einem abgelehnten Zugang (A01/A02/B01/B02).
+# Statuszeile nach einem abgelehnten Zugang (A01/B01/B02).
 NEEDS_LOGIN_STATUS = "Anmeldung abgelehnt – bitte neu anmelden."
 
 

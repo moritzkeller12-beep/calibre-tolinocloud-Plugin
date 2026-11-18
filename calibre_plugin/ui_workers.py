@@ -18,15 +18,6 @@ from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
 
 
-def _id_is_gone(client, deliverable_id):
-    """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten."""
-    try:
-        return all(record.get("tolino_id") != deliverable_id
-                   for record in client.inventory())
-    except TolinoError:
-        return False
-
-
 def _deferred(client, name, *args, **kwargs):
     """Call a client method only when the action runs, after the checkpoint."""
     return lambda: getattr(client, name)(*args, **kwargs)
@@ -71,6 +62,8 @@ class SyncWorker(QObject):
             if isinstance(item, dict) and item.get("uuid")
         }
         self.cancelled = False
+        # Cloud-Bestand für die Löschprüfung: einmal je Lauf gelesen.
+        self._cloud_ids = None
         # Der Worker ändert und speichert eine private Zustandskopie.
         self.state = copy.deepcopy(state) if isinstance(state, dict) else {}
         self.updates = []
@@ -194,8 +187,23 @@ class SyncWorker(QObject):
                        "vor einem erneuten Lauf prüfen."),
                 detail=sanitize_error(exc, account_secrets(self.account_name))) from exc
 
-    @staticmethod
-    def _delete_or_skip(client, deliverable_id):
+    def _copy_is_gone(self, client, deliverable_id):
+        """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten.
+
+        Der Bestand wird einmal je Lauf gelesen: eine Sammelaktion mit vielen
+        abgelehnten Löschungen soll nicht jedes Mal den ganzen Bestand holen.
+        Eine selbst gelöschte Kopie verwirft den gemerkten Stand wieder.
+        """
+        if self._cloud_ids is None:
+            try:
+                self._cloud_ids = {
+                    str(record.get("tolino_id")) for record in client.inventory()
+                    if isinstance(record, dict)}
+            except TolinoError:
+                return False
+        return str(deliverable_id) not in self._cloud_ids
+
+    def _delete_or_skip(self, client, deliverable_id):
         """Return False when the cloud copy is already gone.
 
         Die Cloud meldet eine unbekannte Kennung je nach Endpunkt mit 404
@@ -204,13 +212,16 @@ class SyncWorker(QObject):
         """
         try:
             client.delete(deliverable_id)
-            return True
         except TolinoApiError as exc:
             text = (str(exc) + " " + str(exc.detail)).casefold()
-            if exc.code == "N03" and ("http 404" in text
-                                       or _id_is_gone(client, deliverable_id)):
+            if exc.code != "N03":
+                raise
+            if "http 404" in text or self._copy_is_gone(
+                    client, deliverable_id):
                 return False
             raise
+        self._cloud_ids = None
+        return True
 
     def _finish_delete(self, operation, deleted):
         """Eine Löschoperation als erfolgreich oder übersprungen verbuchen."""
@@ -292,9 +303,31 @@ class SyncWorker(QObject):
                 self.progress.emit(done, total, "Erledigt: %s" % label)
         return done
 
+    def _drop_replaced_read_changes(self):
+        """Nur die Kopie markieren, auf die der Lesestatus noch zeigt.
+
+        Ein Ersetzen-Upload vergibt eine neue tolino-ID, eine Löschung
+        entfernt den Zustand: der Lesestatus aus dem Vergleich meint dann
+        eine Kopie, die es in der Cloud nicht mehr gibt.
+        """
+        kept = []
+        for change in self.read_changes:
+            tolino_id, _book_id, _wanted, book_uuid = change
+            if book_uuid:
+                entry = self.state.get(book_uuid)
+                recorded = (str(entry.get("tolino_id") or "").strip()
+                            if isinstance(entry, dict) else "")
+                if recorded != tolino_id:
+                    continue
+            kept.append(change)
+        self.read_changes = kept
+        self.read_marks = [change[0] for change in kept if change[2]]
+        self.read_unmarks = [change[0] for change in kept if not change[2]]
+
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
                         done, total):
         """Ausgewählten Lesestatus übertragen."""
+        self._drop_replaced_read_changes()
         actions = (
             (read_op, self.read_marks, True,
              "Als gelesen markieren", "Als gelesen markiert"),
@@ -303,6 +336,13 @@ class SyncWorker(QObject):
         )
         for operation, book_ids, finished, start_text, done_text in actions:
             if operation is None:
+                continue
+            operation["count"] = len(book_ids)
+            if not book_ids:
+                # Die Kopie wurde in diesem Lauf ersetzt oder gelöscht.
+                self._finish_operation(operation, OP_SKIPPED,
+                                       reason="Kopie ersetzt oder gelöscht")
+                done += 1
                 continue
             ok, _result = self._step(
                 client, checkpoint, operation, start_text,
