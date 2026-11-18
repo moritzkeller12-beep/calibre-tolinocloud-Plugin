@@ -6,8 +6,9 @@ from .partners import UNKNOWN_SHOP, partner_from_token
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
                      TolinoClient, log_info, log_warning,
                      normalize_hardware_id, sanitize_error)
+from .jwt import payload
 from .token_candidates import (
-    _candidate_age_note, _filter_live_candidates, _jwt_payload,
+    _candidate_age_note, _filter_live_candidates,
     _refresh_token_iat_sort_key, _normalize_live_grab,
 )
 
@@ -25,8 +26,8 @@ def _exchange_grabbed_token(hardware, grabbed, fresh):
     # Token-Endpunkt "zu verbrauchen" hilft niemandem und der eigentliche
     # Refresh-Token wird dann womoeglich gar nicht erst probiert.
     def _is_refresh_typ(token):
-        payload = _jwt_payload(token) or {}
-        return str(payload.get("typ", "")).casefold() == "refresh"
+        claims = payload(token) or {}
+        return str(claims.get("typ", "")).casefold() == "refresh"
 
     known = {token: partner_from_token(token) for token in fresh}
     if not any(known.values()):

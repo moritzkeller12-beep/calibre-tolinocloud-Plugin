@@ -24,20 +24,16 @@ ALLOWED_PATTERNS = (
 )
 
 # Funktionsnamen, die eine Systemgrenze darstellen (egal aus welchem Modul).
+# Die Liste nennt genau die Ziele, die die Suite heute braucht: ein neuer
+# Name ist eine bewusste Entscheidung und laeuft nicht still mit.
 ALLOWED_NAMES = frozenset((
-    "TolinoClient", "TOKEN_VAULT", "login",          # Netz/Anmeldung
-    "log_info", "log_warning", "log_error", "prints",  # Protokoll
-    "settings", "account_by_name", "save_account", "load_account",
-    "save_credentials", "load_credentials", "account_summary",  # Einstellungen
-    "info_dialog", "error_dialog", "question_dialog",  # Qt-Dialoge
-    "sleep", "which", "Popen", "stat", "deepcopy", "urlopen",
-    "_http_get_json", "in_flatpak_sandbox", "find_browsers",
-    "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL", "_EXTRA_BROWSER_PATHS",
-    "save_refresh_token", "account_secrets",   # Calibre-Preferences
-    "_refresh_library_view",                   # Qt-Ansicht
-    "_aes",                                    # optionale Krypto-Abhaengigkeit
-    "grab_live_refresh",                       # Browser-Anmeldung (Netz)
-    "check_stored_login",                      # Zugangspruefung (Netz)
+    "TolinoClient", "login",           # Netz/Anmeldung (TOKEN_VAULT.login)
+    "check_stored_login",              # Zugangspruefung (Netz)
+    "urlopen", "_http_get_json",       # HTTP
+    "Popen", "which", "find_browsers", "in_flatpak_sandbox",  # Browser
+    "info_dialog", "error_dialog",     # modale Qt-Dialoge
+    "_aes",                            # optionale Krypto-Abhaengigkeit
+    "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL",  # Anmelde-Zeitfenster
 ))
 
 SKIP_FILES = {"patch_policy_tests.py"}

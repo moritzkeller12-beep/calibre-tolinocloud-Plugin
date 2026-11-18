@@ -1,12 +1,11 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
+from qt.core import QDialog, QInputDialog, QMessageBox, QThread, Qt
 from .ui_common import (CANCEL_MESSAGE, COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP,
-                        QDialog, QInputDialog, LOGIN_BUTTON_TEXT,
-                        LOGIN_BUTTON_TIP, QMessageBox, QThread,
-                        _active_work_thread, _apply_busy, _dialog_busy,
-                        gui_guard, start_worker, LOGIN_NEXT_STEP,
-                        _login_failure_guidance,
-                        _stop_thread, sync_result_detail,
-                        sync_result_text, Qt)
+                        LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP,
+                        LOGIN_NEXT_STEP, _active_work_thread, _apply_busy,
+                        _dialog_busy, _login_failure_guidance, _stop_thread,
+                        gui_guard, start_worker, sync_result_detail,
+                        sync_result_text)
 from calibre.gui2 import error_dialog, info_dialog
 from .token_vault import TOKEN_VAULT
 from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
@@ -16,7 +15,7 @@ from .config import (PREFERRED_FORMATS, account_by_name, account_summary,
 from .run_context import RunContext
 from .comparison import (comparison_progress_updates,
                          comparison_read_updates)
-from .identifiers import calibre_key, is_real_uuid, normalize_uuid_text
+from .identifiers import book_uuid, calibre_key
 from .library import (TOLINO_IGNORE_COLUMN, column_state, library_scope,
                       bool_column_available, normalize_formats,
                       update_progress_status, update_read_status,
@@ -72,8 +71,8 @@ def _book_key_index(dashboard):
     scope = library_scope(database)
     mapping = {}
     for book_id in book_ids:
-        key = normalize_uuid_text(uuids.get(book_id))
-        if is_real_uuid(key):
+        key = book_uuid(uuids.get(book_id))
+        if key:
             mapping[key] = book_id
         else:
             mapping.setdefault(calibre_key(book_id, scope), book_id)
@@ -886,7 +885,8 @@ class SyncDashboard(DashboardParts, QDialog):
         skipped_uploads = preparation["skipped_uploads"]
         jobs = preparation["jobs"]
         # Der Vault liest den möglicherweise rotierten Token erst beim Login.
-        total = _planning.plan_counts(preparation, len(jobs))["steps"]
+        counts = _planning.PlanCounts(preparation, len(jobs))
+        total = counts.steps
         replacements = [job for job in jobs
                         if job.old_id]
         if replacements and not confirm_replacements(self, replacements):
@@ -902,7 +902,7 @@ class SyncDashboard(DashboardParts, QDialog):
         if skipped_uploads and report_skipped_uploads(
                 self, skipped_uploads, nothing_else=not total):
             return
-        plan = _planning.plan_text(preparation, len(jobs))
+        plan = counts.text()
         log_info("Sync geplant: %s" % plan)
         _apply_busy(self, True)
         self.progress.setRange(0, total)

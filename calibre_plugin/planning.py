@@ -55,28 +55,23 @@ def format_signatures(database, book_id, formats):
 
 
 class SyncJob(NamedTuple):
-    """Ein geplanter Upload: Calibre-Buch, Datei, Cover und alte Cloud-Kopie."""
+    """Ein geplanter Upload: Calibre-Buch, Datei, Cover und alte Cloud-Kopie.
+
+    `path`, `cover` und `title` entstehen erst beim Blick in die Bibliothek
+    (`upload_jobs`); die reine Planung erzeugt den Job ohne sie.
+    """
 
     book_id: object
     book_uuid: object
     format_name: object
-    old_id: object
-    path: object
-    cover: object
-    title: object
+    old_id: object = None
+    path: object = ""
+    cover: object = None
+    title: object = ""
 
     def label(self):
         """Sichtbarer Name des Buchs: Titel, sonst «Buch <Nummer>»."""
         return display_title(self.title, self.book_id)
-
-
-class UploadRecord(NamedTuple):
-    """One planned upload: Calibre book, chosen format, replaced cloud copy."""
-
-    book_id: object
-    book_uuid: object
-    format_name: object
-    old_id: object
 
 
 class MetaUpdateRecord(NamedTuple):
@@ -106,7 +101,7 @@ def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
             continue
         old = state.get(identifier)
         old_id = old.get("tolino_id") if isinstance(old, dict) else None
-        uploads.append(UploadRecord(book_id, identifier, selected_format, old_id))
+        uploads.append(SyncJob(book_id, identifier, selected_format, old_id))
     return uploads
 
 
@@ -296,7 +291,7 @@ def plan_actions(dialog, context, metadata, state, selection, series_map=None):
     requested_uploads = set(selection["uploads"]) & syncable_ids
     uploads = plan_sync(
         metadata, state, preferred, upload_book_ids=requested_uploads)
-    planned_book_ids = {record[0] for record in uploads}
+    planned_book_ids = {job.book_id for job in uploads}
     skipped_formats = []
     display = ", ".join(preferred) or "EPUB"
     for book_id in requested_uploads - planned_book_ids:
@@ -342,14 +337,14 @@ def plan_actions(dialog, context, metadata, state, selection, series_map=None):
 
 
 def upload_jobs(dialog, metadata, uploads):
-    """Build upload jobs, recording unavailable local formats."""
+    """Datei und Cover der geplanten Uploads nachschlagen.
+
+    Fehlt die Datei, wird das Buch mit Grund gemeldet statt hochgeladen.
+    """
     jobs = []
     skipped_uploads = []
-    for upload in uploads:
-        book_id = upload.book_id
-        identifier = upload.book_uuid
-        fmt = upload.format_name
-        old_id = upload.old_id
+    for job in uploads:
+        book_id, fmt = job.book_id, job.format_name
         title = str((metadata.get(book_id) or {}).get("title") or "")
         try:
             path = safe_format_path(dialog.gui.current_db, book_id, fmt)
@@ -368,53 +363,46 @@ def upload_jobs(dialog, metadata, uploads):
         if cover and not image_suffix(cover):
             log_warning("Coverformat unbekannt – Cover wird nicht übertragen.")
             cover = None
-        jobs.append(SyncJob(book_id, identifier, fmt, old_id, path, cover,
-                            title))
+        jobs.append(job._replace(path=path, cover=cover, title=title))
     return jobs, skipped_uploads
 
 
-def plan_counts(preparation, uploads):
-    """Zahlen des Laufs -- eine Regel für Plan, Text und Fortschritt."""
-    changes = preparation.get("read_changes") or ()
-    marked = sum(1 for change in changes
-                 if len(change) > 2 and change[2])
-    unmarked = len(changes) - marked
-    counts = {
-        "uploads": int(uploads),
-        "removals": len(preparation.get("removals") or ()),
-        "metadata": len(preparation.get("meta_updates") or ()),
-        "collections": int(preparation.get("collections") or 0),
-        "read": marked,
-        "unread": unmarked,
-    }
-    # Lesestatus kostet je Richtung einen Schritt, nicht je Buch.
-    counts["steps"] = (counts["uploads"] + counts["removals"]
-                       + counts["metadata"] + counts["collections"]
-                       + (1 if marked else 0) + (1 if unmarked else 0))
-    return counts
+class PlanCounts:
+    """Zahlen eines Laufs -- eine Regel für Plan, Text und Fortschritt."""
 
+    def __init__(self, preparation, uploads):
+        changes = preparation.get("read_changes") or ()
+        self.uploads = int(uploads)
+        self.removals = len(preparation.get("removals") or ())
+        self.metadata = len(preparation.get("meta_updates") or ())
+        self.collections = int(preparation.get("collections") or 0)
+        self.read = sum(1 for change in changes
+                        if len(change) > 2 and change[2])
+        self.unread = len(changes) - self.read
+        # Lesestatus kostet je Richtung einen Schritt, nicht je Buch.
+        self.steps = (self.uploads + self.removals + self.metadata
+                      + self.collections + (1 if self.read else 0)
+                      + (1 if self.unread else 0))
 
-def plan_text(preparation, uploads):
-    """Summarize concrete actions before starting the worker."""
-    counts = plan_counts(preparation, uploads)
-    parts = []
-    if counts["uploads"]:
-        parts.append("%d %s" % (counts["uploads"],
-                                plural(counts["uploads"], "Upload", "Uploads")))
-    if counts["removals"]:
-        parts.append("%d %s" % (counts["removals"],
-                                plural(counts["removals"], "Löschung",
-                                       "Löschungen")))
-    if counts["metadata"]:
-        parts.append("%d Metadaten" % counts["metadata"])
-    if counts["collections"]:
-        parts.append("%d Sammlungen" % counts["collections"])
-    if counts["read"]:
-        parts.append("%d gelesen" % counts["read"])
-    if counts["unread"]:
-        parts.append("%d ungelesen" % counts["unread"])
-    return ("Läuft: %s." % ", ".join(parts)
-            if parts else "Läuft …")
+    def text(self):
+        """Überschrift der geplanten Aktionen."""
+        parts = []
+        if self.uploads:
+            parts.append("%d %s" % (
+                self.uploads, plural(self.uploads, "Upload", "Uploads")))
+        if self.removals:
+            parts.append("%d %s" % (
+                self.removals,
+                plural(self.removals, "Löschung", "Löschungen")))
+        if self.metadata:
+            parts.append("%d Metadaten" % self.metadata)
+        if self.collections:
+            parts.append("%d Sammlungen" % self.collections)
+        if self.read:
+            parts.append("%d gelesen" % self.read)
+        if self.unread:
+            parts.append("%d ungelesen" % self.unread)
+        return "Läuft: %s." % ", ".join(parts) if parts else "Läuft …"
 
 
 def nothing_to_do_text(preparation):

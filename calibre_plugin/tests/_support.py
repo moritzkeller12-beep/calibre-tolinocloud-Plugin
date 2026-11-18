@@ -50,62 +50,12 @@ def dashboard_stub(**attrs):
     return types.SimpleNamespace(**values)
 
 
-class FakeTableItem:
-    """QTableWidgetItem-Ersatz fuer alle Tabellentests."""
-
-    def __init__(self, text=""):
-        self.text = text
-        self._check_state = 0
-        self._flags = 0
-        self.tooltip = ""
-        self.text_alignment = None
-        self._row = 0
-        self._column = 0
-
-    def row(self):
-        return self._row
-
-    def column(self):
-        return self._column
-
-    def setTextAlignment(self, alignment):
-        self.text_alignment = alignment
-
-    def setFlags(self, flags):
-        self._flags = flags
-
-    def flags(self):
-        return self._flags
-
-    def setCheckState(self, state):
-        changed = state != self._check_state
-        self._check_state = state
-        table = getattr(self, "_table", None)
-        if changed and table is not None:
-            table.itemChanged.emit(self)
-
-    def checkState(self):
-        return self._check_state
-
-    def isChecked(self):
-        return bool(self._check_state)
-
-    def setChecked(self, value):
-        self.setCheckState(2 if value else 0)
-
-    def setToolTip(self, text):
-        self.tooltip = text
-
-    def toolTip(self):
-        return self.tooltip
-
-
-def load_ui_module(get_icons_result, qt_stub=None):
+def load_ui_module(get_icons_result, qt_stub):
     """Import ui.py with Calibre and Qt imports stubbed.
 
-    `qt_stub` überschreibt einzelne Qt-Namen (z. B. einen ehrlichen
-    QDialog/QTableWidget-Ersatz, damit der Aufbau eines Fensters
-    wirklich durchlaufen werden kann).
+    `qt_stub` kommt aus `real_qt_stub()`: Widgets, Tabellen, Enums und
+    Signale sind echt. Nur Icons, Pixmaps und Byte-Arrays bleiben Attrappen --
+    keinen Test interessieren echte Bilddaten.
     """
 
     class FakeIcon:
@@ -124,57 +74,10 @@ def load_ui_module(get_icons_result, qt_stub=None):
     qt_core.QIcon = FakeIcon
     qt_core.QPixmap = FakePixmap
     qt_core.QByteArray = bytes
-    for name in ("QCheckBox", "QComboBox", "QDialog", "QFormLayout",
-                 "QGroupBox", "QLabel", "QLineEdit", "QMessageBox",
-                 "QProgressBar", "QPushButton", "QThread", "QVBoxLayout",
-                 "QHBoxLayout", "QTableWidget", "QTableWidgetItem",
-                 "QObject", "QInputDialog", "QFileDialog", "QMenu", "Qt"):
-        setattr(qt_core, name, type(name, (), {}))
-    # Qt6-Form: die unskopierten Namen (QHeaderView.Stretch) gibt es dort
-    # nicht mehr. Ein Stub mit nur ResizeMode deckt genau diesen Fehler auf.
-    header_view = type("QHeaderView", (), {})
-    header_view.ResizeMode = type(
-        "ResizeMode", (), {"Interactive": 0, "Stretch": 1,
-                           "ResizeToContents": 2})
-    qt_core.QHeaderView = header_view
-    qt_core.QStyledItemDelegate = type(
-        "QStyledItemDelegate", (),
-        {"__init__": lambda self, *args, **kwargs: None})
-    qt_core.QEvent = type("QEvent", (), {})
-    qt_core.QDialog.Accepted = 1
-    qt_core.QDialog.DialogCode = qt_core.QDialog
-    qt_core.QMessageBox.Yes = 1
-    qt_core.QMessageBox.No = 2
-    qt_core.QMessageBox.StandardButton = qt_core.QMessageBox
-    # Qt6-Form: Enums sind skopiert; die alten unskopierten Namen fehlen.
-    qt_core.Qt = type("Qt", (), {
-        "SortOrder": type("SortOrder", (),
-                          {"AscendingOrder": 0, "DescendingOrder": 1}),
-        "ItemFlag": type("ItemFlag", (), {
-            "ItemIsEnabled": 1, "ItemIsUserCheckable": 2}),
-        "CheckState": type("CheckState", (),
-                           {"Checked": 2, "Unchecked": 0}),
-        "WidgetAttribute": type("WidgetAttribute", (),
-                                 {"WA_QuitOnClose": 55}),
-    })
-    qt_core.QDialog.setAttribute = lambda self, attribute, value: (
-        setattr(self, "attributes", getattr(self, "attributes", {})),
-        self.attributes.__setitem__(attribute, value),
-    )
-    qt_core.QDialog.setWindowTitle = lambda self, title: setattr(
-        self, "window_title", title)
-    qt_core.QTableWidget.SelectionBehavior = type(
-        "SelectionBehavior", (), {"SelectRows": 1})
-    qt_core.QTableWidget.SelectionMode = type(
-        "SelectionMode", (), {"ExtendedSelection": 2})
-    qt_core.QLineEdit.EchoMode = type("EchoMode", (), {"Password": 2})
-    qt_core.pyqtSignal = lambda *a, **_kwargs: None
-    qt_core.Signal = lambda *a, **_kwargs: None
-    qt_core.QTableWidgetItem = FakeTableItem
-    if qt_stub:
-        # Zuletzt, damit ein Stub auch pyqtSignal/Signal ersetzen darf.
-        for name, value in qt_stub.items():
-            setattr(qt_core, name, value)
+    # Der echte Stub zuletzt: er ersetzt jeden Namen, den die Attrappen
+    # oben nur belegen.
+    for name, value in qt_stub.items():
+        setattr(qt_core, name, value)
     calibre = types.ModuleType("calibre")
     calibre_gui2 = types.ModuleType("calibre.gui2")
     calibre_gui2.error_dialog = None
@@ -245,7 +148,7 @@ def load_ui_module(get_icons_result, qt_stub=None):
     return ui_module
 
 
-def ui_module_for(test_case, qt_stub=None):
+def ui_module_for(test_case, qt_stub):
     """UI-Modul für einen Test laden und die Stubs danach zurücknehmen."""
     module = load_ui_module(lambda *args, **kwargs: None, qt_stub=qt_stub)
     test_case.addCleanup(module._restore_stubs_for_tests)
@@ -274,12 +177,19 @@ class _QtObject:
         pass
 
 
-class _SyncThread:
-    """Synchroner QThread-Ersatz: ``start()`` fuehrt den Worker aus."""
+class SyncThread:
+    """Synchroner QThread-Ersatz: ``start()`` fuehrt den Worker aus.
 
-    def __init__(self, parent=None):
+    ``wait_result`` steuert, ob der Lauf beendet ist -- damit laesst sich der
+    Timeout-Pfad ohne echte Wartezeit pruefen.
+    """
+
+    def __init__(self, parent=None, wait_result=True):
         self.started = FakeSignal()
         self.finished = FakeSignal()
+        self.wait_result = wait_result
+        self.stopped = False
+        self.deleted = False
 
     def start(self):
         for slot in list(self.started.slots):
@@ -289,7 +199,10 @@ class _SyncThread:
         self.stopped = True
 
     def wait(self, *_args):
-        return True
+        return self.wait_result
+
+    def isFinished(self):
+        return self.wait_result
 
     def isRunning(self):
         return False
@@ -385,7 +298,7 @@ def real_qt_stub():
         "Qt": Qt,
         "QEvent": QEvent,
         "QObject": _QtObject,
-        "QThread": _SyncThread,
+        "QThread": SyncThread,
         "pyqtSignal": SignalDescriptor,
         "QDialog": QDialog,
         "QVBoxLayout": QVBoxLayout,

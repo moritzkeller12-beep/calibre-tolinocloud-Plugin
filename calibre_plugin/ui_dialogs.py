@@ -2,11 +2,11 @@
 import re
 from typing import NamedTuple
 
-from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                        QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-                        QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, QStyledItemDelegate, QEvent, Qt,
-                        _set_enabled, gui_guard, start_call)
+from qt.core import (QCheckBox, QComboBox, QDialog, QEvent, QFileDialog,
+                     QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox,
+                     QPushButton, QStyledItemDelegate, QTableWidget,
+                     QTableWidgetItem, QVBoxLayout, Qt)
+from .ui_common import _set_enabled, gui_guard, start_call
 from .planning import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import comparison_sort_key, sort_comparison_rows

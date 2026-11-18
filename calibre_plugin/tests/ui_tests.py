@@ -172,7 +172,7 @@ class InventoryDialogTests(unittest.TestCase):
         dialog.set_column_for_marked_rows("read", False,
                                          "sind bereits ungelesen")
         self.assertEqual([], dialog.selected_read_changes())
-        self.assertTrue(self.ui.common.QMessageBox.calls)
+        self.assertTrue(self.ui.dialogs.QMessageBox.calls)
 
     def test_a_book_without_cloud_copy_cannot_be_marked(self):
         rows = comparison_rows(read_ids=None)
@@ -248,7 +248,7 @@ class DestructiveSelectionTests(unittest.TestCase):
         self.assertEqual([], dialog.selected_cloud_deletions())
         self.assertIsNone(dialog.rows[0].get("delete_cloud"))
         self.assertEqual("Nichts zu löschen",
-                         self.ui.common.QMessageBox.calls[-1][2])
+                         self.ui.dialogs.QMessageBox.calls[-1][2])
 
     def test_an_ignored_row_offers_no_action(self):
         book = {"uuid": UUID, "title": "Der Schwarm",

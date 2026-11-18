@@ -1,37 +1,23 @@
 """Decode and normalize token candidates read from Tolino's Web Reader."""
-import base64
 import json
 import re
 import time
 
 from .browser_crypto import cryptojs_decrypt
 from .errors import TolinoAuthError
+from .jwt import payload
 
 # Values used by the Web Reader for credentials and device identity.
 TOKEN_VALUE_KEYS = ("refresh_token", "t_auth_token", "refreshToken", "refresh-token")
 HARDWARE_VALUE_KEYS = ("hardware_id", "hardwareId", "device_id", "deviceId")
 
-def _jwt_payload(token):
-    """Decode the unverified payload of a JWT-style token (or None)."""
-    try:
-        parts = str(token or "").split(".")
-        if len(parts) != 3 or not parts[1]:
-            return None
-        seg = parts[1]
-        seg += "=" * (-len(seg) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(seg.encode("ascii")))
-        return payload if isinstance(payload, dict) else None
-    except ValueError:
-        return None
-
-
 def _refresh_token_iat(token):
     """Issue time (unix seconds) of a JWT refresh token; None if unknown."""
-    payload = _jwt_payload(token)
-    if not payload:
+    claims = payload(token)
+    if not claims:
         return None
     try:
-        value = float(payload.get("iat"))
+        value = float(claims.get("iat"))
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
@@ -54,7 +40,7 @@ def _undatable_shape(token):
     shape = "%d %s, %d Zeichen" % (
         len(parts), "Teil" if len(parts) == 1 else "Teile", len(text))
     if len(parts) == 3:
-        shape += (", Payload ohne iat" if _jwt_payload(text)
+        shape += (", Payload ohne iat" if payload(text)
                   else ", Payload unlesbar")
     return shape
 

@@ -1,35 +1,14 @@
-"""Gemeinsame Qt-Importe, Konstanten und Hilfsfunktionen der Oberfläche.
+"""Gemeinsame Konstanten und Helfer der Oberfläche.
 
-Alle UI-Module beziehen Qt-Namen und geteilte Helfer von hier, damit ein
-Qt-Stub in den Tests nur an einer Stelle greift.
+Qt-Namen importiert jedes UI-Modul direkt aus `qt.core`; hier liegt nur,
+was mehrere Module teilen. Ein Qt-Stub in den Tests greift damit an
+derselben Stelle wie der Produktivcode.
 """
 import functools
 import re
 
-from qt.core import (QCheckBox, QComboBox, QDialog,
-                     QFormLayout, QGroupBox, QHeaderView, QLabel,
-                     QLineEdit, QMessageBox, QMenu,
-                     QProgressBar, QPushButton, QThread,
-                     QVBoxLayout, QHBoxLayout, QTableWidget,
-                     QTableWidgetItem, QObject, QInputDialog,
-                     QFileDialog, QStyledItemDelegate, QEvent, Qt, pyqtSignal)
+from qt.core import QObject, QThread, pyqtSignal
 from .tolino import TolinoError
-
-# Re-export the Qt names other UI modules and the test loader import from here.
-__all__ = [
-    "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
-    "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog", "QFileDialog",
-    "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView", "QMenu",
-    "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
-    "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QThread", "QVBoxLayout", "QStyledItemDelegate", "QEvent", "Qt",
-    "_THREADS", "_WORKERS", "_apply_busy",
-    "_dialog_busy", "LOGIN_NEXT_STEP", "LOGIN_BUTTON_TEXT", "LOGIN_BUTTON_TIP",
-    "COMPARE_BUTTON_TEXT", "COMPARE_BUTTON_TIP", "_login_failure_guidance",
-    "gui_guard", "start_worker", "_stop_thread", "_set_enabled",
-    "_keep_thread_alive", "pyqtSignal", "sync_result_detail",
-    "sync_result_text",
-]
 
 
 def _widget_deleted(widget):

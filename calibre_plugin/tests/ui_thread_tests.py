@@ -8,34 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from ..errors import TolinoAuthError
-from ._support import FakeSignal, real_qt_stub, ui_module_for
-
-
-class ThreadDouble:
-    """QThread-Doppel: startet nichts, meldet nur Signale."""
-
-    def __init__(self, wait_result=True):
-        self.started = FakeSignal()
-        self.finished = FakeSignal()
-        self.wait_result = wait_result
-        self.stopped = False
-        self.deleted = False
-
-    def start(self):
-        for slot in list(self.started.slots):
-            slot()
-
-    def quit(self, *_args):
-        self.stopped = True
-
-    def wait(self, *_args):
-        return self.wait_result
-
-    def deleteLater(self):
-        self.deleted = True
-
-    def isFinished(self):
-        return self.wait_result
+from ._support import SyncThread, real_qt_stub, ui_module_for
 
 
 class WorkerDouble:
@@ -68,7 +41,7 @@ class ThreadLifecycleTests(unittest.TestCase):
 
     def start(self, thread=None, worker=None):
         dialog = types.SimpleNamespace()
-        thread = thread or ThreadDouble()
+        thread = thread or SyncThread()
         worker = worker or WorkerDouble()
         self.common.start_worker(dialog, worker, thread, "thread", "worker")
         return dialog, thread, worker
@@ -94,7 +67,7 @@ class ThreadLifecycleTests(unittest.TestCase):
         self.assertNotIn(worker, self.common._WORKERS)
 
     def test_a_timeout_keeps_the_thread_referenced(self):
-        thread = ThreadDouble(wait_result=False)
+        thread = SyncThread(wait_result=False)
         self.start(thread=thread)
         self.assertFalse(self.common._stop_thread(thread))
         self.assertIn(thread, self.common._THREADS)
@@ -102,7 +75,7 @@ class ThreadLifecycleTests(unittest.TestCase):
         self.assertNotIn(thread, self.common._THREADS)
 
     def test_a_finished_thread_is_released(self):
-        thread = ThreadDouble()
+        thread = SyncThread()
         self.start(thread=thread)
         self.assertTrue(self.common._stop_thread(thread))
         self.assertTrue(thread.stopped)

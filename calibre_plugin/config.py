@@ -24,9 +24,6 @@ _UNSET = object()
 # Die Datei existiert, war aber gerade nicht lesbar (Rechte, Verzeichnis,
 # E/A-Fehler). Das ist NICHT dasselbe wie «es gibt sie nicht».
 _UNREADABLE = object()
-# Rohinhalt des zuletzt uebernommenen, brauchbaren Standes (siehe `_reload`).
-_FILE_STATE = {"raw": _UNSET}
-
 
 def _read_raw():
     """Rohinhalt der Einstellungsdatei.
@@ -58,12 +55,12 @@ def _parse(raw):
 
 
 def _reload():
-    """Cache und Datei angleichen; nur ein vollstaendiger Stand zaehlt.
+    """Datei bei jedem Zugriff lesen; nur ein vollstaendiger Stand zaehlt.
 
     Eine zweite Calibre-Instanz, der Keep-alive oder ein Kindprozess schreibt
     in dieselbe Datei. Ohne Abgleich zeigt das offene Fenster bis zum Neustart
-    einen veralteten Kontostand. Verglichen wird der Rohinhalt (0,7 ms) statt
-    Zeitstempeln: deren Aufloesung ist je nach Dateisystem grob und schnelle
+    einen veralteten Kontostand. Gelesen wird der Rohinhalt und nicht der
+    Zeitstempel: dessen Aufloesung ist je nach Dateisystem grob, schnelle
     Schreibvorgaenge gleicher Groesse blieben unsichtbar. Eine halb
     geschriebene Datei zaehlt nicht als Stand -- Calibres `refresh()` wuerde
     sie uebernehmen und dabei alle Konten verlieren.
@@ -78,31 +75,26 @@ def _reload():
             # Schreibvorgaenge abbrechen, statt den alten Stand ueber einen
             # fremden oder neueren zu schreiben.
             return False
-        if raw == _FILE_STATE["raw"]:
-            return True
         if raw is None:
             # Keine Datei: der Cache ist der Stand (frische Installation oder
             # gerade geloescht). Ein spaeter angelegter Stand wird erkannt.
-            _FILE_STATE["raw"] = None
             return True
         data = _parse(raw)
         if data is None:
-            # Kein Stand: `raw` bleibt der des letzten brauchbaren Standes.
-            # Dadurch versucht es jeder Lesevorgang erneut, und ein
-            # Schreibvorgang bricht ab, statt die halbe Datei zu ersetzen.
+            # Halb geschrieben: nicht uebernehmen und jeden Schreibvorgang
+            # abbrechen, statt die halbe Datei zu ersetzen. Jeder weitere
+            # Zugriff versucht es erneut.
             return False
         # `clear`/`update` umgehen Calibres committendes `__setitem__`:
         # ein Lesevorgang darf die Datei nicht schreiben.
         dict.clear(PREFERENCES)
         dict.update(PREFERENCES, data)
-        _FILE_STATE["raw"] = raw
         return True
 
 
 def _commit():
-    """Schreiben abschliessen; der Cache gilt bis zum naechsten Abgleich."""
+    """Schreiben abschliessen."""
     PREFERENCES.commit()
-    _FILE_STATE["raw"] = _UNSET
 
 
 def load_state(raw):

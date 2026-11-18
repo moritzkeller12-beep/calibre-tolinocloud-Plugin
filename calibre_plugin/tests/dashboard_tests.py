@@ -12,7 +12,8 @@ from unittest.mock import patch
 from .. import config
 from ..library import TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
 from ..run_context import RunContext
-from ._support import CalibreDatabase, dashboard_stub, ui_module_for
+from ._support import (CalibreDatabase, dashboard_stub, real_qt_stub,
+                       ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 
@@ -24,7 +25,7 @@ class OrchestrationCase(unittest.TestCase):
         self._original = config.PREFERENCES
         config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
         self.addCleanup(setattr, config, "PREFERENCES", self._original)
-        self.ui = ui_module_for(self)
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def worker(self, account="A", outcome=None, updates=((1, "neu-1"),)):
         """Echter SyncWorker nach dem Lauf: nur sein Ergebnis zählt."""

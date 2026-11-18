@@ -1,5 +1,5 @@
 """Authentication and small asynchronous UI workers."""
-from .ui_common import QObject, pyqtSignal
+from qt.core import QObject, pyqtSignal
 from .browser_login import LOGIN_TIMEOUT, grab_live_refresh
 from .config import save_credentials
 from .token_vault import check_stored_login

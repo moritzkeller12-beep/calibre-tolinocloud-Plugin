@@ -4,11 +4,11 @@ from .identifiers import display_title
 from .library import COLUMN_KIND_NAMES, CUSTOM_COLUMNS, create_custom_columns
 from .partners import PARTNERS
 from .tolino import log_warning, sanitize_error
-from .ui_common import (COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP, QComboBox,
-                        QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-                        LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP, QLineEdit,
-                        QMessageBox, QProgressBar, QPushButton, QVBoxLayout,
-                        gui_guard)
+from qt.core import (QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout,
+                     QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
+                     QVBoxLayout)
+from .ui_common import (COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP,
+                        LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP, gui_guard)
 
 
 def _button(text, tip="", slot=None):

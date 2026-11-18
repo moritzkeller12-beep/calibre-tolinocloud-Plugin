@@ -19,8 +19,8 @@ from ..matching import (authors_match, is_valid_isbn, isbn_from_identifier,
                         normalize_isbn)
 from ..planning import (NOTHING_TO_DO_TEXT, local_metadata, metadata_update_fields,
                         nothing_to_do_text, plan_actions, plan_collection_updates,
-                        plan_counts, plan_metadata_updates, plan_sync,
-                        plan_text, remember_collection,
+                        plan_metadata_updates, plan_sync, remember_collection,
+                        PlanCounts,
                         series_map_from_metadata, syncable_metadata)
 from ..run_context import RunContext
 
@@ -397,11 +397,12 @@ class PlanActionsTests(unittest.TestCase):
             "read_changes": [("d1", 1, True, UUID), ("d2", 2, False, UUID)],
             "selected_without_action": {"uploads": 2, "metadata": 0},
         }
-        counts = plan_counts(preparation, uploads=1)
-        self.assertEqual({"uploads": 1, "removals": 1, "metadata": 1,
-                          "collections": 2, "read": 1, "unread": 1,
-                          "steps": 7}, counts)
-        text = plan_text(preparation, uploads=1)
+        counts = PlanCounts(preparation, uploads=1)
+        self.assertEqual((1, 1, 1, 2, 1, 1, 7),
+                         (counts.uploads, counts.removals, counts.metadata,
+                          counts.collections, counts.read, counts.unread,
+                          counts.steps))
+        text = counts.text()
         for part in ("1 Upload", "1 Löschung", "1 Metadaten",
                      "2 Sammlungen", "1 gelesen", "1 ungelesen"):
             self.assertIn(part, text)

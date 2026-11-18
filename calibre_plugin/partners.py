@@ -1,7 +1,7 @@
 """Tolino shops and their stable partner-ID mappings."""
 from urllib.parse import urlsplit
 
-from .token_candidates import _jwt_payload
+from .jwt import payload
 
 WEBREADER_URL = "https://webreader.mytolino.com/library/"
 WEBREADER_TOKEN_HEADERS = {
@@ -64,7 +64,7 @@ def _host(value):
 
 def partner_from_token(token):
     """Buchhändler aus dem ``iss``-Claim eines Tokens (None = unbekannt)."""
-    host = _host((_jwt_payload(token) or {}).get("iss"))
+    host = _host((payload(token) or {}).get("iss"))
     return next((partner_id for partner_id, values in PARTNERS.items()
                  if host and _host(values["token_url"]) == host), None)
 

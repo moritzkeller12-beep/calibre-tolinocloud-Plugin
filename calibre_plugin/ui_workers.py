@@ -3,8 +3,9 @@ import copy
 from collections import Counter
 from functools import partial
 
+from qt.core import QObject, pyqtSignal
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
-                        OP_SUCCEEDED, QObject, pyqtSignal)
+                        OP_SUCCEEDED)
 from .token_vault import TOKEN_VAULT
 from .config import account_secrets, load_state, save_account
 from .planning import (local_metadata, plan_collection_updates,
