@@ -115,7 +115,9 @@ def mirror_account_reading(dashboard, account_name=None):
         # Erst alle Bücher auf unbekannt setzen, dann die Werte des Kontos
         # darüberlegen: kein Wert eines anderen Kontos bleibt stehen.
         read_updates = dict.fromkeys(book_ids)
-        progress_updates = dict.fromkeys(book_ids)
+        # Fortschritt nur fuer Buecher, die dieses Konto kennt: ein fehlender
+        # Wert ist «unbekannt» und darf keine Calibre-Spalte leeren.
+        progress_updates = {}
         for key, entry in state.items():
             if not isinstance(entry, dict):
                 continue

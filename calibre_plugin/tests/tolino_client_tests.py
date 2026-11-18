@@ -9,15 +9,17 @@ falsche Daten in die Cloud schreiben.
 import contextlib
 import json
 import time
+import types
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request
 
+from .. import tolino as tolino_module
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..sync_data import READ_TAG
 from ..tolino import (TolinoClient, _download_token, report_error,
                        sanitize_error)
-from ..tolino import urlopen as REAL_URLOPEN
 from ._support import LocalHTTP, local_tolino_endpoints
 
 HARDWARE = "11111111-1111-4111-8111-111111111111"
@@ -263,6 +265,7 @@ class Backend:
         self.upload_reply = {"metadata": {"deliverableId": "neu-1"}}
         self.download_info = {"DownloadInfo": {
             "contentUrl": "https://example.invalid/buch.epub"}}
+        self.inventory = {"PublicationInventory": {"edata": []}}
         self.ignore_put = False
         self.hide_metadata = False
         self.deleted = []
@@ -285,6 +288,8 @@ class Backend:
                 return json_reply({})
             return json_reply({
                 "metadata": dict(self.metadata.get(deliverable, {}))})
+        if path.startswith("/bosh/rest/inventory/delta"):
+            return json_reply(self.inventory)
         if path.startswith("/bosh/rest/sync-data"):
             body = json.loads(payload or b"{}")
             self.patch_bodies.append(body)
@@ -454,17 +459,15 @@ def credentials(request):
 
 
 def content_opener(payload, final_url=None):
-    """urlopen-Doppel nur fuer den Inhalt; die lokale Cloud bleibt echt."""
+    """Opener-Doppel nur fuer den Inhalt; die lokale Cloud bleibt echt."""
     seen = []
 
-    def opener(request, timeout=None, **_kwargs):
+    def open_(request, timeout=None, **_kwargs):
         url = getattr(request, "full_url", str(request))
-        if "/cloud/downloadinfo" in url:
-            return REAL_URLOPEN(request, timeout=timeout)
         seen.append(request)
         return FakeResponse(final_url or url, payload)
 
-    return opener, seen
+    return types.SimpleNamespace(open=open_), seen
 
 
 class DownloadContentTests(unittest.TestCase):
@@ -474,7 +477,7 @@ class DownloadContentTests(unittest.TestCase):
         backend = download_backend("https://cdn.pageplace.de/buch.epub")
         opener, seen = content_opener(b"EPUB-INHALT")
         with write_client(backend) as client, patch(
-                "calibre_plugin.tolino.urlopen", opener):
+                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
             self.assertEqual(b"EPUB-INHALT", client.download("d1"))
         request = seen[0]
         self.assertEqual("https://cdn.pageplace.de/buch.epub",
@@ -485,7 +488,7 @@ class DownloadContentTests(unittest.TestCase):
         backend = download_backend("https://cdn.example.test/buch.epub")
         opener, seen = content_opener(b"PDF")
         with write_client(backend) as client, patch(
-                "calibre_plugin.tolino.urlopen", opener):
+                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
             self.assertEqual(b"PDF", client.download("d1"))
         self.assertEqual(set(), credentials(seen[0]))
 
@@ -494,10 +497,33 @@ class DownloadContentTests(unittest.TestCase):
         opener, _seen = content_opener(
             b"HTML", final_url="http://cdn.example.test/buch.epub")
         with write_client(backend) as client, patch(
-                "calibre_plugin.tolino.urlopen", opener):
+                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
             with self.assertRaises(TolinoApiError) as caught:
                 client.download("d1")
         self.assertIn("umgeleitet", str(caught.exception))
+
+
+class RedirectTests(unittest.TestCase):
+    """Eine unsichere Weiterleitung wird abgelehnt, bevor sie kontaktiert wird."""
+
+    def handler(self):
+        return tolino_module._SafeRedirects()
+
+    def test_an_https_target_is_followed(self):
+        request = Request("https://cdn.example.test/buch.epub")
+        followed = self.handler().redirect_request(
+            request, None, 302, {}, {},
+            "https://cdn.example.test/neu.epub")
+        self.assertEqual("https://cdn.example.test/neu.epub",
+                         followed.full_url)
+
+    def test_a_plain_http_target_is_refused(self):
+        request = Request("https://cdn.example.test/buch.epub")
+        with self.assertRaises(TolinoApiError) as caught:
+            self.handler().redirect_request(
+                request, None, 302, {}, {},
+                "http://cdn.example.test/neu.epub")
+        self.assertEqual("N02", caught.exception.code)
 
 
 class ReadMarkTests(unittest.TestCase):
@@ -536,6 +562,37 @@ class ReadMarkTests(unittest.TestCase):
                          (entry["value"]["category"],
                           entry["value"]["revision"]))
 
+    def test_a_missing_revision_is_never_sent_as_null(self):
+        backend = Backend()
+        backend.revision = None
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.mark_read_many(["d1"])
+        self.assertEqual("N02", caught.exception.code)
+        # Nur der lesende PATCH ging raus; ohne Revision wird nicht geschrieben.
+        self.assertEqual([{"revision": None, "patches": []}],
+                         backend.patch_bodies)
+
+    def test_unreading_removes_both_cloud_spellings(self):
+        backend = Backend()
+        backend.patches = [
+            {"op": "add", "path": read_tag_path("d1", "tag-1"),
+             "value": {"name": READ_TAG, "category": "system",
+                       "revision": 3}},
+            {"op": "add", "path": read_tag_path("d1", "tag-2"),
+             "value": {"name": READ_TAG, "category": "collection",
+                       "revision": 4}},
+        ]
+        with write_client(backend) as client:
+            client.mark_read_many(["d1"], finished=False)
+        body = backend.patch_bodies[-1]
+        self.assertEqual(
+            [("remove", "system", "tag-1"),
+             ("remove", "collection", "tag-2")],
+            [(entry["op"], entry["value"]["category"],
+              entry["path"].rsplit("/", 1)[-1])
+             for entry in body["patches"]])
+
     def test_an_already_read_book_causes_no_write(self):
         backend = Backend()
         backend.patches = [{"op": "add", "path": read_tag_path("d1"),
@@ -565,6 +622,29 @@ class ReadMarkTests(unittest.TestCase):
         self.assertEqual(("Grenzwelten", "collection"),
                          (body["patches"][0]["value"]["name"],
                           body["patches"][0]["value"]["category"]))
+
+
+class InventoryTests(unittest.TestCase):
+    """Ein teilweise defekter Bestand ist kein gueltiger Bestand."""
+
+    def test_a_complete_inventory_is_returned(self):
+        backend = Backend()
+        backend.inventory = {"PublicationInventory": {"edata": [
+            {"deliverableId": "d1", "title": "Gut", "authors": "Autor"}]}}
+        with write_client(backend) as client:
+            self.assertEqual(["d1"],
+                             [row["tolino_id"] for row in client.inventory()])
+
+    def test_a_partly_broken_inventory_is_refused(self):
+        backend = Backend()
+        backend.inventory = {"PublicationInventory": {"edata": [
+            {"deliverableId": "d1", "title": "Gut"},
+            {"title": "Ohne Kennung"}]}}
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.inventory()
+        self.assertEqual("N02", caught.exception.code)
+        self.assertIn("unvollständig", str(caught.exception))
 
 
 class DeleteAndDownloadTests(unittest.TestCase):

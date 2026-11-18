@@ -313,6 +313,20 @@ class DownloadSaveTests(unittest.TestCase):
             self.assertEqual(b"%PDF-1.7", handle.read())
         self.assertEqual("info", messages[0][0])
 
+    def test_an_existing_adjusted_target_needs_confirmation(self):
+        target = os.path.join(self.tmp, "buch.pdf")
+        with open(target, "wb") as handle:
+            handle.write(b"ALT")
+        box = self.ui.dialogs.QMessageBox
+        original = box.__dict__["question"]
+        box.question = staticmethod(
+            lambda *args, **kwargs: box.StandardButton.No)
+        self.addCleanup(setattr, box, "question", original)
+        _path, messages = self.save("buch.epub", b"%PDF-1.7")
+        with open(target, "rb") as handle:
+            self.assertEqual(b"ALT", handle.read())
+        self.assertEqual("Nicht gespeichert", messages[0][1][1])
+
     def test_html_and_empty_bodies_are_not_saved(self):
         for label, data in (("html", b"<html>Fehler</html>"),
                             ("leer", b"")):

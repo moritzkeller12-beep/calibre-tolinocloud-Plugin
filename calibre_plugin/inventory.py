@@ -185,9 +185,9 @@ def parse_inventory(data):
     raw, problems = [], []
     _collect_inventory(container, raw, problems)
     records = [normalize_inventory_record(item) for item in raw]
-    # Eine leere, aber gültige Bibliothek hat keine Probleme. Sobald nur
-    # unlesbare Einträge gefunden wurden, ist die Antwort keine leere
-    # Bibliothek, sondern unbrauchbar. Einzelne gute Datensätze bleiben
-    # trotz beschädigter Nachbarn sichtbar.
-    return records, problems, bool(records) or not problems
+    # Eine leere, aber gültige Bibliothek hat keine Probleme. Jeder
+    # unlesbare Eintrag macht den Bestand unvollständig: die gute Nachbarn
+    # bleiben fuer die Fehlermeldung sichtbar, der Aufrufer verwirft den
+    # Bestand aber -- sonst gaelte eine fehlende Kopie als geloescht.
+    return records, problems, not problems
 

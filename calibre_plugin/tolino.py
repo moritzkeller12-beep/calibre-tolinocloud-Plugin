@@ -10,7 +10,8 @@ import traceback
 import uuid
 from urllib.error import HTTPError
 from urllib.parse import urlencode, quote as _url_quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import (HTTPRedirectHandler, Request, build_opener,
+                           urlopen)
 
 from .errors import TolinoApiError, TolinoAuthError, TolinoError
 from .inventory import parse_inventory
@@ -140,6 +141,28 @@ _BOT_CHECK_MARKERS = (
     "zugriff geblockt", "access denied", "captcha", "cloudfront",
     "request blocked", "<!doctype html",
 )
+
+
+class _SafeRedirects(HTTPRedirectHandler):
+    """Prueft ein Weiterleitungsziel, bevor urllib es kontaktiert.
+
+    Die Pruefung des finalen Links nach `urlopen` kommt zu spaet: urllib
+    hat das Ziel dann bereits angesprochen. Der Handler lehnt eine unsichere
+    Weiterleitung deshalb schon beim Folgen ab.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urlsplit(str(newurl))
+        if target.scheme.casefold() != "https" or not target.hostname:
+            raise TolinoApiError(
+                "Der Download wurde auf eine unsichere URL umgeleitet.",
+                code="N02",
+                short="tolino hat einen unsicheren Download-Link geliefert.")
+        return HTTPRedirectHandler.redirect_request(
+            self, req, fp, code, msg, headers, newurl)
+
+
+_DOWNLOAD_OPENER = build_opener(_SafeRedirects())
 
 
 def _raise_transport_error(exc, secrets):
@@ -549,14 +572,18 @@ class TolinoClient:
         Eine unbekannte Hülle ist ein Fehler, keine leere Bibliothek: sonst
         sähe der Vergleich eine Bibliothek ohne Bücher und plante Duplikate.
         """
-        records, problems, ok = parse_inventory(
+        records, problems, complete = parse_inventory(
             self._request(BASE_URL + "/inventory/delta?strip=true"))
         if problems:
             log_warning("Tolino-Inventar: %s" % "; ".join(problems))
-        if not ok:
+        if not complete:
+            # Ein unvollstaendiger Bestand wuerde die Zuordnung zu den
+            # fehlenden Datensaetzen loeschen und spaeter einen doppelten
+            # Upload planen.
             raise TolinoApiError(
-                "Die Cloud-Antwort enthält kein PublicationInventory.",
-                code="N02")
+                "Der Bestand von tolino ist unvollständig (%s)."
+                % "; ".join(problems), code="N02",
+                short="tolino hat einen unvollständigen Bestand geliefert.")
         return records
 
     @staticmethod
@@ -773,7 +800,8 @@ class TolinoClient:
             request.add_unredirected_header(
                 "reseller_id", self.partner["reseller_id"])
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with _DOWNLOAD_OPENER.open(request,
+                                       timeout=self.timeout) as response:
                 final_url = urlsplit(response.geturl())
                 if final_url.scheme.casefold() != "https" or not final_url.hostname:
                     raise TolinoApiError(
@@ -841,6 +869,13 @@ class TolinoClient:
         if revision is not None:
             return revision
         revision, _patches = self.sync_snapshot()
+        if revision in (None, ""):
+            # Ein PATCH ohne Revision kann vorhandene Marken ersetzen.
+            raise TolinoApiError(
+                "Die Cloud hat keine Revision zu den Markierungen geliefert.",
+                code="N02",
+                short="Die Antwort von tolino ist unvollständig; bitte neu "
+                      "vergleichen.")
         return revision
 
     def add_to_collection(self, book_id, collection_name, revision=None):
@@ -872,21 +907,24 @@ class TolinoClient:
                 "Gelesen-Markierung ohne Buch.", code="E99",
                 short="Es wurde kein Buch ausgewählt.")
         revision, patches = self.sync_snapshot()
-        active = _sync_data.active_read_tags(patches)
+        revision = self._current_revision(revision)
+        active = _sync_data.read_tag_patches(patches)
         updates = []
         for book_id in ids:
-            existing = active.get((str(book_id), _sync_data.READ_TAG))
+            marks = [(category, item) for (book, category), item
+                     in active.items() if book == str(book_id)]
             if finished:
-                if existing is None:
+                if not marks:
                     updates.append(_sync_data.tag_patch(
                         "add", book_id, _sync_data.READ_TAG, "system"))
-            elif existing is not None:
-                category = str(
-                    (existing.get("value") or {}).get("category") or "system")
+                continue
+            # Beide Schreibweisen entfernen: der Reader legt die Marke je
+            # nach Quelle als System- oder Sammlungs-Tag ab.
+            for category, item in marks:
                 updates.append(_sync_data.tag_patch(
                     "remove", book_id, _sync_data.READ_TAG, category,
-                    revision=existing["value"].get("revision"),
-                    tag_id=_sync_data.tag_id_from_patch(existing)))
+                    revision=item["value"].get("revision"),
+                    tag_id=_sync_data.tag_id_from_patch(item)))
         if not updates:
             return revision
         data = self._sync_patch({"revision": revision, "patches": updates})

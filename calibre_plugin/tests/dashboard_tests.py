@@ -140,6 +140,26 @@ class PersistTests(OrchestrationCase):
                          [column for column, _values in database.api.writes])
 
 
+class MirrorTests(OrchestrationCase):
+    """Unbekannte Cloud-Werte leeren keine vorhandene Calibre-Spalte."""
+
+    def test_an_account_without_progress_keeps_the_column(self):
+        other = "22222222-2222-4222-8222-222222222222"
+        config.save_account("A", {"refresh_token": "tok-A",
+                                  "state": {UUID: {"tolino_id": "d1"}}})
+        database = CalibreDatabase(
+            {TOLINO_READ_COLUMN: {"datatype": "bool"},
+             TOLINO_PROGRESS_COLUMN: {"datatype": "int"}}, books=[1, 2])
+        database.api.values[("uuid", 1)] = UUID
+        database.api.values[("uuid", 2)] = other
+        database.api.values[(TOLINO_PROGRESS_COLUMN, 2)] = 42
+        dashboard = self.dashboard(self.worker(), database)
+        self.ui.sync_results.mirror_account_reading(dashboard, "A")
+        # Das Konto kennt keinen Fortschritt: der Calibre-Wert bleibt stehen.
+        self.assertEqual(42,
+                         database.api.values[(TOLINO_PROGRESS_COLUMN, 2)])
+
+
 class ReportTests(OrchestrationCase):
     """Jeder Ausgang hat seine eigene Rückmeldung; geschlossen bleibt still."""
 

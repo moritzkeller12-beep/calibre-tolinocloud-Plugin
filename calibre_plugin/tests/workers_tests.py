@@ -24,6 +24,7 @@ class FakeClient:
     """Antwortet wie der tolino-Client, ohne Netz."""
 
     access = "acc"
+    hardware = "hw"
 
     def __init__(self, fail_paths=(), upload_results=(), delete_fail=(),
                  inventory_rows=(), inventory_error=None, read_error=None,
@@ -55,6 +56,12 @@ class FakeClient:
         if self.upload_results:
             return self.upload_results.pop(0)
         return "neu-%d" % len(self.uploads)
+
+    def read_ids(self):
+        return set()
+
+    def progress_by_id(self):
+        return {}
 
     def inventory(self):
         self.inventory_calls += 1
@@ -432,12 +439,61 @@ class PersistenceTests(WorkerCase):
         self.assertEqual("neu-1",
                          config.account_by_name("A")["state"][UUID]["tolino_id"])
 
+    def test_a_stale_state_copy_keeps_foreign_assignments(self):
+        config.save_account("A", {"refresh_token": "tok-A",
+                                  "state": {OTHER: {"tolino_id": "fremd"}}})
+        # Der Lauf startet mit einer älteren Kopie, in der OTHER fehlt.
+        self.run_worker(FakeClient(),
+                        jobs=[self.job(1, UUID, "/buch.epub")], state={})
+        stored = config.account_by_name("A")["state"]
+        self.assertEqual("fremd", stored[OTHER]["tolino_id"])
+        self.assertEqual("neu-1", stored[UUID]["tolino_id"])
+
     def test_a_removed_account_is_not_created_by_a_late_callback(self):
         # Das letzte Konto laesst sich nicht entfernen: ein zweites muss her.
         config.save_account("B", {"refresh_token": "tok-B"})
         self.assertTrue(config.remove_account("A"))
         self.run_worker(FakeClient(),
                         jobs=[self.job(1, UUID, "/buch.epub")])
+        self.assertEqual({}, config.account_by_name("A"))
+
+
+class PrepareTests(WorkerCase):
+    """Die Vorbereitung meldet nur «bereit», wenn der Stand gesichert ist."""
+
+    metadata = {1: {"uuid": UUID, "title": "Titel", "authors": "Autor",
+                    "isbn": "", "formats": ["EPUB"]}}
+
+    def prepare(self, client):
+        worker = self.ui.workers.PrepareWorker(self.context, self.metadata)
+        emitted = {}
+        worker.ready.connect(
+            lambda payload: emitted.setdefault("ready", payload))
+        worker.failed.connect(
+            lambda message: emitted.setdefault("failed", message))
+        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
+                          return_value=client):
+            worker.run()
+        return emitted
+
+    def client(self):
+        return FakeClient(inventory_rows=[
+            {"tolino_id": "d1", "title": "Titel", "authors": "Autor",
+             "isbn": ""}])
+
+    def test_an_unsaved_comparison_is_not_reported_as_ready(self):
+        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
+        self.addCleanup(shutil.rmtree, broken, True)
+        config.PREFERENCES.file_path = broken
+        emitted = self.prepare(self.client())
+        self.assertNotIn("ready", emitted)
+        self.assertIn("gespeichert", str(emitted.get("failed")))
+
+    def test_a_removed_account_still_reports_ready(self):
+        config.save_account("B", {"refresh_token": "tok-B"})
+        self.assertTrue(config.remove_account("A"))
+        emitted = self.prepare(self.client())
+        self.assertIn("ready", emitted)
         self.assertEqual({}, config.account_by_name("A"))
 
 

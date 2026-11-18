@@ -1,4 +1,5 @@
 """Dialoge für den tolino-Bibliotheksvergleich."""
+import os
 import re
 from typing import NamedTuple
 
@@ -27,6 +28,26 @@ def _by_title(row):
 def _by_authors(row):
     return (str(row.get("authors") or "").casefold(),
             str(row.get("title") or "").casefold())
+
+
+def download_target(path, data):
+    """Dateiendung an den gelieferten Inhalt anpassen (EPUB/PDF)."""
+    path = str(path)
+    if path.casefold().endswith(".epub") and data[:4] == b"%PDF":
+        return path[:-5] + ".pdf"
+    if path.casefold().endswith(".pdf") and data[:4] == b"PK\x03\x04":
+        return path[:-4] + ".epub"
+    return path
+
+
+def _confirm_overwrite(parent, path):
+    """Rueckfrage vor dem Ueberschreiben einer vorhandenen Datei."""
+    buttons = QMessageBox.StandardButton
+    answer = QMessageBox.question(
+        parent, "Datei überschreiben",
+        "Die Datei\n%s\nexistiert bereits. Überschreiben?" % path,
+        buttons.Yes | buttons.No, buttons.No)
+    return answer == buttons.Yes
 
 
 def _by_field(field):
@@ -988,19 +1009,23 @@ class InventoryDialog(QDialog):
         path = self._download_path
         self._end_action()
         data = bytes(result or b"")
-        is_pdf = data[:4] == b"%PDF"
-        is_epub = data[:4] == b"PK\x03\x04"
-        if path.casefold().endswith(".epub") and is_pdf:
-            path = path[:-5] + ".pdf"
-        elif path.casefold().endswith(".pdf") and is_epub:
-            path = path[:-4] + ".epub"
-        if not (is_pdf or is_epub):
+        if data[:4] not in (b"%PDF", b"PK\x03\x04"):
             # Eine HTML-Fehlerseite oder ein leerer Body ist kein Buch.
             error_dialog(
                 self, "Download ungültig",
                 "Die Cloud-Antwort ist keine EPUB- oder PDF-Datei. "
                 "Gespeichert wurde nichts.", show=True)
             return
+        target = download_target(path, data)
+        if target != path and os.path.exists(target):
+            # Die nachtraeglich angepasste Endung darf keine vorhandene
+            # Datei ohne Rueckfrage ueberschreiben.
+            if not _confirm_overwrite(self, target):
+                info_dialog(self, "Nicht gespeichert",
+                            "Es wurde nichts gespeichert.", show=True,
+                            show_copy_button=False)
+                return
+        path = target
         try:
             with open(path, "wb") as handle:
                 handle.write(data)

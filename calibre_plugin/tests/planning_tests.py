@@ -172,6 +172,33 @@ class ComparisonTests(unittest.TestCase):
                                  ["EPUB"])
         self.assertEqual("ignored", rows[0]["group"])
 
+    def test_an_isbn_match_never_steals_a_stored_assignment(self):
+        other = "22222222-2222-4222-8222-222222222222"
+        rows = compare_inventory(
+            {1: book(), 2: book(uuid=other)},
+            {other: {"tolino_id": "d1"}}, [cloud()], ["EPUB"])
+        by_book = {row["book_id"]: row for row in rows if row["book_id"]}
+        # Die gespeicherte Zuordnung bleibt beim späteren Buch; das frühere
+        # bekommt keinen zweiten Anspruch auf dieselbe Kopie.
+        self.assertEqual("d1", by_book[2]["tolino_id"])
+        self.assertEqual("", by_book[1]["tolino_id"])
+
+    def test_a_new_cloud_id_drops_the_values_of_the_old_copy(self):
+        state = {UUID: {"tolino_id": "alt", "reading": {"read": True},
+                        "collections": ["Serie"]}}
+        rows = compare_inventory({1: book()}, state, [cloud()], ["EPUB"])
+        self.assertEqual("d1", state[UUID]["tolino_id"])
+        self.assertNotIn("reading", state[UUID])
+        self.assertNotIn("collections", state[UUID])
+        self.assertEqual("d1", rows[0]["tolino_id"])
+
+    def test_initials_match_a_full_author_name(self):
+        rows = compare_inventory({1: book(authors="J. Doe", isbn="")}, {},
+                                 [cloud(authors="Jane Doe", isbn="")],
+                                 ["EPUB"])
+        self.assertEqual(("d1", "title_author"),
+                         (rows[0]["tolino_id"], rows[0]["match_reason"]))
+
 
 class NormalizationTests(unittest.TestCase):
     """Cloud-Datensaetze und Suchschluessel kommen in einer Form an."""
@@ -446,10 +473,11 @@ class InventoryParsingTests(unittest.TestCase):
                        "authors": "Autor"},
                       {"title": "Ohne Kennung", "authors": "Autor"}]}})
         # Der gute Datensatz bleibt sichtbar; der defekte Nachbar erscheint
-        # ohne Kennung, statt still zu verschwinden.
+        # ohne Kennung. Der Bestand gilt trotzdem als unvollständig, damit
+        # keine Zuordnung zu einem fehlenden Datensatz gelöscht wird.
         self.assertEqual(["d1", ""], [item["tolino_id"] for item in records])
         self.assertIn("Datensatz ohne Kennung", problems)
-        self.assertTrue(ok)
+        self.assertFalse(ok)
 
     def test_purchase_deliverables_provide_the_deletable_id(self):
         for deliverable in ({"deliverableId": "d1"},

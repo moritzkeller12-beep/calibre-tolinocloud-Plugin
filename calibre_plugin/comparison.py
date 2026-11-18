@@ -262,14 +262,13 @@ class _RemoteIndex:
     """
 
     __slots__ = ("rows", "by_tolino_id", "by_isbn", "by_title",
-                 "by_title_author", "title_counts")
+                 "title_counts")
 
     def __init__(self, rows):
         self.rows = rows
         self.by_tolino_id = {}
         self.by_isbn = {}
         self.by_title = {}
-        self.by_title_author = {}
         self.title_counts = {}
         for index, row in enumerate(rows):
             if row["tolino_id"]:
@@ -282,9 +281,6 @@ class _RemoteIndex:
             title = row["normalized_title"]
             self.title_counts[title] = self.title_counts.get(title, 0) + 1
             self.by_title.setdefault(title, []).append(index)
-            author_key = normalized_authors(row["authors"])
-            if author_key:
-                self.by_title_author.setdefault((title, author_key), []).append(index)
 
 
 def _comparison_row(book_id, title, authors, isbn, tolino_id, status, read,
@@ -331,33 +327,56 @@ def _remote_rows(inventory, read_known, read_ids, progress_known,
     return rows
 
 
+def _reserved_rows(state, remote):
+    """Cloud-Zeilen, die der Zustand bereits einem Buch zuordnet.
+
+    Ohne Reservierung koennte ein frueher ISBN-Treffer die gespeicherte
+    Zuordnung eines spaeteren Buchs beanspruchen; das spaetere Buch wuerde
+    dann erneut hochgeladen.
+    """
+    reserved = {}
+    if not isinstance(state, dict):
+        return reserved
+    for key, entry in state.items():
+        stored = (str(entry.get("tolino_id") or "").strip()
+                  if isinstance(entry, dict) else "")
+        for index in remote.by_tolino_id.get(stored, ()) if stored else ():
+            reserved.setdefault(index, str(key))
+    return reserved
+
+
 def _find_remote_match(index, stored_id, local_isbn, title_key,
-                       author_key, authors, matched):
+                       authors, matched, reserved, book_uuid):
     """Ersten eindeutigen Treffer in der dokumentierten Reihenfolge finden.
 
     Rueckgabe ``(row_index, reason, ambiguous, candidates)``. Ein Treffer
     verbraucht die Zeile erst beim Aufrufer; mehrere freie Treffer auf
     denselben Schluessel sind ein Prueffall und werden nicht nach
-    Listenposition ausgewaehlt. Der Titel+Autor-Schluessel transliteriert
-    ae/oe/ue; deshalb muss bei diesem Grund zusaetzlich `authors_match`
-    zustimmen («Michael» und «Michal» sind nicht derselbe Name).
+    Listenposition ausgewaehlt. Fuer Titel+Autor muss `authors_match`
+    zustimmen: es toleriert Reihenfolge und Initialen («Jane Doe» =
+    «J. Doe»), aber nicht einen anderen Namen.
     """
+    def free(items):
+        """Freie Kandidaten; fremde gespeicherte Zuordnungen bleiben tabu."""
+        return [item for item in items if item not in matched
+                and reserved.get(item) in (None, book_uuid)]
+
     attempts = []
     if stored_id:
         attempts.append((index.by_tolino_id.get(stored_id, ()), "stored_id"))
     if is_valid_isbn(local_isbn):
         attempts.append((index.by_isbn.get(local_isbn, ()), "isbn"))
-    if title_key and author_key:
-        title_author = [
-            item for item in index.by_title_author.get((title_key, author_key), ())
-            if authors_match(authors, index.rows[item]["authors"])]
-        attempts.append((title_author, "title_author"))
+    if title_key:
+        attempts.append(([
+            item for item in index.by_title.get(title_key, ())
+            if authors_match(authors, index.rows[item]["authors"])],
+            "title_author"))
     for indexes, reason in attempts:
-        free = [item for item in indexes if item not in matched]
-        if len(free) == 1:
-            return free[0], reason, False, []
-        if len(free) > 1:
-            return None, "ambiguous", True, free
+        candidates = free(indexes)
+        if len(candidates) == 1:
+            return candidates[0], reason, False, []
+        if len(candidates) > 1:
+            return None, "ambiguous", True, candidates
     return None, "", False, []
 
 
@@ -412,13 +431,19 @@ def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
     if not isinstance(entry, dict):
         entry = {}
         state[book_uuid] = entry
+    previous = str(entry.get("tolino_id") or "").strip()
+    if previous and previous != str(tolino_id):
+        # Lesestatus und Sammlungen gehoerten zur alten Cloud-Kopie.
+        entry.pop("reading", None)
+        entry.pop("collections", None)
     entry["tolino_id"] = tolino_id
     entry.setdefault("calibre_id", book_id)
 
 
-def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
-                          matched, disputed, read_known, read_ids,
-                          progress_known, progress_by_id, read_column=False):
+def _local_comparison_row(book_id, metadata, remote, state, reserved,
+                          preferred_formats, matched, disputed, read_known,
+                          read_ids, progress_known, progress_by_id,
+                          read_column=False):
     """Eine lokale Vergleichszeile -- inklusive einer bestaetigten Zuordnung."""
     # Ignorierte Bücher bleiben zugeordnet, erhalten aber keine Aktion.
     ignored = bool(metadata.get("ignored"))
@@ -435,7 +460,8 @@ def _local_comparison_row(book_id, metadata, remote, state, preferred_formats,
                             if fmt in local_formats), None)
     local_isbn = normalize_isbn(isbn)
     remote_index, match_reason, ambiguous, candidates = _find_remote_match(
-        remote, stored_id, local_isbn, title_key, author_key, authors, matched)
+        remote, stored_id, local_isbn, title_key, authors, matched,
+        reserved, book_uuid)
     file_changed = False
     tolino_id = ""
     status = "new_in_calibre"
@@ -544,12 +570,13 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     rows = _remote_rows(
         inventory, read_known, read_ids, progress_known, progress_by_id)
     remote = _RemoteIndex(rows)
+    reserved = _reserved_rows(state, remote)
     matched = set()
     disputed = set()
     local_rows = []
     for book_id, metadata in metadata_by_id.items():
         local_rows.append(_local_comparison_row(
-            book_id, metadata, remote, state, preferred_formats,
+            book_id, metadata, remote, state, reserved, preferred_formats,
             matched, disputed, read_known, read_ids,
             progress_known, progress_by_id, read_column))
     for index, row in enumerate(remote.rows):

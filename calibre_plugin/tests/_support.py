@@ -439,10 +439,18 @@ def local_tolino_endpoints(origin, partner_ids=(1, 4, 5, 8)):
 class CalibreApi:
     """Calibres new_api als Grenze: merkt Schreibvorgaenge, kann scheitern."""
 
-    def __init__(self, fail=()):
+    def __init__(self, fail=(), books=None):
         self.fail = set(fail)
         self.values = {}
         self.writes = []
+        self.books = list(books or ())
+
+    def all_book_ids(self):
+        return list(self.books)
+
+    def all_field_for(self, field, book_ids):
+        return {book_id: self.values.get((field, book_id), "")
+                for book_id in book_ids}
 
     def has_id(self, book_id):
         return True
@@ -466,10 +474,11 @@ class CalibreDatabase:
     einem Neustart.
     """
 
-    def __init__(self, columns=None, fail=(), create_error=None, dbpath=""):
+    def __init__(self, columns=None, fail=(), create_error=None, dbpath="",
+                 books=None):
         self.field_metadata = dict(columns or {})
         self.dbpath = dbpath
-        self.api = CalibreApi(fail)
+        self.api = CalibreApi(fail, books)
         self.created = []
         self.create_error = create_error
 
