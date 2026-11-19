@@ -45,7 +45,7 @@ def _settings_dialog(dashboard):
         layout.addWidget(group)
     dialog.close_button = _button(
         "Speichern und schliessen",
-        "Speichert die Änderungen und schließt die Einstellungen.",
+        "Speichert die Änderungen und schliesst die Einstellungen.",
         dashboard.close_settings)
     row = QHBoxLayout()
     row.addStretch(1)
@@ -138,7 +138,7 @@ class DashboardParts:
         self.settings_dialog = _settings_dialog(self)
         self._build_transfer_settings()
         self._build_account_settings()
-        root.addWidget(_button("Schließen", slot=self.close))
+        root.addWidget(_button("Schliessen", slot=self.close))
 
     def _build_main_actions(self, root):
         self.status = QLabel()

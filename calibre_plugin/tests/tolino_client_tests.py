@@ -686,9 +686,10 @@ class DeleteAndDownloadTests(unittest.TestCase):
 
     def test_the_download_info_asks_for_the_base64_id(self):
         backend = Backend()
-        with write_client(backend) as client:
-            with self.assertRaises(TolinoApiError):
-                client.download("d1")
+        opener = content_opener(b"x")[0]
+        with write_client(backend) as client, patch(
+                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
+            self.assertEqual(b"x", client.download("d1"))
         expected = _download_token("d1")
         self.assertEqual("/bosh/rest/cloud/downloadinfo/%s/%s/type/external-download"
                          % (expected, expected),

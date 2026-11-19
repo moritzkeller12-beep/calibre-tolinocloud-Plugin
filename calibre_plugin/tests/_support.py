@@ -299,6 +299,8 @@ def real_qt_stub():
     als Python-Signal. Ohne PyQt6 ueberspringt der Test.
     """
     global _REAL_QT_APP
+    # Der Ersatz sammelt prozessweit: jeder Dialogtest startet mit leerer Liste.
+    RecordingMessageBox.calls = []
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     try:
         from PyQt6.QtCore import QEvent, Qt

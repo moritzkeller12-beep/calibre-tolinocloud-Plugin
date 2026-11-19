@@ -150,8 +150,3 @@ def authors_match(left, right):
     if _has_umlaut(left) or _has_umlaut(right):
         return _tokens_match(author_tokens(left), author_tokens(right))
     return False
-
-
-def normalized_authors(value):
-    """Return a stable author lookup key."""
-    return " ".join(author_tokens(value))

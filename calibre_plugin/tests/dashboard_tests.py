@@ -58,9 +58,9 @@ class OrchestrationCase(unittest.TestCase):
             dashboard.isVisible = lambda: visible
         return dashboard
 
-    def sync_completed(self, dashboard, state, updates):
+    def sync_completed(self, dashboard, updates):
         method = self.ui.dashboard.SyncDashboard.sync_completed
-        return method.__get__(dashboard)(state, updates)
+        return method.__get__(dashboard)(updates)
 
     def sync_failed(self, dashboard, message):
         method = self.ui.dashboard.SyncDashboard.sync_failed
@@ -173,8 +173,7 @@ class ReportTests(OrchestrationCase):
                    lambda *args, **kwargs: recorded["info"].append(args)), \
                 patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
-            self.sync_completed(dashboard, {UUID: {"tolino_id": "d1"}},
-                                worker.updates)
+            self.sync_completed(dashboard, worker.updates)
         self.assertEqual("Fertig", recorded["info"][0][1])
         self.assertIn("hochgeladen", recorded["info"][0][2])
         self.assertEqual([], recorded["error"])
@@ -188,7 +187,7 @@ class ReportTests(OrchestrationCase):
                    lambda *args, **kwargs: recorded["info"].append(args)), \
                 patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
-            self.sync_completed(dashboard, {}, worker.updates)
+            self.sync_completed(dashboard, worker.updates)
         self.assertIn("Abgebrochen", recorded["info"][0][2])
         self.assertEqual([], recorded["error"])
 
@@ -200,7 +199,7 @@ class ReportTests(OrchestrationCase):
                    lambda *args, **kwargs: recorded["info"].append(args)), \
                 patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
-            self.sync_completed(dashboard, {}, worker.updates)
+            self.sync_completed(dashboard, worker.updates)
         self.assertEqual("Teilweise fehlgeschlagen", recorded["error"][0][1])
         self.assertIn("Teilweise abgeschlossen", recorded["error"][0][2])
 
@@ -212,7 +211,7 @@ class ReportTests(OrchestrationCase):
                    lambda *args, **kwargs: recorded["info"].append(args)), \
                 patch("calibre_plugin.sync_results.error_dialog",
                       lambda *args, **kwargs: recorded["error"].append(args)):
-            self.sync_completed(dashboard, {}, worker.updates)
+            self.sync_completed(dashboard, worker.updates)
         self.assertEqual(([], []), (recorded["info"], recorded["error"]))
         self.assertTrue(dashboard.finished)
 

@@ -22,7 +22,7 @@ from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
 
 class SyncWorker(QObject):
     progress = pyqtSignal(int, int, str)
-    completed = pyqtSignal(object, object)
+    completed = pyqtSignal(object)
     failed = pyqtSignal(str)
 
     def __init__(self, context, jobs, removals, meta_updates=None,
@@ -285,7 +285,7 @@ class SyncWorker(QObject):
         else:
             self._finish_delete(operation, deleted)
 
-    def _run_deletions(self, client, delete_ops, checkpoint, state, done, total):
+    def _run_deletions(self, client, delete_ops, checkpoint, done, total):
         """Execute only the deletions explicitly selected by the user."""
         for book_uuid, tolino_id, operation in delete_ops:
             label = self._label(book_uuid, None,
@@ -299,13 +299,13 @@ class SyncWorker(QObject):
             if not ok:
                 done += 1
                 continue
-            entry = state.get(book_uuid)
+            entry = self.state.get(book_uuid)
             recorded = (str(entry.get("tolino_id") or "")
                         if isinstance(entry, dict) else "")
             if not recorded or recorded == str(tolino_id):
                 if isinstance(entry, dict) and entry.get("calibre_id") is not None:
                     self.updates.append((entry.get("calibre_id"), ""))
-                state.pop(book_uuid, None)
+                self.state.pop(book_uuid, None)
                 self._persist_state()
             done += 1
             if deleted:
@@ -426,64 +426,71 @@ class SyncWorker(QObject):
         changed = False
         # Ohne Bestand ist keine Zuordnung möglich: dann startet kein
         # Schritt -- auch kein Checkpoint.
-        for book_uuid, tolino_id, series, operation in (
-                collection_ops if known is not None else ()):
-            if (tolino_id, series) in known:
-                checkpoint()  # Skip-Zweig läuft nicht durch _step().
+        try:
+            for book_uuid, tolino_id, series, operation in (
+                    collection_ops if known is not None else ()):
+                if (tolino_id, series) in known:
+                    checkpoint()  # Skip-Zweig läuft nicht durch _step().
+                    remember_collection(self.state, book_uuid, series)
+                    self._finish_operation(operation, OP_SKIPPED,
+                                           reason="schon in der Cloud")
+                    changed = True
+                    done += 1
+                    continue
+
+                ok, new_revision = self._step(
+                    client, checkpoint, operation,
+                    "Serie in der Cloud: %s" % series,
+                    partial(client.add_to_collection, tolino_id, series,
+                            revision=revision),
+                    done, total)
+                if not ok:
+                    # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
+                    revision = None
+                    done += 1
+                    continue
+
+                revision = new_revision
+                known.add((tolino_id, series))
                 remember_collection(self.state, book_uuid, series)
-                self._finish_operation(operation, OP_SKIPPED,
-                                       reason="schon in der Cloud")
                 changed = True
                 done += 1
-                continue
-
-            ok, new_revision = self._step(
-                client, checkpoint, operation,
-                "Serie in der Cloud: %s" % series,
-                partial(client.add_to_collection, tolino_id, series,
-                        revision=revision),
-                done, total)
-            if not ok:
-                # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
-                revision = None
-                done += 1
-                continue
-
-            revision = new_revision
-            known.add((tolino_id, series))
-            remember_collection(self.state, book_uuid, series)
-            changed = True
-            done += 1
-        if changed:
-            self._persist_state()
+        finally:
+            # Auch ein Abbruch oder Auth-Fehler behaelt die bestaetigten
+            # Zuordnungen; sonst stehen sie nur im Speicher.
+            if changed:
+                self._persist_state()
         self.progress.emit(done, total, "Serien geprüft")
         return done
 
     def _run_metadata_updates(self, client, operations, checkpoint, done, total):
         """Apply selected metadata patches and persist their confirmed state."""
         changed = False
-        for record, operation in operations:
-            ok, _result = self._step(
-                client, checkpoint, operation,
-                "Metadaten: %s" % self._label(
-                    record.book_uuid, record.book_id,
-                    (record.fields or {}).get("title")),
-                partial(client.update_metadata, record.tolino_id,
-                        record.fields),
-                done, total)
-            if not ok:
+        try:
+            for record, operation in operations:
+                ok, _result = self._step(
+                    client, checkpoint, operation,
+                    "Metadaten: %s" % self._label(
+                        record.book_uuid, record.book_id,
+                        (record.fields or {}).get("title")),
+                    partial(client.update_metadata, record.tolino_id,
+                            record.fields),
+                    done, total)
+                if not ok:
+                    done += 1
+                    continue
+                entry = self.state.get(record.book_uuid)
+                metadata = self.metadata_by_uuid.get(record.book_uuid)
+                if isinstance(entry, dict) and metadata:
+                    entry["meta_verified_fp"] = metadata_fingerprint(metadata)
+                self.updates.append((record.book_id, record.tolino_id))
+                changed = True
                 done += 1
-                continue
-            entry = self.state.get(record.book_uuid)
-            metadata = self.metadata_by_uuid.get(record.book_uuid)
-            if isinstance(entry, dict) and metadata:
-                entry["meta_verified_fp"] = metadata_fingerprint(metadata)
-            self.updates.append((record.book_id, record.tolino_id))
-            changed = True
-            done += 1
-        if changed:
-            # Einmal je Phase statt je Buch: derselbe Patch ist idempotent.
-            self._persist_state()
+        finally:
+            # Einmal je Phase statt je Buch -- und auch nach Abbruch oder
+            # Auth-Fehler, damit der Patch nicht nur im Speicher steht.
+            if changed:
+                self._persist_state()
         return done
 
     def _run_uploads(self, client, operations, checkpoint, done, total):
@@ -535,7 +542,6 @@ class SyncWorker(QObject):
         return done
 
     def run(self):
-        state = self.state
         client = None
         try:
             client = TOKEN_VAULT.login(self.account_name)
@@ -554,7 +560,7 @@ class SyncWorker(QObject):
             done = self._run_uploads(
                 client, upload_ops, checkpoint, done, total)
             done = self._run_deletions(
-                client, delete_ops, checkpoint, state, done, total)
+                client, delete_ops, checkpoint, done, total)
             done = self._run_read_marks(
                 client, read_op, unread_op, checkpoint, done, total)
             collection_ops = self._plan_collection_operations()
@@ -562,11 +568,11 @@ class SyncWorker(QObject):
             done = self._run_collections(
                 client, collection_ops, checkpoint, done, total)
             self._refresh_counts()
-            self.completed.emit(state, self.updates)
+            self.completed.emit(self.updates)
         except _SyncCancelled:
             # Nicht erreichte Operationen bleiben «nicht begonnen».
             self._refresh_counts()
-            self.completed.emit(state, self.updates)
+            self.completed.emit(self.updates)
         except Exception as exc:
             # Alle nicht erreichten Operationen bleiben ausdruecklich
             # "not_started" -- der Bericht unterscheidet sie von Fehlern.

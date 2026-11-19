@@ -4,8 +4,7 @@ import hashlib
 from .identifiers import state_entry, valid_book_uuid
 from .library import normalize_formats
 from .matching import (author_tokens, authors_match, is_valid_isbn,
-                       normalize_isbn, normalize_match_text, normalize_title,
-                       normalized_authors)
+                       normalize_isbn, normalize_match_text, normalize_title)
 
 IGNORED_EXPLANATION = (
     "In Calibre als «ignoriert» markiert (#tolino_ignore) – wird weder "
@@ -41,9 +40,6 @@ def comparison_group(status):
 
 
 _REASON_EXPLANATIONS = {
-    "cloud_id_missing": ("In tolino vorhanden, aber nicht ansprechbar "
-                         "(kein Download, kein Löschen). Ein Upload würde "
-                         "ein Duplikat erzeugen."),
     "title_only": ("Nur der Titel stimmt überein. Ein Upload würde "
                    "vermutlich ein Duplikat erzeugen."),
     "ambiguous": "Mehrere mögliche Treffer in tolino.",
@@ -271,8 +267,7 @@ class _RemoteIndex:
         self.by_title = {}
         self.title_counts = {}
         for index, row in enumerate(rows):
-            if row["tolino_id"]:
-                self.by_tolino_id.setdefault(row["tolino_id"], []).append(index)
+            self.by_tolino_id.setdefault(row["tolino_id"], []).append(index)
             row_isbn = normalize_isbn(row["isbn"])
             if row_isbn and is_valid_isbn(row_isbn):
                 self.by_isbn.setdefault(row_isbn, []).append(index)
@@ -304,25 +299,26 @@ def _comparison_row(book_id, title, authors, isbn, tolino_id, status, read,
 
 def _remote_rows(inventory, read_known, read_ids, progress_known,
                  progress_by_id):
-    """Normalisierte Cloud-Datensätze in Vergleichszeilen umwandeln."""
+    """Normalisierte Cloud-Datensätze in Vergleichszeilen umwandeln.
+
+    `inventory()` verwirft jeden Datensatz ohne Kennung, deshalb hat hier
+    jede Zeile eine Cloud-ID und ist ansprechbar.
+    """
     rows = []
     seen = set()
     for record in inventory:
-        # Auch Datensätze ohne eindeutige Cloud-ID bleiben sichtbar;
-        # andernfalls erschiene das Buch als neu und könnte ein Duplikat erzeugen.
         tolino_id = record["tolino_id"]
-        if tolino_id:
-            # Derselbe Cloud-Datensatz zweimal geliefert: einmal anzeigen.
-            if tolino_id in seen:
-                continue
-            seen.add(tolino_id)
+        # Derselbe Cloud-Datensatz zweimal geliefert: einmal anzeigen.
+        if tolino_id in seen:
+            continue
+        seen.add(tolino_id)
         rows.append(_comparison_row(
             None, record["title"], record["authors"], record["isbn"],
             tolino_id, "only_tolino",
             _read_flags(tolino_id, read_known, read_ids),
             _progress_state(tolino_id, progress_known, progress_by_id),
             "Nur in tolino – kann heruntergeladen werden.",
-            cloud_id_missing=not bool(tolino_id), file_changed=False,
+            file_changed=False,
             normalized_title=normalize_title(record["title"])))
     return rows
 
@@ -380,10 +376,10 @@ def _find_remote_match(index, stored_id, local_isbn, title_key,
     return None, "", False, []
 
 
-def _metadata_conflict(remote, authors, author_key, local_isbn):
+def _metadata_conflict(remote, authors, local_isbn):
     """Autor oder ISBN widersprechen sich; die Zuordnung bleibt ungeklärt."""
     remote_authors = remote["authors"]
-    if (author_key and author_tokens(remote_authors)
+    if (author_tokens(authors) and author_tokens(remote_authors)
             and not authors_match(authors, remote_authors)):
         return True
     remote_isbn = normalize_isbn(remote["isbn"])
@@ -391,16 +387,12 @@ def _metadata_conflict(remote, authors, author_key, local_isbn):
             and local_isbn != remote_isbn)
 
 
-def _matched_status(metadata, remote, old, selected_format,
-                    authors, author_key, local_isbn):
+def _matched_status(metadata, remote, old, selected_format, authors,
+                    local_isbn):
     """Status einer eindeutig zugeordneten Zeile (Dateisignatur zuerst)."""
     # Gleiche Metadaten dürfen eine geänderte Datei nicht verdecken.
     file_changed = _file_changed(metadata, old, selected_format)
-    if not remote["tolino_id"]:
-        # Die Cloud-Kopie ist nicht ansprechbar. Ein Upload könnte ein Duplikat
-        # erzeugen; daher bleibt die Zeile zur Prüfung.
-        return "review", "cloud_id_missing", file_changed
-    if _metadata_conflict(remote, authors, author_key, local_isbn):
+    if _metadata_conflict(remote, authors, local_isbn):
         return "review", "conflict", file_changed
     same_fields = _same_comparison_fields(metadata, remote)
     current_meta_fp = metadata_fingerprint(metadata)
@@ -469,7 +461,6 @@ def _local_comparison_row(book_id, metadata, remote, state, reserved,
     old = state_entry(state, book_uuid)
     stored_id = str(old.get("tolino_id") or "").strip()
     title_key = normalize_title(title)
-    author_key = normalized_authors(authors)
     local_formats = normalize_formats(metadata.get("formats"))
     selected_format = next((fmt for fmt in preferred_formats
                             if fmt in local_formats), None)
@@ -485,8 +476,7 @@ def _local_comparison_row(book_id, metadata, remote, state, reserved,
         remote_row = remote.rows[remote_index]
         tolino_id = remote_row["tolino_id"]
         status, override, file_changed = _matched_status(
-            metadata, remote_row, old, selected_format,
-            authors, author_key, local_isbn)
+            metadata, remote_row, old, selected_format, authors, local_isbn)
         if override:
             match_reason = override
         if book_uuid and tolino_id and status != "review":
@@ -527,10 +517,6 @@ def _leftover_remote_row(row, disputed, title_counts, row_index):
     if row_index in disputed:
         return _review_row(row, "review",
                            "Möglicher Treffer, nicht eindeutig.")
-    if row.get("cloud_id_missing"):
-        return _review_row(row, "review",
-                           "In tolino vorhanden, aber nicht ansprechbar "
-                           "(kein Download, kein Löschen).")
     if not row["title"]:
         return _review_row(row, "not_matchable",
                            "tolino-Datensatz ohne Titel – nicht zuordenbar.")

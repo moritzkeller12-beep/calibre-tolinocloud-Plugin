@@ -7,6 +7,7 @@
 - Jeder Spalten-Knopf prüft und meldet nur seine eigene Calibre-Spalte. Neue Spalten entstehen ausschliesslich über Calibres `create_custom_column`; danach fordert die Oberfläche zum Neustart auf, und ein zweiter Klick legt nichts doppelt an. `library_scope()` unterscheidet Bibliotheken ohne `library_id` über den `dbpath`, und `#tolino_id` bleibt eine rein informative Spiegelspalte.
 - Nach einem Upload werden Lesestatus und Fortschritt der ersetzten Kopie geleert; ein gleichzeitig gewählter Lesestatus geht nicht mehr an die alte, dabei gelöschte Kopie. Beide Spalten werden getrennt geschrieben, damit ein Fehler den anderen nicht blockiert.
 - Ein nicht gespeicherter Zwischenstand bricht den Sync ab, statt die ersetzte Cloud-Kopie zu löschen; ein nicht gespeicherter Token, eine nicht gespeicherte Anmeldung, nicht gespeicherte Einstellungen, ein fehlgeschlagener Sync-Zustand, eine nicht gespeicherte Geräte-ID, ein nicht gespeicherter Buchhändler, eine nicht gespeicherte Abmeldung und ein nicht angelegtes oder nicht umschaltbares Konto melden jetzt einen Fehler, statt Erfolg vorzutäuschen. Ein eingetippter Token bleibt bei einem Schreibfehler im Feld stehen, und ein nicht gesicherter Stand hält das Einstellungsfenster offen.
+- Bricht ein Lauf mitten in den Metadaten- oder Serienänderungen ab (Abbruch oder abgelehnter Zugang), sind die bereits bestätigten Änderungen trotzdem gesichert; das Buch steht beim nächsten Vergleich nicht wieder auf «changed».
 - Alte `#tolino_id`- und `dbpath`-Migrationspfade entfallen; Config-Speicher, Konten und Tokens bleiben unverändert.
 - Änderungen an der Einstellungsdatei (zweites Calibre-Fenster, anderes Konto) sind im laufenden Programm sofort sichtbar; halb geschriebene oder nicht lesbare Stände werden nie übernommen, und ein Schreibvorgang bricht dann ab, statt Daten zu verlieren. Gleichzeitige Schreibvorgänge zweier Calibre-Prozesse sind nicht serialisiert: der Lock ist prozesslokal, ein echter Schreibwettlauf bleibt damit möglich.
 - Endet der Flatpak-/Snap-Wrapper eines Anmeldefensters vor seinem Browserkind, gilt der DevTools-Port weiterhin als belegt, bis er nicht mehr antwortet. Der DevTools-WebSocket prüft beim Verbindungsaufbau `Sec-WebSocket-Accept` sowie `Upgrade`/`Connection`; eine fremde HTTP-Antwort gilt nicht mehr als offene Verbindung.
@@ -33,7 +34,7 @@
 
 ## 0.1.04
 
-- `#tolino_read` ist nur noch informativ; Lesestatusänderungen werden ausschließlich im Vergleichsfenster ausgewählt.
+- `#tolino_read` ist nur noch informativ; Lesestatusänderungen werden ausschliesslich im Vergleichsfenster ausgewählt.
 - Behebt Qt6-Probleme mit Spaltenbreiten und Dialogcodes; ergänzt einen PyQt6-Offscreen-Test.
 
 ## 0.1.03

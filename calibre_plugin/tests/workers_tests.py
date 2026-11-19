@@ -25,7 +25,7 @@ class FakeClient:
 
     def __init__(self, fail_paths=(), upload_results=(), delete_fail=(),
                  inventory_rows=(), inventory_error=None, read_error=None,
-                 on_upload=None):
+                 on_upload=None, on_metadata=None, on_collection=None):
         self.fail_paths = set(fail_paths)
         self.upload_results = list(upload_results)
         self.delete_fail = set(delete_fail)
@@ -33,6 +33,8 @@ class FakeClient:
         self.inventory_error = inventory_error
         self.read_error = read_error
         self.on_upload = on_upload
+        self.on_metadata = on_metadata
+        self.on_collection = on_collection
         self.uploads = []
         self.covers = []
         self.metadata = []
@@ -65,9 +67,13 @@ class FakeClient:
 
     def update_metadata(self, tolino_id, fields):
         self.metadata.append((tolino_id, dict(fields)))
+        if self.on_metadata is not None:
+            self.on_metadata()
 
     def add_to_collection(self, book_id, name, revision=None):
         self.collections.append((book_id, name))
+        if self.on_collection is not None:
+            self.on_collection()
 
     def collection_pairs(self):
         return set()
@@ -243,6 +249,27 @@ class ReadingAndMetadataTests(WorkerCase):
         self.assertEqual([(1, "d1")], worker.updates)
         self.assertTrue(worker.state[UUID]["meta_verified_fp"])
 
+    def test_a_cancelled_metadata_phase_keeps_the_confirmed_patch(self):
+        records = [MetaUpdateRecord(1, UUID, "d1", {"title": "Neu"}),
+                   MetaUpdateRecord(2, OTHER, "d2", {"title": "Neu"})]
+        metadata = {1: {"uuid": UUID, "title": "Neu", "authors": "",
+                        "isbn": "", "formats": ["EPUB"]}}
+        worker = self.ui.workers.SyncWorker(
+            self.context, [], [], meta_updates=records,
+            metadata=metadata,
+            state={UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}})
+        client = FakeClient(on_metadata=worker.cancel)
+        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
+                          return_value=client):
+            worker.run()
+        # Der Abbruch beendet die Phase nach dem ersten Patch: der bestaetigte
+        # Stand muss trotzdem im Konto stehen, sonst gilt das Buch wieder
+        # als «changed».
+        self.assertEqual([("d1", {"title": "Neu"})], client.metadata)
+        self.assertTrue(
+            config.account_by_name("A")["state"][UUID]["meta_verified_fp"])
+        self.assertEqual("not_started", worker.operations[1]["status"])
+
     def test_a_series_is_added_once_and_remembered(self):
         state = {UUID: {"tolino_id": "d1"}}
         client = FakeClient()
@@ -250,6 +277,21 @@ class ReadingAndMetadataTests(WorkerCase):
             client, state=state, series_map={UUID: "Grenzwelten"})
         self.assertEqual([("d1", "Grenzwelten")], client.collections)
         self.assertIn("Grenzwelten", worker.state[UUID]["collections"])
+
+    def test_a_cancelled_collection_phase_keeps_the_confirmed_series(self):
+        worker = self.ui.workers.SyncWorker(
+            self.context, [], [],
+            state={UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}},
+            series_map={UUID: "Erste", OTHER: "Zweite"})
+        client = FakeClient(on_collection=worker.cancel)
+        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
+                          return_value=client):
+            worker.run()
+        # Nur die bestaetigte Zuordnung ist gesichert; die offene bleibt offen.
+        self.assertEqual([("d1", "Erste")], client.collections)
+        stored = config.account_by_name("A")["state"]
+        self.assertEqual(["Erste"], stored[UUID]["collections"])
+        self.assertEqual([UUID], list(stored))
 
 
 class DeleteTests(WorkerCase):

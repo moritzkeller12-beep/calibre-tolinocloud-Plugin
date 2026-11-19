@@ -769,7 +769,7 @@ class SyncDashboard(DashboardParts, QDialog):
         self.primary.setEnabled(False)
 
     @gui_guard
-    def sync_completed(self, _state, updates):
+    def sync_completed(self, updates):
         """Erfolgreicher Lauf (auch nach regulaerem Abbruch).
 
         Die tolino-IDs landen unter dem KONTO DES LAUFS; Lesewerte werden nur

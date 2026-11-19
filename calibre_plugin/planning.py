@@ -306,7 +306,7 @@ def plan_actions(dialog, context, metadata, state, selection, series_map=None):
         (selection or {}).get("cloud_deletions"))
     titles = {valid_book_uuid(item.get("uuid")): str(item.get("title") or "")
               for item in (metadata or {}).values() if isinstance(item, dict)}
-    titles.pop(None, None)
+    titles.pop("", None)
     titles.update({str(key): str(value or "")
                    for key, value in removal_titles.items()})
     requested_metadata = set(selection["metadata"]) & syncable_ids
