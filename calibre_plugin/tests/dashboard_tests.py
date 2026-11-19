@@ -58,6 +58,10 @@ class OrchestrationCase(unittest.TestCase):
             dashboard.isVisible = lambda: visible
         return dashboard
 
+    def method(self, name):
+        """Echte Dashboard-Methode an ein Doppel binden."""
+        return self.ui.dashboard.SyncDashboard.__dict__[name].__get__
+
     def sync_completed(self, dashboard, updates):
         method = self.ui.dashboard.SyncDashboard.sync_completed
         return method.__get__(dashboard)(updates)
@@ -285,10 +289,6 @@ class SettingsSaveTests(OrchestrationCase):
         self.assertEqual([], loaded)
         self.assertEqual("A", config.settings()["active_account"])
 
-    def method(self, name):
-        """Echte Dashboard-Methode an ein Doppel binden."""
-        return self.ui.dashboard.SyncDashboard.__dict__[name].__get__
-
     def dashboard_for_save(self, **attrs):
         """Doppel mit den echten Speicher-Methoden; `_save_visible_account`
         bleibt stubbar (die echten Pfade decken die Tests oben ab)."""
@@ -362,6 +362,126 @@ class SettingsSaveTests(OrchestrationCase):
         # Nicht gesichert heisst: der Token gilt weiter, nichts meldet Erfolg.
         self.assertEqual("tok-A", dashboard.refresh.value)
         self.assertEqual([], shown)
+
+
+class LoginFlowTests(OrchestrationCase):
+    """Der Anmeldeknopf prüft zuerst und öffnet den Browser nur bei Bedarf."""
+
+    def dashboard(self, stored):
+        opened, checked = [], []
+        dashboard = types.SimpleNamespace(
+            account_name="A", login_thread=None, refresh=FakeField(""),
+            hardware=FakeField("hw"), formats=FakeField("EPUB"),
+            status=FakeField(""),
+            _selected_account=lambda: {"name": "A", "refresh_token": stored},
+            _check_stored_login=checked.append,
+            _start_login_window=opened.append)
+        for name in ("browser_login", "_login_running", "_stored_refresh",
+                     "_typed_refresh", "_effective_refresh", "values",
+                     "login_still_valid", "login_rejected", "_login_cleanup"):
+            setattr(dashboard, name, self.method(name)(dashboard))
+        dashboard.update_status = lambda: None
+        return dashboard, opened, checked
+
+    def test_without_a_stored_token_the_browser_window_opens(self):
+        config.save_account("A", {"refresh_token": ""})
+        dashboard, opened, checked = self.dashboard("")
+        dashboard.browser_login()
+        self.assertEqual(1, len(opened))
+        self.assertEqual([], checked)
+
+    def test_a_stored_token_is_checked_before_the_browser_opens(self):
+        dashboard, opened, checked = self.dashboard("tok-A")
+        dashboard.browser_login()
+        self.assertEqual([], opened)
+        self.assertEqual(1, len(checked))
+
+    def test_a_rejected_check_opens_the_browser(self):
+        dashboard, opened, _checked = self.dashboard("tok-A")
+        dashboard.login_rejected("abgelehnt")
+        self.assertEqual(1, len(opened))
+        self.assertIn("neu anmelden", dashboard.status.value)
+
+
+class ChainTests(OrchestrationCase):
+    """Der Weg vom lokalen Snapshot zum Worker -- einmal ganz, zweimal nicht."""
+
+    def dashboard(self, account="A"):
+        database = full_database()
+        dashboard = dashboard_stub(account_name=account,
+                                   hardware=FakeField("hw"),
+                                   refresh=FakeField(""))
+        dashboard.gui = types.SimpleNamespace(current_db=database)
+        dashboard.status = FakeField("")
+        dashboard.progress = types.SimpleNamespace(
+            setRange=lambda *args: None, setVisible=lambda *args: None,
+            setValue=lambda *args: None)
+        dashboard.progress_label = types.SimpleNamespace(
+            setText=lambda *args: None, setVisible=lambda *args: None)
+        dashboard.update_status = lambda: None
+        dashboard.values = lambda: {"account_name": account,
+                                    "hardware_id": "hw",
+                                    config.PREFERRED_FORMATS: ["EPUB"]}
+        dashboard._effective_refresh = lambda: "tok-%s" % account
+        dashboard._save_visible_account = lambda *args: True
+        dashboard.snapshots, dashboard.prepared = [], []
+        dashboard.confirmed, dashboard.started = [], []
+        dashboard._start_local_snapshot = (
+            lambda *args: dashboard.snapshots.append(args))
+        dashboard._start_prepare_worker = (
+            lambda *args: dashboard.prepared.append(args))
+        dashboard._start_sync_worker = (
+            lambda *args: dashboard.started.append(args))
+        def confirm(*_args, **_kwargs):
+            dashboard.confirmed.append(True)
+            return choice()
+
+        dashboard._confirm_comparison = confirm
+        for name in ("start_sync", "_snapshot_ready", "_prepare_ready",
+                     "_finish_progress_thread", "_finish_snapshot",
+                     "_finish_prepare"):
+            setattr(dashboard, name, self.method(name)(dashboard))
+        return dashboard, database
+
+    def context(self, account="A"):
+        return RunContext.from_values(
+            {"account_name": account, "hardware_id": "hw",
+             "preferred_formats": ["EPUB"]})
+
+    def payload(self, context):
+        return {"context": context, "metadata": {}, "state": {},
+                "comparison": [], "hardware": None}
+
+    def test_the_chain_from_the_library_to_the_worker(self):
+        dashboard, database = self.dashboard()
+        dashboard.start_sync()
+        self.assertEqual([database], [args[0] for args in dashboard.snapshots])
+
+        dashboard._snapshot_ready(self.payload(self.context()))
+        self.assertEqual(1, len(dashboard.prepared))
+
+        dashboard._prepare_ready(self.payload(self.context()))
+        self.assertEqual(1, len(dashboard.confirmed))
+        self.assertEqual(1, len(dashboard.started))
+
+    def test_a_cancelled_comparison_starts_no_worker(self):
+        dashboard, _database = self.dashboard()
+        dashboard._confirm_comparison = lambda *args, **kwargs: None
+        dashboard._prepare_ready(self.payload(self.context()))
+        self.assertEqual([], dashboard.started)
+
+    def test_a_comparison_of_another_account_is_not_shown(self):
+        dashboard, _database = self.dashboard(account="B")
+        dashboard._prepare_ready(self.payload(self.context("A")))
+        self.assertEqual(([], []), (dashboard.confirmed, dashboard.started))
+        self.assertIn("A", dashboard.status.value)
+        self.assertIn("B", dashboard.status.value)
+
+
+def choice():
+    """Leere, aber vollständige Auswahl aus dem Vergleichsfenster."""
+    return {"uploads": set(), "metadata": set(), "read_changes": [],
+            "cloud_deletions": []}
 
 
 if __name__ == "__main__":

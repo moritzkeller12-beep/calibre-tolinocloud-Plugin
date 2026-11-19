@@ -174,6 +174,25 @@ class InventoryDialogTests(unittest.TestCase):
         self.assertEqual([], dialog.selected_read_changes())
         self.assertTrue(self.ui.dialogs.QMessageBox.calls)
 
+    def test_the_recommended_actions_select_exactly_the_suggested_rows(self):
+        book = {"uuid": UUID, "title": "Nur lokal", "authors": "A",
+                "isbn": "", "formats": ["EPUB"]}
+        dialog = self._dialog(compare_inventory({1: book}, {}, [], ["EPUB"]))
+        dialog.clear_all_selection()
+        self.assertEqual(0, dialog._selection_counts()["work"])
+        dialog.apply_recommended()
+        self.assertEqual({1}, dialog._selected_book_ids("upload"))
+        self.assertEqual(1, dialog._selection_counts()["work"])
+
+    def test_automatic_actions_are_only_reported_when_the_plan_counts_them(self):
+        cases = (({}, False), ({"automatic": 0}, False),
+                 ({"automatic": "2"}, True))
+        for options, expected in cases:
+            with self.subTest(options=options):
+                dialog = self.ui.dialogs.InventoryDialog(
+                    comparison_rows(), options=options)
+                self.assertEqual(expected, dialog.automatic_actions_enabled())
+
     def test_a_book_without_cloud_copy_cannot_be_marked(self):
         rows = comparison_rows(read_ids=None)
         rows[0]["tolino_id"] = ""
@@ -326,6 +345,17 @@ class DownloadSaveTests(unittest.TestCase):
         with open(target, "rb") as handle:
             self.assertEqual(b"ALT", handle.read())
         self.assertEqual("Nicht gespeichert", messages[0][1][1])
+
+    def test_a_failed_download_ends_the_action_and_forgets_the_client(self):
+        dialog = self.ui.dialogs.InventoryDialog(comparison_rows())
+        dialog._cached_client = object()
+        dialog._call_thread = object()
+        with patch("calibre_plugin.ui_dialogs.error_dialog") as shown:
+            dialog._download_failed(TolinoError("Netz weg", code="N01"))
+        # Die Tabelle ist wieder bedienbar und der nächste Versuch loggt neu ein.
+        self.assertIsNone(dialog._call_thread)
+        self.assertIsNone(dialog._cached_client)
+        self.assertTrue(shown.called)
 
     def test_html_and_empty_bodies_are_not_saved(self):
         for label, data in (("html", b"<html>Fehler</html>"),

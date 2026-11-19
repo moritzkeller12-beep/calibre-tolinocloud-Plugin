@@ -12,7 +12,8 @@ from ..comparison import content_fingerprint
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..planning import MetaUpdateRecord, SyncJob
 from ..run_context import RunContext
-from ._support import break_settings, real_qt_stub, ui_module_for
+from ._support import (CalibreDatabase, break_settings, real_qt_stub,
+                       ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -521,6 +522,45 @@ class PersistenceTests(WorkerCase):
         self.run_worker(FakeClient(),
                         jobs=[self.job(1, UUID, "/buch.epub")])
         self.assertEqual({}, config.account_by_name("A"))
+
+
+class LocalSnapshotTests(WorkerCase):
+    """Der lokale Snapshot meldet Metadaten oder einen Fehler -- nie beides."""
+
+    def run_snapshot(self, database):
+        worker = self.ui.workers.LocalMetadataWorker(
+            database, self.context, {"marke": True})
+        emitted = {}
+        worker.ready.connect(
+            lambda payload: emitted.setdefault("ready", payload))
+        worker.failed.connect(
+            lambda message: emitted.setdefault("failed", message))
+        worker.run()
+        return worker, emitted
+
+    def database(self, books):
+        return CalibreDatabase(books=list(books), metadata=books)
+
+    def test_a_snapshot_carries_context_state_and_the_books(self):
+        books = {1: {"uuid": UUID, "title": "Der Schwarm",
+                     "authors": "Frank Schätzing", "formats": ["EPUB"]}}
+        _worker, emitted = self.run_snapshot(self.database(books))
+        self.assertEqual({"ready"}, set(emitted))
+        payload = emitted["ready"]
+        self.assertIs(self.context, payload["context"])
+        self.assertEqual({"marke": True}, payload["state"])
+        self.assertEqual("Der Schwarm", payload["metadata"][1]["title"])
+
+    def test_a_failing_library_is_reported_instead_of_an_empty_snapshot(self):
+        database = self.database({})
+
+        def explode():
+            raise OSError("Bibliothek gesperrt")
+
+        database.api.all_book_ids = explode
+        _worker, emitted = self.run_snapshot(database)
+        self.assertEqual({"failed"}, set(emitted))
+        self.assertIn("Bibliothek gesperrt", emitted["failed"])
 
 
 if __name__ == "__main__":

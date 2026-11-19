@@ -23,6 +23,7 @@ from ..planning import (NOTHING_TO_DO_TEXT, local_metadata, metadata_update_fiel
                         PlanCounts,
                         series_map_from_metadata, syncable_metadata)
 from ..run_context import RunContext
+from ._support import CalibreDatabase
 
 UUID = "11111111-1111-4111-8111-111111111111"
 
@@ -60,11 +61,11 @@ class PlanSyncTests(unittest.TestCase):
         self.assertEqual([], plan_sync({1: book(uuid="keine-uuid")}, [],
                                        ["EPUB"], upload_book_ids={1}))
 
-    def test_ignored_books_never_reach_the_planner(self):
-        metadata = {1: book(ignored=True)}
-        self.assertEqual({}, syncable_metadata(metadata))
-        self.assertEqual([], plan_sync(syncable_metadata(metadata), [],
-                                       ["EPUB"], upload_book_ids={1}))
+    def test_ignored_books_are_not_part_of_the_snapshot(self):
+        # `plan_actions` prueft denselben Filter noch einmal am Eingang.
+        self.assertEqual({2: book()},
+                         syncable_metadata({1: book(ignored=True),
+                                            2: book()}))
 
 
 class MetadataUpdateTests(unittest.TestCase):
@@ -245,31 +246,6 @@ class NormalizationTests(unittest.TestCase):
                                 "EPUB"))
 
 
-class MetadataApi:
-    """Die lesende Calibre-Schnittstelle von `local_metadata`."""
-
-    def __init__(self, books, paths):
-        self.books = books
-        self.paths = paths
-
-    def all_book_ids(self):
-        return list(self.books)
-
-    def get_metadata(self, book_id):
-        return dict(self.books[book_id])
-
-    def has_id(self, book_id):
-        return book_id in self.books
-
-    def format_abspath(self, book_id, format_name):
-        return self.paths.get((book_id, format_name), "")
-
-
-class MetadataDatabase:
-    def __init__(self, books, paths=None):
-        self.new_api = MetadataApi(books, dict(paths or {}))
-
-
 class LocalMetadataTests(unittest.TestCase):
     """Der Calibre-Snapshot, aus dem der Vergleich entsteht."""
 
@@ -299,7 +275,9 @@ class LocalMetadataTests(unittest.TestCase):
             {"preferred_formats": ["EPUB", "PDF"]},
             columns={"read": True} if columns is None else columns,
             library_scope="abcdef123456")
-        return local_metadata(MetadataDatabase(self.books, self.paths), context)
+        database = CalibreDatabase(books=list(self.books), metadata=self.books,
+                                   paths=self.paths)
+        return local_metadata(database, context)
 
     def test_the_snapshot_carries_formats_isbn_series_and_flags(self):
         metadata = self.metadata()
@@ -327,28 +305,6 @@ class LocalMetadataTests(unittest.TestCase):
         self.assertNotIn("calibre_read", metadata[1])
 
 
-class UploadApi:
-    """Nur die Calibre-Schnittstelle, die `upload_jobs` benutzt."""
-
-    def __init__(self, paths, cover):
-        self.paths = paths
-        self.cover_data = cover
-
-    def has_id(self, book_id):
-        return any(key[0] == book_id for key in self.paths)
-
-    def format_abspath(self, book_id, format_name):
-        return self.paths.get((book_id, format_name), "")
-
-    def cover(self, _book_id, as_file=False):
-        return self.cover_data
-
-
-class UploadDatabase:
-    def __init__(self, paths=None, cover=b"\xff\xd8\xffJPEG"):
-        self.new_api = UploadApi(dict(paths or {}), cover)
-
-
 def selection(uploads=(), metadata=(), deletions=(), reads=()):
     """Auswahl aus dem Vergleichsfenster -- nur die vier Listen."""
     return {"uploads": set(uploads), "metadata": set(metadata),
@@ -367,9 +323,9 @@ class PlanActionsTests(unittest.TestCase):
         self.context = types.SimpleNamespace(preferred_formats=["EPUB"])
 
     def plan(self, chosen, metadata, state=None, paths=None, cover=None):
-        database = UploadDatabase(
-            {(1, "EPUB"): self.path} if paths is None else paths,
-            **({} if cover is None else {"cover": cover}))
+        database = CalibreDatabase(
+            books=[1], paths={(1, "EPUB"): self.path} if paths is None else paths,
+            cover=b"\xff\xd8\xffJPEG" if cover is None else cover)
         dialog = types.SimpleNamespace(
             gui=types.SimpleNamespace(current_db=database))
         return plan_actions(dialog, self.context, metadata, state or {},

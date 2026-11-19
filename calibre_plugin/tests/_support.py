@@ -455,13 +455,22 @@ def local_tolino_endpoints(origin, partner_ids=(1, 4, 5, 8)):
 
 
 class CalibreApi:
-    """Calibres new_api als Grenze: merkt Schreibvorgaenge, kann scheitern."""
+    """Calibres new_api als Grenze: merkt Schreibvorgaenge, kann scheitern.
 
-    def __init__(self, fail=(), books=None):
+    Lesen kommt aus ``metadata`` (Buch-ID -> Calibre-Felder), ``paths``
+    (Buch-ID/Format -> Datei) und ``cover``; damit bedienen die Planungs-
+    und Worker-Tests dieselbe Grenze wie die Spaltentests.
+    """
+
+    def __init__(self, fail=(), books=None, metadata=None, paths=None,
+                 cover=None):
         self.fail = set(fail)
         self.values = {}
         self.writes = []
         self.books = list(books or ())
+        self.metadata = dict(metadata or {})
+        self.paths = dict(paths or {})
+        self.cover_data = cover
 
     def all_book_ids(self):
         return list(self.books)
@@ -475,6 +484,15 @@ class CalibreApi:
 
     def field_for(self, column, book_id):
         return self.values.get((column, book_id))
+
+    def get_metadata(self, book_id):
+        return dict(self.metadata.get(book_id) or {})
+
+    def format_abspath(self, book_id, format_name):
+        return self.paths.get((book_id, format_name), "")
+
+    def cover(self, _book_id, as_file=False):
+        return self.cover_data
 
     def set_field(self, column, values):
         if column in self.fail:
@@ -493,10 +511,10 @@ class CalibreDatabase:
     """
 
     def __init__(self, columns=None, fail=(), create_error=None, dbpath="",
-                 books=None):
+                 books=None, metadata=None, paths=None, cover=None):
         self.field_metadata = dict(columns or {})
         self.dbpath = dbpath
-        self.api = CalibreApi(fail, books)
+        self.api = CalibreApi(fail, books, metadata, paths, cover)
         self.created = []
         self.create_error = create_error
 

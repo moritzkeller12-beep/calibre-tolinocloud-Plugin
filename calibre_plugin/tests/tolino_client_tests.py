@@ -265,6 +265,125 @@ class RetryTests(unittest.TestCase):
         self.assertEqual([], saved)
         self.assertTrue(client._hw_adopted)
 
+    def test_a_400_adopts_the_registered_id_and_repeats_the_call(self):
+        """Unbekannte Geräte-ID: die registrierte übernehmen, dann einmal neu."""
+        calls = {"devices": 0}
+
+        def responder(_method, path, _headers, _payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            calls["devices"] += 1
+            if calls["devices"] == 1:
+                return 400, {}, b'{"error": "unknown hardware"}'
+            return 200, JSON_HEADERS, json.dumps({"deviceListResponse": {
+                "devices": [{"deviceId": "reg-1",
+                              "deviceLastUsage": "2026-01-01"}]}}).encode()
+
+        saved = []
+        with patch("calibre_plugin.tolino.time.sleep"), \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  hardware_callback=saved.append)
+            self.assertEqual("reg-1", client.fetch_hardware_id())
+            sent = [request["headers"].get("hardware_id")
+                    for request in server.requests
+                    if request["path"].endswith("/devices/list")]
+        # Erster Aufruf, Suche nach der registrierten ID, Wiederholung.
+        self.assertEqual(3, calls["devices"])
+        self.assertEqual([HARDWARE, HARDWARE, "reg-1"], sent)
+        self.assertEqual(["reg-1"], saved)
+
+    def test_a_400_for_the_registered_id_is_not_retried(self):
+        """Schon die registrierte ID: der 400 hat eine andere Ursache."""
+        calls = {"devices": 0}
+
+        def responder(method, path, headers, payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            calls["devices"] += 1
+            if calls["devices"] == 1:
+                return 400, {}, b"{}"
+            return devices_reply(method, path, headers, payload)
+
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoApiError) as caught:
+                client.fetch_hardware_id()
+        self.assertEqual("N03", caught.exception.code)
+        self.assertEqual(2, calls["devices"])
+        self.assertFalse(slept.called)
+        self.assertEqual(HARDWARE, client.hardware)
+
+    def test_a_second_rejection_after_registering_stops_the_call(self):
+        """Registrierung gelingt, der Server lehnt trotzdem ab: Ende, kein Kreis."""
+        calls = {"devices": 0, "register": 0}
+
+        def responder(_method, path, _headers, _payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            if path.endswith("/registerhw"):
+                calls["register"] += 1
+                return 200, JSON_HEADERS, b"{}"
+            calls["devices"] += 1
+            if calls["devices"] == 2:
+                # Leere Geräteliste: es gibt nichts zu übernehmen.
+                return 200, JSON_HEADERS, b'{"deviceListResponse": {"devices": []}}'
+            return 400, {}, b"{}"
+
+        with patch("calibre_plugin.tolino.time.sleep"), \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoApiError) as caught:
+                client.fetch_hardware_id()
+        self.assertEqual("N03", caught.exception.code)
+        # Ein Versuch nach der Registrierung, danach der Warte-Versuch.
+        self.assertEqual((1, 4), (calls["register"], calls["devices"]))
+        self.assertEqual(HARDWARE, client.hardware)
+
+    def test_a_403_without_a_bot_check_is_not_repeated(self):
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                token_server(body=b'{"error": "forbidden"}',
+                             status=403) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoAuthError) as caught:
+                client.login()
+        self.assertEqual("A01", caught.exception.code)
+        self.assertEqual(1, len(server.requests))
+        self.assertFalse(slept.called)
+
+    def test_a_403_away_from_the_token_endpoint_is_no_login_error(self):
+        def responder(_method, _path, _headers, _payload):
+            return 403, {}, b"quota exceeded"
+
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(token_and(responder)) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            client.access, client.expires_at = "acc-1", time.time() + 3600
+            with self.assertRaises(TolinoApiError) as caught:
+                client.fetch_hardware_id()
+        self.assertEqual("N03", caught.exception.code)
+        self.assertFalse(slept.called)
+
+    def test_the_bot_check_retries_stop_at_the_limit(self):
+        def responder(_method, _path, _headers, _payload):
+            return 403, {}, b"<html>captcha</html>"
+
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoAuthError):
+                client.login()
+        limit = len(tolino_module._WAF_RETRY_SECONDS)
+        self.assertEqual(limit + 1, len(server.requests))
+        self.assertEqual(limit, slept.call_count)
+
 
 class Backend:
     """Kleine Loopback-Cloud: Upload, Metadaten, sync-data, Löschen, Download."""
@@ -649,6 +768,24 @@ class ReadMarkTests(unittest.TestCase):
         self.assertEqual(("Grenzwelten", "collection"),
                          (body["patches"][0]["value"]["name"],
                           body["patches"][0]["value"]["category"]))
+
+
+class SyncSnapshotCacheTests(unittest.TestCase):
+    """Ein Lesevorgang bedient beide Abfragen; ein Schreibvorgang verwirft ihn."""
+
+    def test_reads_share_one_snapshot_and_a_write_forces_a_new_one(self):
+        backend = Backend()
+        backend.patches = [{"op": "add", "path": read_tag_path("d1"),
+                            "value": {"name": READ_TAG, "category": "system"}}]
+        with write_client(backend) as client:
+            self.assertEqual({"d1"}, client.read_ids())
+            self.assertEqual(set(), client.collection_pairs())
+            client.add_to_collection("d1", "Grenzwelten")
+            self.assertEqual({"d1"}, client.read_ids())
+        reads = [body for body in backend.patch_bodies
+                 if body == {"revision": None, "patches": []}]
+        # Zwei lesende Abrufe: vor und nach dem Schreibvorgang.
+        self.assertEqual(2, len(reads))
 
 
 class InventoryTests(unittest.TestCase):
