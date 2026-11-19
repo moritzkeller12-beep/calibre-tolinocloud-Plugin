@@ -282,11 +282,17 @@ class RecordingMenu:
 
 
 class RecordingFileDialog:
-    """QFileDialog-Ersatz: ohne Auswahl kommt kein Pfad zurueck."""
+    """QFileDialog-Ersatz: ohne Auswahl kommt kein Pfad zurueck.
 
-    @staticmethod
-    def getSaveFileName(*_args, **_kwargs):
-        return "", ""
+    ``answer`` laesst einen Test einen gewaehlten Speicherort vorgeben;
+    der Standard ist der abgebrochene Dialog.
+    """
+
+    answer = ("", "")
+
+    @classmethod
+    def getSaveFileName(cls, *_args, **_kwargs):
+        return cls.answer
 
 
 def real_qt_stub():

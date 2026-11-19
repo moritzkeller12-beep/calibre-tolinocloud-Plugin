@@ -13,8 +13,8 @@ from .. import config
 from ..comparison import compare_inventory
 from ..library import TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, break_settings, dashboard_stub,
-                       real_qt_stub, ui_module_for)
+from ._support import (CalibreDatabase, SyncThread, break_settings,
+                       dashboard_stub, real_qt_stub, ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -403,8 +403,8 @@ class LoginFlowTests(OrchestrationCase):
         self.assertIn("neu anmelden", dashboard.status.value)
 
 
-class ChainTests(OrchestrationCase):
-    """Der Weg vom lokalen Snapshot zum Worker -- einmal ganz, zweimal nicht."""
+class ChainCase(OrchestrationCase):
+    """Gemeinsamer Aufbau der Kettentests -- selbst kein Testfall."""
 
     def dashboard(self, account="A"):
         database = full_database()
@@ -439,7 +439,8 @@ class ChainTests(OrchestrationCase):
         dashboard._confirm_comparison = confirm
         for name in ("start_sync", "_snapshot_ready", "_prepare_ready",
                      "_finish_progress_thread", "_finish_snapshot",
-                     "_finish_prepare"):
+                     "_finish_prepare", "_snapshot_failed", "_prepare_failed",
+                     "_failed"):
             setattr(dashboard, name, self.method(name)(dashboard))
         return dashboard, database
 
@@ -451,6 +452,9 @@ class ChainTests(OrchestrationCase):
     def payload(self, context):
         return {"context": context, "metadata": {}, "state": {},
                 "comparison": [], "hardware": None}
+
+class ChainTests(ChainCase):
+    """Der Weg vom lokalen Snapshot zum Worker -- einmal ganz, zweimal nicht."""
 
     def test_the_chain_from_the_library_to_the_worker(self):
         dashboard, database = self.dashboard()
@@ -476,6 +480,46 @@ class ChainTests(OrchestrationCase):
         self.assertEqual(([], []), (dashboard.confirmed, dashboard.started))
         self.assertIn("A", dashboard.status.value)
         self.assertIn("B", dashboard.status.value)
+
+
+class StageFailureTests(ChainCase):
+    """Fehler und Abbruch in der Kette: eine Meldung, kein Rest, klare Zeile."""
+
+    def failed_stage(self, stage, message, cancelled=False):
+        dashboard, _database = self.dashboard()
+        setattr(dashboard, stage + "_thread", SyncThread())
+        setattr(dashboard, stage + "_worker",
+                types.SimpleNamespace(cancelled=cancelled))
+        messages = []
+        with patch("calibre_plugin.sync_results.info_dialog",
+                   lambda *args, **kwargs: messages.append(("info", args[1]))), \
+                patch("calibre_plugin.sync_results.error_dialog",
+                      lambda *args, **kwargs:
+                      messages.append(("error", args[1]))):
+            getattr(dashboard, "_%s_failed" % stage)(message)
+        return dashboard, messages
+
+    def test_a_cancelled_stage_is_reported_and_leaves_no_thread(self):
+        dashboard, messages = self.failed_stage(
+            "snapshot", self.ui.dashboard.CANCEL_MESSAGE)
+        self.assertEqual([("info", "Abgebrochen")], messages)
+        self.assertIsNone(dashboard.snapshot_thread)
+        self.assertIsNone(dashboard.snapshot_worker)
+        self.assertEqual("", dashboard.status.value)
+
+    def test_a_rejected_login_moves_the_status_line_to_relogin(self):
+        dashboard, messages = self.failed_stage(
+            "prepare", "tolino hat die Anmeldung abgelehnt. (Code A01)")
+        self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
+        self.assertEqual(self.ui.dashboard.NEEDS_LOGIN_STATUS,
+                         dashboard.status.value)
+        self.assertIsNone(dashboard.prepare_thread)
+        self.assertIsNone(dashboard.prepare_worker)
+
+    def test_another_error_leaves_the_status_line_alone(self):
+        dashboard, messages = self.failed_stage("prepare", "Kein Netz")
+        self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
+        self.assertEqual("", dashboard.status.value)
 
 
 def choice():

@@ -13,8 +13,8 @@ from unittest.mock import patch
 from ..comparison import compare_inventory
 from ..errors import TolinoError
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, dashboard_stub, real_qt_stub,
-                       ui_module_for)
+from ._support import (CalibreDatabase, RecordingFileDialog, dashboard_stub,
+                       real_qt_stub, ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 
@@ -345,6 +345,59 @@ class DownloadSaveTests(unittest.TestCase):
         with open(target, "rb") as handle:
             self.assertEqual(b"ALT", handle.read())
         self.assertEqual("Nicht gespeichert", messages[0][1][1])
+
+    def choose_target(self, path):
+        """Speicherort fuer den Dateidialog vorgeben (Abbruch ist Standard)."""
+        original = RecordingFileDialog.answer
+        RecordingFileDialog.answer = (path, "")
+        self.addCleanup(setattr, RecordingFileDialog, "answer", original)
+
+    def download_dialog(self, rows=None):
+        """Fenster mit zaehlendem Client; der Download bleibt ein Doppel."""
+        downloaded = []
+
+        def download(tolino_id):
+            downloaded.append(tolino_id)
+            return b"PK\x03\x04EPUB"
+
+        dialog = self.ui.dialogs.InventoryDialog(
+            comparison_rows() if rows is None else rows,
+            client_factory=lambda: types.SimpleNamespace(download=download))
+        return dialog, downloaded
+
+    def test_the_selected_book_is_downloaded_under_its_cloud_id(self):
+        target = os.path.join(self.tmp, "buch.epub")
+        self.choose_target(target)
+        dialog, downloaded = self.download_dialog()
+        select_rows(dialog.table, [0])
+        messages = []
+        with patch("calibre_plugin.ui_dialogs.info_dialog",
+                   lambda *args, **kwargs: messages.append(args)), \
+                patch("calibre_plugin.ui_dialogs.error_dialog",
+                      lambda *args, **kwargs: messages.append(args)):
+            dialog.download_selected()
+        self.assertEqual(["d1"], downloaded)
+        with open(target, "rb") as handle:
+            self.assertEqual(b"PK\x03\x04EPUB", handle.read())
+        self.assertIn(target, messages[0][2])
+        self.assertIsNone(dialog._call_thread)
+
+    def test_a_cancelled_file_dialog_starts_no_download(self):
+        dialog, downloaded = self.download_dialog()
+        select_rows(dialog.table, [0])
+        dialog.download_selected()
+        self.assertEqual([], downloaded)
+
+    def test_a_book_without_a_cloud_copy_is_not_downloaded(self):
+        book = {"uuid": UUID, "title": "Nur lokal", "authors": "A",
+                "isbn": "", "formats": ["EPUB"]}
+        dialog, downloaded = self.download_dialog(
+            compare_inventory({1: book}, {}, [], ["EPUB"]))
+        select_rows(dialog.table, [0])
+        dialog.download_selected()
+        self.assertEqual([], downloaded)
+        self.assertEqual("Buch nicht in tolino vorhanden",
+                         self.ui.dialogs.QMessageBox.calls[-1][2])
 
     def test_a_failed_download_ends_the_action_and_forgets_the_client(self):
         dialog = self.ui.dialogs.InventoryDialog(comparison_rows())
