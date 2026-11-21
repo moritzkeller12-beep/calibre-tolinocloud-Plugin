@@ -9,6 +9,12 @@ _INVENTORY_CONTAINERS = ("edata", "ebook")
 # die Kennung des Deliverables: ``identifier`` aus ``epubMetaData`` ist eine
 # ISBN/Verlagsnummer und taugt nicht fuer /deletecontent und /downloadinfo.
 _INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id")
+# Gekaufte Titel tragen kein ``deliverableId``; ihre Deliverables stehen als
+# Liste daneben (``epubMetaData.deliverable``). Deren ``identifier`` (z. B.
+# ``DT0400.978…_A…``) adressiert Download und Loeschen genauso -- live gegen
+# die Cloud geprueft. Bewusst nur dort gesucht: ein ``identifier`` auf oberster
+# Ebene ist eine Produktkennung und keine Deliverable-ID.
+_DELIVERABLE_KEYS = ("deliverableId", "identifier")
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
                             "ebook", "edata")
@@ -51,6 +57,14 @@ def _inventory_id_in(value, keys):
     return str(found).strip()
 
 
+def _record_identifier(item):
+    """Kennung einer Cloud-Kopie -- ``deliverableId`` oder Kauf-Deliverable."""
+    meta = item.get("epubMetaData") if isinstance(item, dict) else None
+    purchased = meta.get("deliverable") if isinstance(meta, dict) else None
+    return (_inventory_id_in(item, _INVENTORY_ID_KEYS)
+            or _inventory_id_in(purchased, _DELIVERABLE_KEYS))
+
+
 def _inventory_author(value):
     if isinstance(value, dict):
         return str(value.get("name") or value.get("displayName") or "").strip()
@@ -71,9 +85,10 @@ def normalize_inventory_record(item):
     ``tolino_id`` bleibt leer, wenn nur ``identifier`` existiert: diese
     Kennung taugt weder fuer ``/downloadinfo`` noch fuer
     ``/deletecontent``. Eine in ``identifier`` eingebettete ISBN wird
-    dagegen für den Abgleich extrahiert.
+    dagegen für den Abgleich extrahiert. Gekaufte Titel liefern ihre
+    Kennung in ``epubMetaData.deliverable[]`` -- die zaehlt.
     """
-    deliverable = _inventory_id_in(item, _INVENTORY_ID_KEYS)
+    deliverable = _record_identifier(item)
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
     isbn = _nested_inventory_value(
@@ -118,7 +133,7 @@ def _collect_inventory(value, records, problems, container=""):
             value = {key: item for key, item in value.items()
                      if key not in _INVENTORY_CONTAINERS}
         records.append(value)
-        if not _inventory_id_in(value, _INVENTORY_ID_KEYS):
+        if not _record_identifier(value):
             problems.append("Datensatz ohne Kennung")
         return
     if isinstance(value, (list, tuple)):
@@ -148,9 +163,9 @@ def parse_inventory(data):
     raw, problems = [], []
     _collect_inventory(container, raw, problems)
     records = [normalize_inventory_record(item) for item in raw]
-    # Eine leere, aber gültige Bibliothek hat keine Probleme. Sobald nur
-    # unlesbare Einträge gefunden wurden, ist die Antwort keine leere
-    # Bibliothek, sondern unbrauchbar. Einzelne gute Datensätze bleiben
-    # trotz beschädigter Nachbarn sichtbar.
-    return records, problems, bool(records) or not problems
+    # Eine leere, aber gültige Bibliothek hat keine Probleme. Jeder
+    # unlesbare Eintrag macht den Bestand unvollständig: die gute Nachbarn
+    # bleiben fuer die Fehlermeldung sichtbar, der Aufrufer verwirft den
+    # Bestand aber -- sonst gaelte eine fehlende Kopie als geloescht.
+    return records, problems, not problems
 

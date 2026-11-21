@@ -1,13 +1,14 @@
 """Aufbau und Bestätigungen des Sync-Dashboards."""
 from calibre.gui2 import error_dialog, info_dialog
 from .identifiers import display_title
-from .library import (COLUMN_KIND_NAMES, CUSTOM_COLUMNS,
-                      create_custom_columns)
+from .library import COLUMN_KIND_NAMES, CUSTOM_COLUMNS, create_custom_columns
 from .partners import PARTNERS
 from .tolino import log_warning, sanitize_error
-from .ui_common import (QComboBox, QDialog, QFormLayout, QGroupBox,
-                        QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                        QProgressBar, QPushButton, QVBoxLayout, gui_guard)
+from qt.core import (QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout,
+                     QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
+                     QVBoxLayout)
+from .ui_common import (COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP,
+                        LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP, gui_guard)
 
 
 def _button(text, tip="", slot=None):
@@ -43,8 +44,8 @@ def _settings_dialog(dashboard):
         setattr(dialog, name + "_form", QFormLayout(group))
         layout.addWidget(group)
     dialog.close_button = _button(
-        "Speichern und schließen",
-        "Speichert die Änderungen und schließt die Einstellungen.",
+        "Speichern und schliessen",
+        "Speichert die Änderungen und schliesst die Einstellungen.",
         dashboard.close_settings)
     row = QHBoxLayout()
     row.addStretch(1)
@@ -59,14 +60,24 @@ def _ask(dialog, title, text):
     return QMessageBox.question(dialog, title, text, yes | no, no) == yes
 
 
+def _default_buttons(login_button, primary, settings_button):
+    """Enter gehoert dem Hauptknopf -- nie der Browser-Anmeldung.
+
+    Ohne diese Zuweisung wird der zuerst gebaute Knopf automatisch der
+    Standardknopf des Dialogs. Ein versehentliches Return im Fenster (etwa
+    nach einem Kontowechsel per Tastatur) oeffnete dann ein Browserfenster
+    zur Anmeldung.
+    """
+    login_button.setAutoDefault(False)
+    settings_button.setAutoDefault(False)
+    primary.setDefault(True)
+
+
 @gui_guard
 def offer_next_step(dialog):
     """Nach der Anmeldung ist der Hauptknopf der naechste Schritt."""
-    primary = getattr(dialog, "primary", None)
-    if primary is None:
-        return
-    primary.setDefault(True)
-    primary.setFocus()
+    dialog.primary.setDefault(True)
+    dialog.primary.setFocus()
 
 
 def confirm_deletions(dialog, removals, titles=None):
@@ -87,8 +98,7 @@ def confirm_deletions(dialog, removals, titles=None):
 
 def confirm_replacements(dialog, jobs):
     """Ersetzen einer vorhandenen Cloud-Kopie vorher ansprechen."""
-    titles = ["- %s" % (job.label() if callable(getattr(job, "label", None))
-                        else "Buch") for job in jobs[:20]]
+    titles = ["- %s" % job.label() for job in jobs[:20]]
     count = len(jobs)
     if count == 1:
         text = ("Die Cloud-Kopie dieses Buchs wird ersetzt. Lesestatus, "
@@ -128,12 +138,9 @@ class DashboardParts:
         self.settings_dialog = _settings_dialog(self)
         self._build_transfer_settings()
         self._build_account_settings()
-        root.addWidget(_button("Schließen", slot=self.close))
+        root.addWidget(_button("Schliessen", slot=self.close))
 
     def _build_main_actions(self, root):
-        self.partner = _combo(
-            [(PARTNERS[pid]["name"], pid) for pid in sorted(PARTNERS)],
-            "Bei diesem Händler hast du dein tolino-Konto.")
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.account_quick = _combo(
@@ -143,12 +150,9 @@ class DashboardParts:
                 index, self.account_quick))
         self.account_quick_label = QLabel("Konto")
         self.login_button = _button(
-            "Bei tolino anmelden",
-            "Öffnet ein Browserfenster zur Anmeldung.", self.browser_login)
+            LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP, self.browser_login)
         self.primary = _button(
-            "Bibliothek vergleichen …",
-            "Vergleicht deine Calibre-Bibliothek mit tolino.",
-            self.primary_action)
+            COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP, self.primary_action)
         self.progress_label = QLabel("Bereit")
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -157,9 +161,9 @@ class DashboardParts:
         self.settings_button = _button(
             "Einstellungen …", "Upload-Formate und Konten.",
             self.open_settings)
+        _default_buttons(self.login_button, self.primary, self.settings_button)
         form = QFormLayout()
         for label, widget in (
-                ("Buchhändler", self.partner),
                 (self.account_quick_label, self.account_quick),
                 ("", self.login_button), ("", self.primary),
                 ("", self.status), ("", self.progress_label),
@@ -204,8 +208,14 @@ class DashboardParts:
         self.logout_button = _button(
             "Abmelden", "Löscht den gespeicherten Zugang dieses Kontos.",
             self.logout)
+        self.partner = _combo(
+            [(PARTNERS[pid]["name"], pid) for pid in sorted(PARTNERS)],
+            "Nur nötig, wenn ein Zugang keinen Buchhändler nennt – sonst "
+            "wird er beim Anmelden aus dem Token gelesen.",
+            slot=self._partner_selected)
         for label, widget in (
                 ("Aktives Konto", self.account_select), ("", buttons),
+                ("Buchhändler (aus dem Token)", self.partner),
                 ("Geräte-ID (automatisch)", self.hardware),
                 ("Zugangstoken (nur bei Problemen ändern)", self.refresh),
                 ("", self.logout_button)):
@@ -227,6 +237,7 @@ class DashboardParts:
             return
         info_dialog(
             self, "Calibre-Spalte angelegt",
-            "Angelegt: #%s.\n\nCalibre neu starten, damit die Spalte in der "
+            "Angelegt: #%s. Calibre neu starten, damit die Spalte in der "
             "Bibliothek nutzbar ist." % label,
             show=True, show_copy_button=False)
+

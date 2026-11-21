@@ -1,29 +1,123 @@
 """Tests for the dependency-free WebSocket framing transport."""
+import base64
+import hashlib
 import json
 import socket
 import struct
 import threading
 import unittest
 from unittest.mock import patch
-from urllib.error import URLError
 
 from ..cdp_transport import _Ws, _http_get_json
+from ._support import LocalHTTP
 
 
 class DevToolsHttpTests(unittest.TestCase):
-    def test_expected_failures_are_unavailable_but_program_errors_propagate(self):
-        for error in (URLError("offline"), OSError("timeout")):
-            with self.subTest(error=error), patch(
-                    "urllib.request.build_opener", side_effect=error):
-                self.assertIsNone(_http_get_json("http://127.0.0.1:1"))
-        response = unittest.mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b"not json"
-        with patch("urllib.request.build_opener") as opener:
-            opener.return_value.open.return_value = response
-            self.assertIsNone(_http_get_json("http://127.0.0.1:1"))
-        with patch("urllib.request.build_opener", side_effect=RuntimeError("bug")):
+    def test_a_refused_connection_is_unavailable(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        self.assertIsNone(
+            _http_get_json("http://127.0.0.1:%d" % port, timeout=2))
+
+    def test_invalid_json_is_unavailable(self):
+        with LocalHTTP(lambda *_args: (200, {}, b"not json")) as server:
+            self.assertIsNone(
+                _http_get_json(server.url("/json/version"), timeout=2))
+
+    def test_program_errors_propagate(self):
+        with patch("urllib.request.build_opener",
+                   side_effect=RuntimeError("bug")):
             with self.assertRaisesRegex(RuntimeError, "bug"):
                 _http_get_json("http://127.0.0.1:1")
+
+
+GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def server_reply(request, accept=None, upgrade=b"websocket",
+                 connection=b"Upgrade",
+                 status=b"HTTP/1.1 101 Switching Protocols"):
+    """Antwort wie ein echter Server: Accept unabhaengig berechnet."""
+    key = b""
+    for line in request.split(b"\r\n"):
+        if line.lower().startswith(b"sec-websocket-key:"):
+            key = line.split(b":", 1)[1].strip()
+    digest = base64.b64encode(hashlib.sha1(key + GUID).digest())
+    return (b"%s\r\nUpgrade: %s\r\nConnection: %s\r\n"
+            b"Sec-WebSocket-Accept: %s\r\n\r\n"
+            % (status, upgrade, connection,
+               digest if accept is None else accept))
+
+
+class FakeSocket:
+    """Socket-Doppel fuer den Upgrade-Handshake (kein echter Server)."""
+
+    def __init__(self, reply_factory):
+        self.reply = None
+        self.reply_factory = reply_factory
+        self.sent = b""
+        self.closed = False
+
+    def sendall(self, data):
+        self.sent += data
+
+    def settimeout(self, value):
+        self.timeout = value
+
+    def recv(self, size):
+        if self.reply is None:
+            self.reply = self.reply_factory(self.sent)
+        chunk, self.reply = self.reply[:size], self.reply[size:]
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class HandshakeTests(unittest.TestCase):
+    """Nur eine vollstaendige 101-Antwort gilt als offene Verbindung."""
+
+    def handshake(self, **options):
+        self.sock = FakeSocket(
+            reply_factory=lambda request: server_reply(request, **options))
+        with patch("calibre_plugin.cdp_transport.socket.create_connection",
+                   return_value=self.sock):
+            return _Ws.connect("127.0.0.1", 9222, "/devtools/page/x",
+                               timeout=2)
+
+    def test_a_complete_handshake_opens_the_connection(self):
+        ws = self.handshake()
+        self.assertIsInstance(ws, _Ws)
+        self.assertIn(b"GET /devtools/page/x HTTP/1.1", self.sock.sent)
+        self.assertIn(b"Sec-WebSocket-Key: ", self.sock.sent)
+        self.assertIn(b"Sec-WebSocket-Version: 13", self.sock.sent)
+        self.assertFalse(self.sock.closed)
+
+    def test_a_connection_header_with_several_tokens_is_accepted(self):
+        # `Connection` ist eine Kommaliste; `Upgrade` ist ein eigener Eintrag.
+        ws = self.handshake(connection=b"keep-alive, Upgrade")
+        self.assertIsInstance(ws, _Ws)
+
+    def test_a_connection_token_must_match_exactly(self):
+        # Die Zeichenfolge irgendwo im Header genuegt nicht.
+        with self.assertRaises(OSError):
+            self.handshake(connection=b"notupgrade")
+
+    def test_an_incomplete_handshake_is_rejected(self):
+        cases = {
+            "falscher Accept": {"accept": b"falscher-digest"},
+            "kein Upgrade": {"upgrade": b"h2c"},
+            "kein Connection-Upgrade": {"connection": b"close"},
+            "kein 101": {"status": b"HTTP/1.1 200 OK"},
+        }
+        for label, options in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(OSError) as caught:
+                    self.handshake(**options)
+                self.assertIn("handshake rejected", str(caught.exception))
+                self.assertTrue(self.sock.closed)
 
 
 class WebSocketTransportTests(unittest.TestCase):

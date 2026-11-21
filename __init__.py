@@ -1,10 +1,11 @@
+# Ohne Calibre (Metadaten-Test via runpy) gibt es customize nicht.
 try:
     from calibre.customize import InterfaceActionBase
 except ImportError:
     InterfaceActionBase = object
 
 
-PLUGIN_VERSION = (0, 1, 7)
+PLUGIN_VERSION = (0, 1, 8)
 
 # GPL-3.0-or-later: siehe LICENSE (kompatibel zu Calibre, das unter GPL-3 steht).
 __license__ = "GPL-3.0-or-later"

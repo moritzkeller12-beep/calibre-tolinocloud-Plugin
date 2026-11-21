@@ -32,9 +32,7 @@ class TolinoSyncAction(InterfaceAction):
         der Keep-alive hier enden und nicht erst in einem atexit-Haken.
         """
         self._finish_session()
-        parent = getattr(super(), "shutting_down", None)
-        if callable(parent):
-            parent()
+        super().shutting_down()
 
     def _finish_session(self):
         """Keep-alive anhalten; Calibre ruft `shutting_down` genau einmal."""

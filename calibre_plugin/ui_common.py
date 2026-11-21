@@ -1,49 +1,26 @@
-"""Gemeinsame Qt-Importe, Konstanten und Hilfsfunktionen der Oberfläche.
+"""Gemeinsame Konstanten und Helfer der Oberfläche.
 
-Alle UI-Module beziehen Qt-Namen und geteilte Helfer von hier, damit ein
-Qt-Stub in den Tests nur an einer Stelle greift.
+Qt-Namen importiert jedes UI-Modul direkt aus `qt.core`; hier liegt nur,
+was mehrere Module teilen. Ein Qt-Stub in den Tests greift damit an
+derselben Stelle wie der Produktivcode.
 """
 import functools
 import re
 
-from qt.core import (QCheckBox, QComboBox, QDialog,
-                     QFormLayout, QGroupBox, QHeaderView, QLabel,
-                     QLineEdit, QMessageBox, QMenu,
-                     QProgressBar, QPushButton, QThread,
-                     QVBoxLayout, QHBoxLayout, QTableWidget,
-                     QTableWidgetItem, QObject, QInputDialog,
-                     QFileDialog, QStyledItemDelegate, QEvent, Qt, pyqtSignal)
+from qt.core import QObject, QThread, pyqtSignal
 from .tolino import TolinoError
-
-# Re-export the Qt names other UI modules and the test loader import from here.
-__all__ = [
-    "CANCEL_MESSAGE", "OP_FAILED", "OP_NOT_STARTED", "OP_SKIPPED",
-    "OP_SUCCEEDED", "QCheckBox", "QComboBox", "QDialog", "QFileDialog",
-    "QFormLayout", "QGroupBox", "QHBoxLayout", "QHeaderView", "QMenu",
-    "QInputDialog", "QLabel", "QLineEdit", "QMessageBox", "QObject",
-    "QProgressBar", "QPushButton", "QTableWidget", "QTableWidgetItem",
-    "QThread", "QVBoxLayout", "QStyledItemDelegate", "QEvent", "Qt",
-    "_THREADS", "_apply_busy",
-    "_dialog_busy", "LOGIN_NEXT_STEP", "_login_failure_guidance",
-    "gui_guard", "start_worker", "_stop_thread", "_set_enabled",
-    "_keep_thread_alive", "pyqtSignal", "sync_result_detail",
-    "sync_result_text",
-]
 
 
 def _widget_deleted(widget):
     """True nur fuer ein von Qt bereits zerstoertes Widget.
 
-    `sip` ist in Calibre vorhanden; ausserhalb (Tests, andere Qt-Bindings)
-    bleibt die Pruefung aus, statt einen Importfehler zu riskieren.
+    ``sip`` kommt über ``qt.core``; ohne Qt-Bindings bleibt die Prüfung
+    aus, statt einen Importfehler zu riskieren.
     """
     try:
-        import sip
+        from qt.core import sip
     except ImportError:
-        try:
-            from PyQt6 import sip
-        except ImportError:
-            return False
+        return False
     try:
         return bool(sip.isdeleted(widget))
     except (TypeError, RuntimeError):
@@ -73,6 +50,12 @@ def gui_guard(function):
 
 
 CANCEL_MESSAGE = "Abgebrochen."
+# Beschriftung und Tooltip der beiden Hauptknoepfe: Aufbau und Dashboard
+# teilen sie, damit ein Textwechsel nicht an zwei Stellen nachgezogen wird.
+LOGIN_BUTTON_TEXT = "Bei tolino anmelden"
+LOGIN_BUTTON_TIP = "Öffnet ein Browserfenster zur Anmeldung."
+COMPARE_BUTTON_TEXT = "Bibliothek vergleichen …"
+COMPARE_BUTTON_TIP = "Vergleicht deine Calibre-Bibliothek mit tolino."
 
 # Ergebnis-Zustände je Operation. "not_started" ist bewusst ein eigener
 # Zustand: nach einem Fehler oder Abbruch darf der Bericht nicht so tun,
@@ -85,6 +68,10 @@ OP_NOT_STARTED = "not_started"
 # Laufende oder nach einem Timeout noch nicht beendete Threads bleiben bis
 # zum finished-Signal referenziert.
 _THREADS = []
+# Dasselbe fuer die Worker: `closeEvent` gibt seine Referenzen bewusst ab,
+# waehrend ein Anmelde-Thread weiterlaeuft. Ohne diese Liste koennte Qt den
+# QObject einsammeln, waehrend seine `run()`-Methode noch im Thread laeuft.
+_WORKERS = []
 
 
 class CallWorker(QObject):
@@ -116,6 +103,7 @@ def start_worker(dialog, worker, thread, thread_name, worker_name,
         signal.connect(slot)
     thread.finished.connect(thread.deleteLater)
     _keep_thread_alive(thread)
+    _keep_worker_alive(thread, worker)
     setattr(dialog, thread_name, thread)
     setattr(dialog, worker_name, worker)
     thread.start()
@@ -141,20 +129,34 @@ def start_call(dialog, call, on_done, on_failed):
 
 
 def _discard_item(collection, item):
-    """Remove `item` if present; a repeated signal must not raise."""
-    try:
-        collection.remove(item)
-    except ValueError:
-        pass
+    """Remove `item` by identity; a repeated signal must not raise.
+
+    Identitaet statt `==`: ein bereits von Qt zerstoertes QObject vertraegt
+    keinen Vergleich mehr, `list.remove` wuerde hier also werfen.
+    """
+    for index, kept in enumerate(collection):
+        if kept is item:
+            del collection[index]
+            return
 
 
 def _keep_thread_alive(thread):
     """Retain a thread until Qt reports that it has finished."""
-    if thread not in _THREADS:
+    if not any(kept is thread for kept in _THREADS):
         _THREADS.append(thread)
-        finished = getattr(thread, "finished", None)
-        if finished is not None:
-            finished.connect(lambda: _discard_item(_THREADS, thread))
+        thread.finished.connect(lambda: _discard_item(_THREADS, thread))
+
+
+def _keep_worker_alive(thread, worker):
+    """Keep the worker referenced until its thread reports `finished`.
+
+    `closeEvent` drops `self.login_worker` while the sign-in thread keeps
+    running. Without this reference Qt could collect the QObject while its
+    `run()` method is still executing in that thread.
+    """
+    if not any(kept is worker for kept in _WORKERS):
+        _WORKERS.append(worker)
+        thread.finished.connect(lambda: _discard_item(_WORKERS, worker))
 
 
 def _stop_thread(thread, timeout_ms=3000):

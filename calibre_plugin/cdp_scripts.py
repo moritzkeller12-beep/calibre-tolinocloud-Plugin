@@ -13,6 +13,22 @@ _TOKEN_SCAN_HELPERS = r"""
   function tryParse(text) {
     try { return JSON.parse(text); } catch (e) { return null; }
   }
+  // Schluesselnamen zaehlen auch fuer einfache Werte im Speicher (localStorage
+  // haelt z. B. hardwareId oft als blanken String, nicht als JSON).
+  function pushKeyed(key, value) {
+    if (typeof value !== 'string' || !value) return;
+    if (value.charAt(0) === '{' || value.charAt(0) === '[') return;
+    if (/refresh/i.test(key)) {
+      push(value, 'refresh');
+    } else if (/hardware|device/i.test(key) &&
+               /^[0-9a-fA-F-]{8,}$/.test(value)) {
+      push(value, 'hardware');
+    } else if (/usertoken/i.test(key) && value.indexOf('U2FsdGVk') === 0) {
+      push(value, 'refresh');
+    } else if (/userinfos/i.test(key) && value.indexOf('U2FsdGVk') === 0) {
+      push(value, 'hardware');
+    }
+  }
   function walk(value, depth, seen) {
     if (!value || depth > 6) return;
     // ArrayBuffer-Views (z. B. offline gespeicherte Buchdaten) haben
@@ -41,22 +57,12 @@ _TOKEN_SCAN_HELPERS = r"""
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       var v = value[key];
       if (typeof v === 'string') {
-        if (/refresh/i.test(key)) {
-          var refreshValue = tryParse(v);
-          if (refreshValue && typeof refreshValue === 'object') {
-            walk(refreshValue, depth + 1, seen);
-          } else {
-            push(v, 'refresh');
-          }
-        }
-        if (/hardware|device/i.test(key) &&
-            /^[0-9a-fA-F-]{8,}$/.test(v)) push(v, 'hardware');
-        if (/usertoken/i.test(key) && v.indexOf('U2FsdGVk') === 0)
-            push(v, 'refresh');
-        if (/userinfos/i.test(key) && v.indexOf('U2FsdGVk') === 0)
-            push(v, 'hardware');
         var parsed = tryParse(v);
-        if (parsed) walk(parsed, depth + 1, seen);
+        if (parsed && typeof parsed === 'object') {
+          walk(parsed, depth + 1, seen);
+        } else {
+          pushKeyed(key, v);
+        }
       } else if (v && typeof v === 'object') {
         walk(v, depth + 1, seen);
       }
@@ -73,8 +79,11 @@ __TOKEN_SCAN_HELPERS__
     if (!store) return;
     try {
       for (var i = 0; i < store.length; i++) {
-        var value = store.getItem(store.key(i));
-        if (value) walk(value, 0, new Set());
+        var key = store.key(i);
+        var value = store.getItem(key);
+        if (!value) continue;
+        pushKeyed(key, value);
+        walk(value, 0, new Set());
       }
     } catch (e) {}
   }
