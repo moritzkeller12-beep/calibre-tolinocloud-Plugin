@@ -33,33 +33,25 @@ def _jwt_shaped(text):
                for part in parts)
 
 
-def _undatable_shape(token):
-    """Structural fingerprint of an undatable candidate – never its value."""
-    text = str(token or "")
+def _candidate_age_note(candidates):
+    """Return a redacted age/shape note for candidate error messages."""
+    tokens = list(candidates or ())
+    issued = max((_refresh_token_iat(token) or 0 for token in tokens),
+                 default=0)
+    if issued:
+        return "Der gefundene Zugang war %d Sekunden alt." % max(
+            0, int(time.time() - issued))
+    if not tokens:
+        return ""
+    # Ohne iat nur die Struktur nennen -- nie den Wert selbst.
+    text = str(tokens[0] or "")
     parts = text.split(".")
     shape = "%d %s, %d Zeichen" % (
         len(parts), "Teil" if len(parts) == 1 else "Teile", len(text))
     if len(parts) == 3:
         shape += (", Payload ohne iat" if payload(text)
                   else ", Payload unlesbar")
-    return shape
-
-
-def _candidate_age_note(candidates):
-    """Return a redacted age/shape note for candidate error messages."""
-    best = None
-    for token in candidates or ():
-        issued = _refresh_token_iat(token)
-        if issued is not None and (best is None or issued > best):
-            best = issued
-    if best is None:
-        token = next(iter(candidates or ()), None)
-        if token is None:
-            return ""
-        return ("Alter des gefundenen Zugangs unbekannt (%s)"
-                % _undatable_shape(token))
-    return "Der gefundene Zugang war %d Sekunden alt." % max(
-        0, int(time.time() - best))
+    return "Alter des gefundenen Zugangs unbekannt (%s)" % shape
 
 
 def _refresh_token_iat_sort_key(value):
@@ -101,11 +93,6 @@ def _json_field_text(value, names):
     return ""
 
 
-def _refresh_field_text(json_text):
-    """The refresh-ish string field of a decrypted reader JSON bundle."""
-    return _json_field_text(json_text, ("refresh",) + TOKEN_VALUE_KEYS) or None
-
-
 def _hardware_from_reader_blob(value):
     """hardwareId from a decrypted userInfos blob; '' when there is none."""
     plain = _decrypt_reader_blob(value)
@@ -123,7 +110,8 @@ def _unwrap_refresh_candidate(token, max_depth=3):
         if not plain:
             break
         if plain.startswith("{"):
-            plain = _refresh_field_text(plain) or ""
+            # Nur ein Refresh-Feld zaehlt; ein anderes JSON-Feld bleibt Text.
+            plain = _json_field_text(plain, ("refresh",) + TOKEN_VALUE_KEYS)
         if _jwt_shaped(plain):
             return plain
         if plain.startswith("U2FsdGVk"):

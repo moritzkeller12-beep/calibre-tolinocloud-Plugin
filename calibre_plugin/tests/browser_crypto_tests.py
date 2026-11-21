@@ -16,7 +16,7 @@ from unittest.mock import patch
 from ..browser_crypto import cryptojs_decrypt
 from ..errors import TolinoAuthError
 from ..token_candidates import (_decrypt_reader_blob, _hardware_from_reader_blob,
-                                _refresh_field_text)
+                                _json_field_text)
 
 # Salt 0011223344556677, Klartext "refresh-token-0123456789-abcdef".
 TOKEN_BLOB = ("U2FsdGVkX18AESIzRFVmd+krvaEq0dFWf6an5omQdUciNDVjZt51GgBA"
@@ -53,7 +53,8 @@ class DecryptTests(unittest.TestCase):
     def test_a_real_userinfos_blob_yields_device_id_and_refresh(self):
         self.assertEqual(USERINFOS_PLAIN, cryptojs_decrypt(USERINFOS_BLOB))
         self.assertEqual("hw-42", _hardware_from_reader_blob(USERINFOS_BLOB))
-        self.assertEqual("tok-9", _refresh_field_text(USERINFOS_PLAIN))
+        self.assertEqual("tok-9",
+                         _json_field_text(USERINFOS_PLAIN, ("refresh",)))
 
     def test_malformed_blobs_are_rejected_without_an_exception(self):
         cases = (

@@ -129,7 +129,7 @@ class StartTests(LaunchCase):
                                return_value=stuck)
         with patches[0], patches[1] as popen, patches[2], \
                 patch("calibre_plugin.cdp._http_get_json", return_value=None), \
-                patch("calibre_plugin.cdp.time.time",
+                patch("calibre_plugin.cdp.time.monotonic",
                       side_effect=itertools.count(0, 100).__next__):
             with self.assertRaises(TolinoAuthError) as caught:
                 cdp.launch_reader_window()
@@ -245,7 +245,7 @@ class GroupStopTests(unittest.TestCase):
         with patch("calibre_plugin.cdp.os.killpg"), \
                 patch("calibre_plugin.cdp._endpoint_answers",
                       return_value=True), \
-                patch("calibre_plugin.cdp.time.time",
+                patch("calibre_plugin.cdp.time.monotonic",
                       side_effect=itertools.count(0, 100).__next__):
             self.assertFalse(cdp._stop_launched_process(
                 wrapper, timeout=0.2, pgid=wrapper.pid, port=5555))

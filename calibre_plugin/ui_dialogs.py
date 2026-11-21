@@ -100,15 +100,27 @@ class _Column(NamedTuple):
 _READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
 _READ_COLUMN_TOOLTIP = ("Auswahl = gelesen; keine Auswahl = ungelesen. Die "
                         "Calibre-Spalte #tolino_read ist nur informativ.")
+class _ActionSpec(NamedTuple):
+    """Eine Auswahlspalte: Schlüssel, Titel, Tooltip, Sortierung, Texte."""
+
+    key: str
+    label: str
+    tooltip: str
+    sort_key: object
+    feedback: tuple
+
+
 # EINE Quelle fuer Spalten, Auswahlschluessel und Rueckmeldungstexte.
 _ACTION_SPECS = (
-    ("upload", "Upload", "Buchdatei in die Cloud hochladen.",
-     comparison_sort_key, ("Upload aktiviert", "Upload deaktiviert")),
-    ("metadata", "Metadaten",
-     "Titel, Autor und ISBN ohne Upload aktualisieren.",
-     _metadata_first, ("Metadaten aktiviert", "Metadaten deaktiviert")),
-    ("read", "Gelesen", _READ_COLUMN_TOOLTIP, _read_first,
-     ("Als gelesen markiert", "Als ungelesen markiert")),
+    _ActionSpec("upload", "Upload", "Buchdatei in die Cloud hochladen.",
+                comparison_sort_key,
+                ("Upload aktiviert", "Upload deaktiviert")),
+    _ActionSpec("metadata", "Metadaten",
+                "Titel, Autor und ISBN ohne Upload aktualisieren.",
+                _metadata_first,
+                ("Metadaten aktiviert", "Metadaten deaktiviert")),
+    _ActionSpec("read", "Gelesen", _READ_COLUMN_TOOLTIP, _read_first,
+                ("Als gelesen markiert", "Als ungelesen markiert")),
 )
 
 
@@ -198,14 +210,15 @@ class InventoryDialog(QDialog):
     Sammelaktionen sind getrennt erreichbar.
     """
 
-    ACTION_KEYS = tuple(spec[0] for spec in _ACTION_SPECS)
+    ACTION_KEYS = tuple(spec.key for spec in _ACTION_SPECS)
     ACTION_COLUMNS = tuple(
-        _Column(spec[1], spec[2], spec[3]) for spec in _ACTION_SPECS)
+        _Column(spec.label, spec.tooltip, spec.sort_key)
+        for spec in _ACTION_SPECS)
     ACTION_LABELS = {
-        (spec[0], enabled): spec[4][0 if enabled else 1]
+        (spec.key, enabled): spec.feedback[0 if enabled else 1]
         for spec in _ACTION_SPECS for enabled in (True, False)
     }
-    ACTION_TOOLTIPS = {spec[0]: spec[2] for spec in _ACTION_SPECS}
+    ACTION_TOOLTIPS = {spec.key: spec.tooltip for spec in _ACTION_SPECS}
     ACTION_TOOLTIPS["read"] = (_READ_TOOLTIP
                                + " Im ausgewählten tolino-Konto änderbar.")
     DATA_COLUMNS = (
@@ -524,26 +537,22 @@ class InventoryDialog(QDialog):
             state.chosen = state.cloud
         self._rebuild_table(self.rows)
 
-    def _set_selection(self, chooser):
-        """Auswahl in einem Schritt setzen (Zeilen und Zellen synchron).
+    def apply_recommended(self):
+        """Die vorgeschlagenen Aktionen für alle Zeilen auswählen.
 
-        Der Lesestatus bleibt bei Empfehlungen unverändert. Zum Löschen
-        markierte Zeilen bleiben unberührt.
+        Zeilen und Zellen bleiben synchron. Der Lesestatus bleibt bei
+        Empfehlungen unverändert; zum Löschen markierte Zeilen unberührt.
         """
         for index, row in enumerate(self.rows):
             caps = row_capabilities(row)
             if not caps["usable"]:
                 continue
-            wanted = tuple(chooser(row))
+            wanted = tuple(self.default_actions(row))
             for column, key in enumerate(self.ACTION_KEYS[:2]):
                 checked = bool(wanted[column]) and caps[key]
                 row[key] = checked
                 self._set_check_quietly(index, column, checked)
         self._update_summary()
-
-    def apply_recommended(self):
-        """Die vorgeschlagenen Aktionen für alle Zeilen auswählen."""
-        self._set_selection(self.default_actions)
 
     def automatic_actions_enabled(self):
         """Tun Automatiken ohne Auswahl WIRKLICH etwas?

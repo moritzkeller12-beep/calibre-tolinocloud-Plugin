@@ -159,21 +159,6 @@ _DARWIN_BROWSERS = (
 )
 
 
-def _installed_under(roots, browsers):
-    """Browser unter Standardpfaden; je relativem Pfad der erste Treffer."""
-    found = []
-    seen = set()
-    for root in roots:
-        for relative_path in browsers:
-            if relative_path in seen:
-                continue
-            path = os.path.join(root, relative_path)
-            if os.path.isfile(path):
-                found.append([path])
-                seen.add(relative_path)
-    return found
-
-
 def _windows_browser_paths(winreg_module=None):
     """Nur von Windows registrierte Browser: App-Paths, keine geratenen Ordner."""
     if winreg_module is None:
@@ -218,11 +203,19 @@ def _windows_browser_paths(winreg_module=None):
 
 
 def _macos_browser_paths(home=None):
-    """Browser in den macOS-Programmverzeichnissen (System und Benutzer)."""
+    """Browser in den macOS-Programmverzeichnissen (System und Benutzer).
+
+    Je relativem Pfad zaehlt der erste Treffer; nur macOS nutzt diese Pfade.
+    """
     home = home or os.path.expanduser("~")
-    return _installed_under(
-        ("/Applications", os.path.join(home, "Applications")),
-        _DARWIN_BROWSERS)
+    found, seen = [], set()
+    for root in ("/Applications", os.path.join(home, "Applications")):
+        for relative_path in _DARWIN_BROWSERS:
+            path = os.path.join(root, relative_path)
+            if relative_path not in seen and os.path.isfile(path):
+                found.append([path])
+                seen.add(relative_path)
+    return found
 
 
 def _platform_browser_paths(platform=None):

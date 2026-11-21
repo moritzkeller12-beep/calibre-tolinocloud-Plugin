@@ -21,38 +21,6 @@ DEFAULT_ACCOUNT = {
 }
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
-# Die Datei existiert, war aber gerade nicht lesbar (Rechte, Verzeichnis,
-# E/A-Fehler). Das ist NICHT dasselbe wie «es gibt sie nicht».
-_UNREADABLE = object()
-
-def _read_raw():
-    """Rohinhalt der Einstellungsdatei.
-
-    ``None`` heisst «Datei fehlt» (frische Installation, geloescht). Ein
-    anderer Lesefehler liefert ``_UNREADABLE``: die Datei kann existieren
-    und nur gerade gesperrt sein. ``_reload`` darf daraus keinen geloeschten
-    Stand machen und keinen Schreibvorgang darauf setzen.
-    """
-    path = getattr(PREFERENCES, "file_path", None)
-    if not path:
-        return None
-    try:
-        with open(path, "rb") as handle:
-            return handle.read()
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return _UNREADABLE
-
-
-def _parse(raw):
-    """Einstellungen aus dem Rohinhalt; `None`, wenn er unvollstaendig ist."""
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
 
 def _reload():
     """Datei bei jedem Zugriff lesen; nur ein vollstaendiger Stand zaehlt.
@@ -65,22 +33,32 @@ def _reload():
     geschriebene Datei zaehlt nicht als Stand -- Calibres `refresh()` wuerde
     sie uebernehmen und dabei alle Konten verlieren.
 
-    `False` heisst: die Datei ist gerade unbrauchbar. Lesen bleibt dann beim
-    letzten guten Stand, ein Schreibvorgang bricht ab, statt ihn zu ueberschreiben.
+    ``False`` heisst: die Datei ist gerade unbrauchbar. Sie kann existieren
+    und nur gesperrt sein (Rechte, Verzeichnis, E/A-Fehler) -- das ist NICHT
+    dasselbe wie «es gibt sie nicht». Lesen bleibt dann beim letzten guten
+    Stand, ein Schreibvorgang bricht ab, statt ihn zu ueberschreiben.
     """
     with _SETTINGS_LOCK:
-        raw = _read_raw()
-        if raw is _UNREADABLE:
+        path = getattr(PREFERENCES, "file_path", None)
+        if not path:
+            return True
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except FileNotFoundError:
+            # Keine Datei: der Cache ist der Stand (frische Installation oder
+            # gerade geloescht). Ein spaeter angelegter Stand wird erkannt.
+            return True
+        except OSError:
             # Datei existiert, ist aber nicht lesbar: Cache behalten und
             # Schreibvorgaenge abbrechen, statt den alten Stand ueber einen
             # fremden oder neueren zu schreiben.
             return False
-        if raw is None:
-            # Keine Datei: der Cache ist der Stand (frische Installation oder
-            # gerade geloescht). Ein spaeter angelegter Stand wird erkannt.
-            return True
-        data = _parse(raw)
-        if data is None:
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            data = None
+        if not isinstance(data, dict):
             # Halb geschrieben: nicht uebernehmen und jeden Schreibvorgang
             # abbrechen, statt die halbe Datei zu ersetzen. Jeder weitere
             # Zugriff versucht es erneut.
@@ -329,8 +307,12 @@ def account_by_name(name):
     return _account(dict(source, name=name), name) if source is not None else {}
 
 
-def _update_account(name, values, allow_virtual_default=False):
-    """Update one existing account; callbacks never recreate deleted accounts."""
+def _update_account(name, values, allow_virtual_default=True):
+    """Update one existing account, by default the virtual default account.
+
+    ``allow_virtual_default=False`` fuer Aufrufer, die auch das virtuelle
+    Default-Konto nicht anlegen duerfen (etwa das Loeschen eines Tokens).
+    """
     with _SETTINGS_LOCK:
         return _write_account(
             name, values, create=False,
@@ -368,7 +350,7 @@ def save_credentials(account_name, refresh_token, hardware, partner_id=None):
     values = {"refresh_token": refresh_token, "hardware_id": hardware}
     if partner_id:
         values["partner_id"] = partner_id
-    return _update_account(account_name, values, allow_virtual_default=True)
+    return _update_account(account_name, values)
 
 
 def save_refresh_token(account_name, token):
@@ -381,8 +363,7 @@ def save_refresh_token(account_name, token):
     """
     token = str(token or "").strip()
     if token:
-        return _update_account(account_name, {"refresh_token": token},
-                               allow_virtual_default=True)
+        return _update_account(account_name, {"refresh_token": token})
     return False
 
 
@@ -403,14 +384,14 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
         current = _stored_token(account_name)
         if rejected and current and current != rejected:
             return False
-        return _update_account(account_name, {"refresh_token": ""})
+        # Ein entferntes Konto darf ein verspaeteter Callback nicht anlegen.
+        return _update_account(account_name, {"refresh_token": ""},
+                               allow_virtual_default=False)
 
 
 def save_hardware_id(account_name, hardware):
     """Die Geraete-ID im Konto sichern -- die Config ist ihre einzige Quelle."""
-    return _update_account(account_name,
-                           {"hardware_id": str(hardware or "")},
-                           allow_virtual_default=True)
+    return _update_account(account_name, {"hardware_id": str(hardware or "")})
 
 
 def account_secrets(account_name):

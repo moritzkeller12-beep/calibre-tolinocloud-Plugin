@@ -151,9 +151,6 @@ class ProgressState:
             text += " · %s/%s" % (self.current, self.last)
         return text
 
-    def __bool__(self):
-        return self.known and self.percent is not None
-
 
 def _progress_state(tolino_id, progress_known, progress_by_id):
     """Fortschritt einer Zeile aus der sync-data-Antwort herauslösen."""

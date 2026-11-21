@@ -46,10 +46,6 @@ class SyncWorker(QObject):
             if isinstance(change, (tuple, list)) and len(change) >= 3
             and (tolino_id := str(change[0] or "").strip())
         ]
-        self.read_marks = [change[0] for change in self.read_changes
-                           if change[2]]
-        self.read_unmarks = [change[0] for change in self.read_changes
-                             if not change[2]]
         self.titles = {str(key): str(value)
                        for key, value in (titles or {}).items()
                        if value}
@@ -82,6 +78,16 @@ class SyncWorker(QObject):
 
     def cancel(self):
         self.cancelled = True
+
+    # Abgeleitet statt gepflegt: `_drop_replaced_read_changes()` kürzt
+    # `read_changes`, beide Listen müssen dann nicht nachgezogen werden.
+    @property
+    def read_marks(self):
+        return [change[0] for change in self.read_changes if change[2]]
+
+    @property
+    def read_unmarks(self):
+        return [change[0] for change in self.read_changes if not change[2]]
 
     def _label(self, book_uuid, book_id=None, title=""):
         """Sichtbarer Name eines Buchs: Titel, sonst «Buch <Nummer>».
@@ -330,8 +336,6 @@ class SyncWorker(QObject):
                     continue
             kept.append(change)
         self.read_changes = kept
-        self.read_marks = [change[0] for change in kept if change[2]]
-        self.read_unmarks = [change[0] for change in kept if not change[2]]
 
     def _run_read_marks(self, client, read_op, unread_op, checkpoint,
                         done, total):

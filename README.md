@@ -41,9 +41,9 @@ ausschliessen.
 Die Suite ist bewusst klein und prüft Nutzerabläufe statt Interna:
 Anmeldung und Konten, Vergleich und Planung, den tolino-Client gegen einen
 lokalen HTTP-Server, den Sync-Worker, die Oberfläche mit echtem PyQt6 und den
-CDP-Lebenszyklus ohne echten Browser. Eine feste Testzahl nennt sie nicht;
-Tests für interne Helfer, Aufrufzählungen und die frühere
-Prozess-Infrastruktur gibt es nicht.
+CDP-Lebenszyklus ohne echten Browser. Eine feste Testzahl nennt sie nicht.
+Einzelne interne Helfer (etwa `_Ws`, `_reader_target`, `_exchange_live_grab`)
+werden direkt geprüft, wo nur so ein Fehlerfall erreichbar ist.
 
 Live-Tests gegen die echte Cloud liegen nur lokal: `calibre_plugin/tests/live_tests.py`
 wird nicht im Repo geführt und ist von Git ignoriert. Datei lokal anlegen,

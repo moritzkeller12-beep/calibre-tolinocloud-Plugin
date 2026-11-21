@@ -19,9 +19,8 @@ Das Plugin protokolliert weder Zugangstoken noch andere Anmeldedaten.
 Die Codes vergibt der Quelltext an genau einer Stelle je Meldung
 (`code="A01"` usw.). Ein Test hält Tabelle und Quelltext zusammen: steht im
 Code ein Code, der hier fehlt, schlägt die Suite fehl. Den nächsten Schritt
-zu jedem Code nennt der Dialog selbst; er steht nur in
-`ui_common._login_failure_guidance` und `ui_common.LOGIN_NEXT_STEP`, damit
-derselbe Satz nicht zweimal gepflegt wird.
+zu jedem Code nennt der Dialog selbst; die Sätze pflegt `ui_common.py` an
+genau einer Stelle, damit derselbe Satz nicht zweimal gepflegt wird.
 
 Bei A01 einmal neu bei tolino anmelden; fehlt PyCryptodome, zuerst das Paket
 installieren. Bei B01 entweder einen Chromium-Browser

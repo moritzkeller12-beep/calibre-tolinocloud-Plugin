@@ -10,8 +10,10 @@ _INVENTORY_CONTAINERS = ("edata", "ebook")
 # ISBN/Verlagsnummer und taugt nicht fuer /deletecontent und /downloadinfo.
 _INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id")
 # Gekaufte Titel tragen kein ``deliverableId``; ihre Deliverables stehen als
-# Liste daneben. Deren ``identifier`` (z. B. ``DT0400.978…_A…``) adressiert
-# Download und Loeschen genauso -- live gegen die Cloud geprueft.
+# Liste daneben (``epubMetaData.deliverable``). Deren ``identifier`` (z. B.
+# ``DT0400.978…_A…``) adressiert Download und Loeschen genauso -- live gegen
+# die Cloud geprueft. Bewusst nur dort gesucht: ein ``identifier`` auf oberster
+# Ebene ist eine Produktkennung und keine Deliverable-ID.
 _DELIVERABLE_KEYS = ("deliverableId", "identifier")
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
@@ -55,36 +57,12 @@ def _inventory_id_in(value, keys):
     return str(found).strip()
 
 
-def _deliverable_identifier(value, depth=0):
-    """Erste Deliverable-Kennung aus einer Liste bzw. einem Objekt."""
-    if depth > 3:
-        return ""
-    if isinstance(value, (list, tuple)):
-        for entry in value:
-            found = _deliverable_identifier(entry, depth + 1)
-            if found:
-                return found
-        return ""
-    if not isinstance(value, dict):
-        return ""
-    for key in _DELIVERABLE_KEYS:
-        found = value.get(key)
-        if isinstance(found, (str, int)) and str(found).strip():
-            return str(found).strip()
-    return ""
-
-
-def _purchase_identifier(item):
-    """Kennung eines gekauften Titels (``epubMetaData.deliverable[]``)."""
-    meta = item.get("epubMetaData") if isinstance(item, dict) else None
-    return _deliverable_identifier(meta.get("deliverable")
-                                   if isinstance(meta, dict) else None)
-
-
 def _record_identifier(item):
     """Kennung einer Cloud-Kopie -- ``deliverableId`` oder Kauf-Deliverable."""
+    meta = item.get("epubMetaData") if isinstance(item, dict) else None
+    purchased = meta.get("deliverable") if isinstance(meta, dict) else None
     return (_inventory_id_in(item, _INVENTORY_ID_KEYS)
-            or _purchase_identifier(item))
+            or _inventory_id_in(purchased, _DELIVERABLE_KEYS))
 
 
 def _inventory_author(value):

@@ -38,14 +38,11 @@ _LAUNCHED = {"process": None, "port": None, "profile": "", "pgid": None}
 
 def _verified_owner(require_endpoint=True):
     """This process's browser record, by default only while it answers."""
-    process = _LAUNCHED["process"]
-    actual_port = _LAUNCHED["port"]
-    profile = _LAUNCHED["profile"]
-    if process is None or not actual_port or not profile:
+    record = dict(_LAUNCHED)
+    if not (record["process"] and record["port"] and record["profile"]):
         return None
-    record = {"process": process, "port": int(actual_port),
-              "profile": profile, "pgid": _LAUNCHED.get("pgid")}
-    if require_endpoint and not _endpoint_answers(record):
+    record["port"] = int(record["port"])
+    if require_endpoint and not _endpoint_answers(record["port"]):
         return None
     return record
 
@@ -73,9 +70,9 @@ def _evaluate_message(ws, expression, timeout, await_promise, message_id):
                   "params": {"expression": expression,
                              "returnByValue": True,
                              "awaitPromise": bool(await_promise)}})
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        message = ws.recv_json(timeout=max(1, deadline - time.time()))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        message = ws.recv_json(timeout=max(1, deadline - time.monotonic()))
         if message.get("id") != message_id:
             continue
         if "error" in message:
@@ -144,8 +141,8 @@ def _wait_for_debug_port(port, timeout, process):
     sofort ab, statt den naechsten Kandidaten um die volle Wartezeit zu
     verzoegern.
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
             return True
         if process.poll() is not None:
@@ -253,12 +250,12 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
     belegt.
     """
     group = _process_group(process, pgid)
-    record = {"port": int(port)} if port else None
+    port = int(port or 0)
 
     def leftover():
         if process.poll() is None:
             return True
-        return bool(record and _endpoint_answers(record, 0.2))
+        return bool(port and _endpoint_answers(port, 0.2))
 
     for hard in (False, True):  # erst hoeflich, dann bestimmt.
         if not leftover():
@@ -273,11 +270,9 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
             process.wait(timeout=max(0.2, timeout))
         except (OSError, subprocess.TimeoutExpired):
             pass
-    if leftover() and record and group:
+    if leftover() and port:
         # Nach SIGKILL braucht der Port einen Moment, bis er geschlossen ist.
-        deadline = time.time() + 0.3
-        while leftover() and time.time() < deadline:
-            time.sleep(0.05)
+        _wait_for_endpoint_exit(port, 0.3)
     return not leftover()
 
 
@@ -427,19 +422,17 @@ def _send_browser_close(port, path, timeout=2):
         return False
 
 
-def _endpoint_answers(record, timeout=0.5):
+def _endpoint_answers(port, timeout=0.5):
     """True while the selected loopback DevTools port answers."""
-    port = int(record.get("port") or 0)
+    port = int(port or 0)
     return (0 < port < 65536 and bool(_http_get_json(
         "http://127.0.0.1:%d/json/version" % port, timeout)))
 
 
-def _wait_for_endpoint_exit(record, seconds):
-    """Sleep in small steps while the DevTools endpoint keeps answering."""
-    if not _endpoint_answers(record, 0.2):
-        return
-    deadline = time.time() + max(0.2, seconds)
-    while _endpoint_answers(record, 0.2) and time.time() < deadline:
+def _wait_for_endpoint_exit(port, seconds):
+    """Warten, bis der Port schweigt -- hoechstens `seconds` lang."""
+    deadline = time.monotonic() + max(0.2, seconds)
+    while _endpoint_answers(port, 0.2) and time.monotonic() < deadline:
         time.sleep(0.1)
 
 
@@ -447,16 +440,16 @@ def _shutdown(record, timeout=2):
     """Close a launched browser, then remove its temporary profile."""
     process = record["process"]
     port = int(record.get("port") or 0)
-    if port and _endpoint_answers(record, timeout):
+    if port and _endpoint_answers(port, timeout):
         target = _browser_ws_for_record(record, timeout)
         if target:
             _send_browser_close(*target, timeout=timeout)
-        _wait_for_endpoint_exit(record, timeout)
+        _wait_for_endpoint_exit(port, timeout)
     if not _stop_launched_process(process, timeout,
                                   pgid=record.get("pgid"), port=port):
         return False
-    _wait_for_endpoint_exit(record, timeout)
-    if _endpoint_answers(record, 0.2):
+    _wait_for_endpoint_exit(port, timeout)
+    if _endpoint_answers(port, 0.2):
         # A wrapper may have exited before its browser child; never delete
         # a profile while DevTools can still be using it.
         return False

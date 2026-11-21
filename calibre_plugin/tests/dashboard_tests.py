@@ -4,6 +4,7 @@ Der Lauf ist vorbei (Client und Thread), geprüft werden Ergebnis-Sicherung,
 Konto-Zuordnung der Spalten und die Rückmeldung je Ausgang. Worker und
 Dashboard sind echte Objekte bzw. das vorhandene Dashboard-Doppel.
 """
+from contextlib import contextmanager
 import types
 import unittest
 import uuid
@@ -169,14 +170,20 @@ class MirrorTests(OrchestrationCase):
 class ReportTests(OrchestrationCase):
     """Jeder Ausgang hat seine eigene Rückmeldung; geschlossen bleibt still."""
 
+    @contextmanager
+    def recorded(self):
+        """Beide Dialoge mitschneiden, statt sie anzuzeigen."""
+        calls = {"info": [], "error": []}
+        with patch("calibre_plugin.sync_results.info_dialog",
+                   lambda *args, **kwargs: calls["info"].append(args)), \
+                patch("calibre_plugin.sync_results.error_dialog",
+                      lambda *args, **kwargs: calls["error"].append(args)):
+            yield calls
+
     def test_a_successful_run_reports_its_result(self):
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database())
-        recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.sync_results.info_dialog",
-                   lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.sync_results.error_dialog",
-                      lambda *args, **kwargs: recorded["error"].append(args)):
+        with self.recorded() as recorded:
             self.sync_completed(dashboard, worker.updates)
         self.assertEqual("Fertig", recorded["info"][0][1])
         self.assertIn("hochgeladen", recorded["info"][0][2])
@@ -186,11 +193,7 @@ class ReportTests(OrchestrationCase):
     def test_a_cancelled_run_reports_a_cancellation(self):
         worker = self.worker(outcome={"cancelled": True})
         dashboard = self.dashboard(worker, full_database())
-        recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.sync_results.info_dialog",
-                   lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.sync_results.error_dialog",
-                      lambda *args, **kwargs: recorded["error"].append(args)):
+        with self.recorded() as recorded:
             self.sync_completed(dashboard, worker.updates)
         self.assertIn("Abgebrochen", recorded["info"][0][2])
         self.assertEqual([], recorded["error"])
@@ -198,11 +201,7 @@ class ReportTests(OrchestrationCase):
     def test_a_partial_failure_gets_its_own_heading(self):
         worker = self.worker(outcome={"uploaded": 1, "failed": 1})
         dashboard = self.dashboard(worker, full_database())
-        recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.sync_results.info_dialog",
-                   lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.sync_results.error_dialog",
-                      lambda *args, **kwargs: recorded["error"].append(args)):
+        with self.recorded() as recorded:
             self.sync_completed(dashboard, worker.updates)
         self.assertEqual("Teilweise fehlgeschlagen", recorded["error"][0][1])
         self.assertIn("Teilweise abgeschlossen", recorded["error"][0][2])
@@ -210,11 +209,7 @@ class ReportTests(OrchestrationCase):
     def test_a_closed_window_gets_no_dialog(self):
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(), visible=False)
-        recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.sync_results.info_dialog",
-                   lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.sync_results.error_dialog",
-                      lambda *args, **kwargs: recorded["error"].append(args)):
+        with self.recorded() as recorded:
             self.sync_completed(dashboard, worker.updates)
         self.assertEqual(([], []), (recorded["info"], recorded["error"]))
         self.assertTrue(dashboard.finished)
@@ -223,11 +218,7 @@ class ReportTests(OrchestrationCase):
         worker = self.worker(outcome={"failed": 1})
         database = full_database()
         dashboard = self.dashboard(worker, database)
-        recorded = {"info": [], "error": []}
-        with patch("calibre_plugin.sync_results.info_dialog",
-                   lambda *args, **kwargs: recorded["info"].append(args)), \
-                patch("calibre_plugin.sync_results.error_dialog",
-                      lambda *args, **kwargs: recorded["error"].append(args)):
+        with self.recorded() as recorded:
             self.sync_failed(dashboard, "Die Verbindung ist fehlgeschlagen.")
         self.assertIn(TOLINO_COLUMN,
                       [column for column, _values in database.api.writes])
