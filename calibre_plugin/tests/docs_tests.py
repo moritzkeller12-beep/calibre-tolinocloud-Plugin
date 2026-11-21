@@ -3,13 +3,34 @@
 Jede Meldung vergibt ihren Code im Quelltext; `docs/fehlercodes.md` ist die
 Tabelle für den Nutzer. Ein neuer Code ohne Zeile dort fällt hier auf.
 """
+import ast
 import os
-import re
 import unittest
 
 SOURCE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS = os.path.join(os.path.dirname(SOURCE_DIR), "docs", "fehlercodes.md")
-CODE = re.compile(r'code="([A-Z][0-9]{2})"')
+
+
+def error_codes(tree):
+    """Konstante ``code=``-Werte aus Fehleraufrufen -- unabhaengig von Quotes.
+
+    Ein Regex auf den Text wuerde einfache/doppelte Anfuehrungszeichen und
+    Leerzeichen unterscheiden; der Syntaxbaum kennt nur den Wert.
+    """
+    codes = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = (getattr(node.func, "attr", None)
+                or getattr(node.func, "id", None))
+        if not (isinstance(name, str) and name.endswith("Error")):
+            continue
+        for keyword in node.keywords:
+            value = keyword.value
+            if (keyword.arg == "code" and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)):
+                codes.add(value.value)
+    return codes
 
 
 class ErrorCodeDocsTests(unittest.TestCase):
@@ -20,8 +41,9 @@ class ErrorCodeDocsTests(unittest.TestCase):
         for name in sorted(os.listdir(SOURCE_DIR)):
             if not name.endswith(".py"):
                 continue
-            with open(os.path.join(SOURCE_DIR, name), encoding="utf-8") as handle:
-                codes.update(CODE.findall(handle.read()))
+            with open(os.path.join(SOURCE_DIR, name),
+                      encoding="utf-8") as handle:
+                codes.update(error_codes(ast.parse(handle.read(), name)))
         with open(DOCS, encoding="utf-8") as handle:
             docs = handle.read()
         self.assertTrue(codes)

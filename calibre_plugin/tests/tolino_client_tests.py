@@ -18,8 +18,7 @@ from urllib.request import Request
 from .. import tolino as tolino_module
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..sync_data import READ_TAG
-from ..tolino import (TolinoClient, _download_token, report_error,
-                       sanitize_error)
+from ..tolino import TolinoClient, report_error, sanitize_error
 from ._support import LocalHTTP, local_tolino_endpoints
 
 HARDWARE = "11111111-1111-4111-8111-111111111111"
@@ -585,7 +584,9 @@ def download_backend(content_url):
 
 
 def credentials(request):
-    return {name.lower() for name in request.unredirected_hdrs}
+    """ALLE Kopfzeilen: regulaere und nicht weiterleitbare."""
+    return ({name.lower() for name in request.headers}
+            | {name.lower() for name in request.unredirected_hdrs})
 
 
 def content_opener(payload):
@@ -612,6 +613,11 @@ class DownloadContentTests(unittest.TestCase):
         self.assertEqual("https://cdn.pageplace.de/buch.epub",
                          request.full_url)
         self.assertIn("t_auth_token", credentials(request))
+        # Der Zugangstoken darf einer Weiterleitung NICHT folgen.
+        self.assertIn("t_auth_token",
+                      {name.lower() for name in request.unredirected_hdrs})
+        self.assertNotIn("t_auth_token",
+                         {name.lower() for name in request.headers})
 
     def test_a_foreign_cdn_gets_no_credentials(self):
         backend = download_backend("https://cdn.example.test/buch.epub")
@@ -619,7 +625,9 @@ class DownloadContentTests(unittest.TestCase):
         with write_client(backend) as client, patch(
                 "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
             self.assertEqual(b"PDF", client.download("d1"))
-        self.assertEqual(set(), credentials(seen[0]))
+        headers = credentials(seen[0])
+        for name in ("t_auth_token", "hardware_id", "reseller_id"):
+            self.assertNotIn(name, headers)
 
     
 
@@ -827,11 +835,11 @@ class DeleteAndDownloadTests(unittest.TestCase):
         with write_client(backend) as client, patch(
                 "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
             self.assertEqual(b"x", client.download("d1"))
-        expected = _download_token("d1")
-        self.assertEqual("/bosh/rest/cloud/downloadinfo/%s/%s/type/external-download"
-                         % (expected, expected),
-                         backend.server.requests[0]["path"])
-        self.assertNotIn("d1", expected)
+        # Literaler Wire-Wert: ein Fehler in der Kodierung darf den Sollwert
+        # nicht mitverfaelschen (base64("d1") = "ZDE=", URL-kodiert).
+        self.assertEqual(
+            "/bosh/rest/cloud/downloadinfo/ZDE%3D/ZDE%3D/type/external-download",
+            backend.server.requests[0]["path"])
 
     def test_a_download_without_a_link_is_an_error(self):
         backend = Backend()

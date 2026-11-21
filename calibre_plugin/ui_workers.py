@@ -55,8 +55,6 @@ class SyncWorker(QObject):
             if isinstance(item, dict) and item.get("uuid")
         }
         self.cancelled = False
-        # Cloud-Bestand für die Löschprüfung: einmal je Lauf gelesen.
-        self._cloud_ids = None
         # Der Worker ändert eine private Zustandskopie; `_state_base` ist der
         # Ausgangsstand, gegen den nur Änderungen gespeichert werden.
         snapshot = state if isinstance(state, dict) else {}
@@ -205,18 +203,18 @@ class SyncWorker(QObject):
     def _copy_is_gone(self, client, deliverable_id):
         """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten.
 
-        Der Bestand wird einmal je Lauf gelesen: eine Sammelaktion mit vielen
-        abgelehnten Löschungen soll nicht jedes Mal den ganzen Bestand holen.
-        Eine selbst gelöschte Kopie verwirft den gemerkten Stand wieder.
+        Nach einem mehrdeutigen Löschfehler zaehlt nur ein JETZT gelesener
+        Bestand: ein frueher gemerkter Stand koennte die Kopie noch enthalten,
+        obwohl sie nicht mehr da ist -- oder umgekehrt. Fehlt sie im lesbaren
+        Bestand, war nichts zu loeschen; ist er unlesbar, bleibt der Fehler.
         """
-        if self._cloud_ids is None:
-            try:
-                self._cloud_ids = {
-                    str(record.get("tolino_id")) for record in client.inventory()
-                    if isinstance(record, dict)}
-            except TolinoError:
-                return False
-        return str(deliverable_id) not in self._cloud_ids
+        try:
+            cloud_ids = {
+                str(record.get("tolino_id")) for record in client.inventory()
+                if isinstance(record, dict)}
+        except TolinoError:
+            return False
+        return str(deliverable_id) not in cloud_ids
 
     def _delete_or_skip(self, client, deliverable_id):
         """Return False when the cloud copy is already gone.
@@ -235,7 +233,6 @@ class SyncWorker(QObject):
                     client, deliverable_id):
                 return False
             raise
-        self._cloud_ids = None
         return True
 
     def _finish_delete(self, operation, deleted):

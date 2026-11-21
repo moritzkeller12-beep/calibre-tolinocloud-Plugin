@@ -308,7 +308,7 @@ class DeleteTests(WorkerCase):
         self.assertEqual([(7, "")], worker.updates)
         self.assertEqual(1, worker.outcome["deleted"])
 
-    def test_many_rejected_deletions_read_the_cloud_inventory_once(self):
+    def test_every_rejected_deletion_reads_a_fresh_cloud_inventory(self):
         state = {UUID: {"tolino_id": "d1", "calibre_id": 1},
                  OTHER: {"tolino_id": "d2", "calibre_id": 2}}
         client = FakeClient(delete_fail={"d1", "d2"},
@@ -316,8 +316,9 @@ class DeleteTests(WorkerCase):
         worker, _emitted = self.run_worker(
             client, state=state,
             removals=[(UUID, "d1"), (OTHER, "d2")])
-        # d2 fehlt im Bestand und ist damit erledigt, d1 steht noch da.
-        self.assertEqual(1, client.inventory_calls)
+        # Jede Ablehnung prueft den Bestand JETZT: d2 fehlt und ist damit
+        # erledigt, d1 steht noch da.
+        self.assertEqual(2, client.inventory_calls)
         self.assertEqual((1, 1), (worker.outcome["failed"],
                                   worker.outcome["skipped"]))
 
@@ -439,17 +440,17 @@ class FailureTests(WorkerCase):
              self.job(2, OTHER, "/zweit.epub")], [], state={})
         client = FakeClient(upload_results=["neu-1"],
                             on_upload=worker.cancel)
-        emitted = {}
-        worker.completed.connect(
-            lambda *args: emitted.setdefault("completed", args))
+        emitted = []
+        worker.completed.connect(lambda *args: emitted.append("completed"))
+        worker.failed.connect(lambda message: emitted.append("failed"))
         with patch.object(self.ui.workers.TOKEN_VAULT, "login",
                           return_value=client):
             worker.run()
         self.assertTrue(worker.outcome["cancelled"])
         self.assertEqual([(1, "neu-1")], worker.updates)
         self.assertEqual("not_started", worker.operations[1]["status"])
-        self.assertIn("completed", emitted)
-        self.assertNotIn("failed", emitted)
+        # Genau EIN terminales Signal -- und zwar kein Fehler.
+        self.assertEqual(["completed"], emitted)
 
     def test_a_failed_read_change_is_not_reported_or_stored_as_done(self):
         state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
@@ -514,6 +515,31 @@ class PersistenceTests(WorkerCase):
         self.run_worker(FakeClient(on_upload=foreign_change), jobs=jobs)
         self.assertEqual("extern",
                          config.account_by_name("A")["state"][UUID]["tolino_id"])
+
+    def test_a_foreign_write_to_the_replaced_copy_is_not_inherited(self):
+        """Waehrend `upload()` schreibt eine andere Instanz die ALTE ID.
+
+        Deren Lesestand und Sammlungen gehoeren zur ersetzten Kopie und
+        duerfen nicht im Eintrag mit der neuen tolino-ID landen.
+        """
+        start = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
+        config.save_account("A", {"refresh_token": "tok-A",
+                                  "state": start})
+
+        def foreign_change():
+            stored = config.account_by_name("A")["state"]
+            stored[UUID].update({"reading": {"read": True},
+                                 "collections": ["Serie"]})
+            config.save_account("A", {"state": stored})
+
+        self.run_worker(
+            FakeClient(upload_results=["neu-1"], on_upload=foreign_change),
+            jobs=[self.job(1, UUID, "/buch.epub", old_id="alt")],
+            state=start)
+        stored = config.account_by_name("A")["state"][UUID]
+        self.assertEqual("neu-1", stored["tolino_id"])
+        self.assertNotIn("reading", stored)
+        self.assertNotIn("collections", stored)
 
     def test_a_removed_account_is_not_created_by_a_late_callback(self):
         # Das letzte Konto laesst sich nicht entfernen: ein zweites muss her.

@@ -63,8 +63,16 @@ def _host(value):
 
 
 def partner_from_token(token):
-    """Buchhändler aus dem ``iss``-Claim eines Tokens (None = unbekannt)."""
-    host = _host((payload(token) or {}).get("iss"))
+    """Buchhändler aus dem ``iss``-Claim eines Tokens (None = unbekannt).
+
+    Ein Issuer, den ``urlsplit()`` nicht parsen kann (etwa kaputte
+    IPv6-Klammern), ist kein Buchhändler: der manuelle Rückfall bleibt so
+    erreichbar, statt den Aufrufer mit einem ``ValueError`` zu verlassen.
+    """
+    try:
+        host = _host((payload(token) or {}).get("iss"))
+    except ValueError:
+        return None
     return next((partner_id for partner_id, values in PARTNERS.items()
                  if host and _host(values["token_url"]) == host), None)
 

@@ -190,8 +190,17 @@ def grab_live_refresh(hardware, timeout=300, progress=None):
             grabbed = more
             saw_reader = True
             endpoint_misses = 0
-            result, error = _exchange_live_grab(
-                hardware, grabbed, rejected, progress)
+            try:
+                result, error = _exchange_live_grab(
+                    hardware, grabbed, rejected, progress)
+            except TolinoAuthError:
+                # Der B03-Pfad hat das Fenster bereits geschlossen.
+                raise
+            except Exception:
+                # Auch ein Netzwehler (N01) beim Tausch darf das Fenster und
+                # sein Temp-Profil nicht bis zum naechsten Start offen lassen.
+                _close_window()
+                raise
             if result is not None:
                 return result
             if error:

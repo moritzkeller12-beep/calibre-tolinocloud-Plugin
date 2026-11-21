@@ -171,9 +171,12 @@ class _Ws:
                     continue
                 message = bytes(fragmented)
                 opcode = fragmented_opcode
-                fragmented_opcode = None
             else:
                 continue
+            # Die Nachricht ist vollstaendig: ihre Bytes duerfen nicht ins
+            # Groessenlimit der naechsten Nachricht einfliessen.
+            fragmented = bytearray()
+            fragmented_opcode = None
             if opcode == 0x1:
                 try:
                     return json.loads(message.decode("utf-8"))

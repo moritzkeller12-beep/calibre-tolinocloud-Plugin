@@ -26,7 +26,10 @@ Bei A01 einmal neu bei tolino anmelden; fehlt PyCryptodome, zuerst das Paket
 installieren. Bei B01 entweder einen Chromium-Browser
 installieren oder Zugangstoken und Geräte-ID in den Einstellungen eintragen;
 unter Flatpak steht der passende Freigabebefehl im Calibre-Log. Bei B02 das
-Anmeldefenster offen lassen, bis die Bücherliste lädt. Bei B03 in den
-Einstellungen den Buchhändler wählen und den Zugang von Hand eintragen. Eine fehlgeschlagene
+Anmeldefenster offen lassen, bis die Bücherliste lädt. Bei B03 nennt der
+Dialog selbst beide manuellen Schritte: in den Einstellungen den Buchhändler
+wählen und den Zugang von Hand eintragen. Derselbe Satz steht in
+`partners.py`, weil Browser-Anmeldung und Handeingabe ihn teilen; die
+allgemeinen nächsten Schritte pflegt `ui_common.py`. Eine fehlgeschlagene
 Verbindung kann nach einem Timeout bereits den einmalig nutzbaren
 Zugangstoken verbraucht haben; erscheint danach A01, neu anmelden.

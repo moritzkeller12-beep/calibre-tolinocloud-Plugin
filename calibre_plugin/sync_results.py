@@ -162,6 +162,21 @@ def persist_sync_result(dialog, updates):
     dialog_account = str(getattr(dialog, "account_name", "") or "")
     account_name = str(getattr(worker, "account_name", None) or dialog_account)
     columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
+    # Die Bibliothek des Starts ist die einzige, in die dieser Lauf schreiben
+    # darf: sonst landen tolino-IDs in einer anderen Bibliothek.
+    start_scope = str(getattr(getattr(worker, "context", None),
+                             "library_scope", "") or "")
+    if start_scope:
+        try:
+            current_scope = library_scope(dialog.gui.current_db)
+        except Exception as exc:
+            current_scope = ""
+            log_warning("Bibliothek konnte nicht bestimmt werden: %s"
+                        % sanitize_error(exc))
+        if current_scope != start_scope:
+            log_warning("Bibliothek gewechselt: Sync-Lauf abgebrochen, es "
+                        "wurde nichts gespeichert.")
+            return ["Bibliothek gewechselt – Lauf abgebrochen"]
     failures = []
     writers = [
         ("id", "tolino-IDs",
@@ -250,21 +265,26 @@ def report_sync(dialog, outcome, failures, message="", cancelled=False):
     outcome = outcome if isinstance(outcome, dict) else {}
     detail = sync_result_detail(outcome)
     result = sync_result_text(outcome, "")
+    text_message = str(message or "")
+    # Eine konkrete Fehlermeldung hat Vorrang vor einem Abbruchflag: sonst
+    # verschluckte ein abgebrochener Lauf seinen eigenen Fehlergrund.
+    error_message = bool(text_message) and text_message != CANCEL_MESSAGE
+    cancellation = (bool(cancelled) or bool(outcome.get("cancelled"))
+                    or text_message == CANCEL_MESSAGE)
     if failures:
         text = ("Nicht gespeichert: %s. Cloud-Änderungen bleiben bestehen; "
                 "bitte den Bestand prüfen." % ", ".join(failures))
-        if message:
-            text = str(message) + "\n\n" + text
+        if text_message:
+            text = text_message + "\n\n" + text
         elif result:
             text += "\n\n" + result
         report(dialog, "fehler", "Speichern fehlgeschlagen", text,
                "Speichern fehlgeschlagen", detail)
-    elif (cancelled or outcome.get("cancelled")
-          or str(message) == CANCEL_MESSAGE):
+    elif cancellation and not error_message:
         report(dialog, "info", "Abgebrochen", sync_cancelled_text(outcome),
                "Lauf abgebrochen")
-    elif message:
-        text = str(message)
+    elif text_message:
+        text = text_message
         if outcome.get("failed") and result:
             text += "\n\n" + result
         report(dialog, "fehler", sync_failure_heading(outcome)[0], text,

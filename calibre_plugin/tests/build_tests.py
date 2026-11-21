@@ -87,6 +87,19 @@ class PluginArchiveTests(unittest.TestCase):
         # Nicht zerlegbarer Quelltext wird unverändert ausgeliefert.
         self.assertEqual(b"x = (\n", strip_source(b"x = (\n"))
 
+    def test_a_docstring_followed_by_a_comment_is_still_stripped(self):
+        source = (b"def answer():\n"
+                  b'    """Antwort."""  # Hinweis\n'
+                  b"    return 42\n")
+        stripped = strip_source(source)
+        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+        self.assertNotIn(b"Antwort", stripped)
+        self.assertNotIn(b"Hinweis", stripped)
+        self.assertEqual(b"    return 42", stripped.splitlines()[2])
+        namespace = {}
+        exec(compile(stripped, "<test>", "exec"), namespace)
+        self.assertEqual(42, namespace["answer"]())
+
     def test_the_documented_version_matches_the_plugin_version(self):
         """README und CHANGELOG zeigen dieselbe Nummer wie __init__.py."""
         tree = ast.parse((ROOT / "__init__.py").read_text(encoding="utf-8"))

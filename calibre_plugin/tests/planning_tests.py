@@ -26,6 +26,7 @@ from ..run_context import RunContext
 from ._support import CalibreDatabase
 
 UUID = "11111111-1111-4111-8111-111111111111"
+OTHER = "22222222-2222-4222-8222-222222222222"
 
 
 def book(**extra):
@@ -46,7 +47,10 @@ class PlanSyncTests(unittest.TestCase):
     """Hochladen: nur ausgewaehlte Buecher im bevorzugten Format."""
 
     def test_only_selected_book_with_preferred_format_is_planned(self):
-        metadata = {1: book(), 2: book(title="Nur PDF", formats=["PDF"])}
+        metadata = {1: book(), 2: book(title="Nur PDF", formats=["PDF"]),
+                    # EPUB, aber nicht ausgewaehlt: prueft den Auswahlfilter
+                    # unabhaengig vom Formatfilter.
+                    3: book(uuid=OTHER, title="Nicht gewählt")}
         uploads = plan_sync(metadata, {}, ["EPUB"], upload_book_ids={1, 2})
         self.assertEqual([(1, UUID, "EPUB", None)],
                          [(item.book_id, item.book_uuid, item.format_name,

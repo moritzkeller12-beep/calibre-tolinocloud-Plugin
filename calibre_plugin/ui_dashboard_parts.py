@@ -20,14 +20,18 @@ def _button(text, tip="", slot=None):
     return button
 
 
-def _combo(items=(), tip="", slot=None):
+def _combo(items=(), tip="", slot=None, activated=None):
     combo = QComboBox()
     for text, data in items:
         combo.addItem(text, data)
     if tip:
         combo.setToolTip(tip)
     if slot is not None:
+        # Nur echte Indexwechsel; programmgesteuertes Laden blockt Signale.
         combo.currentIndexChanged.connect(slot)
+    if activated is not None:
+        # Auch die bewusste erneute Auswahl desselben Eintrags zaehlt.
+        combo.activated.connect(activated)
     return combo
 
 
@@ -212,7 +216,7 @@ class DashboardParts:
             [(PARTNERS[pid]["name"], pid) for pid in sorted(PARTNERS)],
             "Nur nötig, wenn ein Zugang keinen Buchhändler nennt – sonst "
             "wird er beim Anmelden aus dem Token gelesen.",
-            slot=self._partner_selected)
+            slot=self._partner_selected, activated=self._partner_selected)
         for label, widget in (
                 ("Aktives Konto", self.account_select), ("", buttons),
                 ("Buchhändler (aus dem Token)", self.partner),

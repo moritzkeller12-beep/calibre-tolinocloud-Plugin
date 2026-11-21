@@ -179,15 +179,30 @@ class TokenTests(ConfigCase):
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
         self.assertFalse(config.save_refresh_token("A", "tok-B"))
 
-    def test_a_state_save_keeps_a_foreign_change_to_another_field(self):
+    def test_a_state_save_keeps_a_foreign_change_to_the_same_copy(self):
         config.save_account("A", {"refresh_token": "tok-A", "state": {
-            "b1": {"tolino_id": "alt", "reading": {"read": True}}}})
+            "b1": {"tolino_id": "alt", "calibre_id": 1,
+                   "reading": {"read": True}}}})
         # Ausgangsstand des Laufs: derselbe Eintrag, aber anderer Lesestand.
-        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
+        base = {"b1": {"tolino_id": "alt", "calibre_id": 1,
+                       "reading": {"read": False}}}
         self.assertTrue(config.save_state(
-            "A", {"b1": {"tolino_id": "neu", "reading": {"read": False}}},
-            base))
-        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
+            "A", {"b1": {"tolino_id": "alt", "calibre_id": 2,
+                         "reading": {"read": False}}}, base))
+        self.assertEqual({"tolino_id": "alt", "calibre_id": 2,
+                          "reading": {"read": True}},
+                         config.account_by_name("A")["state"]["b1"])
+
+    def test_a_copy_change_discards_the_old_copy_values(self):
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "alt", "reading": {"read": True},
+                   "collections": ["Serie"],
+                   "meta_verified_fp": "fp"}}})
+        # Nur die alte Kopie ist gespeichert; lokal ersetzt ein Upload sie.
+        base = {"b1": {"tolino_id": "alt"}}
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "neu"}}, base))
+        self.assertEqual({"tolino_id": "neu"},
                          config.account_by_name("A")["state"]["b1"])
 
     def test_a_field_removed_locally_disappears_from_the_stored_state(self):

@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 from .. import config
 from ..comparison import compare_inventory
-from ..library import TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN
+from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
+                      TOLINO_READ_COLUMN, library_scope)
 from ..run_context import RunContext
 from ._support import (CalibreDatabase, SyncThread, break_settings,
                        dashboard_stub, real_qt_stub, ui_module_for)
@@ -125,6 +126,32 @@ class PersistTests(OrchestrationCase):
         self.assertEqual([TOLINO_COLUMN],
                          [column for column, _values in database.api.writes])
 
+    def test_a_changed_library_is_not_written_and_the_abort_is_reported(self):
+        worker = self.worker()
+        worker.context = RunContext.from_values(
+            {"account_name": "A", "preferred_formats": ["EPUB"]},
+            columns={"id": True, "read": True, "progress": True},
+            library_scope="fremde-bibliothek")
+        database = full_database()
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual(["Bibliothek gewechselt – Lauf abgebrochen"], failures)
+        self.assertEqual([], database.api.writes)
+
+    def test_the_library_of_the_start_snapshot_is_written(self):
+        worker = self.worker()
+        database = full_database()
+        worker.context = RunContext.from_values(
+            {"account_name": "A", "preferred_formats": ["EPUB"]},
+            columns={"id": True, "read": True, "progress": True},
+            library_scope=library_scope(database))
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual([], failures)
+        self.assertEqual([TOLINO_COLUMN, TOLINO_READ_COLUMN,
+                          TOLINO_PROGRESS_COLUMN],
+                         [column for column, _values in database.api.writes])
+
 
 class MirrorTests(OrchestrationCase):
     """Kontowechsel zeigt genau ein Konto; unklare Werte leeren nichts."""
@@ -206,6 +233,25 @@ class ReportTests(OrchestrationCase):
         self.assertEqual("Teilweise fehlgeschlagen", recorded["error"][0][1])
         self.assertIn("Teilweise abgeschlossen", recorded["error"][0][2])
 
+    def test_an_error_message_wins_over_a_cancel_flag(self):
+        worker = self.worker()
+        dashboard = self.dashboard(worker, full_database())
+        with self.recorded() as recorded:
+            self.ui.sync_results.report_sync(
+                dashboard, {"failed": 1, "cancelled": True}, [],
+                "Netz weg", True)
+        self.assertEqual("Fehlgeschlagen", recorded["error"][0][1])
+        self.assertEqual([], recorded["info"])
+
+    def test_a_cancel_without_a_message_stays_a_cancel(self):
+        worker = self.worker()
+        dashboard = self.dashboard(worker, full_database())
+        with self.recorded() as recorded:
+            self.ui.sync_results.report_sync(
+                dashboard, {}, [], self.ui.common.CANCEL_MESSAGE, True)
+        self.assertIn("Abgebrochen", recorded["info"][0][1])
+        self.assertEqual([], recorded["error"])
+
     def test_a_closed_window_gets_no_dialog(self):
         worker = self.worker()
         dashboard = self.dashboard(worker, full_database(), visible=False)
@@ -262,10 +308,15 @@ class SettingsSaveTests(OrchestrationCase):
     def test_a_failed_settings_save_does_not_switch_the_account(self):
         config.save_account("A", {"refresh_token": "tok-A"}, active="A")
         config.save_account("B", {"refresh_token": "tok-B"})
+        combo = types.SimpleNamespace(
+            signals=[], index=1,
+            blockSignals=lambda value: combo.signals.append(value),
+            findData=lambda value: 0 if value == "A" else -1,
+            setCurrentIndex=lambda index: setattr(combo, "index", index))
         loaded = []
         dashboard = self.dashboard_for_save(
             account_name="A", account_names=["A", "B"], login_thread=None,
-            _hardware_edited=False,
+            account_select=combo, _hardware_edited=False,
             values=lambda: {"account_name": "A", "hardware_id": "hw",
                             config.PREFERRED_FORMATS: ["EPUB"]},
             load_values=lambda: loaded.append(True))
@@ -277,6 +328,8 @@ class SettingsSaveTests(OrchestrationCase):
         with patch.object(self.ui.dashboard, "error_dialog"):
             self.assertFalse(dashboard.switch_account("B"))
         self.assertEqual("A", dashboard.account_name)
+        # Die Auswahl geht zurueck, ohne die Felder neu zu laden.
+        self.assertEqual(([True, False], 0), (combo.signals, combo.index))
         self.assertEqual([], loaded)
         self.assertEqual("A", config.settings()["active_account"])
 
@@ -287,7 +340,7 @@ class SettingsSaveTests(OrchestrationCase):
         dashboard._save_visible_account = lambda: attrs.get("saved", True)
         for name in ("_save_failed", "_save_settings", "close_settings",
                      "new_account", "switch_account", "_partner_selected",
-                     "logout"):
+                     "_restore_account_choice", "logout"):
             setattr(dashboard, name, self.method(name)(dashboard))
         return dashboard
 
@@ -315,16 +368,17 @@ class SettingsSaveTests(OrchestrationCase):
         self.assertTrue(shown.called)
         self.assertEqual([], loaded)
 
-    def test_a_partner_choice_that_cannot_be_saved_is_reported(self):
-        config.save_account("A", {"refresh_token": "tok-A"})
+    def test_a_partner_choice_does_not_touch_the_stored_login(self):
+        config.save_account("A", {"refresh_token": "tok-A", "partner_id": 1})
         dashboard = self.dashboard_for_save(
             account_name="A", _partner_chosen=False,
             partner=types.SimpleNamespace(currentData=lambda: 2))
-        break_settings(self)
-        with patch.object(self.ui.dashboard, "error_dialog") as shown:
-            dashboard._partner_selected(1)
-        self.assertTrue(shown.called)
+        dashboard._partner_selected(1)
         self.assertTrue(dashboard._partner_chosen)
+        # Gespeichert wird die Auswahl erst mit einem Ersatz-Token; der
+        # vorhandene Thalia-Zugang bleibt unangetastet.
+        self.assertEqual(1, config.account_summary("A")["partner_id"])
+        self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
 
     def test_a_switch_that_cannot_be_stored_reloads_the_stored_account(self):
         config.save_account("A", {"refresh_token": "tok-A"}, active="A")
@@ -459,6 +513,15 @@ class ChainTests(ChainCase):
         self.assertEqual(1, len(dashboard.confirmed))
         self.assertEqual(1, len(dashboard.started))
 
+    def test_a_failed_settings_save_stops_the_comparison(self):
+        dashboard, _database = self.dashboard()
+        shown = []
+        dashboard._save_visible_account = lambda *args: False
+        dashboard._save_failed = shown.append
+        dashboard.start_sync()
+        self.assertEqual([], dashboard.snapshots)
+        self.assertEqual(["Einstellungen nicht gespeichert"], shown)
+
     def test_a_cancelled_comparison_starts_no_worker(self):
         dashboard, _database = self.dashboard()
         dashboard._confirm_comparison = lambda *args, **kwargs: None
@@ -509,6 +572,20 @@ class StageFailureTests(ChainCase):
 
     def test_another_error_leaves_the_status_line_alone(self):
         dashboard, messages = self.failed_stage("prepare", "Kein Netz")
+        self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
+        self.assertEqual("", dashboard.status.value)
+
+    def test_a_rejected_login_of_another_account_keeps_the_status_line(self):
+        dashboard, _database = self.dashboard()
+        dashboard.account_name = "B"
+        dashboard.prepare_thread = SyncThread()
+        dashboard.prepare_worker = types.SimpleNamespace(
+            cancelled=False, account_name="A")
+        messages = []
+        with patch("calibre_plugin.sync_results.error_dialog",
+                   lambda *args, **kwargs:
+                   messages.append(("error", args[1]))):
+            dashboard._prepare_failed("Anmeldung abgelehnt. (Code A01)")
         self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
         self.assertEqual("", dashboard.status.value)
 

@@ -140,6 +140,25 @@ class StartTests(LaunchCase):
         self.assertIs(stuck, cdp._LAUNCHED["process"])
         self.assertTrue(os.path.isdir(cdp._LAUNCHED["profile"]))
 
+    def test_a_group_that_outlives_the_wrapper_is_not_reported_as_stopped(self):
+        """Ein Browserkind ohne Port lebt weiter -- Erfolg erst nach seinem Ende."""
+        wrapper = FakeProcess(exits_on=("terminate",))
+        signals = []
+
+        def killpg(group, sig):
+            signals.append((group, sig))
+
+        with patch("calibre_plugin.cdp.os.killpg", side_effect=killpg), \
+                patch("calibre_plugin.cdp._group_alive", return_value=True), \
+                patch("calibre_plugin.cdp._endpoint_answers",
+                      return_value=False), \
+                patch("calibre_plugin.cdp.time.monotonic",
+                      side_effect=itertools.count(0, 100).__next__):
+            self.assertFalse(cdp._stop_launched_process(
+                wrapper, timeout=0.2, pgid=wrapper.pid, port=0))
+        self.assertEqual([(wrapper.pid, signal.SIGTERM),
+                          (wrapper.pid, signal.SIGKILL)], signals)
+
     def test_a_wrapper_that_exits_without_its_browser_stops_the_start(self):
         """Ein beendeter Flatpak-Wrapper sagt nichts ueber Chromium.
 
@@ -156,6 +175,7 @@ class StartTests(LaunchCase):
                       return_value=False), \
                 patch("calibre_plugin.cdp._endpoint_answers",
                       return_value=True), \
+                patch("calibre_plugin.cdp._group_alive", return_value=True), \
                 patch("calibre_plugin.cdp.os.killpg") as killpg:
             with self.assertRaises(TolinoAuthError) as caught:
                 cdp.launch_reader_window()
@@ -222,17 +242,20 @@ class GroupStopTests(unittest.TestCase):
 
     def test_a_dead_wrapper_still_gets_the_saved_group_killed(self):
         wrapper = FakeProcess()
-        signals, alive = [], {"orphan": False}
+        signals, alive = [], {"orphan": False, "group": True}
 
         def killpg(group, sig):
             signals.append((group, sig))
             if sig == signal.SIGTERM:
                 wrapper.alive = False   # der Wrapper gibt auf ...
+                alive["group"] = False  # ... die Gruppe selbst ist weg ...
                 alive["orphan"] = True  # ... sein Browserkind haelt den Port
             else:
                 alive["orphan"] = False
 
         with patch("calibre_plugin.cdp.os.killpg", side_effect=killpg), \
+                patch("calibre_plugin.cdp._group_alive",
+                      side_effect=lambda _group: alive["group"]), \
                 patch("calibre_plugin.cdp._endpoint_answers",
                       side_effect=lambda *args, **kwargs: alive["orphan"]):
             self.assertTrue(cdp._stop_launched_process(
@@ -243,6 +266,7 @@ class GroupStopTests(unittest.TestCase):
     def test_an_endpoint_that_keeps_answering_is_not_reported_as_stopped(self):
         wrapper = FakeProcess(exits_on=("terminate",))
         with patch("calibre_plugin.cdp.os.killpg"), \
+                patch("calibre_plugin.cdp._group_alive", return_value=False), \
                 patch("calibre_plugin.cdp._endpoint_answers",
                       return_value=True), \
                 patch("calibre_plugin.cdp.time.monotonic",

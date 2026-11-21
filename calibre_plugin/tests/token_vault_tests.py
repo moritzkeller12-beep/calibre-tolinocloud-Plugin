@@ -115,14 +115,16 @@ class LoginTests(VaultCase):
         self.assertEqual("", config.account_summary("A")["refresh_token"])
 
     def test_relogin_uses_the_token_saved_in_the_meantime(self):
-        server = TokenServer()
+        # Der Client kennt nach dem Login nur rot-1; der Server lehnt genau
+        # diesen ab. Nur der inzwischen NEUER gespeicherte Token kommt durch.
+        server = TokenServer(rejected={"rot-1"})
         config.save_account("A", {"refresh_token": "start"})
         with self.vault(server):
             client = TOKEN_VAULT.login("A")
-            # Der Keep-alive hat inzwischen rotiert.
-            config.save_refresh_token("A", "rot-1")
+            self.assertEqual("rot-1", client.refresh)
+            config.save_refresh_token("A", "rot-1-neu")
             self.assertEqual("rot-2", TOKEN_VAULT.relogin(client))
-        self.assertEqual(["start", "rot-1"], server.used_tokens)
+        self.assertEqual(["start", "rot-1-neu"], server.used_tokens)
         self.assertEqual("rot-2", config.account_summary("A")["refresh_token"])
 
 
@@ -183,10 +185,19 @@ class KeepaliveTests(VaultCase):
         self.assertEqual("rot-1", config.account_summary("B")["refresh_token"])
 
     def test_an_unreadable_settings_file_rotates_nothing(self):
-        config.save_account("A", {"refresh_token": "tok-A"})
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "tok-A",
+                                  "hardware_id": "hw-A"})
         with open(config.PREFERENCES.file_path, "w", encoding="utf-8") as handle:
             handle.write('{"accounts": [')
-        self.assertEqual(0, TOKEN_VAULT.keepalive_refresh())
+        with self.vault(server):
+            self.assertEqual(0, TOKEN_VAULT.keepalive_refresh())
+        # Ein Token, dessen Rotation nicht gespeichert werden kann, darf gar
+        # nicht erst eingeloest werden -- und das Konto bleibt unangetastet.
+        self.assertEqual([], server.server.requests)
+        account = config.account_summary("A")
+        self.assertEqual("tok-A", account["refresh_token"])
+        self.assertEqual("hw-A", account["hardware_id"])
 
     def test_the_thread_starts_once_and_stops_cleanly(self):
         self.addCleanup(stop_token_keepalive)

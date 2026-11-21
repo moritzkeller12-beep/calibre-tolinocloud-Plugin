@@ -1,9 +1,13 @@
 """Persistent settings and account state for tolino Cloud Sync."""
+import contextlib
 import copy
 import json
+import os
 import threading
 
 from calibre.utils.config import JSONConfig
+
+from .comparison import COPY_BOUND_FIELDS
 
 # Der bisherige Store bleibt der aktive Datenspeicher: Der neue Namespace
 # aus dem 0.1.08-Entwicklungsstand wurde vor der Verteilung zurückgenommen.
@@ -21,6 +25,68 @@ DEFAULT_ACCOUNT = {
 }
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
+# `_SETTINGS_LOCK` gilt nur in diesem Prozess. Eine zweite Calibre-Instanz
+# oder der Keep-alive schreibt dieselbe Datei; Laden, Vergleichen und Commit
+# muessen deshalb zusaetzlich prozessuebergreifend gesperrt sein.
+_LOCK_STATE = threading.local()
+
+
+def _lock_handle(handle):
+    """Advisory lock on the settings lock file, where the OS supports it.
+
+    Die Sperre endet mit dem Schliessen der Datei -- ein eigenes Entsperren
+    ist weder noetig noch plattformuebergreifend gleich.
+    """
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except (ImportError, OSError):
+        pass
+
+
+@contextlib.contextmanager
+def _settings_file_lock():
+    """Sperrdatei neben dem Speicher; im selben Thread wiederverwendbar.
+
+    Ohne Sperrdatei (unschreibbares Verzeichnis, fehlendes ``fcntl``) bleibt
+    nur `_SETTINGS_LOCK`: der eigene Prozess ist trotzdem geschuetzt, ein
+    fremder Schreiber aber nicht ausgeschlossen. Verschachtelte Aufrufe
+    (etwa `_write_account` aus `save_state`) sperren nicht erneut.
+    """
+    depth = getattr(_LOCK_STATE, "depth", 0)
+    if depth:
+        _LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _LOCK_STATE.depth = depth
+        return
+    handle, path = None, getattr(PREFERENCES, "file_path", None)
+    if path:
+        try:
+            handle = open(str(path) + ".lock", "a+b")
+            if os.fstat(handle.fileno()).st_size == 0:
+                # msvcrt sperrt ein Byte; eine leere Datei liesse sich nicht
+                # sperren.
+                handle.write(b"\0")
+                handle.flush()
+            _lock_handle(handle)
+        except OSError:
+            if handle is not None:
+                handle.close()
+            handle = None
+    _LOCK_STATE.depth = 1
+    try:
+        yield
+    finally:
+        _LOCK_STATE.depth = 0
+        if handle is not None:
+            handle.close()
 
 def _reload():
     """Datei bei jedem Zugriff lesen; nur ein vollstaendiger Stand zaehlt.
@@ -137,6 +203,16 @@ def _active_name(accounts):
     return active if active in names else accounts[0]["name"]
 
 
+def settings_readable():
+    """True nur, wenn der Einstellungsspeicher gerade lesbar ist.
+
+    Der Keep-alive darf einen einmal nutzbaren Token nicht einloesen, wenn
+    die Rotation anschliessend nicht gespeichert werden kann.
+    """
+    with _SETTINGS_LOCK:
+        return _reload()
+
+
 def settings():
     """Aktuelles Konto und Metadaten -- ohne Buchzustände zu kopieren."""
     with _SETTINGS_LOCK:
@@ -162,53 +238,60 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
     das aktive Konto neu bestimmt. Fehlt es, bleibt die Auswahl unberührt.
     ``reload=False`` nur für Aufrufer, die den Stand gerade selbst gelesen und
     zusammengefuehrt haben: sie schreiben genau diesen Stand.
+
+    Laden und Commit laufen unter beiden Sperren: ein fremder Prozess kann
+    die Datei zwischen `_reload()` und `_commit()` nicht mehr aendern.
     """
-    name = str(name or "").strip()
-    if not name or not isinstance(values, dict):
-        return False
-    # Eine zweite Calibre-Instanz oder der Keep-alive kann inzwischen
-    # geschrieben haben. `JSONConfig` haelt den Stand im Speicher und
-    # schreibt beim naechsten Commit ALLES zurueck -- ohne diesen Abgleich
-    # loescht der eigene, gecachte Stand fremde Token.
-    if reload and not _reload():
-        return False
-    raw = PREFERENCES.get("accounts", None)
-    records = list(raw) if isinstance(raw, list) else []
-    index = None
-    if records:
-        for position, (stored, _source) in enumerate(_named_accounts(records)):
-            if stored == name:
-                index = position
-                break
-    previous_active = ""
-    if active is not _UNSET:
-        previous_active = _active_name(
-            [{"name": stored} for stored, _source in _named_accounts(records)])
-    if index is None:
-        if not (create or (allow_virtual_default and not records
-                           and name == DEFAULT_ACCOUNT_NAME)):
+    with _SETTINGS_LOCK, _settings_file_lock():
+        name = str(name or "").strip()
+        if not name or not isinstance(values, dict):
             return False
-        records.append(_account(dict(values, name=name), name))
-    else:
-        record = dict(records[index])
-        record.update({key: values[key] for key in ACCOUNT_KEYS
-                       if key in values})
-        records[index] = _account(record, name,
-                                  copy_state="state" in values)
-    changes = {"accounts": records}
-    if active is not _UNSET:
-        names = {stored for stored, _source in _named_accounts(records)}
-        chosen = str(active or previous_active or "").strip()
-        changes["active_account"] = chosen if chosen in names else name
-    elif not PREFERENCES.get("active_account"):
-        changes["active_account"] = name
-    if preferred_formats is not None:
-        changes[PREFERRED_FORMATS] = list(preferred_formats)
-    # `update` umgeht Calibres committendes `__setitem__`: alle Werte landen
-    # in EINEM Schreibvorgang, statt halb geschrieben auf der Platte zu stehen.
-    PREFERENCES.update(changes)
-    _commit()
-    return True
+        # Eine zweite Calibre-Instanz oder der Keep-alive kann inzwischen
+        # geschrieben haben. `JSONConfig` haelt den Stand im Speicher und
+        # schreibt beim naechsten Commit ALLES zurueck -- ohne diesen Abgleich
+        # loescht der eigene, gecachte Stand fremde Token.
+        if reload and not _reload():
+            return False
+        raw = PREFERENCES.get("accounts", None)
+        records = list(raw) if isinstance(raw, list) else []
+        index = None
+        if records:
+            for position, (stored, _source) in enumerate(
+                    _named_accounts(records)):
+                if stored == name:
+                    index = position
+                    break
+        previous_active = ""
+        if active is not _UNSET:
+            previous_active = _active_name(
+                [{"name": stored}
+                 for stored, _source in _named_accounts(records)])
+        if index is None:
+            if not (create or (allow_virtual_default and not records
+                               and name == DEFAULT_ACCOUNT_NAME)):
+                return False
+            records.append(_account(dict(values, name=name), name))
+        else:
+            record = dict(records[index])
+            record.update({key: values[key] for key in ACCOUNT_KEYS
+                           if key in values})
+            records[index] = _account(record, name,
+                                      copy_state="state" in values)
+        changes = {"accounts": records}
+        if active is not _UNSET:
+            names = {stored for stored, _source in _named_accounts(records)}
+            chosen = str(active or previous_active or "").strip()
+            changes["active_account"] = chosen if chosen in names else name
+        elif not PREFERENCES.get("active_account"):
+            changes["active_account"] = name
+        if preferred_formats is not None:
+            changes[PREFERRED_FORMATS] = list(preferred_formats)
+        # `update` umgeht Calibres committendes `__setitem__`: alle Werte
+        # landen in EINEM Schreibvorgang, statt halb geschrieben auf der
+        # Platte zu stehen.
+        PREFERENCES.update(changes)
+        _commit()
+        return True
 
 
 def save_account(name, values, active=None, preferred_formats=None,
@@ -228,9 +311,24 @@ def save_account(name, values, active=None, preferred_formats=None,
             allow_virtual_default=True)
 
 
+def _copy_changed(before, entry):
+    """True, wenn die beiden Eintraege zu verschiedenen Cloud-Kopien gehoeren."""
+    old = str(before.get("tolino_id") or "").strip()
+    new = str(entry.get("tolino_id") or "").strip()
+    return old != new
+
+
 def _merged_entry(before, entry, current):
-    """Ein Buch feldweise zusammenfuehren: nur eigene Aenderungen setzen."""
+    """Ein Buch feldweise zusammenfuehren: nur eigene Aenderungen setzen.
+
+    Wechselt die tolino-ID, gehoert der gespeicherte Stand zu einer anderen
+    Cloud-Kopie: Lesestand, Sammlungen und Metadaten-Bestaetigung duerfen
+    nicht uebernommen werden, auch wenn sie nur dort stehen.
+    """
     merged = dict(current) if isinstance(current, dict) else {}
+    if isinstance(before, dict) and _copy_changed(before, entry):
+        for field in COPY_BOUND_FIELDS:
+            merged.pop(field, None)
     if not isinstance(before, dict):
         # Neues Buch: was inzwischen dazukam, bleibt stehen.
         merged.update(entry)
@@ -273,7 +371,7 @@ def save_state(account_name, state, base):
     werden deshalb nur geaenderte Felder. Ein hier entfernter Eintrag oder
     ein entferntes Feld verschwindet auch dann, wenn `base` es noch nennt.
     """
-    with _SETTINGS_LOCK:
+    with _SETTINGS_LOCK, _settings_file_lock():
         if not _reload():
             return False
         source = _account_record(account_name)
@@ -327,7 +425,7 @@ def _stored_token(account_name):
 
 def set_active_account(name):
     """Switch the active account without touching any stored values."""
-    with _SETTINGS_LOCK:
+    with _SETTINGS_LOCK, _settings_file_lock():
         # Wie bei jedem Schreiben: erst den fremden Stand laden, sonst
         # schreibt der eigene Cache fremde Token weg.
         if not _reload():
@@ -378,9 +476,10 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
     Konto, bleibt er unangetastet.
     """
     rejected = str(rejected_token or "").strip()
-    # Vergleich und Loeschen in einem Lock: sonst kann zwischen beiden
-    # Schritten genau die Rotation stattfinden, die geschuetzt werden soll.
-    with _SETTINGS_LOCK:
+    # Vergleich und Loeschen unter beiden Sperren: sonst kann zwischen beiden
+    # Schritten genau die Rotation stattfinden, die geschuetzt werden soll --
+    # auch aus einer zweiten Calibre-Instanz.
+    with _SETTINGS_LOCK, _settings_file_lock():
         current = _stored_token(account_name)
         if rejected and current and current != rejected:
             return False
@@ -402,7 +501,7 @@ def account_secrets(account_name):
 
 def remove_account(name):
     """Remove one saved account and select a remaining account."""
-    with _SETTINGS_LOCK:
+    with _SETTINGS_LOCK, _settings_file_lock():
         if not _reload():
             return False
         raw = PREFERENCES.get("accounts", None)

@@ -18,18 +18,27 @@ _SKIPPED = frozenset((tokenize.NL, tokenize.COMMENT, tokenize.INDENT,
 _BROKEN = (LookupError, SyntaxError, UnicodeDecodeError, tokenize.TokenError)
 
 
+def _next_significant(tokens, index):
+    """Typ des naechsten Tokens nach ``index``, Kommentare uebersprungen."""
+    for token in tokens[index + 1:]:
+        if token.type not in _SKIPPED:
+            return token.type
+    return None
+
+
 def _docstring_spans(tokens):
     """Spans aller Docstrings: ein String, der allein eine Anweisung bildet.
 
     Die Tokenfolge ist in jeder Python-Version gleich; ``ast`` fuehrt
-    Docstrings seit 3.14 nicht mehr als eigene Knoten.
+    Docstrings seit 3.14 nicht mehr als eigene Knoten. Ein Kommentar vor dem
+    abschliessenden NEWLINE (etwa ``# Hinweis`` hinter einem String) aendert
+    nichts an der Anweisungsgrenze und wird deshalb uebersprungen.
     """
     spans, previous = [], tokenize.ENCODING
     for index, token in enumerate(tokens):
-        following = tokens[index + 1].type if index + 1 < len(tokens) else None
         if (token.type == tokenize.STRING
                 and previous in (tokenize.NEWLINE, tokenize.ENCODING)
-                and following == tokenize.NEWLINE):
+                and _next_significant(tokens, index) == tokenize.NEWLINE):
             spans.append((token.start, token.end))
         if token.type not in _SKIPPED:
             previous = token.type

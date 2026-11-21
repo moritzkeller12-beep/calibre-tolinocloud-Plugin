@@ -9,7 +9,7 @@ import threading
 
 from .config import (account_secrets, account_summary,
                      clear_refresh_token_if_unchanged, save_hardware_id,
-                     save_refresh_token, settings)
+                     save_refresh_token, settings, settings_readable)
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
                      TolinoError, log_info, log_warning,
                      normalize_refresh_token, sanitize_error)
@@ -100,6 +100,12 @@ class TokenVault:
 
     def keepalive_refresh(self):
         """Refresh saved accounts; return only the number of rotations."""
+        if not settings_readable():
+            # Ein Token, dessen Rotation nicht gespeichert werden kann, waere
+            # verbrannt: lieber gar nicht erst einloesen.
+            log_warning("Tolino-Keep-alive: Einstellungen sind nicht "
+                        "lesbar; es wird nichts erneuert.")
+            return 0
         try:
             accounts = settings()["accounts"]
         except Exception:

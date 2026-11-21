@@ -420,34 +420,44 @@ class TolinoClient:
     def _request(self, url, method="GET", data=None, form=False,
                  authenticated=True, content_type=None, _extra_headers=None):
         retry = {"auth": True, "hardware": True, "waf": 0}
-        while True:
-            if authenticated and (not self.access
-                                  or time.time() >= self.expires_at):
-                self.login()
-            request = self._build_request(url, method, data, form,
-                                          authenticated, content_type,
-                                          _extra_headers)
-            try:
-                with urlopen(request, timeout=self.timeout) as response:
-                    self.last_error_text = None
-                    raw = response.read()
-            except HTTPError as exc:
-                # HTTPError is itself a response wrapper; leaving it open
-                # leaks the socket until the garbage collector runs.
+        try:
+            while True:
+                if authenticated and (not self.access
+                                      or time.time() >= self.expires_at):
+                    self.login()
+                request = self._build_request(url, method, data, form,
+                                              authenticated, content_type,
+                                              _extra_headers)
                 try:
-                    raw_detail = exc.read().decode("utf-8", "replace")
-                finally:
-                    exc.close()
-                # Kehrt nur zurück, wenn ein weiterer Versuch erlaubt ist.
-                self._handle_http_error(exc, raw_detail,
-                                        url, authenticated, retry)
-                continue
-            except OSError as exc:
-                _raise_transport_error(exc, (self.refresh, self.access))
-            data = _decode_json(raw)
-            # Erst eine lesbare Antwort bestaetigt die uebernommene Geraete-ID.
-            self._confirm_adopted_hardware()
-            return data
+                    with urlopen(request, timeout=self.timeout) as response:
+                        self.last_error_text = None
+                        raw = response.read()
+                except HTTPError as exc:
+                    # HTTPError is itself a response wrapper; leaving it open
+                    # leaks the socket until the garbage collector runs.
+                    try:
+                        raw_detail = exc.read().decode("utf-8", "replace")
+                    finally:
+                        exc.close()
+                    # Kehrt nur zurück, wenn ein weiterer Versuch erlaubt ist.
+                    self._handle_http_error(exc, raw_detail,
+                                            url, authenticated, retry)
+                    continue
+                except OSError as exc:
+                    _raise_transport_error(exc, (self.refresh, self.access))
+                data = _decode_json(raw)
+                # Nur ein AUTHENTIFIZIERTER Aufruf bestaetigt die uebernommene
+                # Geraete-ID: der Token-Tausch selbst nutzt sie nicht.
+                if authenticated:
+                    self._confirm_adopted_hardware()
+                return data
+        except Exception:
+            if retry["auth"] is False:
+                # Nach einer Token-Erneuerung hat der Wiederholungsversuch die
+                # uebernommene Geraete-ID nicht bewiesen: sie bleibt
+                # ungespeichert, statt spaeter zufaellig bestaetigt zu werden.
+                self._hw_adopted = False
+            raise
 
     def _build_request(self, url, method, data, form, authenticated,
                        content_type, extra_headers):

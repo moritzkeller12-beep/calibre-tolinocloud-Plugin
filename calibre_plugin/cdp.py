@@ -240,14 +240,34 @@ def _process_group(process, pgid=None):
     return pid if own_group else None
 
 
+def _group_alive(group):
+    """True, solange noch irgendein Prozess dieser Gruppe existiert."""
+    if not group:
+        return False
+    try:
+        os.killpg(int(group), 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _wait_for_group_exit(group, seconds):
+    """Warten, bis die Gruppe verschwindet -- hoechstens `seconds` lang."""
+    deadline = time.monotonic() + max(0.2, seconds)
+    while _group_alive(group) and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
 def _stop_launched_process(process, timeout=2, pgid=None, port=None):
     """Den gestarteten Browser samt Gruppe beenden; True, wenn er weg ist.
 
     Das Ende des Wrapper-Prozesses beweist nicht, dass das Browserkind weg
-    ist. Solange der DevTools-Port dieses Fensters antwortet, gilt die
-    Gruppe als lebendig und wird mit der beim Start gemerkten Gruppen-ID
-    hart beendet -- sonst bliebe der Port fuer den naechsten Kandidaten
-    belegt.
+    ist. Deshalb zaehlt erst, wenn Wrapper, gemerkte Prozessgruppe UND
+    DevTools-Port schweigen; die Gruppe wird dafuer immer beendet -- auch
+    wenn der Wrapper schon fertig ist. Sonst bliebe ein Browserkind (oder
+    der Port fuer den naechsten Kandidaten) am Leben.
     """
     group = _process_group(process, pgid)
     port = int(port or 0)
@@ -255,7 +275,9 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
     def leftover():
         if process.poll() is None:
             return True
-        return bool(port and _endpoint_answers(port, 0.2))
+        if port and _endpoint_answers(port, 0.2):
+            return True
+        return _group_alive(group)
 
     for hard in (False, True):  # erst hoeflich, dann bestimmt.
         if not leftover():
@@ -267,12 +289,22 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
                 process.kill()
             else:
                 process.terminate()
-            process.wait(timeout=max(0.2, timeout))
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError:
             pass
-    if leftover() and port:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0.2, timeout))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if group and not hard:
+            # Nach SIGTERM bekommt die Gruppe kurz Zeit, selbst zu enden.
+            _wait_for_group_exit(group, timeout)
+    if port:
         # Nach SIGKILL braucht der Port einen Moment, bis er geschlossen ist.
         _wait_for_endpoint_exit(port, 0.3)
+    if group:
+        # Das Browserkind einer beendeten Gruppe wird kurz zum Zombie.
+        _wait_for_group_exit(group, 0.3)
     return not leftover()
 
 

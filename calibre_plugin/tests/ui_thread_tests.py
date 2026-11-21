@@ -139,21 +139,26 @@ class AuthWorkerTests(unittest.TestCase):
         return worker, events
 
     def test_the_token_is_saved_before_completed_is_emitted(self):
-        saved = []
         worker, events = self.worker(
             grab_live_refresh={"return_value": ("neu", "hw", 1)},
-            save_credentials={"side_effect": lambda *args: saved.append(args)})
+            save_credentials={
+                "side_effect": lambda *args: events.append(("saved", args))})
         worker.run()
-        self.assertEqual([("A", "neu", "hw", 1)], saved)
-        self.assertEqual([("completed", "hw")], events)
+        # Ein gemeinsamer Recorder belegt die Reihenfolge: erst speichern,
+        # dann melden.
+        self.assertEqual([("saved", ("A", "neu", "hw", 1)),
+                          ("completed", "hw")], events)
 
     def test_a_failed_grab_reports_failed_without_completing(self):
-        worker, events = self.worker(
-            grab_live_refresh={"side_effect": TolinoAuthError("B02")},
-            save_credentials={"side_effect": AssertionError("darf nicht")})
-        worker.run()
-        self.assertEqual("failed", events[0][0])
-        self.assertNotIn("completed", [name for name, _value in events])
+        module = self.ui.auth_workers
+        error = TolinoAuthError("B02")
+        with patch.object(module, "grab_live_refresh", side_effect=error), \
+                patch.object(module, "save_credentials") as save:
+            worker, events = self.worker()
+            worker.run()
+        # Genau der urspruengliche Fehler erreicht das Signal.
+        self.assertEqual([("failed", error)], events)
+        save.assert_not_called()
 
     def test_a_failed_save_is_reported_and_not_completed(self):
         worker, events = self.worker(

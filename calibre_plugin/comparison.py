@@ -10,6 +10,11 @@ IGNORED_EXPLANATION = (
     "In Calibre als «ignoriert» markiert (#tolino_ignore) – wird weder "
     "hochgeladen noch abgeglichen.")
 
+# Felder, die zu genau EINER Cloud-Kopie gehoeren: nach einem Kopiewechsel
+# (neue tolino-ID) sind sie wertlos. Dieselbe Liste nutzen das Zuruecksetzen
+# eines Eintrags und der Drei-Wege-Merge der Einstellungen.
+COPY_BOUND_FIELDS = ("reading", "collections", "meta_verified_fp")
+
 
 def _metadata_text(metadata, name):
     return str(metadata.get(name) or "")
@@ -426,7 +431,7 @@ def reset_copy_state(entry):
     beantwortet nur «hat sich meine Datei geaendert?».
     """
     if isinstance(entry, dict):
-        for field in ("reading", "collections", "meta_verified_fp"):
+        for field in COPY_BOUND_FIELDS:
             entry.pop(field, None)
     return entry
 

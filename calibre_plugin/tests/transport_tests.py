@@ -218,6 +218,25 @@ class WebSocketTransportTests(unittest.TestCase):
         self.assertTrue(seen[0][2])
         self.assertEqual(b"ping-data", seen[0][3])
 
+    def test_a_completed_message_does_not_count_towards_the_next_one(self):
+        """Der Fragmentpuffer wird nach jeder Nachricht geleert."""
+        ws = _Ws(None)
+        frames = iter([
+            (False, 0x1, b'{"id": '),
+            (True, 0x0, b"1}"),
+            (True, 0x1, b'{"id": 2}'),
+        ])
+        pending = []
+
+        def read_frame(_deadline, pending_size=0):
+            pending.append(pending_size)
+            return next(frames)
+
+        with patch.object(_Ws, "_read_frame", staticmethod(read_frame)):
+            self.assertEqual({"id": 1}, ws.recv_json(timeout=1))
+            self.assertEqual({"id": 2}, ws.recv_json(timeout=1))
+        self.assertEqual([0, 7, 0], pending)
+
     def test_an_oversized_frame_is_rejected_before_reading_the_payload(self):
         """Die Laengenangabe darf keinen beliebig grossen Puffer anfordern."""
         left, right = socket.socketpair()

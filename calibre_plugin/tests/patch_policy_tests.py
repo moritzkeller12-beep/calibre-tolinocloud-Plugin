@@ -40,24 +40,80 @@ ALLOWED_NAMES = frozenset((
 SKIP_FILES = {"patch_policy_tests.py"}
 
 
-def _targets(node):
-    """Alle Patch-Ziele eines Tests."""
+def _call_name(call):
+    """Qualifizierter Name eines Aufrufs, etwa ``mock.patch``."""
+    parts, node = [], call.func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _patch_member(name):
+    """``patch``, ``patch.object`` oder ``patch.multiple`` -- sonst None.
+
+    Der Modul-Alias (``mock.patch``) ist bewusst egal: entscheidend ist das
+    Glied ``patch`` und die jeweils verwendete Form.
+    """
+    parts = name.split(".")
+    if len(parts) >= 2 and parts[-1] == "patch":
+        return "patch"
+    if len(parts) >= 3 and parts[-2] == "patch" and parts[-1] in (
+            "object", "multiple"):
+        return parts[-1]
+    return None
+
+
+def _patch_aliases(tree):
+    """Explizite Import-Aliase fuer ``patch`` (etwa ``mock_patch``)."""
+    aliases = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "patch":
+                    aliases.add(alias.asname or alias.name)
+    return aliases
+
+
+def _argument(value):
+    """Konstanter String-Wert eines Zielarguments, sonst None."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    return None
+
+
+def _targets(node, aliases=frozenset()):
+    """Zielargumente aller Patch-Aufrufe eines Tests.
+
+    Nur das jeweilige Ziel zaehlt: ``patch("os.name", "nt")`` patcht
+    ``os.name`` -- der Ersatzwert ``"nt"`` ist kein Ziel.
+    """
     found = []
     for child in ast.walk(node):
         if not isinstance(child, ast.Call):
             continue
-        name = getattr(child.func, "attr", None) or getattr(child.func, "id", None)
-        if name == "patch":
-            for arg in child.args:
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    found.append(arg.value)
-        elif (name == "object" and isinstance(child.func, ast.Attribute)
-              and getattr(child.func.value, "id", None) == "patch"):
-            # ``patch.object(modul, "name")``: das gepatchte Attribut ist das
-            # Ziel. Frueher wurde diese Form gar nicht geprueft.
-            if (len(child.args) >= 2
-                    and isinstance(child.args[1], ast.Constant)):
-                found.append(str(child.args[1].value))
+        name = _call_name(child)
+        member = _patch_member(name)
+        if member is None and name in aliases:
+            member = "patch"
+        if member == "patch":
+            args = child.args[:1] + [
+                keyword.value for keyword in child.keywords
+                if keyword.arg == "target"]
+        elif member == "object":
+            # ``patch.object(modul, "name")``: das Attribut ist das Ziel.
+            args = child.args[1:2] + [
+                keyword.value for keyword in child.keywords
+                if keyword.arg == "attribute"]
+        elif member == "multiple":
+            args = child.args[:1] + [
+                keyword.value for keyword in child.keywords
+                if keyword.arg == "target"]
+        else:
+            continue
+        found.extend(item for item in map(_argument, args) if item)
     return found
 
 
@@ -79,9 +135,10 @@ def offenders():
         functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
         for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
             functions.extend(n for n in cls.body if isinstance(n, ast.FunctionDef))
+        aliases = _patch_aliases(tree)
         for func in functions:
             # Auch Helfer zaehlen: ein Patch im Helfer umgeht die Regel sonst.
-            for target in _targets(func):
+            for target in _targets(func, aliases):
                 if not _allowed(target):
                     found.append((filename, func.name, target))
     return found

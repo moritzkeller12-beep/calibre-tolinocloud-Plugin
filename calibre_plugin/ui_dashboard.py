@@ -111,6 +111,23 @@ class SyncDashboard(DashboardParts, QDialog):
             return
         self.switch_account(combo.itemData(index))
 
+    def _restore_account_choice(self):
+        """Beide Kontoauswahlen zurückstellen -- ohne Signal.
+
+        Die Felder werden bewusst NICHT neu geladen: ungespeicherte Eingaben
+        bleiben so stehen.
+        """
+        for widget in (getattr(self, "account_select", None),
+                       getattr(self, "account_quick", None)):
+            if widget is None:
+                continue
+            try:
+                widget.blockSignals(True)
+                widget.setCurrentIndex(
+                    max(0, widget.findData(self.account_name)))
+            finally:
+                widget.blockSignals(False)
+
     def switch_account(self, name):
         """Konto wechseln – erst sichern, dann das neue laden.
 
@@ -136,6 +153,8 @@ class SyncDashboard(DashboardParts, QDialog):
         if not self._save_settings():
             # Ein nicht gesicherter Stand darf keinen Kontowechsel auslösen:
             # sonst überschreibt der nächste Schreibvorgang ihn endgültig.
+            # Die Auswahl geht zurück; die Felder bleiben unangetastet.
+            self._restore_account_choice()
             return False
         if not set_active_account(name):
             self._save_failed("Konto nicht gewechselt")
@@ -295,12 +314,13 @@ class SyncDashboard(DashboardParts, QDialog):
         return self._typed_refresh() or self._stored_refresh()
 
     def _partner_selected(self, _index=None):
-        """Buchhändler von Hand wählen – nur für Zugänge ohne ``iss``."""
+        """Buchhändler von Hand wählen – nur für Zugänge ohne ``iss``.
+
+        Die Auswahl bleibt lokal: gespeichert wird sie erst zusammen mit
+        einem Ersatz-Token über `store_refresh()`. So bleibt der vorhandene
+        Thalia-Token eines Kontos unangetastet.
+        """
         self._partner_chosen = True
-        partner_id = self.partner.currentData()
-        if (self.account_name and partner_id and not save_account(
-                self.account_name, {"partner_id": partner_id})):
-            self._save_failed("Buchhändler nicht gespeichert")
 
     def store_refresh(self, refresh):
         """Token im Konto speichern -- der einzige Ort fuer Zugangsdaten.
@@ -323,11 +343,16 @@ class SyncDashboard(DashboardParts, QDialog):
         if not self._hardware_edited:
             account = account_summary(self.account_name) or {}
             hardware = str(account.get("hardware_id") or "")
-        if not save_credentials(
+        try:
+            stored = save_credentials(
                 self.account_name, token,
                 hardware or normalize_hardware_id(self.hardware.text())
                 or hardware_id(),
-                partner_id):
+                partner_id)
+        except OSError:
+            # Ein E/A-Fehler ist derselbe Fall wie ein Rückgabewert ``False``.
+            stored = False
+        if not stored:
             # Nicht gespeichert: die Eingabe bleibt stehen, damit sie nicht
             # verloren geht, und der Aufrufer meldet keinen Erfolg.
             error_dialog(self, "Token nicht gespeichert",
@@ -521,7 +546,11 @@ class SyncDashboard(DashboardParts, QDialog):
         if not self._effective_refresh():
             self.status.setText("Nicht angemeldet.")
             return
-        self._save_visible_account(values)
+        if not self._save_visible_account(values):
+            # Ohne gesicherten Stand darf kein Refresh-Token verbraucht
+            # werden; die Meldung nennt den Speicherfehler.
+            self._save_failed("Einstellungen nicht gespeichert")
+            return
         database = self.gui.current_db
         context = RunContext.from_values(
             values, column_state(database),
@@ -577,6 +606,11 @@ class SyncDashboard(DashboardParts, QDialog):
         """Abbruch melden oder Fehler protokollieren und anzeigen."""
         worker = getattr(self, worker_name, None)
         cancelled = bool(getattr(worker, "cancelled", False))
+        # Das Startkonto VOR finish() lesen: der Laufzustand wird dort
+        # abgeraeumt, die angezeigte Auswahl kann sich aber geaendert haben.
+        run_account = (getattr(worker, "account_name", None)
+                       or getattr(getattr(worker, "context", None),
+                                  "account_name", None))
         finish()
         if cancelled or str(message) == CANCEL_MESSAGE:
             report(self, "info", "Abgebrochen",
@@ -585,10 +619,13 @@ class SyncDashboard(DashboardParts, QDialog):
         log_warning(log_text + sanitize_error(message))
         shown = report(self, "fehler", "Vergleich fehlgeschlagen",
                        str(message), log_text.rstrip(": "))
-        if shown and needs_new_login(message):
+        same_account = (run_account is None
+                        or str(run_account) == str(self.account_name or ""))
+        if shown and needs_new_login(message) and same_account:
             # Ein abgelehnter Zugang darf nicht als «Angemeldet.» stehen
             # bleiben: sonst sieht der Nutzer keinen Grund, sich neu
-            # anzumelden, und der Vergleich scheitert immer wieder.
+            # anzumelden, und der Vergleich scheitert immer wieder. Ein
+            # inzwischen angezeigtes anderes Konto bleibt unberuehrt.
             self.status.setText(NEEDS_LOGIN_STATUS)
 
     @gui_guard

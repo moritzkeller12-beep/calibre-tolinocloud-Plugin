@@ -47,5 +47,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tolino_cloud_sync
+          name: tolino_cloud_sync-${{ matrix.python-version }}
           path: tolino_cloud_sync.zip
