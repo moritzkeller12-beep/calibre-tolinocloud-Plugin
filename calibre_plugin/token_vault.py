@@ -9,7 +9,8 @@ import threading
 
 from .config import (account_secrets, account_summary,
                      clear_refresh_token_if_unchanged, save_hardware_id,
-                     save_refresh_token, settings, settings_readable)
+                     save_refresh_token, settings, settings_readable,
+                     settings_write_lock)
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
                      TolinoError, log_info, log_warning,
                      normalize_refresh_token, sanitize_error)
@@ -26,10 +27,14 @@ class TokenVault:
     def __init__(self):
         self._lock = threading.Lock()
 
-    def login(self, account_name, partner_id=None, lock_timeout=5):
+    def login(self, account_name, partner_id=None, lock_timeout=5, *,
+              keepalive=False):
         """Login-Client; der Shop steht im Konto (``partner_id`` nur als Ersatz).
         """
-        with self._held_lock(lock_timeout):
+        guard = settings_write_lock() if keepalive else contextlib.nullcontext()
+        with self._held_lock(lock_timeout), guard:
+            if keepalive and not settings_readable():
+                raise TolinoError("Einstellungen konnten nicht gelesen werden.")
             values = self._stored_credentials(account_name)
             client = TolinoClient(
                 partner_id or values["partner_id"], values["hardware_id"],
@@ -121,7 +126,7 @@ class TokenVault:
                     account.get("refresh_token")):
                 continue
             try:
-                self.login(name, lock_timeout=0)
+                self.login(name, lock_timeout=0, keepalive=True)
                 rotated += 1
             except Exception as exc:
                 # Ein belegter Lock ist kein Fehler -- nächste Runde.

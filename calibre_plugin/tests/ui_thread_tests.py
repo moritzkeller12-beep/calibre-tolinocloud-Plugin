@@ -7,6 +7,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from .. import config
 from ..errors import TolinoAuthError
 from ._support import SyncThread, real_qt_stub, ui_module_for
 
@@ -150,15 +151,15 @@ class AuthWorkerTests(unittest.TestCase):
                           ("completed", "hw")], events)
 
     def test_a_failed_grab_reports_failed_without_completing(self):
-        module = self.ui.auth_workers
+        self.addCleanup(setattr, config, "PREFERENCES", config.PREFERENCES)
+        config.PREFERENCES = config.JSONConfig("failed-browser-login")
+        config.save_account("A", {"refresh_token": "alt"})
         error = TolinoAuthError("B02")
-        with patch.object(module, "grab_live_refresh", side_effect=error), \
-                patch.object(module, "save_credentials") as save:
-            worker, events = self.worker()
-            worker.run()
+        worker, events = self.worker(grab_live_refresh={"side_effect": error})
+        worker.run()
         # Genau der urspruengliche Fehler erreicht das Signal.
         self.assertEqual([("failed", error)], events)
-        save.assert_not_called()
+        self.assertEqual("alt", config.account_summary("A")["refresh_token"])
 
     def test_a_failed_save_is_reported_and_not_completed(self):
         worker, events = self.worker(

@@ -26,8 +26,8 @@ DEFAULT_ACCOUNT = {
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
 # `_SETTINGS_LOCK` gilt nur in diesem Prozess. Eine zweite Calibre-Instanz
-# oder der Keep-alive schreibt dieselbe Datei; Laden, Vergleichen und Commit
-# muessen deshalb zusaetzlich prozessuebergreifend gesperrt sein.
+# kann dieselbe Datei schreiben. Wo verfuegbar, schuetzt eine zusaetzliche
+# Dateisperre das Laden, Vergleichen und Schreiben.
 _LOCK_STATE = threading.local()
 
 
@@ -45,7 +45,7 @@ def _lock_handle(handle):
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    except (ImportError, OSError):
+    except ImportError:
         pass
 
 
@@ -75,18 +75,27 @@ def _settings_file_lock():
                 # sperren.
                 handle.write(b"\0")
                 handle.flush()
-            _lock_handle(handle)
         except OSError:
             if handle is not None:
                 handle.close()
             handle = None
-    _LOCK_STATE.depth = 1
     try:
+        if handle is not None:
+            _lock_handle(handle)
+        _LOCK_STATE.depth = 1
         yield
     finally:
         _LOCK_STATE.depth = 0
         if handle is not None:
             handle.close()
+
+
+@contextlib.contextmanager
+def settings_write_lock():
+    """Keep cooperating settings writers out until a rotation is saved."""
+    with _SETTINGS_LOCK, _settings_file_lock():
+        yield
+
 
 def _reload():
     """Datei bei jedem Zugriff lesen; nur ein vollstaendiger Stand zaehlt.
@@ -321,21 +330,26 @@ def _copy_changed(before, entry):
 def _merged_entry(before, entry, current):
     """Ein Buch feldweise zusammenfuehren: nur eigene Aenderungen setzen.
 
-    Wechselt die tolino-ID, gehoert der gespeicherte Stand zu einer anderen
-    Cloud-Kopie: Lesestand, Sammlungen und Metadaten-Bestaetigung duerfen
-    nicht uebernommen werden, auch wenn sie nur dort stehen.
+    Kopiegebundene Felder duerfen nur von der resultierenden ID stammen.
     """
     merged = dict(current) if isinstance(current, dict) else {}
-    if isinstance(before, dict) and _copy_changed(before, entry):
+    changes = (set(entry) if not isinstance(before, dict) else
+               {field for field in set(before) | set(entry)
+                if before.get(field) != entry.get(field)})
+    if "tolino_id" in changes:
+        result_copy = entry
+    else:
+        result_copy = merged
+    if _copy_changed(merged, result_copy):
         for field in COPY_BOUND_FIELDS:
             merged.pop(field, None)
-    if not isinstance(before, dict):
-        # Neues Buch: was inzwischen dazukam, bleibt stehen.
-        merged.update(entry)
-        return merged
-    for field in set(before) | set(entry):
-        if before.get(field) == entry.get(field):
-            continue  # lokal unveraendert: der gespeicherte Wert gilt
+    local_matches = not _copy_changed(entry, result_copy)
+    local_replaced = isinstance(before, dict) and _copy_changed(before, entry)
+    for field in changes:
+        if field in COPY_BOUND_FIELDS and (
+                not local_matches or (local_replaced and field not in entry)):
+            # Eine Entfernung beim Kopiewechsel betrifft nur die alte Kopie.
+            continue
         if field in entry:
             merged[field] = entry[field]
         else:

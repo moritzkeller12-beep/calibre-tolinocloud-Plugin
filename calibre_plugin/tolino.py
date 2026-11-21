@@ -344,7 +344,9 @@ class TolinoClient:
             if stored is False:
                 # Ein nicht gespeicherter Einmal-Token ist verloren: die
                 # Anmeldung darf nicht als gelungen gelten.
-                self.access = None
+                self.refresh = self.access = None
+                self.expires_at = 0
+                self._notify_token_rejected(previous_refresh)
                 raise TolinoAuthError(
                     "Der erneuerte Zugang konnte nicht gespeichert werden. " + RELOGIN,
                     code="A01",
@@ -415,7 +417,7 @@ class TolinoClient:
                 callback(rejected)
             except Exception as exc:
                 log_warning("Abgelehnter Token konnte nicht geloescht "
-                            "werden: %s" % sanitize_error(exc))
+                            "werden: %s" % sanitize_error(exc, (rejected,)))
 
     def _request(self, url, method="GET", data=None, form=False,
                  authenticated=True, content_type=None, _extra_headers=None):
@@ -448,13 +450,13 @@ class TolinoClient:
                 data = _decode_json(raw)
                 # Nur ein AUTHENTIFIZIERTER Aufruf bestaetigt die uebernommene
                 # Geraete-ID: der Token-Tausch selbst nutzt sie nicht.
-                if authenticated:
+                if authenticated and not retry["hardware"]:
                     self._confirm_adopted_hardware()
                 return data
         except Exception:
-            if retry["auth"] is False:
-                # Nach einer Token-Erneuerung hat der Wiederholungsversuch die
-                # uebernommene Geraete-ID nicht bewiesen: sie bleibt
+            if not retry["auth"] or not retry["hardware"]:
+                # Der Wiederholungsversuch hat die uebernommene
+                # Geraete-ID nicht bewiesen: sie bleibt
                 # ungespeichert, statt spaeter zufaellig bestaetigt zu werden.
                 self._hw_adopted = False
             raise

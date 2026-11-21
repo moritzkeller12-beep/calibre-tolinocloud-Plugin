@@ -100,6 +100,19 @@ class PluginArchiveTests(unittest.TestCase):
         exec(compile(stripped, "<test>", "exec"), namespace)
         self.assertEqual(42, namespace["answer"]())
 
+    def test_a_module_docstring_does_not_precede_a_future_import(self):
+        source = (b'"""Modul.\nBeschreibung."""  # Hinweis\n'
+                  b"from __future__ import annotations\n"
+                  b"class Empty:\n"
+                  b'    """Klasse."""\n'
+                  b"def empty():\n"
+                  b'    """Funktion."""\n')
+        stripped = strip_source(source)
+        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+        self.assertEqual([], _docstring_owners(stripped))
+        self.assertNotIn(b"Hinweis", stripped)
+        compile(stripped, "<test>", "exec")
+
     def test_the_documented_version_matches_the_plugin_version(self):
         """README und CHANGELOG zeigen dieselbe Nummer wie __init__.py."""
         tree = ast.parse((ROOT / "__init__.py").read_text(encoding="utf-8"))

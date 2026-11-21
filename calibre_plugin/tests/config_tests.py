@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from .. import config
 
@@ -148,6 +149,23 @@ class ExternalChangeTests(ConfigCase):
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
 
 
+    @unittest.skipIf(os.name == "nt", "POSIX file lock")
+    def test_a_failed_file_lock_does_not_write_settings(self):
+        config.save_account("A", {"refresh_token": "tok-A"})
+        with patch("fcntl.flock", side_effect=OSError("Sperre belegt")):
+            with self.assertRaisesRegex(OSError, "Sperre belegt"):
+                config.save_refresh_token("A", "tok-B")
+        self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
+
+    def test_a_missing_lock_file_does_not_prevent_a_write(self):
+        config.save_account("A", {"refresh_token": "tok-A"})
+        lock_path = str(self.file_path()) + ".lock"
+        os.remove(lock_path)
+        os.mkdir(lock_path)
+        self.assertTrue(config.save_refresh_token("A", "tok-B"))
+        self.assertEqual("tok-B", config.account_summary("A")["refresh_token"])
+
+
 class TokenTests(ConfigCase):
     """Token-Rotation: nur der abgelehnte Token darf verschwinden."""
 
@@ -214,14 +232,38 @@ class TokenTests(ConfigCase):
         self.assertEqual({"tolino_id": "alt"},
                          config.account_by_name("A")["state"]["b1"])
 
-    def test_a_new_book_keeps_fields_a_foreign_run_already_stored(self):
-        config.save_account("A", {"refresh_token": "tok-A", "state": {
-            "b1": {"tolino_id": "extern", "reading": {"read": True}}}})
-        self.assertTrue(config.save_state(
-            "A", {"b1": {"tolino_id": "neu", "calibre_id": 7}}, {}))
-        self.assertEqual({"tolino_id": "neu", "calibre_id": 7,
-                          "reading": {"read": True}},
-                         config.account_by_name("A")["state"]["b1"])
+    def test_a_new_book_keeps_foreign_reading_only_for_the_same_copy(self):
+        for stored_id in ("neu", "extern"):
+            with self.subTest(stored_id=stored_id):
+                reading = {"read": True}
+                config.save_account("A", {"state": {
+                    "b1": {"tolino_id": stored_id, "reading": reading}}})
+                self.assertTrue(config.save_state(
+                    "A", {"b1": {"tolino_id": "neu", "calibre_id": 7}}, {}))
+                expected = {"tolino_id": "neu", "calibre_id": 7}
+                if stored_id == "neu":
+                    expected["reading"] = reading
+                self.assertEqual(expected,
+                                 config.account_by_name("A")["state"]["b1"])
+
+    def test_a_local_reading_change_applies_only_to_its_own_copy(self):
+        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
+        local = {"b1": {"tolino_id": "alt", "reading": {"read": True}}}
+        for stored_id in ("alt", "neu"):
+            with self.subTest(stored_id=stored_id):
+                stored = {"tolino_id": stored_id, "reading": {"read": False}}
+                config.save_account("A", {"state": {"b1": stored}})
+                self.assertTrue(config.save_state("A", local, base))
+                self.assertEqual(local["b1"] if stored_id == "alt" else stored,
+                                 config.account_by_name("A")["state"]["b1"])
+
+    def test_a_replacement_keeps_reading_already_saved_for_the_new_copy(self):
+        stored = {"tolino_id": "neu", "reading": {"read": True}}
+        config.save_account("A", {"state": {"b1": stored}})
+        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
+        self.assertTrue(config.save_state("A", {"b1": {"tolino_id": "neu"}},
+                                          base))
+        self.assertEqual(stored, config.account_by_name("A")["state"]["b1"])
 
 
 if __name__ == "__main__":

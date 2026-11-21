@@ -62,9 +62,10 @@ def _strip_comments(text, tokens):
 
 
 def _blank_docstrings(text, spans):
-    """Docstrings durch ``0`` ersetzen; die Zeilenzahl bleibt gleich.
+    """Docstrings entfernen; die Zeilenzahl bleibt gleich.
 
-    Das ``0`` haelt eine Klasse am Leben, deren Rumpf nur ein Docstring war.
+    Ein Platzhalter haelt Klassen- und Funktionsruempfe gueltig. Auf
+    Modulebene darf vor einem Future-Import keine Anweisung stehen.
     """
     starts, offset = [], 0
     for line in text.splitlines(keepends=True):
@@ -75,7 +76,8 @@ def _blank_docstrings(text, spans):
         start = starts[start_row - 1] + start_col
         end = starts[end_row - 1] + end_col
         kept = "".join(char for char in text[start:end][1:] if char in "\r\n")
-        text = text[:start] + "0" + kept + text[end:]
+        placeholder = "0" if start_col else ""
+        text = text[:start] + placeholder + kept + text[end:]
     return text
 
 

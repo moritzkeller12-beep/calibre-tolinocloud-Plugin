@@ -212,6 +212,8 @@ class SyncWorker(QObject):
             cloud_ids = {
                 str(record.get("tolino_id")) for record in client.inventory()
                 if isinstance(record, dict)}
+        except TolinoAuthError:
+            raise
         except TolinoError:
             return False
         return str(deliverable_id) not in cloud_ids

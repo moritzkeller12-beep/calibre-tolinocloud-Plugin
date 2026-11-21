@@ -20,6 +20,7 @@ ALLOWED_PATTERNS = (
     r"^(urllib|http|ssl|socket|subprocess|shutil|os|sys|time|datetime|"
     r"logging|copy|json|re|zipfile|pathlib|io)\.",
     r"^(qt|PyQt5|PyQt6|calibre)\.",
+    r"^fcntl\.flock$",                    # Dateisperre
     r"\.time\.(monotonic|time|sleep)$",   # Uhr
 )
 
@@ -31,6 +32,7 @@ ALLOWED_NAMES = frozenset((
     "check_stored_login",              # Zugangspruefung (Netz)
     "urlopen", "_http_get_json",       # HTTP
     "Popen", "which", "find_browsers", "in_flatpak_sandbox",  # Browser
+    "grab_live_refresh",               # interaktiver Browser-Login
     "info_dialog", "error_dialog",     # modale Qt-Dialoge
     "getText",                         # modaler Eingabedialog (Qt)
     "_aes",                            # optionale Krypto-Abhaengigkeit
@@ -60,7 +62,7 @@ def _patch_member(name):
     parts = name.split(".")
     if len(parts) >= 2 and parts[-1] == "patch":
         return "patch"
-    if len(parts) >= 3 and parts[-2] == "patch" and parts[-1] in (
+    if len(parts) >= 2 and parts[-2] == "patch" and parts[-1] in (
             "object", "multiple"):
         return parts[-1]
     return None
@@ -96,8 +98,11 @@ def _targets(node, aliases=frozenset()):
             continue
         name = _call_name(child)
         member = _patch_member(name)
-        if member is None and name in aliases:
-            member = "patch"
+        if member is None:
+            root, _, suffix = name.partition(".")
+            if root in aliases:
+                member = {"": "patch", "object": "object",
+                          "multiple": "multiple"}.get(suffix)
         if member == "patch":
             args = child.args[:1] + [
                 keyword.value for keyword in child.keywords
@@ -146,6 +151,21 @@ def offenders():
 
 class PatchPolicyTests(unittest.TestCase):
     """Kein Test darf die Logik wegpatchen, die er pruefen soll."""
+
+    def test_detects_direct_aliased_and_qualified_patch_members(self):
+        tree = ast.parse("""
+from unittest.mock import patch, patch as replace
+patch.object(module, "direct_object")
+patch.multiple("direct_multiple", value=1)
+replace.object(module, attribute="alias_object")
+replace.multiple(target="alias_multiple", value=1)
+mock.patch.object(module, "qualified_object")
+mock.patch.multiple("qualified_multiple", value=1)
+""")
+        self.assertEqual(
+            ["direct_object", "direct_multiple", "alias_object",
+             "alias_multiple", "qualified_object", "qualified_multiple"],
+            _targets(tree, _patch_aliases(tree)))
 
     def test_only_system_boundaries_are_patched(self):
         bad = offenders()

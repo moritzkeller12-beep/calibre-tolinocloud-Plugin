@@ -212,57 +212,43 @@ class RetryTests(unittest.TestCase):
         self.assertIsNone(client.access)
 
     def test_a_token_callback_that_returns_false_stops_the_login(self):
+        spent = []
         with token_server() as server, local_tolino_endpoints(server.origin):
             client = TolinoClient(1, HARDWARE, refresh="start",
-                                  token_callback=lambda _token: False)
+                                  token_callback=lambda _token: False,
+                                  token_rejected_callback=spent.append)
             with self.assertRaises(TolinoAuthError) as caught:
                 client.login()
         self.assertEqual("A01", caught.exception.code)
         self.assertIsNone(client.access)
+        self.assertIsNone(client.refresh)
+        self.assertEqual(["start"], spent)
 
-    def test_an_adopted_id_is_saved_once_after_a_successful_call(self):
+    def test_a_failed_update_retry_does_not_confirm_hardware_on_inventory(self):
         saved = []
-        with LocalHTTP(token_and(devices_reply)) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
+        update_ids = []
+
+        def responder(method, path, headers, payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            if path.endswith("/devices/list"):
+                return devices_reply(method, path, headers, payload)
+            if "/inventory/delta" in path:
+                return 200, JSON_HEADERS, b'{"PublicationInventory": {"edata": []}}'
+            if method == "GET":
+                return 200, JSON_HEADERS, b'{"metadata": {}}'
+            update_ids.append(headers["hardware_id"])
+            return 400, {}, b"{}"
+
+        with LocalHTTP(responder) as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, "old-hardware", refresh="start",
                                   hardware_callback=saved.append)
-            client.hardware = "adopted"
-            client._hw_adopted = True
-            client.fetch_hardware_id()
-        self.assertEqual(["adopted"], saved)
-        self.assertFalse(client._hw_adopted)
-
-    def test_a_hardware_callback_that_returns_false_is_reported(self):
-        with LocalHTTP(token_and(devices_reply)) as server, \
-                local_tolino_endpoints(server.origin), patch(
-                    "calibre_plugin.tolino.log_warning") as warned:
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  hardware_callback=lambda _hardware: False)
-            client.hardware = "adopted"
-            client._hw_adopted = True
-            client.fetch_hardware_id()
-        self.assertEqual(1, warned.call_count)
-        self.assertIn("Geräte-ID", str(warned.call_args[0][0]))
-
-    def test_a_failed_call_keeps_the_adopted_id_unsaved(self):
-        def refuse(_method, _path, _headers, _payload):
-            return 500, {}, b""
-
-        saved = []
-        with LocalHTTP(token_and(refuse)) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  hardware_callback=saved.append)
-            client.hardware = "adopted"
-            client._hw_adopted = True
-            # Gueltiger Zugang: der Fehler kommt aus dem Geraete-Aufruf, nicht
-            # aus einer Anmeldung (die wuerde die ID schon bestaetigen).
-            client.access = "acc-1"
-            client.expires_at = time.time() + 3600
             with self.assertRaises(TolinoError):
-                client.fetch_hardware_id()
+                client.update_metadata("book", {"title": "Neu"})
+            self.assertEqual([], client.inventory())
+        self.assertEqual(["old-hardware", HARDWARE], update_ids)
         self.assertEqual([], saved)
-        self.assertTrue(client._hw_adopted)
+        self.assertFalse(client._hw_adopted)
 
     def test_a_400_adopts_the_registered_id_and_repeats_the_call(self):
         """Unbekannte Geräte-ID: die registrierte übernehmen, dann einmal neu."""
@@ -292,6 +278,25 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(3, calls["devices"])
         self.assertEqual([HARDWARE, HARDWARE, "reg-1"], sent)
         self.assertEqual(["reg-1"], saved)
+
+    def test_a_hardware_callback_that_returns_false_is_reported(self):
+        calls = 0
+
+        def responder(method, path, headers, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return 400, {}, b"{}"
+            return devices_reply(method, path, headers, payload)
+
+        with LocalHTTP(token_and(responder)) as server, \
+                local_tolino_endpoints(server.origin), patch(
+                    "calibre_plugin.tolino.log_warning") as warned:
+            client = TolinoClient(1, "old-hardware", refresh="start",
+                                  hardware_callback=lambda _hardware: False)
+            client.fetch_hardware_id()
+        self.assertEqual(1, warned.call_count)
+        self.assertIn("Geräte-ID", str(warned.call_args[0][0]))
 
     def test_a_400_for_the_registered_id_is_not_retried(self):
         """Schon die registrierte ID: der 400 hat eine andere Ursache."""

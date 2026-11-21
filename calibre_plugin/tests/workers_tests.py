@@ -255,10 +255,12 @@ class ReadingAndMetadataTests(WorkerCase):
                    MetaUpdateRecord(2, OTHER, "d2", {"title": "Neu"})]
         metadata = {1: {"uuid": UUID, "title": "Neu", "authors": "",
                         "isbn": "", "formats": ["EPUB"]}}
+        state = {UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}}
+        config.save_account("A", {"state": state})
         worker = self.ui.workers.SyncWorker(
             self.context, [], [], meta_updates=records,
             metadata=metadata,
-            state={UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}})
+            state=state)
         client = FakeClient(on_metadata=worker.cancel)
         with patch.object(self.ui.workers.TOKEN_VAULT, "login",
                           return_value=client):
@@ -280,9 +282,11 @@ class ReadingAndMetadataTests(WorkerCase):
         self.assertIn("Grenzwelten", worker.state[UUID]["collections"])
 
     def test_a_cancelled_collection_phase_keeps_the_confirmed_series(self):
+        state = {UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}}
+        config.save_account("A", {"state": state})
         worker = self.ui.workers.SyncWorker(
             self.context, [], [],
-            state={UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}},
+            state=state,
             series_map={UUID: "Erste", OTHER: "Zweite"})
         client = FakeClient(on_collection=worker.cancel)
         with patch.object(self.ui.workers.TOKEN_VAULT, "login",
@@ -292,7 +296,7 @@ class ReadingAndMetadataTests(WorkerCase):
         self.assertEqual([("d1", "Erste")], client.collections)
         stored = config.account_by_name("A")["state"]
         self.assertEqual(["Erste"], stored[UUID]["collections"])
-        self.assertEqual([UUID], list(stored))
+        self.assertEqual({"tolino_id": "d2"}, stored[OTHER])
 
 
 class DeleteTests(WorkerCase):
@@ -340,6 +344,16 @@ class DeleteTests(WorkerCase):
             client, state=state, removals=[(UUID, "d1")])
         self.assertEqual(1, worker.outcome["failed"])
         self.assertEqual("d1", worker.state[UUID]["tolino_id"])
+
+    def test_an_auth_failure_while_checking_a_deletion_stops_the_run(self):
+        state = {UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}}
+        client = FakeClient(delete_fail={"d1"},
+                            inventory_error=TolinoAuthError("Sitzung beendet",
+                                                           code="A01"))
+        _worker, emitted = self.run_worker(
+            client, state=state, removals=[(UUID, "d1"), (OTHER, "d2")])
+        self.assertEqual(["d1"], client.deleted)
+        self.assertIn("Sitzung beendet", emitted["failed"])
 
     def test_a_copy_still_in_the_cloud_keeps_the_error_and_the_state(self):
         state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}

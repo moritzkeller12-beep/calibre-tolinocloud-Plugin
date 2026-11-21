@@ -199,6 +199,24 @@ class KeepaliveTests(VaultCase):
         self.assertEqual("tok-A", account["refresh_token"])
         self.assertEqual("hw-A", account["hardware_id"])
 
+    def test_settings_that_break_mid_round_stop_the_next_exchange(self):
+        config.save_account("A", {"refresh_token": "tok-A", "hardware_id": "a"})
+        config.save_account("B", {"refresh_token": "tok-B", "hardware_id": "b"})
+        path = config.PREFERENCES.file_path
+
+        class InterruptedStoreServer(TokenServer):
+            def respond(self, *request):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write('{"accounts": [')
+                return super().respond(*request)
+
+        server = InterruptedStoreServer()
+        with self.vault(server):
+            self.assertEqual(0, TOKEN_VAULT.keepalive_refresh())
+        self.assertEqual(["tok-A"], server.used_tokens)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual('{"accounts": [', handle.read())
+
     def test_the_thread_starts_once_and_stops_cleanly(self):
         self.addCleanup(stop_token_keepalive)
         thread = start_token_keepalive(interval=3600)
