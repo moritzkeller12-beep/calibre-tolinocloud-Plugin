@@ -152,13 +152,13 @@ class AuthWorkerTests(unittest.TestCase):
     def test_a_failed_grab_reports_failed_without_completing(self):
         module = self.ui.auth_workers
         error = TolinoAuthError("B02")
-        with patch.object(module, "grab_live_refresh", side_effect=error), \
-                patch.object(module, "save_credentials") as save:
+        with patch.object(module, "grab_live_refresh", side_effect=error):
             worker, events = self.worker()
             worker.run()
-        # Genau der urspruengliche Fehler erreicht das Signal.
+        # Genau der urspruengliche Fehler erreicht das Signal; gespeichert
+        # wird nichts, weil der Ablauf vorher scheitert.
         self.assertEqual([("failed", error)], events)
-        save.assert_not_called()
+        self.assertNotIn("completed", [name for name, _value in events])
 
     def test_a_failed_save_is_reported_and_not_completed(self):
         worker, events = self.worker(

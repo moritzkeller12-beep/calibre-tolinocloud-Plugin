@@ -33,6 +33,8 @@ ALLOWED_NAMES = frozenset((
     "Popen", "which", "find_browsers", "in_flatpak_sandbox",  # Browser
     "info_dialog", "error_dialog",     # modale Qt-Dialoge
     "getText",                         # modaler Eingabedialog (Qt)
+    "grab_live_refresh",               # Browserfenster (Anmeldung)
+    "_lock_handle", "_read_frame",     # Sperrdatei (Dateisystem), Rahmen
     "_aes",                            # optionale Krypto-Abhaengigkeit
     "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL",  # Anmelde-Zeitfenster
 ))
@@ -51,17 +53,19 @@ def _call_name(call):
     return ".".join(reversed(parts))
 
 
-def _patch_member(name):
+def _patch_member(name, aliases=frozenset()):
     """``patch``, ``patch.object`` oder ``patch.multiple`` -- sonst None.
 
     Der Modul-Alias (``mock.patch``) ist bewusst egal: entscheidend ist das
-    Glied ``patch`` und die jeweils verwendete Form.
+    Glied ``patch`` und die jeweils verwendete Form. Direkt importiert
+    (``from unittest.mock import patch``) fehlt das Modul davor; dann traegt
+    der Import-Alias die Erkennung.
     """
     parts = name.split(".")
-    if len(parts) >= 2 and parts[-1] == "patch":
+    if parts[-1] == "patch":
         return "patch"
-    if len(parts) >= 3 and parts[-2] == "patch" and parts[-1] in (
-            "object", "multiple"):
+    if (parts[-1] in ("object", "multiple") and len(parts) >= 2
+            and (parts[-2] == "patch" or parts[-2] in aliases)):
         return parts[-1]
     return None
 
@@ -95,7 +99,7 @@ def _targets(node, aliases=frozenset()):
         if not isinstance(child, ast.Call):
             continue
         name = _call_name(child)
-        member = _patch_member(name)
+        member = _patch_member(name, aliases)
         if member is None and name in aliases:
             member = "patch"
         if member == "patch":

@@ -34,9 +34,10 @@ Testabhängigkeiten: `pycryptodome`, `PyQt6`.
 Die Einstellungsdatei wird bei jedem Lese- und Schreibzugriff erneut geprüft:
 ein abgeschlossener Schreibvorgang eines zweiten Calibre-Fensters wird
 übernommen, halb geschriebene oder nicht lesbare Stände nie. Gleichzeitige
-Schreibvorgänge zweier Calibre-Prozesse sind dagegen nicht serialisiert –
-der Lock ist prozesslokal, ein echter Schreibwettlauf lässt sich damit nicht
-ausschliessen.
+Schreibvorgänge zweier Calibre-Prozesse serialisiert eine Sperrdatei neben
+der Einstellungsdatei; scheitert das Sperren selbst, bricht der Schreibvorgang
+ab. Lässt sich die Sperrdatei gar nicht anlegen (etwa ein unschreibbares
+Verzeichnis), bleibt es beim prozesslokalen Lock.
 
 Die Suite ist bewusst klein und prüft Nutzerabläufe statt Interna:
 Anmeldung und Konten, Vergleich und Planung, den tolino-Client gegen einen

@@ -142,7 +142,8 @@ class StartTests(LaunchCase):
 
     def test_a_group_that_outlives_the_wrapper_is_not_reported_as_stopped(self):
         """Ein Browserkind ohne Port lebt weiter -- Erfolg erst nach seinem Ende."""
-        wrapper = FakeProcess(exits_on=("terminate",))
+        # Der Wrapper ist schon fertig; nur die Gruppe haelt den Lauf auf.
+        wrapper = FakeProcess(alive=False, exits_on=())
         signals = []
 
         def killpg(group, sig):

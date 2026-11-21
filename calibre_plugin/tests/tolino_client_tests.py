@@ -244,7 +244,7 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(1, warned.call_count)
         self.assertIn("Geräte-ID", str(warned.call_args[0][0]))
 
-    def test_a_failed_call_keeps_the_adopted_id_unsaved(self):
+    def test_a_failed_call_does_not_confirm_the_adopted_id(self):
         def refuse(_method, _path, _headers, _payload):
             return 500, {}, b""
 
@@ -262,7 +262,9 @@ class RetryTests(unittest.TestCase):
             with self.assertRaises(TolinoError):
                 client.fetch_hardware_id()
         self.assertEqual([], saved)
-        self.assertTrue(client._hw_adopted)
+        # Auch ein spaeterer erfolgreicher Bestandsaufruf darf die ID nicht
+        # mehr bestaetigen: die Wiederholung dieses Aufrufs ist gescheitert.
+        self.assertFalse(client._hw_adopted)
 
     def test_a_400_adopts_the_registered_id_and_repeats_the_call(self):
         """Unbekannte Geräte-ID: die registrierte übernehmen, dann einmal neu."""
@@ -651,12 +653,15 @@ class RedirectTests(unittest.TestCase):
                          followed.full_url)
 
     def test_a_plain_http_target_is_refused(self):
+        response = types.SimpleNamespace(closed=False)
+        response.close = lambda: setattr(response, "closed", True)
         request = Request("https://cdn.example.test/buch.epub")
         with self.assertRaises(TolinoApiError) as caught:
             self.handler().redirect_request(
-                request, None, 302, {}, {},
+                request, response, 302, {}, {},
                 "http://cdn.example.test/neu.epub")
         self.assertEqual("N02", caught.exception.code)
+        self.assertTrue(response.closed)
 
 
 class ReadMarkTests(unittest.TestCase):

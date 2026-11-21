@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from .. import config
 
@@ -205,6 +206,27 @@ class TokenTests(ConfigCase):
         self.assertEqual({"tolino_id": "neu"},
                          config.account_by_name("A")["state"]["b1"])
 
+    def test_a_stored_entry_of_the_new_copy_keeps_its_values(self):
+        """Der andere Lauf hat die Ersatzkopie schon gelesen: nicht verwerfen."""
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
+        base = {"b1": {"tolino_id": "alt"}}
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "neu"}}, base))
+        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
+                         config.account_by_name("A")["state"]["b1"])
+
+    def test_a_local_change_does_not_move_to_a_foreign_copy(self):
+        """Lokale Lesedaten der alten Kopie bleiben bei der neuen Kopie weg."""
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
+        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "alt", "reading": {"read": True}}},
+            base))
+        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
+                         config.account_by_name("A")["state"]["b1"])
+
     def test_a_field_removed_locally_disappears_from_the_stored_state(self):
         config.save_account("A", {"refresh_token": "tok-A", "state": {
             "b1": {"tolino_id": "alt", "collections": ["Serie"]}}})
@@ -214,14 +236,30 @@ class TokenTests(ConfigCase):
         self.assertEqual({"tolino_id": "alt"},
                          config.account_by_name("A")["state"]["b1"])
 
-    def test_a_new_book_keeps_fields_a_foreign_run_already_stored(self):
+    def test_a_new_book_keeps_stored_values_of_the_same_copy(self):
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "neu", "calibre_id": 7}}, {}))
+        self.assertEqual({"tolino_id": "neu", "reading": {"read": True},
+                          "calibre_id": 7},
+                         config.account_by_name("A")["state"]["b1"])
+
+    def test_a_new_book_does_not_inherit_reading_of_another_copy(self):
         config.save_account("A", {"refresh_token": "tok-A", "state": {
             "b1": {"tolino_id": "extern", "reading": {"read": True}}}})
         self.assertTrue(config.save_state(
             "A", {"b1": {"tolino_id": "neu", "calibre_id": 7}}, {}))
-        self.assertEqual({"tolino_id": "neu", "calibre_id": 7,
-                          "reading": {"read": True}},
+        self.assertEqual({"tolino_id": "neu", "calibre_id": 7},
                          config.account_by_name("A")["state"]["b1"])
+
+    def test_a_failing_lock_aborts_the_write(self):
+        """Ungesperrt zu schreiben koennte einen fremden Stand ersetzen."""
+        config.save_account("A", {"refresh_token": "tok-A"})
+        with patch("calibre_plugin.config._lock_handle",
+                   side_effect=OSError("kein Lock")):
+            self.assertFalse(config.save_refresh_token("A", "tok-B"))
+        self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
 
 
 if __name__ == "__main__":

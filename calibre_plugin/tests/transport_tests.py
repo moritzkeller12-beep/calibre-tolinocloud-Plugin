@@ -218,11 +218,11 @@ class WebSocketTransportTests(unittest.TestCase):
         self.assertTrue(seen[0][2])
         self.assertEqual(b"ping-data", seen[0][3])
 
-    def test_a_completed_message_does_not_count_towards_the_next_one(self):
+    def test_a_skipped_message_does_not_count_towards_the_next_one(self):
         """Der Fragmentpuffer wird nach jeder Nachricht geleert."""
         ws = _Ws(None)
         frames = iter([
-            (False, 0x1, b'{"id": '),
+            (False, 0x2, b'{"id": '),
             (True, 0x0, b"1}"),
             (True, 0x1, b'{"id": 2}'),
         ])
@@ -233,7 +233,8 @@ class WebSocketTransportTests(unittest.TestCase):
             return next(frames)
 
         with patch.object(_Ws, "_read_frame", staticmethod(read_frame)):
-            self.assertEqual({"id": 1}, ws.recv_json(timeout=1))
+            # Die fragmentierte Binaernachricht wird im selben Aufruf
+            # uebersprungen; zurueck kommt die Textnachricht danach.
             self.assertEqual({"id": 2}, ws.recv_json(timeout=1))
         self.assertEqual([0, 7, 0], pending)
 

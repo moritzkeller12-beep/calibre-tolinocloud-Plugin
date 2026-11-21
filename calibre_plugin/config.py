@@ -35,18 +35,18 @@ def _lock_handle(handle):
     """Advisory lock on the settings lock file, where the OS supports it.
 
     Die Sperre endet mit dem Schliessen der Datei -- ein eigenes Entsperren
-    ist weder noetig noch plattformuebergreifend gleich.
+    ist weder noetig noch plattformuebergreifend gleich. Ein Fehler beim
+    Sperren wird weitergegeben: ungesperrt zu schreiben koennte fremde Token
+    ueberschreiben. Fehlt der Sperrmechanismus ganz, bleibt es beim
+    Prozess-Lock.
     """
-    try:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    except (ImportError, OSError):
-        pass
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
 
 
 @contextlib.contextmanager
@@ -55,34 +55,41 @@ def _settings_file_lock():
 
     Ohne Sperrdatei (unschreibbares Verzeichnis, fehlendes ``fcntl``) bleibt
     nur `_SETTINGS_LOCK`: der eigene Prozess ist trotzdem geschuetzt, ein
-    fremder Schreiber aber nicht ausgeschlossen. Verschachtelte Aufrufe
-    (etwa `_write_account` aus `save_state`) sperren nicht erneut.
+    fremder Schreiber aber nicht ausgeschlossen -- dann liefert der Block
+    ``True``. Scheitert dagegen das Sperren selbst, liefert er ``False`` und
+    der Aufrufer schreibt nicht. Verschachtelte Aufrufe (etwa
+    `_write_account` aus `save_state`) sperren nicht erneut.
     """
     depth = getattr(_LOCK_STATE, "depth", 0)
     if depth:
         _LOCK_STATE.depth = depth + 1
         try:
-            yield
+            yield True
         finally:
             _LOCK_STATE.depth = depth
         return
-    handle, path = None, getattr(PREFERENCES, "file_path", None)
+    handle, path, locked = None, getattr(PREFERENCES, "file_path", None), True
     if path:
         try:
             handle = open(str(path) + ".lock", "a+b")
-            if os.fstat(handle.fileno()).st_size == 0:
-                # msvcrt sperrt ein Byte; eine leere Datei liesse sich nicht
-                # sperren.
-                handle.write(b"\0")
-                handle.flush()
-            _lock_handle(handle)
         except OSError:
-            if handle is not None:
-                handle.close()
             handle = None
+        if handle is not None:
+            try:
+                if os.fstat(handle.fileno()).st_size == 0:
+                    # msvcrt sperrt ein Byte; eine leere Datei liesse sich
+                    # nicht sperren.
+                    handle.write(b"\0")
+                    handle.flush()
+                _lock_handle(handle)
+            except ImportError:
+                pass
+            except OSError:
+                handle.close()
+                handle, locked = None, False
     _LOCK_STATE.depth = 1
     try:
-        yield
+        yield locked
     finally:
         _LOCK_STATE.depth = 0
         if handle is not None:
@@ -240,9 +247,12 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
     zusammengefuehrt haben: sie schreiben genau diesen Stand.
 
     Laden und Commit laufen unter beiden Sperren: ein fremder Prozess kann
-    die Datei zwischen `_reload()` und `_commit()` nicht mehr aendern.
+    die Datei zwischen `_reload()` und `_commit()` nicht mehr aendern. Ist
+    die Sperrdatei nicht zu halten, wird nichts geschrieben.
     """
-    with _SETTINGS_LOCK, _settings_file_lock():
+    with _SETTINGS_LOCK, _settings_file_lock() as locked:
+        if not locked:
+            return False
         name = str(name or "").strip()
         if not name or not isinstance(values, dict):
             return False
@@ -311,35 +321,54 @@ def save_account(name, values, active=None, preferred_formats=None,
             allow_virtual_default=True)
 
 
-def _copy_changed(before, entry):
-    """True, wenn die beiden Eintraege zu verschiedenen Cloud-Kopien gehoeren."""
-    old = str(before.get("tolino_id") or "").strip()
-    new = str(entry.get("tolino_id") or "").strip()
-    return old != new
+def _cloud_id(entry):
+    """Die tolino-ID eines Eintrags; leer heisst «keine Kopie»."""
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("tolino_id") or "").strip()
 
 
 def _merged_entry(before, entry, current):
     """Ein Buch feldweise zusammenfuehren: nur eigene Aenderungen setzen.
 
-    Wechselt die tolino-ID, gehoert der gespeicherte Stand zu einer anderen
-    Cloud-Kopie: Lesestand, Sammlungen und Metadaten-Bestaetigung duerfen
-    nicht uebernommen werden, auch wenn sie nur dort stehen.
+    Kopiegebundene Felder (Lesestand, Sammlungen, Metadaten-Bestaetigung)
+    gelten nur fuer die Kopie, auf die der Eintrag am Ende zeigt. Wechselt
+    die tolino-ID, bleibt der gespeicherte Stand der alten Kopie aussen vor
+    -- und der eigene ebenfalls, falls der gespeicherte Stand schon auf die
+    neue Kopie zeigt. Nur bei gleicher Cloud-ID werden diese Felder
+    uebernommen.
     """
     merged = dict(current) if isinstance(current, dict) else {}
-    if isinstance(before, dict) and _copy_changed(before, entry):
+    base = before if isinstance(before, dict) else {}
+    id_changed = base.get("tolino_id") != entry.get("tolino_id")
+    # Die Kopie, auf die der zusammengefuehrte Eintrag zeigen wird.
+    copy_id = _cloud_id(entry) if id_changed else (
+        _cloud_id(merged) or _cloud_id(entry))
+    if _cloud_id(current) != copy_id:
+        # Der gespeicherte Stand gehoert zu einer anderen Cloud-Kopie.
         for field in COPY_BOUND_FIELDS:
             merged.pop(field, None)
-    if not isinstance(before, dict):
-        # Neues Buch: was inzwischen dazukam, bleibt stehen.
-        merged.update(entry)
-        return merged
-    for field in set(before) | set(entry):
-        if before.get(field) == entry.get(field):
+    local_copy = _cloud_id(entry) == copy_id
+    for field in set(base) | set(entry):
+        if field == "tolino_id" or base.get(field) == entry.get(field):
             continue  # lokal unveraendert: der gespeicherte Wert gilt
+        if field in COPY_BOUND_FIELDS and not local_copy:
+            # Der eigene Wert beschreibt eine andere Kopie als das Ergebnis.
+            continue
         if field in entry:
             merged[field] = entry[field]
         else:
             merged.pop(field, None)
+    # Neue Kopie oder noch unbekannter gespeicherter Eintrag: die tolino-ID
+    # gehoert zum Eintrag, nicht zu einer Kopie-Feld-Aenderung. Eine schon
+    # gespeicherte ID bleibt stehen, sonst kaeme die eigene Kopie zurueck.
+    if id_changed:
+        if "tolino_id" in entry:
+            merged["tolino_id"] = entry["tolino_id"]
+        else:
+            merged.pop("tolino_id", None)
+    elif merged and "tolino_id" in entry and "tolino_id" not in merged:
+        merged["tolino_id"] = entry["tolino_id"]
     return merged
 
 
@@ -371,7 +400,9 @@ def save_state(account_name, state, base):
     werden deshalb nur geaenderte Felder. Ein hier entfernter Eintrag oder
     ein entferntes Feld verschwindet auch dann, wenn `base` es noch nennt.
     """
-    with _SETTINGS_LOCK, _settings_file_lock():
+    with _SETTINGS_LOCK, _settings_file_lock() as locked:
+        if not locked:
+            return False
         if not _reload():
             return False
         source = _account_record(account_name)
@@ -425,7 +456,9 @@ def _stored_token(account_name):
 
 def set_active_account(name):
     """Switch the active account without touching any stored values."""
-    with _SETTINGS_LOCK, _settings_file_lock():
+    with _SETTINGS_LOCK, _settings_file_lock() as locked:
+        if not locked:
+            return False
         # Wie bei jedem Schreiben: erst den fremden Stand laden, sonst
         # schreibt der eigene Cache fremde Token weg.
         if not _reload():
@@ -479,7 +512,9 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
     # Vergleich und Loeschen unter beiden Sperren: sonst kann zwischen beiden
     # Schritten genau die Rotation stattfinden, die geschuetzt werden soll --
     # auch aus einer zweiten Calibre-Instanz.
-    with _SETTINGS_LOCK, _settings_file_lock():
+    with _SETTINGS_LOCK, _settings_file_lock() as locked:
+        if not locked:
+            return False
         current = _stored_token(account_name)
         if rejected and current and current != rejected:
             return False
@@ -501,7 +536,9 @@ def account_secrets(account_name):
 
 def remove_account(name):
     """Remove one saved account and select a remaining account."""
-    with _SETTINGS_LOCK, _settings_file_lock():
+    with _SETTINGS_LOCK, _settings_file_lock() as locked:
+        if not locked:
+            return False
         if not _reload():
             return False
         raw = PREFERENCES.get("accounts", None)

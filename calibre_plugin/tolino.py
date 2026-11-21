@@ -154,6 +154,10 @@ class _SafeRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urlsplit(str(newurl))
         if target.scheme.casefold() != "https" or not target.hostname:
+            # Der abgelehnte Antwort-Stream wird nicht mehr gebraucht und
+            # sonst erst vom Garbage Collector geschlossen.
+            if fp is not None:
+                fp.close()
             raise TolinoApiError(
                 "Der Download wurde auf eine unsichere URL umgeleitet.",
                 code="N02",
@@ -452,11 +456,10 @@ class TolinoClient:
                     self._confirm_adopted_hardware()
                 return data
         except Exception:
-            if retry["auth"] is False:
-                # Nach einer Token-Erneuerung hat der Wiederholungsversuch die
-                # uebernommene Geraete-ID nicht bewiesen: sie bleibt
-                # ungespeichert, statt spaeter zufaellig bestaetigt zu werden.
-                self._hw_adopted = False
+            # Kein erfolgreicher Aufruf in DIESEM Versuch: eine uebernommene
+            # Geraete-ID bleibt ungespeichert, statt spaeter von einem
+            # beliebigen erfolgreichen Bestandsaufruf bestaetigt zu werden.
+            self._hw_adopted = False
             raise
 
     def _build_request(self, url, method, data, form, authenticated,

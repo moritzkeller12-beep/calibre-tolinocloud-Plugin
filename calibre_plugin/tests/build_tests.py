@@ -87,6 +87,24 @@ class PluginArchiveTests(unittest.TestCase):
         # Nicht zerlegbarer Quelltext wird unverändert ausgeliefert.
         self.assertEqual(b"x = (\n", strip_source(b"x = (\n"))
 
+    def test_a_module_docstring_before_a_future_import_is_removed(self):
+        """Ein ``0``-Platzhalter machte den Future-Import ungueltig."""
+        source = (b'"""Modul."""\n'
+                  b"# Hinweis\n"
+                  b"from __future__ import annotations\n"
+                  b"X = 1\n")
+        stripped = strip_source(source)
+        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+        self.assertNotIn(b"Modul.", stripped)
+        self.assertEqual(b"from __future__ import annotations",
+                         stripped.splitlines()[2])
+        namespace = {}
+        exec(compile(stripped, "<test>", "exec"), namespace)
+        self.assertEqual(1, namespace["X"])
+        # Leere Rumpfe behalten ihren Platzhalter.
+        self.assertIn(b"    0\n", strip_source(
+            b'class Leer:\n    """Nur Text."""\n'))
+
     def test_a_docstring_followed_by_a_comment_is_still_stripped(self):
         source = (b"def answer():\n"
                   b'    """Antwort."""  # Hinweis\n'
