@@ -60,6 +60,11 @@ class OrchestrationCase(unittest.TestCase):
             dashboard.isVisible = lambda: visible
         return dashboard
 
+    def stored_ids(self, account="A", tolino_id="neu-1"):
+        """Die Konto-Zuordnung eintragen, die der Lauf gesichert hat."""
+        config.save_account(account, {"state": {
+            UUID: {"tolino_id": tolino_id}}})
+
     def method(self, name):
         """Echte Dashboard-Methode an ein Doppel binden."""
         return self.ui.dashboard.SyncDashboard.__dict__[name].__get__
@@ -74,10 +79,13 @@ class OrchestrationCase(unittest.TestCase):
 
 
 def full_database(fail=()):
-    return CalibreDatabase(
+    database = CalibreDatabase(
         {TOLINO_COLUMN: {"datatype": "text"},
          TOLINO_READ_COLUMN: {"datatype": "bool"},
-         TOLINO_PROGRESS_COLUMN: {"datatype": "int"}}, fail=set(fail))
+         TOLINO_PROGRESS_COLUMN: {"datatype": "int"}},
+        fail=set(fail), books=[1])
+    database.api.values[("uuid", 1)] = UUID
+    return database
 
 
 class PersistTests(OrchestrationCase):
@@ -85,6 +93,7 @@ class PersistTests(OrchestrationCase):
 
     def test_reading_columns_only_for_the_displayed_account(self):
         worker = self.worker(account="B")
+        self.stored_ids("B")
         database = full_database()
         failures = self.ui.sync_results.persist_sync_result(
             self.dashboard(worker, database, account="A"), worker.updates)
@@ -94,6 +103,7 @@ class PersistTests(OrchestrationCase):
 
         database = full_database()
         worker = self.worker(account="A")
+        self.stored_ids("A")
         self.ui.sync_results.persist_sync_result(
             self.dashboard(worker, database), worker.updates)
         self.assertEqual([TOLINO_COLUMN, TOLINO_READ_COLUMN,
@@ -102,6 +112,7 @@ class PersistTests(OrchestrationCase):
 
     def test_a_failing_column_is_named(self):
         worker = self.worker()
+        self.stored_ids()
         dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
         failures = self.ui.sync_results.persist_sync_result(
             dashboard, worker.updates)
@@ -110,6 +121,7 @@ class PersistTests(OrchestrationCase):
     def test_the_cleanup_callback_runs_even_when_a_column_fails(self):
         """Geprueft wird `finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
         worker = self.worker()
+        self.stored_ids()
         dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
         outcome, failures = self.ui.sync_results.finish_sync(
             dashboard, worker.updates)
@@ -117,9 +129,34 @@ class PersistTests(OrchestrationCase):
         self.assertEqual(["tolino-IDs"], failures)
         self.assertTrue(dashboard.finished)
 
+    def test_a_late_result_keeps_the_finished_worker(self):
+        """closeEvent leert `worker`; das Ergebnis des Laufs zaehlt trotzdem."""
+        worker = self.worker()
+        self.stored_ids()
+        dashboard = self.dashboard(worker, full_database())
+        dashboard.worker = None
+        outcome, failures = self.ui.sync_results.finish_sync(
+            dashboard, worker.updates, worker)
+        self.assertEqual({"uploaded": 1}, outcome)
+        self.assertEqual([], failures)
+        self.assertTrue(dashboard.finished)
+
+    def test_a_book_without_a_stored_id_clears_its_column(self):
+        """Nach dem Loeschen steht im Konto keine Zuordnung mehr."""
+        worker = self.worker(updates=((1, ""),))
+        database = full_database()
+        database.api.values[(TOLINO_COLUMN, 1)] = '{"A": "alt"}'
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual([], failures)
+        self.assertEqual((TOLINO_COLUMN, {1: ""}), database.api.writes[0])
+
     def test_an_unknown_column_is_simply_skipped(self):
         worker = self.worker()
-        database = CalibreDatabase({TOLINO_COLUMN: {"datatype": "text"}})
+        self.stored_ids()
+        database = CalibreDatabase({TOLINO_COLUMN: {"datatype": "text"}},
+                                   books=[1])
+        database.api.values[("uuid", 1)] = UUID
         failures = self.ui.sync_results.persist_sync_result(
             self.dashboard(worker, database), worker.updates)
         self.assertEqual([], failures)
@@ -140,6 +177,7 @@ class PersistTests(OrchestrationCase):
 
     def test_the_library_of_the_start_snapshot_is_written(self):
         worker = self.worker()
+        self.stored_ids()
         database = full_database()
         worker.context = RunContext.from_values(
             {"account_name": "A", "preferred_formats": ["EPUB"]},
@@ -262,6 +300,7 @@ class ReportTests(OrchestrationCase):
 
     def test_a_failed_run_keeps_the_ids_of_completed_uploads(self):
         worker = self.worker(outcome={"failed": 1})
+        self.stored_ids()
         database = full_database()
         dashboard = self.dashboard(worker, database)
         with self.recorded() as recorded:

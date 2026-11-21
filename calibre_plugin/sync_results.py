@@ -151,14 +151,40 @@ def mirror_comparison_reading(dashboard, comparison):
         "Lesewerte konnten nicht nach Calibre gespiegelt werden")
 
 
-def persist_sync_result(dialog, updates):
+def _stored_id_updates(dialog, updates, account_name):
+    """(Buch, tolino-ID) aus dem gespeicherten Konto-Zustand.
+
+    Welche Buecher ein Lauf betrifft, bestimmt sein Ergebnis; der Wert kommt
+    aus dem Konto, denn `#tolino_id` spiegelt nur, was dort steht. So landet
+    auch nach einem Fehlschlag keine tolino-ID in der Spalte, die der
+    Zwischenstand nicht gesichert hat.
+    """
+    if not account_name or not updates:
+        return []
+    state = load_state((account_by_name(account_name) or {}).get("state"))
+    _book_ids, book_ids_by_key = book_key_index(dialog)
+    key_of = {}
+    for key, book_id in book_ids_by_key.items():
+        key_of.setdefault(book_id, key)
+    found = []
+    for book_id, _tolino_id in updates:
+        entry = state.get(str(key_of.get(book_id)))
+        # Fehlt das Buch im Konto, gibt es fuer dieses Konto keine Zuordnung
+        # (etwa nach dem Loeschen): die Spalte wird geleert.
+        found.append((book_id, entry.get("tolino_id")
+                      if isinstance(entry, dict) else ""))
+    return found
+
+
+def persist_sync_result(dialog, updates, worker=None):
     """Tolino-IDs, Lesestatus und Fortschritt in Calibre spiegeln.
 
     Den Konto-Zustand sichern die Worker selbst; hier laufen nur die
     Calibre-Schreibvorgänge, einzeln abgesichert: ein Fehler in einer Spalte
-    darf die anderen nicht blockieren.
+    darf die anderen nicht blockieren. `worker` ist der Worker DIESES Laufs:
+    nach einem Thread-Timeout beim Schliessen ist `dialog.worker` schon leer.
     """
-    worker = getattr(dialog, "worker", None)
+    worker = worker if worker is not None else getattr(dialog, "worker", None)
     dialog_account = str(getattr(dialog, "account_name", "") or "")
     account_name = str(getattr(worker, "account_name", None) or dialog_account)
     columns = getattr(getattr(worker, "context", None), "columns", {}) or {}
@@ -178,10 +204,11 @@ def persist_sync_result(dialog, updates):
                         "wurde nichts gespeichert.")
             return ["Bibliothek gewechselt – Lauf abgebrochen"]
     failures = []
+    id_updates = _stored_id_updates(dialog, updates, account_name)
     writers = [
         ("id", "tolino-IDs",
          lambda db: update_tolino_ids(
-             db, updates, account_name=account_name)),
+             db, id_updates, account_name=account_name)),
     ]
     if account_name and account_name == dialog_account:
         writers.extend([
@@ -204,11 +231,12 @@ def persist_sync_result(dialog, updates):
     return failures
 
 
-def finish_sync(dialog, updates):
+def finish_sync(dialog, updates, worker=None):
     """Laufergebnis spiegeln und den Thread in jedem Fall beenden."""
-    outcome = dict(getattr(dialog.worker, "outcome", None) or {})
+    worker = worker if worker is not None else getattr(dialog, "worker", None)
+    outcome = dict(getattr(worker, "outcome", None) or {})
     try:
-        return outcome, persist_sync_result(dialog, updates)
+        return outcome, persist_sync_result(dialog, updates, worker)
     finally:
         # Auch ein unerwarteter Fehler beim Schreiben in Calibre darf
         # den Dialog nicht im Zustand «läuft» zurücklassen.

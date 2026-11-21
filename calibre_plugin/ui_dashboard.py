@@ -812,7 +812,7 @@ class SyncDashboard(DashboardParts, QDialog):
         Die tolino-IDs landen unter dem KONTO DES LAUFS; Lesewerte werden nur
         ueberschrieben, solange dieses Konto noch angezeigt wird.
         """
-        report_sync(self, *finish_sync(self, updates))
+        report_sync(self, *finish_sync(self, updates, self.worker))
 
     @gui_guard
     def sync_failed(self, message):
@@ -820,7 +820,7 @@ class SyncDashboard(DashboardParts, QDialog):
         # Auch ein Fehlerlauf hat evtl. schon Uploads abgeschlossen: deren
         # tolino-IDs in die Spalte schreiben, niemals für ein anderes Konto.
         outcome, failures = finish_sync(
-            self, getattr(worker, "updates", ()))
+            self, getattr(worker, "updates", ()), worker)
         report_sync(
             self, outcome, failures,
             str(message or "Synchronisierung fehlgeschlagen."),
@@ -840,12 +840,16 @@ class SyncDashboard(DashboardParts, QDialog):
         if _active_work_thread(self):
             self.cancel_sync()
         for thread_name, worker_name in (
-                ("thread", "worker"),
+                ("thread", None),
                 ("prepare_thread", "prepare_worker"),
                 ("snapshot_thread", "snapshot_worker")):
             _stop_thread(getattr(self, thread_name, None))
             setattr(self, thread_name, None)
-            setattr(self, worker_name, None)
+            if worker_name:
+                setattr(self, worker_name, None)
+        # `self.worker` bleibt bis zur Auswertung stehen: nach einem
+        # Thread-Timeout kann das Ergebnis noch eintreffen und braucht
+        # Ergebnis, Konto und Spalten; `finish_thread()` raeumt danach auf.
         # A running browser sign-in is left alone on purpose: its thread is
         # unparented and self-terminates after its timeout, and joining it
         # here could freeze the close for minutes.
