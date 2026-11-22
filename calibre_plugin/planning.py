@@ -128,10 +128,7 @@ def remember_collection(state, book_uuid, series):
     series = str(series or "").strip()
     if not series:
         return False
-    entry = state.get(book_uuid)
-    if not isinstance(entry, dict):
-        entry = {}
-        state[book_uuid] = entry
+    entry = state_entry(state, book_uuid, create=True)
     recorded = entry.get("collections")
     if not isinstance(recorded, list):
         recorded = []

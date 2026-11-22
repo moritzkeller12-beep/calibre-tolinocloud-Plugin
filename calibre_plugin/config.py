@@ -519,12 +519,6 @@ def _update_account(name, values, allow_virtual_default=True):
             allow_virtual_default=allow_virtual_default)
 
 
-def _stored_token(account_name):
-    """Der gespeicherte Refresh-Token eines Kontos, leer heisst «keiner»."""
-    return str(
-        account_summary(account_name).get("refresh_token") or "").strip()
-
-
 def set_active_account(name):
     """Switch the active account without touching any stored values."""
     with _SETTINGS_LOCK, _settings_file_lock():
@@ -616,7 +610,8 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
     # Schritten genau die Rotation stattfinden, die geschuetzt werden soll --
     # auch aus einer zweiten Calibre-Instanz.
     with _SETTINGS_LOCK, _settings_file_lock():
-        current = _stored_token(account_name)
+        current = str(account_summary(account_name).get(
+            "refresh_token") or "").strip()
         if rejected and current and current != rejected:
             return False
         # Ein entferntes Konto darf ein verspaeteter Callback nicht anlegen.

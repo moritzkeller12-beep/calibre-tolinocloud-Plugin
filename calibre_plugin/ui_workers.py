@@ -381,10 +381,7 @@ class SyncWorker(QObject):
         key = valid_book_uuid(book_uuid)
         if not key:
             return False
-        entry = self.state.get(key)
-        if not isinstance(entry, dict):
-            entry = {}
-            self.state[key] = entry
+        entry = state_entry(self.state, key, create=True)
         reading = reading_state(entry)
         if reading.get("read") is bool(finished):
             return False
@@ -617,11 +614,9 @@ class LocalMetadataWorker(QObject):
         try:
             metadata = local_metadata(self.database, self.context)
         except Exception as exc:
-            if self.cancelled:
-                self.failed.emit(CANCEL_MESSAGE)
-                return
-            self.failed.emit(report_error(
-                exc, "Bibliothek", self.context.secrets()))
+            self.failed.emit(
+                CANCEL_MESSAGE if self.cancelled else report_error(
+                    exc, "Bibliothek", self.context.secrets()))
             return
         if self.cancelled:
             self.failed.emit(CANCEL_MESSAGE)

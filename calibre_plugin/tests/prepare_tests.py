@@ -3,15 +3,13 @@
 Der Client ist ein Doppel an der Netznaht; Vergleich, Zustandsfuehrung und
 Kontospeicherung laufen im Produktivcode.
 """
-import shutil
-import tempfile
 import unittest
 
 from .. import config
 from ..errors import TolinoAuthError, TolinoError
 from ..run_context import RunContext
-from ._support import (PreferencesCase, execute_worker, real_qt_stub,
-                       ui_module_for)
+from ._support import (PreferencesCase, break_settings, execute_worker,
+                       real_qt_stub, ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -104,9 +102,7 @@ class ComparisonTests(PrepareCase):
 
     def test_a_failed_comparison_save_is_not_reported_as_ready(self):
         config.save_account("A", {"refresh_token": "tok-A"})
-        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
-        self.addCleanup(shutil.rmtree, broken, True)
-        config.PREFERENCES.file_path = broken
+        break_settings(self)
         _worker, emitted = self.prepare(FakeClient([CLOUD]))
         self.assertNotIn("ready", emitted)
         self.assertIn("gespeichert", str(emitted.get("failed")))
@@ -149,23 +145,17 @@ class OptionalDataTests(PrepareCase):
         self.assertNotIn("progress", payload["state"].get(UUID, {})
                          .get("reading", {}))
 
-    def test_a_rejected_login_while_reading_the_status_fails_the_run(self):
+    def test_a_rejected_login_while_reading_a_status_fails_the_run(self):
         """Ein abgelehnter Token ist kein «unbekannter» Lesewert."""
-        config.save_account("A", {"refresh_token": "tok-A"})
-        _worker, emitted = self.prepare(FakeClient(
-            [CLOUD], read_error=TolinoAuthError("abgelehnt", code="A01")))
-        self.assertNotIn("ready", emitted)
-        self.assertIn("abgelehnt", emitted["failed"])
-        self.assertEqual({}, config.account_by_name("A")["state"])
-
-    def test_a_rejected_login_while_reading_the_progress_fails_the_run(self):
-        config.save_account("A", {"refresh_token": "tok-A"})
-        _worker, emitted = self.prepare(FakeClient(
-            [CLOUD], progress_error=TolinoAuthError("abgelehnt",
-                                                    code="A01")))
-        self.assertNotIn("ready", emitted)
-        self.assertIn("abgelehnt", emitted["failed"])
-        self.assertEqual({}, config.account_by_name("A")["state"])
+        for failure in ("read_error", "progress_error"):
+            with self.subTest(failure=failure):
+                config.save_account("A", {"refresh_token": "tok-A"})
+                _worker, emitted = self.prepare(FakeClient(
+                    [CLOUD], **{failure: TolinoAuthError("abgelehnt",
+                                                         code="A01")}))
+                self.assertNotIn("ready", emitted)
+                self.assertIn("abgelehnt", emitted["failed"])
+                self.assertEqual({}, config.account_by_name("A")["state"])
 
     def test_progress_is_not_requested_while_the_read_status_is_unknown(self):
         client = FakeClient([CLOUD], read_error=TolinoError("weg"))

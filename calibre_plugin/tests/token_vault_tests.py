@@ -4,7 +4,6 @@ Der Vault spricht einen Loopback-Token-Endpunkt an (echte Sockets) und
 schreibt in einen echten Einstellungsspeicher; geprüft wird, was nach einem
 Tausch im Konto steht und was bei Ablehnung oder belegtem Lock passiert.
 """
-import base64
 import contextlib
 import json
 import os
@@ -18,16 +17,9 @@ from ..token_vault import (TOKEN_VAULT, check_stored_login,
                            start_token_keepalive, stop_token_keepalive)
 from ..tolino import BUSY_MESSAGE, TolinoClient
 from ._support import (LocalHTTP, PreferencesCase, break_settings,
-                       local_tolino_endpoints)
+                       jwt_token, local_tolino_endpoints)
 
 JSON_HEADERS = {"Content-Type": "application/json"}
-
-
-def jwt_token(claims):
-    """JWT-foermiger Token mit frei waehlbaren Claims (ohne Signatur)."""
-    segment = base64.urlsafe_b64encode(
-        json.dumps(claims).encode("utf-8")).decode("ascii").rstrip("=")
-    return "eyJhbGciOiJub25lIn0." + segment + ".sig"
 
 
 class TokenServer:

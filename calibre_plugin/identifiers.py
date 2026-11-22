@@ -43,13 +43,9 @@ def book_uuid(item):
     return text if _UUID_TEXT.fullmatch(text) else ""
 
 
-def _book_number(book_id):
-    return str(book_id if book_id is not None else "").strip()
-
-
 def calibre_key(book_id, library_scope=""):
     """Stable scoped state key; empty without a book number or scope."""
-    number = _book_number(book_id)
+    number = str(book_id if book_id is not None else "").strip()
     scope = _text(library_scope)
     if not number or not scope:
         return ""
@@ -67,7 +63,13 @@ def display_title(title, number=None):
     return "Buch ohne Titel"
 
 
-def state_entry(state, key):
-    """Zustandseintrag eines Buchs -- fremde Formen zählen als leer."""
+def state_entry(state, key, create=False):
+    """Zustandseintrag eines Buchs -- fremde Formen zählen als leer.
+
+    ``create`` legt einen fehlenden Eintrag als leeres Dict an.
+    """
     entry = state.get(key) if key and isinstance(state, dict) else None
+    if not isinstance(entry, dict) and create and isinstance(state, dict):
+        entry = {}
+        state[key] = entry
     return entry if isinstance(entry, dict) else {}

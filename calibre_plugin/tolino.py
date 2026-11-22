@@ -251,11 +251,6 @@ def normalize_hardware_id(value):
     return text
 
 
-def _access_margin(lifetime):
-    """Vorlauf vor dem Ablauf: ein Zehntel, aber 30 s bis 5 min."""
-    return min(_ACCESS_MARGIN_MAX, max(_ACCESS_MARGIN_MIN, int(lifetime) // 10))
-
-
 def _access_deadline(access_token, lifetime, now=None):
     """Ablaufzeit des Access-Tokens (unix seconds) aus Antwort und Claims.
 
@@ -269,7 +264,8 @@ def _access_deadline(access_token, lifetime, now=None):
     """
     now = time.time() if now is None else now
     lifetime = max(0, int(lifetime or 0))
-    margin = _access_margin(lifetime or 3600)
+    margin = min(_ACCESS_MARGIN_MAX,
+                 max(_ACCESS_MARGIN_MIN, (lifetime or 3600) // 10))
     deadline = now + max(0, lifetime - margin)
     issued, claim = token_issued_at(access_token), token_expires_at(access_token)
     if claim is None:
@@ -279,12 +275,6 @@ def _access_deadline(access_token, lifetime, now=None):
                     "die Gültigkeit wird relativ gerechnet.")
         return deadline
     return min(deadline, claim - margin)
-
-
-def _refresh_scope(token):
-    """Scope des ausgestellten Tokens -- oder "" (dann nicht mitschicken)."""
-    scope = (token_payload(token) or {}).get("scope")
-    return scope.strip() if isinstance(scope, str) else ""
 
 
 def _decode_json(raw):
@@ -461,9 +451,9 @@ class TolinoClient:
         # scheitert die Erneuerung mit invalid_scope -- und das sieht aus wie
         # eine abgelaufene Anmeldung. Mitgeschickt wird nur, was im Token
         # selbst steht.
-        scope = _refresh_scope(used_refresh)
-        if scope:
-            payload["scope"] = scope
+        scope = (token_payload(used_refresh) or {}).get("scope")
+        if isinstance(scope, str) and scope.strip():
+            payload["scope"] = scope.strip()
         try:
             data = self._request(self.partner["token_url"], "POST", payload,
                                  form=True, authenticated=False)

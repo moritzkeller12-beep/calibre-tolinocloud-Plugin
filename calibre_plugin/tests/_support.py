@@ -4,8 +4,10 @@ Enthaelt nur, was die Suite wirklich braucht: der UI-Loader mit Qt-/Calibre-
 Stubs, ein echtes PyQt6-Offscreen-Fenster, ein Loopback-HTTP-Server, die
 Calibre-Datenbankgrenze und das Dashboard-Doppel.
 """
+import base64
 import contextlib
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -51,6 +53,13 @@ def break_settings(case):
     broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
     case.addCleanup(shutil.rmtree, broken, True)
     config.PREFERENCES.file_path = broken
+
+
+def jwt_token(claims):
+    """JWT-foermiger Token mit frei waehlbaren Claims (ohne Signatur)."""
+    segment = base64.urlsafe_b64encode(
+        json.dumps(claims).encode("utf-8")).decode("ascii").rstrip("=")
+    return "eyJhbGciOiJub25lIn0." + segment + ".sig"
 
 
 def record(worker, *names):

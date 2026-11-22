@@ -320,14 +320,22 @@ class DeleteTests(WorkerCase):
         self.assertEqual({}, worker.state)
         self.assertEqual([(7, "")], worker.updates)
 
-    def test_an_unreadable_inventory_is_not_an_already_gone_copy(self):
-        state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
-        client = FakeClient(delete_fail={"d1"},
-                            inventory_error=TolinoError("Bestand weg"))
-        worker, _emitted = self.run_worker(
-            client, state=state, removals=[(UUID, "d1")])
-        self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual("d1", worker.state[UUID]["tolino_id"])
+    def test_a_copy_that_is_not_gone_keeps_the_error_and_the_state(self):
+        cases = (
+            ("Bestand unlesbar", FakeClient(
+                delete_fail={"d1"},
+                inventory_error=TolinoError("Bestand weg"))),
+            ("noch in der Cloud", FakeClient(
+                delete_fail={"d1"},
+                inventory_rows=[{"tolino_id": "d1"}])),
+        )
+        for label, client in cases:
+            with self.subTest(label):
+                state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
+                worker, _emitted = self.run_worker(
+                    client, state=state, removals=[(UUID, "d1")])
+                self.assertEqual(1, worker.outcome["failed"])
+                self.assertEqual("d1", worker.state[UUID]["tolino_id"])
 
     def test_an_auth_failure_while_checking_a_deletion_stops_the_run(self):
         state = {UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}}
@@ -338,15 +346,6 @@ class DeleteTests(WorkerCase):
             client, state=state, removals=[(UUID, "d1"), (OTHER, "d2")])
         self.assertEqual(["d1"], client.deleted)
         self.assertIn("Sitzung beendet", emitted["failed"])
-
-    def test_a_copy_still_in_the_cloud_keeps_the_error_and_the_state(self):
-        state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
-        client = FakeClient(delete_fail={"d1"},
-                            inventory_rows=[{"tolino_id": "d1"}])
-        worker, _emitted = self.run_worker(
-            client, state=state, removals=[(UUID, "d1")])
-        self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual("d1", worker.state[UUID]["tolino_id"])
 
     def test_a_failed_deletion_does_not_skip_the_following_one(self):
         state = {UUID: {"tolino_id": "d1", "calibre_id": 1},

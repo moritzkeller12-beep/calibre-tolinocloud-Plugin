@@ -228,10 +228,7 @@ def store_reading_state(state, comparison):
                               and getattr(progress, "known", False))
         if not (read_known or progress_known):
             continue
-        entry = state.get(key)
-        if not isinstance(entry, dict):
-            entry = {}
-            state[key] = entry
+        entry = state_entry(state, key, create=True)
         recorded = str(entry.get("tolino_id") or "").strip()
         if recorded and recorded != tolino_id:
             continue
@@ -434,10 +431,7 @@ def reset_copy_state(entry):
 
 def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
     """Persist a confirmed assignment under the Calibre UUID."""
-    entry = state.get(book_uuid)
-    if not isinstance(entry, dict):
-        entry = {}
-        state[book_uuid] = entry
+    entry = state_entry(state, book_uuid, create=True)
     previous = str(entry.get("tolino_id") or "").strip()
     if previous and previous != str(tolino_id):
         reset_copy_state(entry)
