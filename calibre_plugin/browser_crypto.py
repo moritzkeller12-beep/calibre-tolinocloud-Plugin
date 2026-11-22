@@ -20,15 +20,6 @@ def _evp_bytes_to_key(password, salt):
     return derived[:32], derived[32:48]
 
 
-def _pkcs7_unpad(data):
-    if not data or len(data) % 16:
-        return None
-    pad = data[-1]
-    if not 1 <= pad <= 16 or data[-pad:] != bytes([pad]) * pad:
-        return None
-    return data[:-pad]
-
-
 def _aes():
     """Load AES lazily; a missing optional dependency is a user-facing error.
 
@@ -71,9 +62,12 @@ def cryptojs_decrypt(b64_text):
         plain = AES.new(key, AES.MODE_CBC, iv).decrypt(ciphertext)
     except ValueError:
         return ""
-    plain = _pkcs7_unpad(plain)
-    if plain is None:
+    if not plain or len(plain) % 16:
         return ""
+    pad = plain[-1]
+    if not 1 <= pad <= 16 or plain[-pad:] != bytes([pad]) * pad:
+        return ""
+    plain = plain[:-pad]
     try:
         return plain.decode("utf-8")
     except UnicodeDecodeError:

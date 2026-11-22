@@ -93,8 +93,6 @@ class FakeSignal:
         for slot in list(self.slots):
             slot(*args)
 
-    fire = emit
-
 
 _WORKER_FIELDS = ("thread", "worker", "prepare_thread", "prepare_worker",
                   "snapshot_thread", "snapshot_worker", "login_thread",

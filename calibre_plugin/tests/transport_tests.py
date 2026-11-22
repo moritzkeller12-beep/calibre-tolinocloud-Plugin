@@ -121,12 +121,17 @@ class HandshakeTests(unittest.TestCase):
 
 
 class WebSocketTransportTests(unittest.TestCase):
-    def test_recv_json_reassembles_a_two_frame_text_message(self):
+    def socket_pair(self, timeout=None):
         left, right = socket.socketpair()
         left.setblocking(True)
         right.setblocking(True)
+        if timeout: right.settimeout(timeout)
         self.addCleanup(left.close)
         self.addCleanup(right.close)
+        return left, right
+
+    def test_recv_json_reassembles_a_two_frame_text_message(self):
+        left, right = self.socket_pair()
         message = json.dumps({"method": "Runtime.evaluate", "id": 3}).encode()
         split = len(message) // 2
         ready = threading.Event()
@@ -187,12 +192,7 @@ class WebSocketTransportTests(unittest.TestCase):
         return header[0] & 0x0F, bool(header[0] & 0x80), masked, payload
 
     def test_ping_gets_a_masked_pong_and_unsolicited_pong_is_ignored(self):
-        left, right = socket.socketpair()
-        left.setblocking(True)
-        right.setblocking(True)
-        right.settimeout(3)
-        self.addCleanup(left.close)
-        self.addCleanup(right.close)
+        left, right = self.socket_pair(timeout=3)
         ready = threading.Event()
         seen = []
 
@@ -240,9 +240,7 @@ class WebSocketTransportTests(unittest.TestCase):
 
     def test_an_oversized_frame_is_rejected_before_reading_the_payload(self):
         """Die Laengenangabe darf keinen beliebig grossen Puffer anfordern."""
-        left, right = socket.socketpair()
-        self.addCleanup(left.close)
-        self.addCleanup(right.close)
+        left, right = self.socket_pair()
         right.sendall(bytes([0x81, 127])
                       + struct.pack(">Q", 16 * 1024 * 1024 + 1))
         with self.assertRaisesRegex(OSError, "too large"):

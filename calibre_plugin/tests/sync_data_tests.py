@@ -126,17 +126,13 @@ class ReadingProgressTests(unittest.TestCase):
         progress = reading_progress(patches)["d1"]
         self.assertEqual((80, ""), (progress["percent"], progress["position"]))
 
-    def test_removing_the_newest_bookmark_falls_back_to_the_older_one(self):
-        patches = [bookmark("d1", "alt", 100, progress=0.2),
-                   bookmark("d1", "neu", 200, progress=0.8),
-                   bookmark("d1", "neu", 200, op="remove")]
-        self.assertEqual(20, reading_progress(patches)["d1"]["percent"])
-
-    def test_a_removal_only_drops_its_own_bookmark(self):
-        patches = [bookmark("d1", "alt", 100, progress=0.2),
-                   bookmark("d1", "neu", 200, progress=0.8),
-                   bookmark("d1", "alt", 100, op="remove")]
-        self.assertEqual(80, reading_progress(patches)["d1"]["percent"])
+    def test_a_removal_only_drops_the_named_bookmark(self):
+        base = [bookmark("d1", "alt", 100, progress=0.2),
+                bookmark("d1", "neu", 200, progress=0.8)]
+        self.assertEqual(20, reading_progress(
+            base + [bookmark("d1", "neu", 200, op="remove")])["d1"]["percent"])
+        self.assertEqual(80, reading_progress(
+            base + [bookmark("d1", "alt", 100, op="remove")])["d1"]["percent"])
 
 
 if __name__ == "__main__":

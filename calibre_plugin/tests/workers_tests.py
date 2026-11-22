@@ -365,24 +365,20 @@ class DeleteTests(WorkerCase):
 class ReplaceTests(WorkerCase):
     """Ersetzen: die alte Kopie wird nur nach echtem neuen Upload geloescht."""
 
-    def test_a_new_copy_deletes_the_previous_cloud_copy(self):
-        state = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
-        client = FakeClient(upload_results=["neu-1"])
-        worker, _emitted = self.run_worker(
-            client, jobs=[self.job(1, UUID, "/buch.epub", old_id="alt")],
-            state=state)
-        self.assertEqual(["alt"], client.deleted)
-        self.assertEqual("neu-1", worker.state[UUID]["tolino_id"])
-        self.assertEqual(1, worker.outcome["deleted"])
-
-    def test_the_same_id_from_the_upload_is_never_deleted(self):
-        state = {UUID: {"tolino_id": "d1", "calibre_id": 1}}
-        client = FakeClient(upload_results=["d1"])
-        worker, _emitted = self.run_worker(
-            client, jobs=[self.job(1, UUID, "/buch.epub", old_id="d1")],
-            state=state)
-        self.assertEqual([], client.deleted)
-        self.assertEqual("d1", worker.state[UUID]["tolino_id"])
+    def test_a_new_copy_deletes_the_previous_id_but_not_the_uploaded_one(self):
+        for old_id, uploaded, deleted in (
+                ("alt", "neu-1", ["alt"]),
+                ("d1", "d1", [])):
+            with self.subTest(old_id=old_id):
+                state = {UUID: {"tolino_id": old_id, "calibre_id": 1}}
+                client = FakeClient(upload_results=[uploaded])
+                worker, _emitted = self.run_worker(
+                    client,
+                    jobs=[self.job(1, UUID, "/buch.epub", old_id=old_id)],
+                    state=state)
+                self.assertEqual(deleted, client.deleted)
+                self.assertEqual(uploaded, worker.state[UUID]["tolino_id"])
+                self.assertEqual(len(deleted), worker.outcome["deleted"])
 
     def test_a_read_mark_never_targets_the_replaced_copy(self):
         state = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
