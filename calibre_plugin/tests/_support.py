@@ -468,9 +468,6 @@ class LocalHTTP:
     def url(self, path):
         return self.origin + path
 
-    def paths(self):
-        return [request["path"] for request in self.requests]
-
     def __exit__(self, *_exc):
         self._server.shutdown()
         self._server.server_close()
