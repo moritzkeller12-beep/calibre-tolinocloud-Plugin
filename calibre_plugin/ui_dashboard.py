@@ -835,6 +835,15 @@ class SyncDashboard(DashboardParts, QDialog):
         self.progress_label.setText("Bereit")
         self.update_status()
 
+    def reject(self):
+        """Esc schliesst wie das Fensterkreuz: erst laeuft `closeEvent`.
+
+        `QDialog.reject()` blendet das Fenster nur aus und ueberspringt
+        `closeEvent`; laufende Worker liefen dann ohne Fenster weiter und
+        die sichtbaren Einstellungen blieben ungesichert.
+        """
+        self.close()
+
     def closeEvent(self, event):
         """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
         if _active_work_thread(self):

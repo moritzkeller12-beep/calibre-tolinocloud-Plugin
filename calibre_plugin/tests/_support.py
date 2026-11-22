@@ -140,9 +140,7 @@ def load_ui_module(get_icons_result, qt_stub):
                       "ui_dashboard_parts", "planning", "sync_results"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
-    modules_before_entry = set(sys.modules)
     ui_module = importlib.import_module("calibre_plugin.ui")
-    loaded_by_entry = set(sys.modules) - modules_before_entry
     # Tests use these modules directly; production's Calibre entrypoint does
     # not re-export them or import them eagerly.
     ui_module.common = importlib.import_module("calibre_plugin.ui_common")
@@ -153,7 +151,6 @@ def load_ui_module(get_icons_result, qt_stub):
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
     ui_module.sync_results = importlib.import_module("calibre_plugin.sync_results")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")
-    ui_module._loaded_by_entry_for_tests = loaded_by_entry
     # Stubs stay active until restore_stubs() so that function-level
     # imports (from calibre.gui2 import get_icons) still resolve.
     def restore_stubs():

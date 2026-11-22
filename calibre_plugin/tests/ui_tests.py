@@ -86,6 +86,64 @@ class CreateColumnTests(unittest.TestCase):
         self.assertIn("schon vorhanden", boxes[0][2])
 
 
+class EscapeCloseTests(unittest.TestCase):
+    """Esc schliesst wie das Fensterkreuz: `closeEvent` laeuft wirklich."""
+
+    def setUp(self):
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
+
+    def test_escape_runs_close_event_and_saves_the_visible_account(self):
+        """Esc schliesst wie das Fensterkreuz: `closeEvent` laeuft und `exec()`
+        endet.
+
+        `QDialog.reject()` allein liesse `closeEvent` aus -- kein Abbruch,
+        keine Sicherung der sichtbaren Einstellungen. Die Schleife prueft
+        beides am echten `exec()`, weil das Fenster nur so benutzt wird.
+        """
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QDialog, QLineEdit
+
+        base = self.ui.dashboard.SyncDashboard
+        events = []
+
+        class Dashboard(base):
+            """Ohne Widget-Aufbau; Schliessen und Speichern aufgezeichnet."""
+
+            def _build_ui(self):
+                self.hardware = QLineEdit()
+
+            def load_values(self):
+                pass
+
+            def _save_visible_account(self, values=None):
+                events.append("saved")
+                return True
+
+            def closeEvent(self, event):
+                events.append("closed")
+                base.closeEvent(self, event)
+
+        dashboard = Dashboard(None)
+        dashboard.account_name = "A"
+        self.addCleanup(dashboard.deleteLater)
+        state = {"timed_out": False}
+        QTimer.singleShot(10, lambda: QTest.keyClick(
+            dashboard, Qt.Key.Key_Escape))
+
+        def force_close():
+            # Notausstieg, damit ein Fehler den Test nicht haengen laesst.
+            state["timed_out"] = True
+            QDialog.reject(dashboard)
+
+        QTimer.singleShot(1500, force_close)
+        dashboard.exec()
+        self.assertFalse(state["timed_out"], "exec() lief nach Esc weiter")
+        # Genau einmal, und das Speichern erst nach dem Abbruch im closeEvent.
+        self.assertEqual(["closed", "saved"], events)
+        self.assertEqual(QDialog.DialogCode.Rejected, dashboard.result())
+
+
 class ReadingMirrorTests(unittest.TestCase):
     """Lesestatus und Fortschritt sind getrennte Spalten."""
 

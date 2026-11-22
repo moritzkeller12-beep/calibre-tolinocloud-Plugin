@@ -319,8 +319,6 @@ class InventoryDialog(QDialog):
             if row.get("stale_cloud_id"):
                 return (False, False)
             return (caps["upload"], False)
-        if row.get("status") == "new_in_calibre":
-            return (caps["upload"], False)
         if row.get("status") == "changed":
             if row.get("file_changed"):
                 return (caps["upload"], False)

@@ -35,7 +35,6 @@ ALLOWED_NAMES = frozenset((
     "grab_live_refresh",               # interaktiver Browser-Login
     "info_dialog", "error_dialog",     # modale Qt-Dialoge
     "getText",                         # modaler Eingabedialog (Qt)
-    "grab_live_refresh",               # Browserfenster (Anmeldung)
     "_lock_handle", "_read_frame",     # Sperrdatei (Dateisystem), Rahmen
     "_aes",                            # optionale Krypto-Abhaengigkeit
     "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL",  # Anmelde-Zeitfenster
