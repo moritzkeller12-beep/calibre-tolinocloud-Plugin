@@ -11,14 +11,12 @@ from ..sync_data import (READ_TAG, active_tags, collection_pairs, read_ids,
                          reading_progress, tag_id_from_patch, tag_patch)
 
 
-def tag(book_id, name, category, tag_id=None, op="add", revision=None):
+def tag(book_id, name, category, tag_id=None, op="add"):
     """Ein Tag-Patch in der Form, die die Cloud zurückliefert."""
     path = "/publications/%s/tags" % book_id
     if tag_id:
         path = "%s/%s" % (path, tag_id)
     value = {"name": name, "category": category}
-    if revision is not None:
-        value["revision"] = revision
     return {"op": op, "path": path, "value": value}
 
 
