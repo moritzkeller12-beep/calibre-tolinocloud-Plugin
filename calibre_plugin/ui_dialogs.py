@@ -173,9 +173,8 @@ class _CellCheckDelegate(QStyledItemDelegate):
         if event.button() != Qt.MouseButton.LeftButton:
             return False
         flags = model.flags(index)
-        if not (flags & Qt.ItemFlag.ItemIsUserCheckable):
-            return False
-        if not (flags & Qt.ItemFlag.ItemIsEnabled):
+        if not (flags & (Qt.ItemFlag.ItemIsUserCheckable
+                         | Qt.ItemFlag.ItemIsEnabled)):
             return False
         state = index.data(Qt.ItemDataRole.CheckStateRole)
         previous = state

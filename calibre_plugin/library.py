@@ -303,14 +303,14 @@ def safe_format_path(database, book_id, format_name):
     api = database.new_api
     if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    missing_path = ("Calibre returned no path for book %r format %s"
+                    % (book_id, format_name))
     try:
         path = api.format_abspath(book_id, format_name)
     except (ValueError, IndexError, KeyError, OSError) as exc:
-        raise ValueError("Calibre returned no path for book %r format %s" %
-                         (book_id, format_name)) from exc
+        raise ValueError(missing_path) from exc
     if not isinstance(path, str) or not path:
-        raise ValueError("Calibre returned no path for book %r format %s" %
-                         (book_id, format_name))
+        raise ValueError(missing_path)
     return path
 
 
