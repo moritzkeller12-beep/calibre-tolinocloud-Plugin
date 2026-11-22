@@ -15,6 +15,7 @@ from ..browser_login import (_exchange_grabbed_token, _exchange_live_grab,
 from ..errors import TolinoAuthError
 from ..token_candidates import (_candidate_age_note, _filter_live_candidates,
                                 _normalize_live_grab)
+from ._support import no_crypto
 
 # Ein formal gueltiger CryptoJS-Blob ("Salted__" + Salt + ein Block),
 # damit der Decoder wirklich nach PyCryptodome fragt.
@@ -33,13 +34,6 @@ def jwt(iat=None, typ="Refresh", iss=THALIA):
     body = base64.urlsafe_b64encode(json.dumps(payload).encode())
     return "%s.%s.sig" % (head.decode().rstrip("="),
                           body.decode().rstrip("="))
-
-
-def no_crypto():
-    """Steht fuer eine Installation ohne PyCryptodome."""
-    return patch("calibre_plugin.browser_crypto._aes",
-                 side_effect=TolinoAuthError("PyCryptodome fehlt",
-                                             code="A01"))
 
 
 class TokenCandidateTests(unittest.TestCase):

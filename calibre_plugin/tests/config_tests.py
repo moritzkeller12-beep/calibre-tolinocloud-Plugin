@@ -4,21 +4,14 @@ import os
 import shutil
 import tempfile
 import unittest
-import uuid
 from unittest.mock import patch
 
 from .. import config
+from ._support import PreferencesCase
 
 
-class ConfigCase(unittest.TestCase):
+class ConfigCase(PreferencesCase):
     """Jeder Test bekommt einen eigenen Einstellungsspeicher."""
-
-    def setUp(self):
-        self._original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-
-    def tearDown(self):
-        config.PREFERENCES = self._original
 
 
 class AccountTests(ConfigCase):

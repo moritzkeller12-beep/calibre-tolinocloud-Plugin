@@ -7,7 +7,6 @@ Dashboard sind echte Objekte bzw. das vorhandene Dashboard-Doppel.
 from contextlib import contextmanager
 import types
 import unittest
-import uuid
 from unittest.mock import patch
 
 from .. import config
@@ -15,20 +14,19 @@ from ..comparison import compare_inventory
 from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
                       TOLINO_READ_COLUMN, library_scope)
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, SyncThread, break_settings,
-                       dashboard_stub, real_qt_stub, ui_module_for)
+from ._support import (CalibreDatabase, PreferencesCase, SyncThread,
+                       break_settings, dashboard_stub, real_qt_stub,
+                       ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
 
 
-class OrchestrationCase(unittest.TestCase):
+class OrchestrationCase(PreferencesCase):
     """Frischer Einstellungsspeicher und geladenes UI-Modul je Test."""
 
     def setUp(self):
-        self._original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-        self.addCleanup(setattr, config, "PREFERENCES", self._original)
+        super().setUp()
         # Ein Sync-Lauf setzt gespeicherte Konten voraus; nur so kann der
         # Zustand am Ende auch geschrieben werden.
         for name in ("A", "B"):

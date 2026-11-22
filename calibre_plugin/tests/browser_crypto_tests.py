@@ -11,12 +11,12 @@ Seiten verstecken.
 """
 import base64
 import unittest
-from unittest.mock import patch
 
 from ..browser_crypto import cryptojs_decrypt
 from ..errors import TolinoAuthError
 from ..token_candidates import (_decrypt_reader_blob, _hardware_from_reader_blob,
                                 _json_field_text)
+from ._support import no_crypto
 
 # Salt 0011223344556677, Klartext "refresh-token-0123456789-abcdef".
 TOKEN_BLOB = ("U2FsdGVkX18AESIzRFVmd+krvaEq0dFWf6an5omQdUciNDVjZt51GgBA"
@@ -34,12 +34,6 @@ BAD_UTF8_BLOB = "U2FsdGVkX18BAgMEBQYHCKOyTjr4WBTk5NFNgncrn6U="
 # Letzter Ciphertext-Block ersetzt: das Padding passt nicht mehr.
 BAD_PADDING_BLOB = base64.b64encode(
     base64.b64decode(TOKEN_BLOB)[:32] + b"\x00" * 16).decode()
-
-
-def no_crypto():
-    """Steht fuer eine Installation ohne PyCryptodome."""
-    return patch("calibre_plugin.browser_crypto._aes",
-                 side_effect=TolinoAuthError("PyCryptodome fehlt", code="A01"))
 
 
 class DecryptTests(unittest.TestCase):

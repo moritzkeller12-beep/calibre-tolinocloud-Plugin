@@ -7,7 +7,6 @@ Tausch im Konto steht und was bei Ablehnung oder belegtem Lock passiert.
 import contextlib
 import json
 import unittest
-import uuid
 from urllib.parse import parse_qs
 
 from .. import config
@@ -15,7 +14,8 @@ from ..errors import TolinoAuthError, TolinoError
 from ..token_vault import (TOKEN_VAULT, check_stored_login,
                            start_token_keepalive, stop_token_keepalive)
 from ..tolino import BUSY_MESSAGE, TolinoClient
-from ._support import LocalHTTP, break_settings, local_tolino_endpoints
+from ._support import (LocalHTTP, PreferencesCase, break_settings,
+                       local_tolino_endpoints)
 
 JSON_HEADERS = {"Content-Type": "application/json"}
 
@@ -47,15 +47,8 @@ class TokenServer:
                 for request in self.server.requests]
 
 
-class VaultCase(unittest.TestCase):
+class VaultCase(PreferencesCase):
     """Frischer Einstellungsspeicher je Test."""
-
-    def setUp(self):
-        self._original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-
-    def tearDown(self):
-        config.PREFERENCES = self._original
 
     @contextlib.contextmanager
     def vault(self, server):

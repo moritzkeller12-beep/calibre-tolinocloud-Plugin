@@ -4,7 +4,6 @@ Der Worker wird mit einem Client-Doppel an der Netznaht ausgeführt; alles
 andere (Planung, Zustand, Signale, Bericht) ist Produktivcode.
 """
 import unittest
-import uuid
 from unittest.mock import patch
 
 from .. import config
@@ -12,8 +11,8 @@ from ..comparison import content_fingerprint
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..planning import MetaUpdateRecord, SyncJob
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, break_settings, real_qt_stub,
-                       ui_module_for)
+from ._support import (CalibreDatabase, PreferencesCase, break_settings,
+                       real_qt_stub, ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -92,14 +91,11 @@ class FakeClient:
         return True
 
 
-class WorkerCase(unittest.TestCase):
+class WorkerCase(PreferencesCase):
     """Laedt die Oberflaeche (fuer die echten Worker-Klassen) je Test neu."""
 
     def setUp(self):
-        self._original_preferences = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-        self.addCleanup(setattr, config, "PREFERENCES",
-                        self._original_preferences)
+        super().setUp()
         # Der Lauf sichert seinen Zwischenstand in genau diesem Konto.
         config.save_account("A", {"refresh_token": "tok-A",
                                   "hardware_id": "hw"})

@@ -13,7 +13,30 @@ import tempfile
 import threading
 import types
 import unittest
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
+
+from ..errors import TolinoAuthError
+
+
+class PreferencesCase(unittest.TestCase):
+    """Jeder Test bekommt einen eigenen Einstellungsspeicher."""
+
+    def setUp(self):
+        from .. import config
+
+        self._original_preferences = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
+        self.addCleanup(setattr, config, "PREFERENCES",
+                        self._original_preferences)
+
+
+def no_crypto():
+    """Steht fuer eine Installation ohne PyCryptodome."""
+    return patch("calibre_plugin.browser_crypto._aes",
+                 side_effect=TolinoAuthError("PyCryptodome fehlt",
+                                             code="A01"))
 
 
 def break_settings(case):
