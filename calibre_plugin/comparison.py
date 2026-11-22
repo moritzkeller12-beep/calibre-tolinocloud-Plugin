@@ -6,10 +6,6 @@ from .library import normalize_formats
 from .matching import (author_tokens, authors_match, is_valid_isbn,
                        normalize_isbn, normalize_match_text, normalize_title)
 
-IGNORED_EXPLANATION = (
-    "In Calibre als «ignoriert» markiert (#tolino_ignore) – wird weder "
-    "hochgeladen noch abgeglichen.")
-
 # Felder, die zu genau EINER Cloud-Kopie gehoeren: nach einem Kopiewechsel
 # (neue tolino-ID) sind sie wertlos. Dieselbe Liste nutzen das Zuruecksetzen
 # eines Eintrags und der Drei-Wege-Merge der Einstellungen.
@@ -494,7 +490,8 @@ def _local_comparison_row(book_id, metadata, remote, state, reserved,
         book_id, title, authors, isbn, tolino_id, status,
         _read_flags(tolino_id, read_known, read_ids),
         _progress_state(tolino_id, progress_known, progress_by_id),
-        (IGNORED_EXPLANATION if ignored
+        (("In Calibre als «ignoriert» markiert (#tolino_ignore) – wird "
+          "weder hochgeladen noch abgeglichen.") if ignored
          else _row_explanation(status, match_reason, file_changed)),
         group="ignored" if ignored else comparison_group(status),
         uuid=book_uuid or str(metadata.get("uuid") or ""),

@@ -10,21 +10,6 @@ def in_flatpak_sandbox():
     return os.path.exists("/.flatpak-info")
 
 
-def flatpak_permission_hint():
-    """Commands to grant host-browser access to sandboxed Calibre."""
-    return (
-        "Calibre läuft als Flatpak und sieht die Browser des Rechners "
-        "nicht. Einmalig freigeben und Calibre vollständig neu starten."
-        "\n\nBenutzer-Installation:"
-        "\nflatpak override --user --talk-name=org.freedesktop.Flatpak"
-        " com.calibre_ebook.calibre"
-        "\n\nSystem-Installation:"
-        "\nsudo flatpak override --talk-name=org.freedesktop.Flatpak"
-        " com.calibre_ebook.calibre"
-        "\n\nPrüfen: flatpak info --show-permissions"
-        " com.calibre_ebook.calibre")
-
-
 def missing_browser_error(status=""):
     """Return user-facing details when no Chromium browser is available.
 
@@ -40,16 +25,20 @@ def missing_browser_error(status=""):
             "Bitte «flatpak update» ausführen und Calibre danach "
             "vollständig neu starten.")
     if in_flatpak_sandbox() and status != "empty":
-        message += "\n\n" + flatpak_permission_hint()
+        message += (
+            "\n\nCalibre läuft als Flatpak und sieht die Browser des "
+            "Rechners nicht. Einmalig freigeben und Calibre vollständig "
+            "neu starten."
+            "\n\nBenutzer-Installation:"
+            "\nflatpak override --user --talk-name=org.freedesktop.Flatpak"
+            " com.calibre_ebook.calibre"
+            "\n\nSystem-Installation:"
+            "\nsudo flatpak override --talk-name=org.freedesktop.Flatpak"
+            " com.calibre_ebook.calibre"
+            "\n\nPrüfen: flatpak info --show-permissions"
+            " com.calibre_ebook.calibre")
     return message
 
-
-# PATH-independent locations for desktop-launched Calibre.
-_EXTRA_BROWSER_PATHS = (
-    "/usr/lib/chromium/chromium",
-    "/opt/google/chrome/chrome",
-    "/snap/bin/chromium",
-)
 
 # Executable aliases shared by PATH and Flatpak host probing.
 _BROWSER_COMMANDS = (
@@ -123,7 +112,10 @@ def _collect_candidates(home=None):
         path = shutil.which(exe)
         if path:
             found.append([path])
-    for path in _EXTRA_BROWSER_PATHS:
+    # PATH-unabhaengige Orte fuer aus der Oberflaeche gestartete Calibre.
+    for path in ("/usr/lib/chromium/chromium",
+                 "/opt/google/chrome/chrome",
+                 "/snap/bin/chromium"):
         if not (os.path.isfile(path) and os.access(path, os.X_OK)):
             continue
         if any(path == argv[0] for argv in found):
@@ -145,18 +137,6 @@ def _collect_candidates(home=None):
     return found, status
 
 
-# Windows registriert installierte Browser unter "App Paths".
-_WINDOWS_BROWSER_EXECUTABLES = (
-    "chrome.exe", "chromium.exe", "brave.exe", "msedge.exe",
-    "vivaldi.exe", "opera.exe",
-)
-
-_DARWIN_BROWSERS = (
-    "Google Chrome.app/Contents/MacOS/Google Chrome",
-    "Chromium.app/Contents/MacOS/Chromium",
-    "Brave Browser.app/Contents/MacOS/Brave Browser",
-    "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-)
 
 
 def _windows_browser_paths(winreg_module=None):
@@ -176,7 +156,9 @@ def _windows_browser_paths(winreg_module=None):
     for root in roots:
         for view in views:
             access = winreg_module.KEY_READ | view
-            for executable in _WINDOWS_BROWSER_EXECUTABLES:
+            # Windows registriert installierte Browser unter "App Paths".
+            for executable in ("chrome.exe", "chromium.exe", "brave.exe",
+                               "msedge.exe", "vivaldi.exe", "opera.exe"):
                 try:
                     key = winreg_module.OpenKey(
                         root, app_paths + "\\" + executable, 0, access)
@@ -210,7 +192,11 @@ def _macos_browser_paths(home=None):
     home = home or os.path.expanduser("~")
     found, seen = [], set()
     for root in ("/Applications", os.path.join(home, "Applications")):
-        for relative_path in _DARWIN_BROWSERS:
+        for relative_path in (
+                "Google Chrome.app/Contents/MacOS/Google Chrome",
+                "Chromium.app/Contents/MacOS/Chromium",
+                "Brave Browser.app/Contents/MacOS/Brave Browser",
+                "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"):
             path = os.path.join(root, relative_path)
             if relative_path not in seen and os.path.isfile(path):
                 found.append([path])
@@ -218,17 +204,11 @@ def _macos_browser_paths(home=None):
     return found
 
 
-def _platform_browser_paths(platform=None):
-    """Find browsers in the platform's standard installation directories."""
-    platform = platform or sys.platform
-    if platform == "win32":
-        return _windows_browser_paths()
-    if platform == "darwin":
-        return _macos_browser_paths()
-    return []
-
-
 def find_browsers(home=None):
     """Alle Kandidaten inkl. Plattformpfade und Status der Host-Sonde."""
     found, status = _collect_candidates(home)
-    return found + _platform_browser_paths(), status
+    if sys.platform == "win32":
+        return found + _windows_browser_paths(), status
+    if sys.platform == "darwin":
+        return found + _macos_browser_paths(), status
+    return found, status

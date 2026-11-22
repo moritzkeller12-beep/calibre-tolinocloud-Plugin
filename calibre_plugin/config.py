@@ -222,16 +222,6 @@ def _active_name(accounts):
     return active if active in names else accounts[0]["name"]
 
 
-def settings_readable():
-    """True nur, wenn der Einstellungsspeicher gerade lesbar ist.
-
-    Der Keep-alive darf einen einmal nutzbaren Token nicht einloesen, wenn
-    die Rotation anschliessend nicht gespeichert werden kann.
-    """
-    with _SETTINGS_LOCK:
-        return _reload()
-
-
 def settings_writable():
     """True nur, wenn ein Schreibvorgang jetzt committen koennte.
 
@@ -240,8 +230,13 @@ def settings_writable():
     dessen Rotation danach nicht gespeichert werden kann, waere verbrannt.
     """
     path = getattr(PREFERENCES, "file_path", None)
-    if not path or not settings_readable():
+    if not path:
         return False
+    # Der Keep-alive darf einen einmal nutzbaren Token nicht einloesen,
+    # wenn die Rotation anschliessend nicht gespeichert werden kann.
+    with _SETTINGS_LOCK:
+        if not _reload():
+            return False
     try:
         with open(str(path), "r+b"):
             pass

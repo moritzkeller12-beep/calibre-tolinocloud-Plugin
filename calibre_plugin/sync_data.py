@@ -88,11 +88,6 @@ def read_ids(patches):
     return {book_id for book_id, _category in read_tag_patches(patches)}
 
 
-def bookmark_path_parts(path):
-    """Return (book ID, bookmark ID) for a publication bookmark path."""
-    return _publication_path_parts(path, "bookmark")
-
-
 def _position_text(value):
     if value is None:
         return ""
@@ -157,7 +152,7 @@ def reading_progress(patches):
     for item in patches:
         if not isinstance(item, dict):
             continue
-        parts = bookmark_path_parts(item.get("path"))
+        parts = _publication_path_parts(item.get("path"), "bookmark")
         if parts is None:
             continue
         key = (parts[0], parts[1])

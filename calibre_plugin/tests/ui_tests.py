@@ -31,6 +31,25 @@ def comparison_rows(**kwargs):
                              [cloud], ["EPUB"], **kwargs)
 
 
+def bare_dashboard(ui):
+    """Dashboard ohne Widget-Aufbau; nur das Geraete-Feld."""
+    from PyQt6.QtWidgets import QLineEdit
+
+    class Dashboard(ui.dashboard.SyncDashboard):
+        def _build_ui(self):
+            self.hardware = QLineEdit()
+
+        def load_values(self):
+            pass
+
+    return Dashboard
+
+
+def job(label, old_id=None):
+    """Platzhalter fuer einen Upload-Job im Bestaetigungsdialog."""
+    return types.SimpleNamespace(label=lambda: label, old_id=old_id)
+
+
 def click_cell(table, row, column):
     """Echten Linksklick der Maus auf eine Zelle der Tabelle schicken."""
     from PyQt6.QtCore import Qt
@@ -96,19 +115,13 @@ class EscapeCloseTests(UiCase):
         """
         from PyQt6.QtCore import Qt, QTimer
         from PyQt6.QtTest import QTest
-        from PyQt6.QtWidgets import QDialog, QLineEdit
+        from PyQt6.QtWidgets import QDialog
 
-        base = self.ui.dashboard.SyncDashboard
         events = []
+        base = self.ui.dashboard.SyncDashboard
 
-        class Dashboard(base):
+        class Dashboard(bare_dashboard(self.ui)):
             """Ohne Widget-Aufbau; Schliessen und Speichern aufgezeichnet."""
-
-            def _build_ui(self):
-                self.hardware = QLineEdit()
-
-            def load_values(self):
-                pass
 
             def _save_visible_account(self, values=None):
                 events.append("saved")
@@ -139,19 +152,10 @@ class EscapeCloseTests(UiCase):
 
     def test_a_failed_save_keeps_the_window_open(self):
         """Ein Speicherfehler beim Schliessen darf die Eingaben nicht verlieren."""
-        from PyQt6.QtWidgets import QLineEdit
-
-        base = self.ui.dashboard.SyncDashboard
         messages = []
 
-        class Dashboard(base):
+        class Dashboard(bare_dashboard(self.ui)):
             """Ohne Widget-Aufbau; der Speicher schlaegt fehl."""
-
-            def _build_ui(self):
-                self.hardware = QLineEdit()
-
-            def load_values(self):
-                pass
 
             def _save_visible_account(self, values=None):
                 return False
@@ -526,11 +530,8 @@ class ConfirmationTests(unittest.TestCase):
         self.assertIn("in Calibre bleibt", text)
 
     def test_replacing_more_than_twenty_books_names_the_rest(self):
-        def job(label):
-            return types.SimpleNamespace(label=lambda: label, old_id="d1")
-
         self.ask(self.box.Yes)
-        jobs = [job("Buch %d" % number) for number in range(22)]
+        jobs = [job("Buch %d" % number, "d1") for number in range(22)]
         self.assertTrue(self.parts.confirm_replacements(None, jobs))
         text = self.question_text()
         self.assertIn("Lesestatus", text)
@@ -606,9 +607,6 @@ class ConfirmationTests(unittest.TestCase):
     def test_an_accepted_replacement_confirmation_starts_the_same_jobs(self):
         self.ask(self.box.Yes)
 
-        def job(label, old_id=None):
-            return types.SimpleNamespace(label=lambda: label, old_id=old_id)
-
         jobs = [job("Der Schwarm", "d1"), job("Nur in Calibre")]
         stub = self.start_sync(self.sync_stub(), {
             "jobs": jobs, "removals": [], "meta_updates": [],
@@ -623,9 +621,6 @@ class ConfirmationTests(unittest.TestCase):
 
     def test_a_cancelled_replacement_confirmation_starts_no_worker(self):
         self.ask(self.box.No)
-
-        def job(label, old_id=None):
-            return types.SimpleNamespace(label=lambda: label, old_id=old_id)
 
         context = RunContext.from_values(
             {"account_name": "A", "preferred_formats": ["EPUB"]})

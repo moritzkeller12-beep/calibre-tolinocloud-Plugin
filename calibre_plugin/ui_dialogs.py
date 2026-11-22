@@ -30,16 +30,6 @@ def _by_authors(row):
             str(row.get("title") or "").casefold())
 
 
-def download_target(path, data):
-    """Dateiendung an den gelieferten Inhalt anpassen (EPUB/PDF)."""
-    path = str(path)
-    if path.casefold().endswith(".epub") and data[:4] == b"%PDF":
-        return path[:-5] + ".pdf"
-    if path.casefold().endswith(".pdf") and data[:4] == b"PK\x03\x04":
-        return path[:-4] + ".epub"
-    return path
-
-
 def _confirm_overwrite(parent, path):
     """Rueckfrage vor dem Ueberschreiben einer vorhandenen Datei."""
     buttons = QMessageBox.StandardButton
@@ -1021,7 +1011,13 @@ class InventoryDialog(QDialog):
                 "Die Cloud-Antwort ist keine EPUB- oder PDF-Datei. "
                 "Gespeichert wurde nichts.", show=True)
             return
-        target = download_target(path, data)
+        # Dateiendung an den gelieferten Inhalt anpassen (EPUB/PDF).
+        target = str(path)
+        if target.casefold().endswith(".epub") and data[:4] == b"%PDF":
+            target = target[:-5] + ".pdf"
+        if (target.casefold().endswith(".pdf")
+                and data[:4] == b"PK\x03\x04"):
+            target = target[:-4] + ".epub"
         if target != path and os.path.exists(target):
             # Die nachtraeglich angepasste Endung darf keine vorhandene
             # Datei ohne Rueckfrage ueberschreiben.

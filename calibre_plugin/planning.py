@@ -105,32 +105,6 @@ def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
     return uploads
 
 
-def normalize_removals(explicit=()):
-    """Normalize user-picked cloud deletions.
-
-    `explicit` holds (book_uuid, tolino_id, title) triples marked in the
-    comparison dialog. A cloud copy is deleted once. Returns the selected
-    pairs and a title map keyed by tolino id.
-    """
-    merged = []
-    seen = set()
-    titles = {}
-    for entry in tuple(explicit or ()):
-        if not isinstance(entry, (tuple, list)) or len(entry) < 2:
-            continue
-        book_uuid, tolino_id = entry[0], entry[1]
-        title = str(entry[2] or "") if len(entry) > 2 else ""
-        tolino_id = str(tolino_id or "").strip()
-        if not tolino_id:
-            continue
-        if title:
-            titles[tolino_id] = title
-        if tolino_id not in seen:
-            seen.add(tolino_id)
-            merged.append((str(book_uuid or ""), tolino_id))
-    return merged, titles
-
-
 def series_map_from_metadata(metadata_by_id):
     """uuid -> Serienname fuer alle Buecher mit Serie.
 
@@ -302,8 +276,21 @@ def plan_actions(dialog, context, metadata, state, selection, series_map=None):
         skipped_formats.append(
             "Buch %s (%s): kein Format %s." %
             (book_id, title, display))
-    removals, removal_titles = normalize_removals(
-        (selection or {}).get("cloud_deletions"))
+    explicit = (selection or {}).get("cloud_deletions")
+    removals, seen, removal_titles = [], set(), {}
+    for entry in tuple(explicit or ()):
+        if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+            continue
+        book_uuid, tolino_id = entry[0], entry[1]
+        title = str(entry[2] or "") if len(entry) > 2 else ""
+        tolino_id = str(tolino_id or "").strip()
+        if not tolino_id:
+            continue
+        if title:
+            removal_titles[tolino_id] = title
+        if tolino_id not in seen:
+            seen.add(tolino_id)
+            removals.append((str(book_uuid or ""), tolino_id))
     titles = {valid_book_uuid(item.get("uuid")): str(item.get("title") or "")
               for item in (metadata or {}).values() if isinstance(item, dict)}
     titles.pop("", None)

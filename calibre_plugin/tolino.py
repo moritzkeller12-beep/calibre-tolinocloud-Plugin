@@ -137,11 +137,6 @@ def _download_token(deliverable_id):
 _REGISTER_SETTLE_SECONDS = 1.5
 # Feldbefund: Der erste Token-Aufruf kann am Bot-Schutz scheitern.
 _WAF_RETRY_SECONDS = (2.0, 5.0)
-_BOT_CHECK_MARKERS = (
-    "zugriff geblockt", "access denied", "captcha", "cloudfront",
-    "request blocked", "<!doctype html",
-)
-
 
 class _SafeRedirects(HTTPRedirectHandler):
     """Prueft ein Weiterleitungsziel, bevor urllib es kontaktiert.
@@ -543,7 +538,9 @@ class TolinoClient:
                 and retry["waf"] < len(_WAF_RETRY_SECONDS)):
             return False
         if not any(marker in self.last_error_text.casefold()
-                   for marker in _BOT_CHECK_MARKERS):
+                   for marker in (
+                       "zugriff geblockt", "access denied", "captcha",
+                       "cloudfront", "request blocked", "<!doctype html")):
             return False
         time.sleep(_WAF_RETRY_SECONDS[retry["waf"]])
         retry["waf"] += 1

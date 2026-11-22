@@ -18,22 +18,6 @@ from .ui_common import (CANCEL_MESSAGE, sync_result_detail,
                         sync_result_text)
 
 
-def window_gone(dialog):
-    """Modale Rueckmeldung nur, solange das Fenster noch offen ist.
-
-    Wird das Dashboard waehrend eines Laufs geschlossen, melden die Worker
-    danach «Abgebrochen.» oder einen Fehler. Ein Dialog auf einem
-    geschlossenen Fenster sieht niemand, blockiert aber den GUI-Thread und
-    haelt einen eigenstaendig gestarteten Prozess am Leben. Protokolliert
-    wird der Ausgang trotzdem.
-
-    Test-Doubles ohne `isVisible` gelten als offen -- dort bleibt alles beim
-    alten Verhalten.
-    """
-    visible = getattr(dialog, "isVisible", None)
-    return visible is not None and not visible()
-
-
 def book_key_index(dashboard):
     """Return all book ids and every key that maps to one of them.
 
@@ -56,21 +40,6 @@ def book_key_index(dashboard):
         else:
             mapping.setdefault(calibre_key(book_id, scope), book_id)
     return book_ids, mapping
-
-
-def refresh_library_view(dashboard, book_ids):
-    """Geänderte Calibre-Zeilen sichtbar machen, ohne die Bibliothek neu zu laden."""
-    view = getattr(getattr(dashboard, "gui", None), "library_view", None)
-    model = getattr(view, "model", None)
-    if callable(model):
-        model = model()
-    refresh = getattr(model, "refresh_ids", None)
-    if callable(refresh):
-        try:
-            refresh(tuple(book_ids))
-        except Exception as exc:
-            log_warning("Calibre-Ansicht konnte nicht aktualisiert werden: %s"
-                        % sanitize_error(exc))
 
 
 def write_reading_updates(dashboard, read_updates, progress_updates,
@@ -99,7 +68,17 @@ def write_reading_updates(dashboard, read_updates, progress_updates,
     if written:
         book_ids = {book_id for book_id, _value
                     in read_updates + progress_updates}
-        refresh_library_view(dashboard, book_ids)
+        view = getattr(getattr(dashboard, "gui", None), "library_view", None)
+        model = getattr(view, "model", None)
+        if callable(model):
+            model = model()
+        refresh = getattr(model, "refresh_ids", None)
+        if callable(refresh):
+            try:
+                refresh(tuple(book_ids))
+            except Exception as exc:
+                log_warning("Calibre-Ansicht konnte nicht aktualisiert werden: %s"
+                            % sanitize_error(exc))
     return written
 
 
@@ -246,14 +225,6 @@ def finish_sync(dialog, updates, worker=None):
         dialog.finish_thread()
 
 
-def sync_cancelled_text(outcome):
-    """Abschlusstext eines regulären Abbruchs -- auch mit Teilerfolgen."""
-    result = sync_result_text(outcome, "")
-    if result:
-        return "Abgebrochen. " + result
-    return "Abgebrochen. Es wurde nichts übertragen."
-
-
 def sync_failure_heading(outcome):
     """Titel und Vorsatz eines fehlerhaften Laufs.
 
@@ -274,7 +245,10 @@ def report(dialog, kind, title, text, log, detail=""):
     `kind` ist «info», «fehler» oder «warnung». Rückgabe: False, wenn nur
     protokolliert wurde -- der Aufrufer spart sich dann die UI-Arbeit.
     """
-    if window_gone(dialog):
+    # Ein Dialog auf einem geschlossenen Fenster blockiert den GUI-Thread;
+    # Doubles ohne `isVisible` gelten als offen.
+    visible = getattr(dialog, "isVisible", None)
+    if visible is not None and not visible():
         log_warning("Fenster geschlossen; %s: %s"
                     % (log, sanitize_error(text)))
         return False
@@ -312,7 +286,9 @@ def report_sync(dialog, outcome, failures, message="", cancelled=False):
         report(dialog, "fehler", "Speichern fehlgeschlagen", text,
                "Speichern fehlgeschlagen", detail)
     elif cancellation and not error_message:
-        report(dialog, "info", "Abgebrochen", sync_cancelled_text(outcome),
+        report(dialog, "info", "Abgebrochen",
+               ("Abgebrochen. " + result) if result
+               else "Abgebrochen. Es wurde nichts übertragen.",
                "Lauf abgebrochen")
     elif text_message:
         text = text_message
