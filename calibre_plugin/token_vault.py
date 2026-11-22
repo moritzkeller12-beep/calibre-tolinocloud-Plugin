@@ -37,16 +37,6 @@ def _seconds(value):
         return 0.0
 
 
-def _partner_number(value):
-    """Buchhaendler-Nummer des Kontos; ohne Angabe der Standardpartner."""
-    if value is None:
-        return 1
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _require_savable_rotation():
     """Ein Tausch darf nur starten, wenn die Rotation speicherbar ist."""
     if settings_writable():
@@ -134,9 +124,14 @@ class TokenVault:
         if not refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
                                   code="A01")
+        partner = account.get("partner_id")
+        try:
+            partner = 1 if partner is None else int(partner)
+        except (TypeError, ValueError):
+            partner = 0
         return {"refresh_token": refresh,
                 "hardware_id": str(account.get("hardware_id") or ""),
-                "partner_id": _partner_number(account.get("partner_id")),
+                "partner_id": partner,
                 "access_token": str(account.get("access_token") or ""),
                 "access_expires_at": _seconds(account.get("access_expires_at"))}
 

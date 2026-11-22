@@ -61,7 +61,7 @@ class VaultCase(PreferencesCase):
 class LoginTests(VaultCase):
     """Ein Login tauscht genau einen Token und schreibt die Rotation zurück."""
 
-    def test_the_rotated_token_replaces_the_stored_one(self):
+    def test_a_login_rotates_the_token_and_stores_the_hardware_id(self):
         server = TokenServer()
         config.save_account("A", {"refresh_token": "start"})
         with self.vault(server):
@@ -70,12 +70,6 @@ class LoginTests(VaultCase):
         self.assertEqual("rot-1", config.account_summary("A")["refresh_token"])
         self.assertEqual(["start"], server.used_tokens)
         self.assertEqual("A", client.account_name)
-
-    def test_a_generated_hardware_id_is_stored_in_the_account(self):
-        server = TokenServer()
-        config.save_account("A", {"refresh_token": "start"})
-        with self.vault(server):
-            client = TOKEN_VAULT.login("A")
         stored = config.account_summary("A")["hardware_id"]
         self.assertTrue(stored)
         self.assertEqual(client.hardware, stored)

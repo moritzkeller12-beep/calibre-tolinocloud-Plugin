@@ -64,7 +64,15 @@ def _lock_handle(handle):
     if os.name == "nt":
         import msvcrt
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        while True:  # LK_LOCK waere nach zehn Sekunden beendet
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if (getattr(exc, "winerror", None) != 33
+                        and exc.errno not in (11, 13, 36)):
+                    raise
+                time.sleep(0.05)
     else:
         import fcntl
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -315,18 +323,12 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
             return False
         raw = PREFERENCES.get("accounts", None)
         records = list(raw) if isinstance(raw, list) else []
-        index = None
-        if records:
-            for position, (stored, _source) in enumerate(
-                    _named_accounts(records)):
-                if stored == name:
-                    index = position
-                    break
-        previous_active = ""
-        if active is not _UNSET:
-            previous_active = _active_name(
-                [{"name": stored}
-                 for stored, _source in _named_accounts(records)])
+        index = next((position for position, (stored, _source) in
+                      enumerate(_named_accounts(records))
+                      if stored == name), None)
+        previous_active = (_active_name(
+            [{"name": stored} for stored, _ in _named_accounts(records)])
+            if active is not _UNSET else "")
         if index is None:
             if not (create or (allow_virtual_default and not records
                                and name == DEFAULT_ACCOUNT_NAME)):

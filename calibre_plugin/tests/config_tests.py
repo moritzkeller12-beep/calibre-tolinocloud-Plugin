@@ -2,7 +2,7 @@
 import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from .. import config
 from ._support import PreferencesCase, break_settings
@@ -170,19 +170,33 @@ class ExternalChangeTests(ConfigCase):
         self.assertTrue(config.save_refresh_token("A", "tok-B"))
         self.assertEqual("tok-B", config.account_summary("A")["refresh_token"])
 
+    def test_the_windows_lock_retries_contention(self):
+        """msvcrt.LK_LOCK bricht nach zehn Sekunden ab; der Lock muss warten."""
+        fake = type("FakeMsvcrt", (), {
+            "LK_NBLCK": 2,
+            "locking": Mock(side_effect=[OSError(13, "belegt")] * 2 + [None])})
+        with patch("os.name", "nt"), \
+                patch.dict("sys.modules", {"msvcrt": fake}):
+            config._lock_handle(Mock())
+        self.assertEqual(3, fake.locking.call_count)
+        broken = type("BrokenMsvcrt", (), {
+            "LK_NBLCK": 2,
+            "locking": Mock(side_effect=OSError(5, "kaputt"))})
+        with patch("os.name", "nt"), \
+                patch.dict("sys.modules", {"msvcrt": broken}):
+            with self.assertRaises(OSError):
+                config._lock_handle(Mock())
+
 
 class TokenTests(ConfigCase):
     """Token-Rotation: nur der abgelehnte Token darf verschwinden."""
 
-    def test_a_rotated_token_replaces_the_stored_one(self):
-        config.save_account("A", {"refresh_token": "alt"})
-        self.assertTrue(config.save_refresh_token("A", "neu"))
-        self.assertEqual("neu", config.account_summary("A")["refresh_token"])
-
-    def test_an_empty_token_does_not_clear_the_login(self):
+    def test_only_a_non_empty_rotation_replaces_the_login(self):
         config.save_account("A", {"refresh_token": "alt"})
         self.assertFalse(config.save_refresh_token("A", ""))
         self.assertEqual("alt", config.account_summary("A")["refresh_token"])
+        self.assertTrue(config.save_refresh_token("A", "neu"))
+        self.assertEqual("neu", config.account_summary("A")["refresh_token"])
 
     def test_only_the_rejected_token_is_cleared(self):
         config.save_account("A", {"refresh_token": "verloren"})
@@ -228,26 +242,17 @@ class TokenTests(ConfigCase):
         self.assertEqual({"tolino_id": "neu"},
                          config.account_by_name("A")["state"]["b1"])
 
-    def test_a_stored_entry_of_the_new_copy_keeps_its_values(self):
+    def test_stored_values_of_the_new_copy_survive_a_replacement(self):
         """Der andere Lauf hat die Ersatzkopie schon gelesen: nicht verwerfen."""
-        config.save_account("A", {"refresh_token": "tok-A", "state": {
-            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
-        base = {"b1": {"tolino_id": "alt"}}
-        self.assertTrue(config.save_state(
-            "A", {"b1": {"tolino_id": "neu"}}, base))
-        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
-                         config.account_by_name("A")["state"]["b1"])
-
-    def test_a_local_change_does_not_move_to_a_foreign_copy(self):
-        """Lokale Lesedaten der alten Kopie bleiben bei der neuen Kopie weg."""
-        config.save_account("A", {"refresh_token": "tok-A", "state": {
-            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
-        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
-        self.assertTrue(config.save_state(
-            "A", {"b1": {"tolino_id": "alt", "reading": {"read": True}}},
-            base))
-        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
-                         config.account_by_name("A")["state"]["b1"])
+        stored = {"tolino_id": "neu", "reading": {"read": True}}
+        for base in ({"b1": {"tolino_id": "alt"}},
+                     {"b1": {"tolino_id": "alt", "reading": {"read": False}}}):
+            with self.subTest(base=base):
+                config.save_account("A", {"state": {"b1": stored}})
+                self.assertTrue(config.save_state(
+                    "A", {"b1": {"tolino_id": "neu"}}, base))
+                self.assertEqual(stored,
+                                 config.account_by_name("A")["state"]["b1"])
 
     def test_a_field_removed_locally_disappears_from_the_stored_state(self):
         config.save_account("A", {"refresh_token": "tok-A", "state": {
@@ -275,21 +280,15 @@ class TokenTests(ConfigCase):
     def test_a_local_reading_change_applies_only_to_its_own_copy(self):
         base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
         local = {"b1": {"tolino_id": "alt", "reading": {"read": True}}}
-        for stored_id in ("alt", "neu"):
-            with self.subTest(stored_id=stored_id):
-                stored = {"tolino_id": stored_id, "reading": {"read": False}}
+        for stored_id, stored_reading in (("alt", {"read": False}),
+                                           ("neu", {"read": False}),
+                                           ("neu", {"read": True})):
+            with self.subTest(stored_id=stored_id, reading=stored_reading):
+                stored = {"tolino_id": stored_id, "reading": stored_reading}
                 config.save_account("A", {"state": {"b1": stored}})
                 self.assertTrue(config.save_state("A", local, base))
                 self.assertEqual(local["b1"] if stored_id == "alt" else stored,
                                  config.account_by_name("A")["state"]["b1"])
-
-    def test_a_replacement_keeps_reading_already_saved_for_the_new_copy(self):
-        stored = {"tolino_id": "neu", "reading": {"read": True}}
-        config.save_account("A", {"state": {"b1": stored}})
-        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
-        self.assertTrue(config.save_state("A", {"b1": {"tolino_id": "neu"}},
-                                          base))
-        self.assertEqual(stored, config.account_by_name("A")["state"]["b1"])
 
 
 if __name__ == "__main__":
