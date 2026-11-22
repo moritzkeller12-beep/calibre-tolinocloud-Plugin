@@ -60,12 +60,13 @@ _by_tolino_id = _by_field("tolino_id")
 _by_uuid = _by_field("uuid")
 
 
-def _by_calibre(row):
-    return (0 if row.get("book_id") is not None else 1,) + _by_title(row)
+def _by_presence(is_present):
+    """Zeilen mit vorhandenem Feld zuerst, innerhalb dessen nach Titel."""
+    return lambda row: (0 if is_present(row) else 1,) + _by_title(row)
 
 
-def _by_cloud(row):
-    return (0 if row.get("tolino_id") else 1,) + _by_title(row)
+_by_calibre = _by_presence(lambda row: row.get("book_id") is not None)
+_by_cloud = _by_presence(lambda row: bool(row.get("tolino_id")))
 
 
 def _metadata_first(row):
@@ -73,9 +74,7 @@ def _metadata_first(row):
             + comparison_sort_key(row)[2:])
 
 
-def _read_first(row):
-    return ((0 if row.get("read") else 1,)
-            + _by_title(row))
+_read_first = _by_presence(lambda row: bool(row.get("read")))
 
 
 def _by_progress(row):
@@ -310,10 +309,9 @@ class InventoryDialog(QDialog):
         Upload-Vorschlag.
         """
         caps = row_capabilities(row)
-        if not caps["usable"]:
-            return (False, False)
-        # Bei unsicheren Zuordnungen könnte ein Upload Duplikate erzeugen.
-        if row.get("status") == "review":
+        # Gesperrte Zeilen und unsichere Zuordnungen bekommen keinen
+        # Vorschlag: ein Upload koennte Duplikate erzeugen.
+        if not caps["usable"] or row.get("status") == "review":
             return (False, False)
         if row.get("book_id") is None or not row.get("tolino_id"):
             if row.get("stale_cloud_id"):
@@ -864,9 +862,10 @@ class InventoryDialog(QDialog):
         """
         uploads = metadata = 0
         marked_read = marked_unread = deletions = undecided = 0
-        review_groups = ("review", "duplicate_tolino", "not_matchable")
         for row in self.rows:
-            if row.get("group") in review_groups:
+            # `group` traegt nur die Werte aus `comparison_group` bzw.
+            # "ignored"; die Statusnamen aus «zu pruefen» kommen hier nie an.
+            if row.get("group") == "review":
                 undecided += 1
             caps = row_capabilities(row)
             if caps["delete"] and row.get("delete_cloud"):
