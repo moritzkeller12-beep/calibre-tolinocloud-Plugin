@@ -2,13 +2,13 @@
 
 Synchronisiert Bücher, Metadaten, Lesestatus und Fortschritt zwischen Calibre und der tolino Cloud.
 
-Aktuelle Version: **0.1.08** (Quelle: [`__init__.py`](__init__.py)).
+Aktuelle Version: **0.1.09** (Quelle: [`__init__.py`](__init__.py)).
 
-0.1.08 ist der neue State-Release: frühere Spalten- und `dbpath`-Migrationen werden nicht mehr ausgeführt. Der bisherige Config-Speicher bleibt unverändert aktiv; bestehende Konten und Tokens bleiben nach dem Upgrade erhalten.
+0.1.09 schliesst das Dashboard per Esc wie das Fensterkreuz (laufende Worker werden abgebrochen, sichtbare Einstellungen noch gesichert); der übrige Code ist ohne Verhaltensänderung gestrafft. Config-Speicher, Konten und Tokens bleiben unverändert.
 
 ## Installation
 
-1. [Plugin-ZIP für 0.1.08 herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/0.1.08/tolino_cloud_sync.zip).
+1. [Plugin-ZIP für 0.1.09 herunterladen](https://github.com/moritzkeller12-beep/calibre-tolinocloud-Plugin/raw/0.1.09/tolino_cloud_sync.zip).
 2. In Calibre: **Einstellungen → Plugins → Plugin aus Datei laden** und ZIP auswählen.
 3. Calibre neu starten.
 
