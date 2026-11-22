@@ -28,11 +28,10 @@ def _start_port():
         return int(sock.getsockname()[1])
 
 
-# Ownership is deliberately process-local: this module records only the
-# ephemeral profile, loopback port and Popen handle created by this plugin.
-# Die Prozessgruppe wird beim Start festgehalten: der Wrapper eines
-# Flatpak-/Snap-Pakets kann vor seinem Browserkind enden, danach laesst
-# sich die Gruppe nicht mehr ueber os.getpgid(pid) finden.
+# Der Besitz ist bewusst prozesslokal: nur Profil, Loopback-Port und
+# Popen-Handle dieses Plugins stehen hier. Die Prozessgruppe wird beim Start
+# festgehalten -- der Wrapper eines Flatpak-/Snap-Pakets kann vor seinem
+# Browserkind enden, danach findet os.getpgid(pid) nichts mehr.
 _LAUNCHED = {"process": None, "port": None, "profile": "", "pgid": None}
 
 
@@ -174,9 +173,8 @@ def launch_reader_window():
     failures = []
     for argv in options:
         # Jeder Kandidat wird versucht: ein installiertes, aber nicht
-        # startfaehiges Paket (defektes snap, deinstalliertes Flatpak) darf
-        # die Anmeldung nicht blockieren, solange ein spaeterer Browser
-        # funktioniert.
+        # startfaehiges Paket darf die Anmeldung nicht blockieren, solange
+        # ein spaeterer Browser funktioniert.
         profile = tempfile.mkdtemp(prefix="tolino-grab-")
         try:
             process = subprocess.Popen(
@@ -203,11 +201,10 @@ def launch_reader_window():
         failures.append("%s: keine Antwort" % argv[0])
         if not _stop_launched_process(process, timeout=2,
                                       pgid=_LAUNCHED["pgid"], port=port):
-            # Der Prozess lebt weiter und haelt den DevTools-Port. Ein
-            # weiterer Kandidat wuerde dessen Antwort als eigene lesen und
-            # denselben Port doppelt belegen. Der Besitzer bleibt vermerkt,
-            # damit ein erneutes Schliessen ihn noch beenden kann; das
-            # Profil bleibt, solange der Browser es benutzt.
+            # Der Prozess lebt weiter und haelt den DevTools-Port; ein
+            # weiterer Kandidat wuerde dessen Antwort als eigene lesen. Der
+            # Besitzer bleibt vermerkt, damit ein erneutes Schliessen ihn
+            # beenden kann; das Profil bleibt, solange der Browser es nutzt.
             raise TolinoAuthError(
                 "Das Anmeldefenster liess sich nicht beenden. Bitte den "
                 "Browser schliessen und es erneut versuchen.", code="B01",

@@ -20,10 +20,9 @@ def _exchange_grabbed_token(hardware, grabbed, fresh):
     Returns (refresh, hardware, partner_id). Ohne erkennbaren Shop wird
     nichts getauscht -- ein geratener Endpunkt verbrennt den Einmal-Token.
     """
-    # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sind
-    # kurzlebig und haben denselben JWT-Aufbau -- ein Access-Token am
-    # Token-Endpunkt "zu verbrauchen" hilft niemandem und der eigentliche
-    # Refresh-Token wird dann womoeglich gar nicht erst probiert.
+    # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sehen
+    # gleich aus. Ein Access-Token am Token-Endpunkt zu verbrauchen hilft
+    # niemandem und der echte Refresh-Token wuerde gar nicht probiert.
     known = {token: partner_from_token(token) for token in fresh}
     if not any(known.values()):
         raise TolinoAuthError(UNKNOWN_SHOP + RELOGIN, code="B03")

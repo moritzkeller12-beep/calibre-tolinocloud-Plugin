@@ -31,9 +31,8 @@ DEFAULT_ACCOUNT = {
 ACCOUNT_KEYS = tuple(key for key in DEFAULT_ACCOUNT if key != "name")
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
-# `_SETTINGS_LOCK` gilt nur in diesem Prozess. Eine zweite Calibre-Instanz
-# kann dieselbe Datei schreiben. Wo verfuegbar, schuetzt eine zusaetzliche
-# Dateisperre das Laden, Vergleichen und Schreiben.
+# `_SETTINGS_LOCK` gilt nur in diesem Prozess; eine zweite Calibre-Instanz
+# kann dieselbe Datei schreiben. Wo verfuegbar, schuetzt eine Dateisperre.
 _LOCK_STATE = threading.local()
 
 
@@ -315,10 +314,9 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
         name = str(name or "").strip()
         if not name or not isinstance(values, dict):
             return False
-        # Eine zweite Calibre-Instanz oder der Keep-alive kann inzwischen
-        # geschrieben haben. `JSONConfig` haelt den Stand im Speicher und
-        # schreibt beim naechsten Commit ALLES zurueck -- ohne diesen Abgleich
-        # loescht der eigene, gecachte Stand fremde Token.
+        # Eine zweite Instanz oder der Keep-alive kann inzwischen geschrieben
+        # haben; `JSONConfig` schreibt beim Commit seinen ganzen Speicherstand
+        # zurueck -- ohne Abgleich loescht der gecachte Stand fremde Token.
         if reload and not _reload():
             return False
         raw = PREFERENCES.get("accounts", None)
@@ -350,8 +348,7 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
         if preferred_formats is not None:
             changes[PREFERRED_FORMATS] = list(preferred_formats)
         # `update` umgeht Calibres committendes `__setitem__`: alle Werte
-        # landen in EINEM Schreibvorgang, statt halb geschrieben auf der
-        # Platte zu stehen.
+        # landen in EINEM Schreibvorgang statt halb auf der Platte.
         PREFERENCES.update(changes)
         _commit()
         return True
@@ -604,9 +601,8 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
     Konto, bleibt er unangetastet.
     """
     rejected = str(rejected_token or "").strip()
-    # Vergleich und Loeschen unter beiden Sperren: sonst kann zwischen beiden
-    # Schritten genau die Rotation stattfinden, die geschuetzt werden soll --
-    # auch aus einer zweiten Calibre-Instanz.
+    # Vergleich und Loeschen unter beiden Sperren: sonst kann dazwischen genau
+    # die Rotation stattfinden, die geschuetzt werden soll -- auch extern.
     with _SETTINGS_LOCK, _settings_file_lock():
         current = str(account_summary(account_name).get(
             "refresh_token") or "").strip()

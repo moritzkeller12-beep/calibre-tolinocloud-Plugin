@@ -7,8 +7,7 @@ from .matching import (author_tokens, authors_match, is_valid_isbn,
                        normalize_isbn, normalize_match_text, normalize_title)
 
 # Felder, die zu genau EINER Cloud-Kopie gehoeren: nach einem Kopiewechsel
-# (neue tolino-ID) sind sie wertlos. Dieselbe Liste nutzen das Zuruecksetzen
-# eines Eintrags und der Drei-Wege-Merge der Einstellungen.
+# wertlos. Dieselbe Liste nutzen Zuruecksetzen und Drei-Wege-Merge.
 COPY_BOUND_FIELDS = ("reading", "collections", "meta_verified_fp")
 
 
@@ -391,12 +390,10 @@ def _matched_status(metadata, remote, old, selected_format, authors,
         return "review", "conflict", file_changed
     same_fields = _same_comparison_fields(metadata, remote)
     current_meta_fp = metadata_fingerprint(metadata)
-    # Nur ein nach PUT per GET bestaetigter Patch darf explizite Inventarwerte
-    # ueberstimmen. Bewusster Kompromiss: aendert die Cloud den Titel spaeter,
-    # gilt die Zeile weiter als gleich -- sonst wuerde jede externe Aenderung
-    # beim naechsten Sync sofort wieder ueberschrieben.
-    # Eine Bestaetigung gilt nur fuer die Kopie, fuer die sie geschrieben
-    # wurde: nach einem Wechsel der Cloud-ID ist sie wertlos.
+    # Nur ein nach PUT per GET bestaetigter Patch ueberstimmt Inventarwerte.
+    # Bewusster Kompromiss: aendert die Cloud den Titel spaeter, gilt die
+    # Zeile weiter als gleich -- sonst wuerde jede externe Aenderung sofort
+    # wieder ueberschrieben. Die Bestaetigung gilt nur fuer ihre Cloud-Kopie.
     verified_metadata_matches = (
         bool(old.get("meta_verified_fp"))
         and old.get("meta_verified_fp") == current_meta_fp

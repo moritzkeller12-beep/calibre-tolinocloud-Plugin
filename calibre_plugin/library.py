@@ -111,10 +111,9 @@ COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein",
                      "int": "Zahl", "float": "Zahl"}
 
 # Spalten, die dieses Plugin in DIESER Calibre-Sitzung angelegt hat -- je
-# Bibliothek, denn ein Bibliothekswechsel bringt eine andere field_metadata.
-# Calibre fuehrt eine neue Spalte erst nach einem Neustart in
-# `field_metadata`; ohne diesen Merker wollte ein zweiter Klick dieselbe
-# Spalte erneut anlegen.
+# Bibliothek, denn ein Wechsel bringt andere field_metadata. Calibre kennt
+# eine neue Spalte erst nach einem Neustart; ohne den Merker legte ein
+# zweiter Klick dieselbe Spalte erneut an.
 CREATED_COLUMNS = {}
 
 

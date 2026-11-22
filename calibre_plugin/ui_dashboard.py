@@ -240,8 +240,7 @@ class SyncDashboard(DashboardParts, QDialog):
             return
         # Ein eingetippter Zugangstoken ist eine Eingabe wie jede andere:
         # «Speichern und schliessen» darf ihn nicht still verwerfen. Ohne
-        # erkannten Buchhändler bleibt das Fenster offen, damit die Eingabe
-        # nicht verloren geht -- die Meldung nennt den Grund.
+        # erkannten Buchhändler bleibt das Fenster offen und nennt den Grund.
         if typed and self.account_name and not self.store_refresh(typed):
             return
         self.settings_dialog.accept()
@@ -863,11 +862,10 @@ class SyncDashboard(DashboardParts, QDialog):
             if worker_name:
                 setattr(self, worker_name, None)
         # `self.worker` bleibt bis zur Auswertung stehen: nach einem
-        # Thread-Timeout kann das Ergebnis noch eintreffen und braucht
-        # Ergebnis, Konto und Spalten; `finish_thread()` raeumt danach auf.
-        # A running browser sign-in is left alone on purpose: its thread is
-        # unparented and self-terminates after its timeout, and joining it
-        # here could freeze the close for minutes.
+        # Thread-Timeout kann das Ergebnis noch eintreffen; `finish_thread()`
+        # raeumt danach auf. Eine laufende Browser-Anmeldung bleibt bewusst
+        # unangetastet: ihr Thread endet selbst per Timeout, ein Join koennte
+        # das Schliessen minutenlang blockieren.
         self.login_thread = None
         self.login_worker = None
         event.accept()

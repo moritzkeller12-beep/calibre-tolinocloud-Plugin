@@ -66,11 +66,10 @@ class _Ws:
             name, separator, value = line.partition(b":")
             if separator:
                 headers[name.strip().lower()] = value.strip()
-        # Nur eine echte 101-Antwort mit den Upgrade-Headern und dem
-        # richtigen Accept-Digest ist ein WebSocket. Ohne diese Pruefung
-        # wuerde auch eine fremde HTTP-Antwort als Verbindung gelten.
-        # `Connection` ist eine Kommaliste: nur ein eigener Eintrag zaehlt,
-        # nicht die Zeichenfolge irgendwo im Header.
+        # Nur eine echte 101-Antwort mit Upgrade-Headern und richtigem
+        # Accept-Digest ist ein WebSocket. `Connection` ist eine Kommaliste:
+        # nur ein eigener Eintrag zaehlt, nicht die Zeichenfolge irgendwo
+        # im Header.
         connection_tokens = {
             token.strip().lower()
             for token in headers.get(b"connection", b"").split(b",")}

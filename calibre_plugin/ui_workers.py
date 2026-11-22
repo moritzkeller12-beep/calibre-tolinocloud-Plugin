@@ -37,8 +37,7 @@ class SyncWorker(QObject):
         self.meta_updates = list(meta_updates or ())
         self.series_map = dict(series_map or {})
         # (tolino-ID, Calibre-Nummer, gelesen?) je ausdrücklich gewählter
-        # Änderung aus dem Vergleichsfenster. Leer heisst: Lesestatus bleibt
-        # unangetastet und die Spalte unverändert.
+        # Änderung; leer heisst: Lesestatus und Spalte bleiben unverändert.
         self.read_changes = [
             (tolino_id, change[1], bool(change[2]),
              valid_book_uuid(change[3]) if len(change) > 3 else "")
@@ -740,12 +739,9 @@ class PrepareWorker(QObject):
                 return
             store_reading_state(state, comparison)
             if state != original_state:
-                # Alle Änderungen des Vergleichs (bestätigte IDs,
-                # veraltete Kopien, Lesewerte) in EINEM Schreibvorgang sichern.
-                # Nur bestehende Konten aktualisieren: ein während des
-                # Vergleichs entferntes Konto darf nicht wieder erscheinen
-                # und bleibt damit ein erlaubter Sonderfall. Ein echter
-                # Schreibfehler darf dagegen nicht als «bereit» gelten.
+                # Alle Vergleichsänderungen (IDs, alte Kopien, Lesewerte) in
+                # EINEM Schreibvorgang sichern. Ein entferntes Konto bleibt
+                # Sonderfall; ein Schreibfehler gilt nicht als «bereit».
                 try:
                     stored = save_state(self.account_name, state,
                                         original_state)

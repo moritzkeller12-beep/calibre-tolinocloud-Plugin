@@ -416,9 +416,8 @@ class InventoryDialog(QDialog):
             QTableWidget.SelectionMode.ExtendedSelection)
         for index, column in enumerate(self.COLUMNS):
             self.table.horizontalHeaderItem(index).setToolTip(column.tooltip)
-        # Spaltenkopf-Klick sortiert (QTableWidget-eigenes Sortieren würde
-        # die Check-Zellen nicht mit den Zeilen mitziehen -- alles wird
-        # deshalb über _rebuild_table neu aufgebaut).
+        # Spaltenkopf-Klick sortiert; QTableWidget-eigenes Sortieren zoege die
+        # Check-Zellen nicht mit -- deshalb baut _rebuild_table neu auf.
         self._sort_column = 0
         self._sort_descending = False
         table_header = self.table.horizontalHeader()

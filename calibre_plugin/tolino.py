@@ -387,9 +387,8 @@ class TolinoClient:
                     exc, (previous_refresh, new_refresh, self.access))
             if stored is False:
                 # Der neue Token ist gueltig, aber nicht gesichert: die
-                # Anmeldung darf nicht als gelungen gelten. Den bisherigen
-                # gespeicherten Token nicht loeschen -- der Schreibfehler
-                # sagt nichts ueber seine Gueltigkeit aus.
+                # Anmeldung gilt nicht als gelungen. Den gespeicherten Token
+                # nicht loeschen -- der Schreibfehler sagt nichts ueber ihn.
                 self.access = None
                 self.expires_at = 0
                 raise TolinoAuthError(
@@ -439,10 +438,8 @@ class TolinoClient:
             "refresh_token": used_refresh,
         }
         # Ohne ``scope`` gilt der beim Ausstellen verwendete (RFC 6749, 6).
-        # Ein hartkodierter Wert waere geraten: weicht er vom echten Scope ab,
-        # scheitert die Erneuerung mit invalid_scope -- und das sieht aus wie
-        # eine abgelaufene Anmeldung. Mitgeschickt wird nur, was im Token
-        # selbst steht.
+        # Nur mitgeschickt, was im Token steht: ein geratener Wert scheitert
+        # mit invalid_scope und sieht aus wie eine abgelaufene Anmeldung.
         scope = (token_payload(used_refresh) or {}).get("scope")
         if isinstance(scope, str) and scope.strip():
             payload["scope"] = scope.strip()
@@ -456,10 +453,9 @@ class TolinoClient:
             token_rejected = ("invalid_grant" in folded
                               or "reuse exceeded" in folded)
             if session_ended or token_rejected:
-                # Ein anderer Lauf (Keep-alive, zweite Calibre-Instanz) kann
-                # inzwischen rotiert haben: dann ist der gespeicherte Token
-                # der einzige, der noch gilt -- und ein Versuch damit ist
-                # kein zweiter Versuch mit dem abgelehnten. Genau EINER.
+                # Ein anderer Lauf (Keep-alive, zweite Instanz) kann inzwischen
+                # rotiert haben: dann ist der gespeicherte Token der einzige,
+                # der gilt -- ein Versuch damit ist kein zweiter. Genau EINER.
                 newer = self._newer_stored_token(used_refresh)
                 if newer:
                     log_warning("Tolino-Anmeldung: der gespeicherte Zugang "
@@ -697,9 +693,8 @@ class TolinoClient:
         if problems:
             log_warning("Tolino-Inventar: %s" % "; ".join(problems))
         if not complete:
-            # Ein unvollstaendiger Bestand wuerde die Zuordnung zu den
-            # fehlenden Datensaetzen loeschen und spaeter einen doppelten
-            # Upload planen.
+            # Ein unvollstaendiger Bestand wuerde die Zuordnung zu fehlenden
+            # Datensaetzen loeschen und spaeter einen doppelten Upload planen.
             raise TolinoApiError(
                 "Der Bestand von tolino ist unvollständig (%s)."
                 % "; ".join(problems), code="N02",
@@ -926,9 +921,8 @@ class TolinoClient:
             host == "pageplace.de" or host.endswith(".pageplace.de"))
         request = Request(content_url, headers=headers)
         if authenticated_host:
-            # urllib forwards regular Request headers over cross-host redirects.
-            # Keep account credentials off redirect requests; a signed HTTPS
-            # redirect to a CDN remains supported without disclosing the token.
+            # urllib sends regular headers over cross-host redirects: keep
+            # credentials off redirects; a signed HTTPS CDN redirect works.
             request.add_unredirected_header("t_auth_token", self.access)
             request.add_unredirected_header("hardware_id", self.hardware)
             request.add_unredirected_header(

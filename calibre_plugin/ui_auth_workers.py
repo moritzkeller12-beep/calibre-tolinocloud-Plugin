@@ -24,8 +24,7 @@ class BrowserLoginWorker(QObject):
                 self.hardware, timeout=LOGIN_TIMEOUT,
                 progress=self.progress.emit)
             # Vor dem Signal speichern: das Dashboard darf vorher schliessen,
-            # ohne dass der neue Single-Use-Token verloren geht. ``False``
-            # heisst nicht gespeichert -- dann ist die Anmeldung gescheitert.
+            # ohne dass der Single-Use-Token verloren geht; ``False`` = Fehler.
             if save_credentials(self.account_name, refresh, hardware,
                                 partner_id) is False:
                 raise TolinoAuthError(
