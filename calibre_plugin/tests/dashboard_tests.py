@@ -13,12 +13,9 @@ from ..comparison import compare_inventory
 from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
                       TOLINO_READ_COLUMN, library_scope)
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, PreferencesCase, SyncThread,
-                       break_settings, dashboard_stub, real_qt_stub,
-                       ui_module_for)
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
+from ._support import (OTHER, UUID, CalibreDatabase, PreferencesCase,
+                       SyncThread, break_settings, dashboard_stub,
+                       real_qt_stub, ui_module_for)
 
 
 class OrchestrationCase(PreferencesCase):

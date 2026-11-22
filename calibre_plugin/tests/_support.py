@@ -21,6 +21,11 @@ from unittest.mock import patch
 
 from ..errors import TolinoAuthError
 
+# Feste Buch- und Kontokennungen fuer die Fixtures: dieselben Werte in allen
+# Testmodulen, damit eine Buchzeile ueberall denselben Schluessel hat.
+UUID = "11111111-1111-4111-8111-111111111111"
+OTHER = "22222222-2222-4222-8222-222222222222"
+
 
 class PreferencesCase(unittest.TestCase):
     """Jeder Test bekommt einen eigenen Einstellungsspeicher."""

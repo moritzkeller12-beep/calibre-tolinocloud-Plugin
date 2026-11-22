@@ -23,10 +23,7 @@ from ..planning import (NOTHING_TO_DO_TEXT, local_metadata, metadata_update_fiel
                         PlanCounts,
                         series_map_from_metadata, syncable_metadata)
 from ..run_context import RunContext
-from ._support import CalibreDatabase
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
+from ._support import OTHER, UUID, CalibreDatabase
 
 
 def book(**extra):

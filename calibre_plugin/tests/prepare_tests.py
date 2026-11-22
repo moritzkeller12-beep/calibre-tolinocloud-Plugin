@@ -7,11 +7,8 @@ Kontospeicherung laufen im Produktivcode.
 from .. import config
 from ..errors import TolinoAuthError, TolinoError
 from ..run_context import RunContext
-from ._support import (PreferencesCase, break_settings, execute_worker,
-                       real_qt_stub, ui_module_for)
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
+from ._support import (OTHER, UUID, PreferencesCase, break_settings,
+                       execute_worker, real_qt_stub, ui_module_for)
 BOOK = {"uuid": UUID, "title": "Der Schwarm", "authors": "Frank Schätzing",
         "isbn": "9780306406157", "formats": ["EPUB"], "ignored": False}
 CLOUD = {"tolino_id": "d1", "title": "Der Schwarm",

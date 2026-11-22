@@ -10,11 +10,9 @@ from ..comparison import content_fingerprint
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..planning import MetaUpdateRecord, SyncJob
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, PreferencesCase, break_settings,
-                       execute_worker, real_qt_stub, record, ui_module_for)
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
+from ._support import (OTHER, UUID, CalibreDatabase, PreferencesCase,
+                       break_settings, execute_worker, real_qt_stub, record,
+                       ui_module_for)
 
 
 class FakeClient:

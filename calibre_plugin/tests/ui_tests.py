@@ -13,10 +13,8 @@ from unittest.mock import patch
 from ..comparison import compare_inventory
 from ..errors import TolinoError
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, RecordingFileDialog, UiCase,
+from ._support import (UUID, CalibreDatabase, RecordingFileDialog, UiCase,
                        dashboard_stub, real_qt_stub, ui_module_for)
-
-UUID = "11111111-1111-4111-8111-111111111111"
 
 
 def comparison_rows(**kwargs):
