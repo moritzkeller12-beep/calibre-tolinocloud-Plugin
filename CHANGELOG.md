@@ -10,7 +10,9 @@
 - Beim Erneuern wird kein hartkodierter Scope mehr mitgeschickt, sondern der Scope des ausgestellten Tokens (RFC 6749, §6); ein abweichender Wert konnte die Erneuerung mit `invalid_scope` scheitern lassen.
 - Nach `invalid_grant`/`reuse exceeded` wird einmal der inzwischen gespeicherte Token versucht, bevor die Ablehnung gilt; gelöscht wird weiterhin nur der wirklich abgelehnte Token. Ein per 401 oder Ablehnung verworfener Access-Token verschwindet auch aus den Einstellungen.
 - Einstellungsdatei und Sperrdatei werden auf `0600` gesetzt (POSIX).
-- Neu: `tools/token_refresh.py` erneuert fällige Konten ohne geöffnetes Calibre (systemd-Timer, Cron, Aufgabenplanung) — siehe README.
+- Neu: `tools/token_refresh.py` erneuert fällige Konten ohne geöffnetes Calibre (systemd-Timer, Cron, Aufgabenplanung).
+- Eine patchlose `sync-data`-Antwort mit gültiger Revision gilt als leerer Stand; fehlende Revision, `patches: null` oder ein falscher Typ bleiben Fehler. Lesestatus, Sammlungen und Serienzuordnung bleiben erhalten.
+- Reine Straffung ohne Verhaltensänderung: private Ein-Aufrufer-Helfer zusammengeführt, eine leere Test-Fixture entfernt und doppelte Testschritte zusammengelegt. Die README beschreibt nur noch Installation, Benutzung und Entwicklung.
 
 ## 0.1.09
 

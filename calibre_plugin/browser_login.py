@@ -24,16 +24,13 @@ def _exchange_grabbed_token(hardware, grabbed, fresh):
     # kurzlebig und haben denselben JWT-Aufbau -- ein Access-Token am
     # Token-Endpunkt "zu verbrauchen" hilft niemandem und der eigentliche
     # Refresh-Token wird dann womoeglich gar nicht erst probiert.
-    def _is_refresh_typ(token):
-        claims = payload(token) or {}
-        return str(claims.get("typ", "")).casefold() == "refresh"
-
     known = {token: partner_from_token(token) for token in fresh}
     if not any(known.values()):
         raise TolinoAuthError(UNKNOWN_SHOP + RELOGIN, code="B03")
     candidate = min((token for token in fresh if known[token]),
-                    key=lambda token: (not _is_refresh_typ(token),
-                                       -(issued_at(token) or 0.0)))
+                    key=lambda token: (
+                        str((payload(token) or {}).get("typ", "")).casefold()
+                        != "refresh", -(issued_at(token) or 0.0)))
     partner_id = known[candidate]
     hardware_id = next((value for value in (
         normalize_hardware_id(item) for item in (grabbed.get("hardware") or ()))

@@ -454,7 +454,6 @@ class InventoryDialog(QDialog):
         confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
         self.confirm = confirm
-        self.cancel = cancel
         buttons.addWidget(confirm)
         buttons.addStretch(1)
         buttons.addWidget(cancel)

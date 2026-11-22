@@ -60,19 +60,6 @@ RELOGIN = "Bitte bei tolino anmelden."
 # Gleichzeitige Einlösung eines Single-Use-Tokens beendet die Sitzung.
 BUSY_MESSAGE = "Die Anmeldung wird gerade erneuert, bitte kurz warten."
 RELOGIN_THEN = "Danach bei tolino anmelden."
-def _trace_text(exc):
-    """Vollständiger Traceback samt Ursachenkette -- "" wenn es keinen gibt.
-
-    Die Exception wird selbst formatiert (nicht sys.exc_info()), damit auch
-    die Kette «Ursache -> Folgefehler» im Log landet und nicht der zufällig
-    gerade behandelte Fehler.
-    """
-    if (exc.__traceback__ is None and exc.__cause__ is None
-            and exc.__context__ is None):
-        return ""
-    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-
-
 def report_error(exc, context="", secrets=()):
     """Loggt Code, Text und Detail (ohne Token); gibt die Nutzermeldung zurück.
 
@@ -95,8 +82,12 @@ def report_error(exc, context="", secrets=()):
     if context:
         line += " (%s)" % context
     log_warning("tolino-Fehler " + line)
-    trace = _trace_text(exc)
-    if trace:
+    # Die Exception selbst formatieren: so landet auch die Kette
+    # «Ursache -> Folgefehler» im Log, nicht nur der aktuelle Fehler.
+    if (exc.__traceback__ is not None or exc.__cause__ is not None
+            or exc.__context__ is not None):
+        trace = "".join(traceback.format_exception(
+            type(exc), exc, exc.__traceback__))
         log_warning("Tolino-Details " + sanitize_error(trace, secrets))
     return "%s (Code %s)" % (shown, code)
 
@@ -128,15 +119,6 @@ def log_warning(message):
 BASE_URL = "https://bosh.pageplace.de/bosh/rest"
 
 
-def _download_token(deliverable_id):
-    """Kennung fuer /cloud/downloadinfo: base64 im Pfad, nie roh.
-
-    Die Cloud erwartet die Deliverable-Kennung base64-kodiert (UTF-8) und
-    antwortet auf die rohe Kennung mit HTTP 404. base64 enthaelt ``+``,
-    ``/`` und ``=``, deshalb wird zusaetzlich prozentkodiert.
-    """
-    raw = str(deliverable_id).encode("utf-8")
-    return _url_quote(base64.b64encode(raw).decode("ascii"), safe="")
 # Feldbefund: Nach registerhw wird die Geräte-ID verzögert akzeptiert.
 _REGISTER_SETTLE_SECONDS = 1.5
 # Feldbefund: Der erste Token-Aufruf kann am Bot-Schutz scheitern.
@@ -915,7 +897,10 @@ class TolinoClient:
 
     def download(self, deliverable_id):
         """Download one book from the cloud as bytes."""
-        token = _download_token(deliverable_id)
+        # Die Cloud erwartet die Kennung base64-kodiert und antwortet auf
+        # die rohe ID mit HTTP 404; base64-Sonderzeichen werden kodiert.
+        token = _url_quote(base64.b64encode(
+            str(deliverable_id).encode("utf-8")).decode("ascii"), safe="")
         info_url = (BASE_URL + "/cloud/downloadinfo/%s/%s/type/external-download"
                     % (token, token))
         info = self._request(info_url)
@@ -975,16 +960,18 @@ class TolinoClient:
         """
         if self._sync_cache is None:
             data = self._sync_patch({"revision": None, "patches": []})
-            revision, patches = data.get("revision"), data.get("patches")
-            # Eine unvollstaendige Antwort ist kein leerer Lesestand: sonst
-            # gaelte jedes Buch als ungelesen. Der Aufrufer behandelt den
-            # Fehler als «unbekannt».
-            if revision in (None, "") or not isinstance(patches, (list, tuple)):
+            revision = data.get("revision")
+            # Die API laesst `patches` weg, wenn seit der Revision nichts
+            # zu synchronisieren ist. Nur ein vorhandener, falscher Typ ist
+            # eine unvollstaendige Antwort; `null` bleibt ebenfalls Fehler.
+            if (revision in (None, "")
+                    or ("patches" in data and not isinstance(
+                        data["patches"], (list, tuple)))):
                 raise TolinoApiError(
                     "Die Cloud-Antwort zu den Markierungen ist unvollständig.",
                     code="N02",
                     short="Die Antwort von tolino ist unvollständig.")
-            self._sync_cache = (revision, list(patches))
+            self._sync_cache = (revision, list(data.get("patches") or ()))
         return self._sync_cache
 
     def read_ids(self):

@@ -57,6 +57,8 @@ class LoginTests(unittest.TestCase):
             client = TolinoClient(1, HARDWARE, refresh="start",
                                   token_callback=saved.append)
             self.assertEqual("rot-1", client.login())
+            self.assertEqual("rot-1", client.login())
+            self.assertEqual(1, len(server.requests))
             request = server.requests[0]
         self.assertEqual(["rot-1"], saved)
         self.assertIn("grant_type=refresh_token", request["body"].decode())
@@ -85,14 +87,6 @@ class LoginTests(unittest.TestCase):
                 client.login()
         self.assertEqual("N01", caught.exception.code)
         self.assertEqual("start", client.refresh)
-
-    def test_a_second_login_reuses_the_valid_access_token(self):
-        with token_server() as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
-            client.login()
-            client.login()
-            requests = len(server.requests)
-        self.assertEqual(1, requests)
 
     def test_a_rejected_token_is_retried_once_with_the_stored_one(self):
         # Der Parallel-Lauf (Keep-alive, zweite Instanz) hat inzwischen
@@ -825,7 +819,7 @@ class ReadMarkTests(unittest.TestCase):
         self.assertEqual("N02", caught.exception.code)
         self.assertEqual([], backend.patch_bodies)
 
-    def test_a_malformed_snapshot_is_not_an_empty_read_state(self):
+    def test_snapshot_validation_distinguishes_empty_from_malformed(self):
         backend = Backend()
         backend.sync_response = {}
         with write_client(backend) as client:
@@ -833,10 +827,15 @@ class ReadMarkTests(unittest.TestCase):
                 client.read_ids()
             with self.assertRaises(TolinoApiError):
                 client.mark_read_many(["d1"])
+            # Nur lesende PATCHes, kein Schreibvorgang mit leerem Bestand.
+            self.assertTrue(all(body["patches"] == []
+                                for body in backend.patch_bodies))
+            # Die dokumentierte patchlose Antwort ist dagegen leer, nicht defekt.
+            backend.sync_response = {"revision": 7}
+            self.assertEqual(set(), client.read_ids())
+            self.assertEqual(set(), client.collection_pairs())
+            self.assertEqual(7, client.add_to_collection("d1", "Grenzwelten"))
         self.assertEqual("N02", caught.exception.code)
-        # Nur lesende PATCHes, kein Schreibvorgang mit leerem Bestand.
-        self.assertTrue(all(body["patches"] == []
-                            for body in backend.patch_bodies))
 
     def test_an_already_read_book_causes_no_write(self):
         backend = Backend()

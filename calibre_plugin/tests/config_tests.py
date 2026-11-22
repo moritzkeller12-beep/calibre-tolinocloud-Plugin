@@ -8,10 +8,6 @@ from .. import config
 from ._support import PreferencesCase, break_settings
 
 
-class ConfigCase(PreferencesCase):
-    """Jeder Test bekommt einen eigenen Einstellungsspeicher."""
-
-
 class StoreDoubleTests(unittest.TestCase):
     """Das Test-Doppel schreibt erst bei ``commit()``, wie Calibres Vorbild."""
 
@@ -28,7 +24,7 @@ class StoreDoubleTests(unittest.TestCase):
         self.assertEqual(1, store["a"])
 
 
-class AccountTests(ConfigCase):
+class AccountTests(PreferencesCase):
     """Mehrere Konten bleiben getrennt; die Auswahl aendert keine Werte."""
 
     def test_accounts_keep_their_tokens_and_state_apart(self):
@@ -68,7 +64,7 @@ class AccountTests(ConfigCase):
         self.assertEqual({}, config.account_by_name("A"))
 
 
-class ExternalChangeTests(ConfigCase):
+class ExternalChangeTests(PreferencesCase):
     """Die Datei gehoert mehreren Prozessen: fremde Staende bleiben erhalten.
 
     Geprueft wird die beobachtbare Datei, nicht die Zahl der Schreibaufrufe:
@@ -95,6 +91,11 @@ class ExternalChangeTests(ConfigCase):
         return {"name": name, "partner_id": 1, "hardware_id": "",
                 "refresh_token": token, "state": state or {}}
 
+    def prepare_external(self, active="A", token="alt"):
+        config.save_account("A", {"refresh_token": "alt"}, active="A")
+        self.write_externally([self.account("A", token),
+                               self.account("B", "tok-B")], active=active)
+
     def test_a_missing_settings_file_is_a_fresh_installation(self):
         """Ohne Datei gibt es ein virtuelles Default-Konto, keinen Fehler."""
         self.assertFalse(os.path.exists(self.file_path()))
@@ -105,28 +106,19 @@ class ExternalChangeTests(ConfigCase):
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
 
     def test_a_file_changed_by_another_process_is_adopted(self):
-        config.save_account("A", {"refresh_token": "alt"}, active="A")
-        self.write_externally(
-            [self.account("A", "extern"), self.account("B", "tok-B")],
-            active="A")
+        self.prepare_external(token="extern")
         self.assertEqual("extern",
                          config.account_summary("A")["refresh_token"])
         self.assertEqual("tok-B", config.account_summary("B")["refresh_token"])
 
     def test_an_externally_added_account_survives_a_local_write(self):
-        config.save_account("A", {"refresh_token": "alt"}, active="A")
-        self.write_externally(
-            [self.account("A", "alt"), self.account("B", "tok-B")],
-            active="A")
+        self.prepare_external()
         self.assertTrue(config.save_refresh_token("A", "neu"))
         self.assertEqual("neu", config.account_summary("A")["refresh_token"])
         self.assertEqual("tok-B", config.account_summary("B")["refresh_token"])
 
     def test_an_externally_selected_account_stays_active(self):
-        config.save_account("A", {"refresh_token": "alt"}, active="A")
-        self.write_externally(
-            [self.account("A", "alt"), self.account("B", "tok-B")],
-            active="B")
+        self.prepare_external(active="B")
         # Eine Token-Rotation darf die Auswahl nicht umschalten.
         self.assertTrue(config.save_refresh_token("A", "neu"))
         self.assertEqual("B", config.settings()["active_account"])
@@ -188,7 +180,7 @@ class ExternalChangeTests(ConfigCase):
                 config._lock_handle(Mock())
 
 
-class TokenTests(ConfigCase):
+class TokenTests(PreferencesCase):
     """Token-Rotation: nur der abgelehnte Token darf verschwinden."""
 
     def test_only_a_non_empty_rotation_replaces_the_login(self):
