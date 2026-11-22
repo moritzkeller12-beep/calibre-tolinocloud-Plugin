@@ -568,6 +568,7 @@ class CalibreDatabase:
         self.dbpath = dbpath
         self.api = CalibreApi(fail, books, metadata, paths, cover)
         self.created = []
+        self.specs = []
         self.create_error = create_error
 
     @property
@@ -579,6 +580,7 @@ class CalibreDatabase:
         if self.create_error is not None:
             raise self.create_error
         self.created.append(label)
+        self.specs.append((label, datatype))
         return len(self.created)
 
 

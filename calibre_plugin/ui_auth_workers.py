@@ -2,7 +2,7 @@
 from qt.core import QObject, pyqtSignal
 from .browser_login import LOGIN_TIMEOUT, grab_live_refresh
 from .config import save_credentials
-from .errors import TolinoAuthError
+from .errors import SETTINGS_WRITE_DETAIL, TolinoAuthError
 from .token_vault import check_stored_login
 from .tolino import RELOGIN, report_error
 
@@ -30,7 +30,7 @@ class BrowserLoginWorker(QObject):
                 raise TolinoAuthError(
                     "Die Anmeldung konnte nicht gespeichert werden. " + RELOGIN,
                     code="A01",
-                    detail="Einstellungen konnten nicht geschrieben werden.")
+                    detail=SETTINGS_WRITE_DETAIL)
         except Exception as exc:
             self.failed.emit(exc)
             return

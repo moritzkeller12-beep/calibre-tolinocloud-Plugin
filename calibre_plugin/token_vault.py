@@ -12,6 +12,7 @@ from .config import (account_secrets, account_tokens,
                      clear_refresh_token_if_unchanged, save_access_token,
                      save_hardware_id, save_refresh_token, settings,
                      settings_write_lock, settings_writable)
+from .errors import SETTINGS_WRITE_DETAIL
 from .jwt import lifetime_seconds
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
                      TolinoError, log_info, log_warning,
@@ -100,7 +101,7 @@ class TokenVault:
                     "gilt jeder Lauf als neues Gerät; bitte die "
                     "Einstellungsdatei prüfen und erneut anmelden.",
                     short="Die Geräte-ID konnte nicht gespeichert werden.",
-                    detail="Einstellungen konnten nicht geschrieben werden.")
+                    detail=SETTINGS_WRITE_DETAIL)
             # Erst anmelden, dann den Vault einhaengen: `login()` wuerde
             # sonst ueber `relogin()` den bereits gehaltenen Lock anfordern.
             client.login(force=force)

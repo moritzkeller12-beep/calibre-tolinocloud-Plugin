@@ -131,6 +131,8 @@ def _reader_flags(port, profile):
 _START_TIMEOUT = 12
 # Ein Titel fuer alle Startfehler: die Details stehen in `detail`.
 _BROWSER_NOT_POSSIBLE = "Browser-Anmeldung nicht möglich"
+# Loopback-Endpunkt dieses Prozesses; nur der DevTools-Port variiert.
+_VERSION_URL = "http://127.0.0.1:%d/json/version"
 
 
 def _wait_for_debug_port(port, timeout, process):
@@ -142,7 +144,7 @@ def _wait_for_debug_port(port, timeout, process):
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
+        if _http_get_json(_VERSION_URL % port, 2):
             return True
         if process.poll() is not None:
             return False
@@ -425,8 +427,7 @@ def grab_once_from_grabber(timeout=12):
 def _browser_ws_for_record(record, timeout=2):
     """Return the browser's CDP address, limited to its chosen port."""
     port = int(record.get("port") or 0)
-    version = _http_get_json(
-        "http://127.0.0.1:%d/json/version" % port, timeout)
+    version = _http_get_json(_VERSION_URL % port, timeout)
     ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
     prefix = "ws://127.0.0.1:%d" % port
     if not ws_url.startswith(prefix + "/devtools/"):
@@ -455,7 +456,7 @@ def _endpoint_answers(port, timeout=0.5):
     """True while the selected loopback DevTools port answers."""
     port = int(port or 0)
     return (0 < port < 65536 and bool(_http_get_json(
-        "http://127.0.0.1:%d/json/version" % port, timeout)))
+        _VERSION_URL % port, timeout)))
 
 
 def _wait_for_endpoint_exit(port, seconds):

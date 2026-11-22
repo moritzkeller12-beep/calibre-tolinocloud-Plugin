@@ -13,7 +13,8 @@ from urllib.parse import urlencode, quote as _url_quote, urlsplit
 from urllib.request import (HTTPRedirectHandler, Request, build_opener,
                            urlopen)
 
-from .errors import TolinoApiError, TolinoAuthError, TolinoError
+from .errors import (SETTINGS_WRITE_DETAIL, TolinoApiError, TolinoAuthError,
+                     TolinoError)
 from .inventory import parse_inventory
 from .jwt import (expires_at as token_expires_at,
                   issued_at as token_issued_at,
@@ -394,7 +395,7 @@ class TolinoClient:
                 raise TolinoAuthError(
                     "Der erneuerte Zugang konnte nicht gespeichert werden. " + RELOGIN,
                     code="A01",
-                    detail=detail or "Einstellungen konnten nicht geschrieben werden."
+                    detail=detail or SETTINGS_WRITE_DETAIL
                 ) from None
 
         try:
@@ -851,8 +852,7 @@ class TolinoClient:
                 exc, (self.refresh, self.access))
         if stored is False:
             log_warning("Geräte-ID konnte nicht gespeichert werden: %s"
-                        % (detail or "Einstellungen konnten nicht "
-                           "geschrieben werden."))
+                        % (detail or SETTINGS_WRITE_DETAIL))
 
     def _register_hardware(self):
         """Register this hardware id at the BOSH service (reference flow)."""

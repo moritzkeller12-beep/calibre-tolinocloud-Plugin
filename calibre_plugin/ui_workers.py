@@ -9,6 +9,7 @@ from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
 from .token_vault import TOKEN_VAULT
 from .config import (account_by_name, account_secrets, load_state,
                      save_state)
+from .errors import SETTINGS_WRITE_DETAIL
 from .planning import (local_metadata, plan_collection_updates,
                        remember_collection)
 from .comparison import (compare_inventory, content_fingerprint,
@@ -193,7 +194,7 @@ class SyncWorker(QObject):
                 short=("Der Sync-Zwischenstand konnte nicht gespeichert werden. "
                        "Cloud-Änderungen bleiben bestehen; bitte den Bestand "
                        "vor einem erneuten Lauf prüfen."),
-                detail=detail or "Einstellungen konnten nicht geschrieben werden.")
+                detail=detail or SETTINGS_WRITE_DETAIL)
         # Alles, was jetzt im Zustand steht, ist gesichert: der naechste
         # Schreibvorgang uebernimmt nur noch neue Aenderungen und laesst
         # fremde Aenderungen an denselben Feldern stehen.
@@ -752,8 +753,7 @@ class PrepareWorker(QObject):
                         "Der Zustand des Vergleichs konnte nicht gespeichert "
                         "werden.",
                         short="Der Vergleich konnte nicht gespeichert werden.",
-                        detail="Einstellungen konnten nicht geschrieben "
-                               "werden.")
+                        detail=SETTINGS_WRITE_DETAIL)
             self.ready.emit({
                 "context": self.context,
                 "metadata": self.metadata,

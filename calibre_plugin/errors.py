@@ -22,6 +22,10 @@ class TolinoError(Exception):
         self.detail = detail
 
 
+# Einheitlicher Log-Detailtext, wenn die Einstellungen nicht schreibbar sind.
+SETTINGS_WRITE_DETAIL = "Einstellungen konnten nicht geschrieben werden."
+
+
 # Fehlercodes, nach denen nur eine neue Anmeldung weiterhilft.
 RELOGIN_CODES = ("A01", "B01", "B02")
 

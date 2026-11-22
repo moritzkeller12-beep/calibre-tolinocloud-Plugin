@@ -18,25 +18,11 @@ from ._support import CalibreDatabase
 ALL_LABELS = [spec[0] for spec in CUSTOM_COLUMNS]
 
 
-class _RecordingDatabase(CalibreDatabase):
-    """Merkt sich Label und Calibre-Typ jedes Anlege-Aufrufs."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.specs = []
-
-    def create_custom_column(self, label, name, datatype, is_multiple,
-                             editable=True, display=None):
-        self.specs.append((label, datatype))
-        return super().create_custom_column(label, name, datatype,
-                                            is_multiple, editable, display)
-
-
 class ColumnCreationTests(unittest.TestCase):
     """Spalten entstehen ueber Calibres oeffentliche API -- einmal je Bibliothek."""
 
     def test_missing_columns_are_created_with_their_types(self):
-        database = _RecordingDatabase(dbpath=self.id())
+        database = CalibreDatabase(dbpath=self.id())
         created = create_custom_columns(database)
         self.assertEqual(ALL_LABELS, created)
         self.assertEqual([("tolino_id", "text"), ("tolino_read", "bool"),
@@ -44,7 +30,7 @@ class ColumnCreationTests(unittest.TestCase):
                          database.specs)
 
     def test_a_second_click_creates_no_duplicates(self):
-        database = _RecordingDatabase(dbpath=self.id())
+        database = CalibreDatabase(dbpath=self.id())
         create_custom_columns(database)
         self.assertEqual([], create_custom_columns(database))
         self.assertEqual(ALL_LABELS, database.created)
@@ -56,11 +42,11 @@ class ColumnCreationTests(unittest.TestCase):
         self.assertEqual(ALL_LABELS, create_custom_columns(second))
 
     def test_existing_columns_are_not_touched(self):
-        database = _RecordingDatabase(
+        database = CalibreDatabase(
             {TOLINO_COLUMN: {"datatype": "text"}}, dbpath=self.id())
         self.assertEqual(["tolino_read", "tolino_progress", "tolino_ignore"],
                          create_custom_columns(database))
-        complete = _RecordingDatabase(
+        complete = CalibreDatabase(
             {column: {"datatype": "text"} for column in
              (TOLINO_COLUMN, TOLINO_READ_COLUMN, TOLINO_PROGRESS_COLUMN,
               TOLINO_IGNORE_COLUMN)}, dbpath=self.id() + "-b")
@@ -68,7 +54,7 @@ class ColumnCreationTests(unittest.TestCase):
         self.assertEqual([], complete.created)
 
     def test_a_single_label_creates_only_that_column(self):
-        database = _RecordingDatabase(dbpath=self.id())
+        database = CalibreDatabase(dbpath=self.id())
         self.assertEqual(["tolino_progress"],
                          create_custom_columns(database, ["tolino_progress"]))
         self.assertEqual([("tolino_progress", "int")], database.specs)
