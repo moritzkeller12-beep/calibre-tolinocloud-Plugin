@@ -364,11 +364,10 @@ def save_account(name, values, active=None, preferred_formats=None,
     verspäteter Hintergrund-Schreibvorgang darf kein gelöschtes Konto
     wieder anlegen.
     """
-    with _SETTINGS_LOCK:
-        return _write_account(
-            name, values, active=active,
-            preferred_formats=preferred_formats, create=create,
-            allow_virtual_default=True)
+    return _write_account(
+        name, values, active=active,
+        preferred_formats=preferred_formats, create=create,
+        allow_virtual_default=True)
 
 
 def _cloud_id(entry):
@@ -506,10 +505,9 @@ def _update_account(name, values, allow_virtual_default=True):
     ``allow_virtual_default=False`` fuer Aufrufer, die auch das virtuelle
     Default-Konto nicht anlegen duerfen (etwa das Loeschen eines Tokens).
     """
-    with _SETTINGS_LOCK:
-        return _write_account(
-            name, values, create=False,
-            allow_virtual_default=allow_virtual_default)
+    return _write_account(
+        name, values, create=False,
+        allow_virtual_default=allow_virtual_default)
 
 
 def set_active_account(name):
