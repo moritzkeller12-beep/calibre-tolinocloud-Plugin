@@ -39,7 +39,7 @@ def missing_browser_error(status=""):
             "Calibre läuft als Flatpak, aber «flatpak-spawn» fehlt. "
             "Bitte «flatpak update» ausführen und Calibre danach "
             "vollständig neu starten.")
-    if in_flatpak_sandbox() and status not in ("empty", "unavailable"):
+    if in_flatpak_sandbox() and status != "empty":
         message += "\n\n" + flatpak_permission_hint()
     return message
 
