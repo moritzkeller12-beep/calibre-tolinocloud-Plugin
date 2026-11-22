@@ -16,6 +16,8 @@ Voraussetzung: Calibre 6 oder neuer. Die automatische Anmeldung benötigt Chrome
 
 Plugin öffnen und **Bei tolino anmelden**. Ohne Browser lassen sich Zugangstoken und Geräte-ID in den Einstellungen eintragen. Danach **Bibliothek vergleichen …** wählen, gewünschte Aktionen markieren und **Synchronisierung starten**.
 
+Die Calibre-Spalten (`#tolino_id`, `#tolino_read`, `#tolino_progress`, `#tolino_ignore`) sind optional; in **Einstellungen …** legt jeder Knopf nur seine eigene Spalte an – danach Calibre neu starten.
+
 Ohne geöffnetes Calibre erneuert `python3 tools/token_refresh.py` fällige Konten; `--help` nennt die Optionen.
 
 Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste](docs/fehlercodes.md).

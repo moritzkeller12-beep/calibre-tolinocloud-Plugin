@@ -1,75 +1,75 @@
 # Änderungen
 
-## Unveröffentlicht
-
-- Token-Erneuerungen laufen bei normalem Login und bei Relogin unter derselben prozessübergreifenden Dateisperre wie das Speichern der Rotation. Die Schreibbarkeitsprüfung erwirbt diesen Lock selbst und blockiert nur noch dann, wenn tatsächlich ein Refresh-Token getauscht werden muss — ein noch gültiger Access-Token funktioniert auch bei nicht beschreibbaren Einstellungen.
-- Unter Windows wartet die Sperrdatei jetzt auch dann weiter, wenn eine andere Instanz sie länger als zehn Sekunden hält, statt die Anmeldung mit einem Sperrfehler abzubrechen.
-- Anmeldung bleibt länger gültig: der Keep-alive richtet sich nach der Laufzeit des gespeicherten Refresh-Tokens (ein Fünftel Vorlauf, höchstens alle 45, mindestens alle 5 Minuten) und beginnt mit einer sofortigen Prüfung statt nach einer vollen Wartezeit; Konten mit noch gültigem Access-Token werden übersprungen.
-- Ein gültiger Access-Token wird mit Ablaufzeit gespeichert. Ein Start innerhalb dieser Zeit tauscht nicht und verbraucht damit keine Rotation des Einmal-Tokens.
-- Die Gültigkeit wird gegen `expires_in` **und** die `iat`/`exp`-Claims gerechnet; weicht die lokale Uhr stark ab, gilt die relative Laufzeit (Warnung im Log) statt eines scheinbar ewig gültigen oder sofort abgelaufenen Tokens.
-- Beim Erneuern wird kein hartkodierter Scope mehr mitgeschickt, sondern der Scope des ausgestellten Tokens (RFC 6749, §6); ein abweichender Wert konnte die Erneuerung mit `invalid_scope` scheitern lassen.
-- Nach `invalid_grant`/`reuse exceeded` wird einmal der inzwischen gespeicherte Token versucht, bevor die Ablehnung gilt; gelöscht wird weiterhin nur der wirklich abgelehnte Token. Ein per 401 oder Ablehnung verworfener Access-Token verschwindet auch aus den Einstellungen.
-- Einstellungsdatei und Sperrdatei werden auf `0600` gesetzt (POSIX).
-- Neu: `tools/token_refresh.py` erneuert fällige Konten ohne geöffnetes Calibre (systemd-Timer, Cron, Aufgabenplanung).
-- Eine patchlose `sync-data`-Antwort mit gültiger Revision gilt als leerer Stand; fehlende Revision, `patches: null` oder ein falscher Typ bleiben Fehler. Lesestatus, Sammlungen und Serienzuordnung bleiben erhalten.
-- Reine Straffung ohne Verhaltensänderung: private Ein-Aufrufer-Helfer zusammengeführt, eine leere Test-Fixture entfernt und doppelte Testschritte zusammengelegt. Die README beschreibt nur noch Installation, Benutzung und Entwicklung.
-
 ## 0.1.09
 
-- Esc schliesst das Dashboard wie das Fensterkreuz über `closeEvent`: ein laufender Worker wird abgebrochen, die sichtbaren Einstellungen werden noch gesichert. Schlägt das Sichern fehl, bleibt das Fenster offen und meldet den Fehler, statt die Eingaben zu verlieren.
-- Reine Straffung ohne Verhaltensänderung: tote Status- und Gruppenvergleiche sowie ein unerreichbarer Sondenstatus im Browser-Finder entfernt, doppelte Sortierschlüssel zusammengefasst und ein doppelter Test gestrichen (363 → 362 Tests bei gleicher Abdeckung). Die CI prüft zusätzlich Python 3.10.
+- **Anmeldung bleibt auch bei parallelen Calibre-Instanzen stabil.** Login, Relogin und Token-Erneuerung teilen sich eine Dateisperre; unter Windows wird auch eine längere Sperre abgewartet, statt die Anmeldung abzubrechen.
+- **Sitzungen halten länger und erneuern sparsamer.** Ein gültiger Access-Token wird mit Ablaufzeit gespeichert und wiederverwendet. Keep-alive und Gültigkeitsprüfung richten sich nach der echten Token-Laufzeit; bei starker Uhrabweichung gilt die relative Laufzeit. Beim Erneuern wird der Scope des Tokens mitgeschickt; nach einer Ablehnung wird einmal der inzwischen gespeicherte Token versucht, und nur der abgelehnte Token verschwindet.
+- **Zugangsdaten und Hintergrund-Refresh sind abgesichert.** Einstellungs- und Sperrdatei sind unter POSIX nur für den Benutzer lesbar. `tools/token_refresh.py` erneuert fällige Konten auch ohne geöffnetes Calibre.
+- **Cloud-Antworten ohne Patch gelten als leerer Stand.** Antwortet tolino mit gültiger Revision, aber ohne `patches`, wertet das Plugin das als leere Markierungsliste statt als Fehler. Fehlende Revision, `patches: null` oder ein falscher Typ brechen weiterhin mit einem Hinweis ab.
+- **Das Dashboard schliesst kontrolliert.** Esc nutzt denselben Weg wie das Fensterkreuz: Ein laufender Sync wird abgebrochen, sichtbare Einstellungen werden gesichert. Scheitert das Speichern, bleibt das Fenster mit einer Meldung offen.
+- **Intern aufgeräumt.** Private Helfer mit nur einem Aufrufer und doppelte Testschritte wurden zusammengeführt, die README auf Installation, Benutzung und Entwicklung reduziert; die CI prüft zusätzlich Python 3.10.
 
 ## 0.1.08
 
-- Nach einem abgelehnten Zugang (A01/B01/B02) steht in der Statuszeile «Anmeldung abgelehnt – bitte neu anmelden.» statt weiter «Angemeldet.»; dasselbe gilt, wenn beim optionalen Lesestatus die Anmeldung abgelehnt wird. Gewöhnliche Fehler dieser Abrufe bleiben «unbekannt».
-- «Speichern und schliessen» übernimmt einen eingetippten Token; Enter speichert, statt die Browser-Anmeldung zu starten. Ist kein Buchhändler erkennbar, bleibt das Fenster offen, damit die Eingabe nicht verloren geht.
-- Jeder Spalten-Knopf prüft und meldet nur seine eigene Calibre-Spalte. Neue Spalten entstehen ausschliesslich über Calibres `create_custom_column`; danach fordert die Oberfläche zum Neustart auf, und ein zweiter Klick legt nichts doppelt an. `library_scope()` unterscheidet Bibliotheken ohne `library_id` über den `dbpath`, und `#tolino_id` bleibt eine rein informative Spiegelspalte.
-- Nach einem Upload werden Lesestatus und Fortschritt der ersetzten Kopie geleert; ein gleichzeitig gewählter Lesestatus geht nicht mehr an die alte, dabei gelöschte Kopie. Beide Spalten werden getrennt geschrieben, damit ein Fehler den anderen nicht blockiert.
-- Ein nicht gespeicherter Zwischenstand bricht den Sync ab, statt die ersetzte Cloud-Kopie zu löschen; ein nicht gespeicherter Token, eine nicht gespeicherte Anmeldung, nicht gespeicherte Einstellungen, ein fehlgeschlagener Sync-Zustand, eine nicht gespeicherte Geräte-ID, ein nicht gespeicherter Buchhändler, eine nicht gespeicherte Abmeldung und ein nicht angelegtes oder nicht umschaltbares Konto melden jetzt einen Fehler, statt Erfolg vorzutäuschen. Ein eingetippter Token bleibt bei einem Schreibfehler im Feld stehen, und ein nicht gesicherter Stand hält das Einstellungsfenster offen.
-- Bricht ein Lauf mitten in den Metadaten- oder Serienänderungen ab (Abbruch oder abgelehnter Zugang), sind die bereits bestätigten Änderungen trotzdem gesichert; das Buch steht beim nächsten Vergleich nicht wieder auf «changed».
-- Alte `#tolino_id`- und `dbpath`-Migrationspfade entfallen; Config-Speicher, Konten und Tokens bleiben unverändert.
-- Änderungen an der Einstellungsdatei (zweites Calibre-Fenster, anderes Konto) sind im laufenden Programm sofort sichtbar; halb geschriebene oder nicht lesbare Stände werden nie übernommen, und ein Schreibvorgang bricht dann ab, statt Daten zu verlieren. Gleichzeitige Schreibvorgänge zweier Calibre-Prozesse serialisiert eine Sperrdatei neben der Einstellungsdatei; scheitert das Sperren selbst, bricht der Schreibvorgang ab, statt ungesperrt fortzufahren. Lässt sich die Sperrdatei nicht anlegen, bleibt es beim prozesslokalen Lock.
-- Endet der Flatpak-/Snap-Wrapper eines Anmeldefensters vor seinem Browserkind, gilt der DevTools-Port weiterhin als belegt, bis er nicht mehr antwortet. Der DevTools-WebSocket prüft beim Verbindungsaufbau `Sec-WebSocket-Accept` sowie `Upgrade`/`Connection`; eine fremde HTTP-Antwort gilt nicht mehr als offene Verbindung.
-- Datenkonsistenz: Aufeinanderfolgende Läufe überschreiben keine fremden Zuordnungen mehr — Vorbereitung und Sync sichern über dieselbe Regel feldweise nur ihre eigenen Änderungen gegen den gespeicherten Stand (ein Lesevorgang je Sicherung), und der Worker sichert danach seinen neuen Ausgangsstand; den Abschlusszustand schreiben sie selbst, statt ihn am Ende zu wiederholen. Ein unvollständiger Cloud-Bestand oder eine unvollständige Markierungs-Antwort bricht mit einem Hinweis ab, statt Zuordnungen zu löschen oder alles als ungelesen zu werten; ein Abbruch meldet genau ein Ergebnis; ein Kontowechsel räumt den Fortschritt des vorherigen Kontos; eine neue Cloud-ID erbt weder Lesestatus noch Sammlungen noch Metadatenbestätigung der alten Kopie — auch dann nicht, wenn diese zuerst aus der Cloud verschwunden war. Beim Download überschreibt eine nachträglich angepasste Dateiendung keine vorhandene Datei ohne Rückfrage.
-- Der Code ist gebündelt und gestrafft: eine Planungsdatei statt drei, zwei UUID-Helfer statt vier, ein Job-Typ statt zweier, ein eigenes `jwt.py` statt einer privaten Funktion über Modulgrenzen und direkte `qt.core`-Importe statt einer Re-Export-Liste. Verhalten unverändert.
-- Weiter gestrafft ohne Verhaltensänderung: drei statt fünf Kennungs-Helfer im Bestand, eine Funktion statt drei für die Einstellungsdatei, eine Endpunkt-Prüfung statt zweier Warteschleifen, benannte statt indizierte Aktionsspalten, abgeleitete statt doppelt gepflegte Lesestatus-Listen, ein gemeinsamer Dialog-Mitschnitt in den Berichtstests. Die Zeitgrenzen im Anmeldefenster laufen jetzt über die monotone Uhr; ein Uhrsprung verfälscht die Wartezeiten nicht mehr.
+- **Anmeldung und Token-Eingabe sind klarer.** Abgelehnte Zugänge zeigen «Anmeldung abgelehnt – bitte neu anmelden.» statt «Angemeldet.». Ein eingetippter Token wird mit «Speichern und schliessen» übernommen; Enter speichert, und ohne erkennbaren Buchhändler bleibt das Fenster offen, damit nichts verloren geht.
+- **Calibre-Spalten werden einzeln verwaltet.** Jeder Anlegen-Knopf prüft nur seine eigene Spalte und legt sie über Calibres `create_custom_column` an; danach ist ein Neustart nötig, ein zweiter Klick erzeugt keine Dublette. Bibliotheken ohne `library_id` werden über den `dbpath` getrennt; `#tolino_id` bleibt eine informative Spalte. Alte `#tolino_id`- und `dbpath`-Migrationspfade entfallen, Konten und Tokens bleiben erhalten.
+- **Ersetzte Cloud-Kopien hinterlassen keinen alten Lesestand.** Nach dem Upload werden Lesestatus und Fortschritt der alten Kopie geleert; eine neue Lesemarke geht nicht an die gelöschte Kopie. Beide Spalten werden getrennt geschrieben, damit ein Fehler die andere nicht blockiert.
+- **Speicherfehler werden nicht mehr als Erfolg gemeldet.** Token, Anmeldung, Einstellungen, Sync-Zustand, Geräte-ID, Buchhändler, Abmeldung und Kontoänderungen brechen sichtbar ab. Ein nicht gesicherter Zwischenstand verhindert das Löschen der alten Cloud-Kopie; ein Token bleibt im Feld, das Einstellungsfenster bleibt offen.
+- **Teilstände und Einstellungen bleiben konsistent.** Abgebrochene Metadaten- oder Serienänderungen behalten bereits bestätigte Änderungen. Änderungen aus einem zweiten Calibre-Fenster sind sofort sichtbar; halbe oder unlesbare Stände werden nicht übernommen. Eine Dateisperre serialisiert Schreibvorgänge, mit lokalem Lock als Fallback.
+- **Sicherheit und Datenkonsistenz verbessert.** Der CDP-Handshake prüft `Sec-WebSocket-Accept`, `Upgrade` und `Connection`; ein beendeter Flatpak-/Snap-Wrapper hält den Port nicht fälschlich frei. Feldweise Sicherungen verhindern, dass parallele Läufe fremde Zuordnungen überschreiben; unvollständige Cloud-Antworten brechen ab, neue Cloud-IDs erben keinen alten Lesestand, und Downloads überschreiben keine Datei ohne Rückfrage.
 
 ## 0.1.07
 
-- Fehlerbehebungen und Härtung für Anmeldung, Cloud-Sync, Lesestatus und UI; keine Legacy-Pfade entfernt.
+- **Cover-Uploads funktionieren wieder.** Der Client sendet den von tolino erwarteten `control`-Block; ohne ihn antwortete der Cover-Endpunkt mit HTTP 400.
+- **Das Vergleichsfenster ist aufgeräumt.** Es heisst «Bibliothek vergleichen», hat breitere Aktionsspalten und linksbündige Auswahlkästchen. Häkchen lassen sich unter Qt6 wieder abwählen, und ein Doppelklick schaltet nicht doppelt um.
+- **Die Browser-Anmeldung räumt zuverlässig auf.** Das Chromium-Fenster wird auch bei Fehlern geschlossen; fehlt PyCryptodome für verschlüsselte Token, gibt es einen klaren Hinweis mit Code A01 statt eines stillen Fehlschlags.
+- **Kontowechsel behalten den Lesestand.** Für Bücher ohne echte Calibre-UUID wird die Zuordnung über Bibliothek und Calibre-Nummer fortgeführt; echte UUIDs haben Vorrang. Alte ungescopte `calibre-<id>`-Einträge werden nicht übernommen, kontobezogene `#tolino_id`-Zuordnungen beim ersten Vergleich migriert; der alte `/registerhw`-Fallback entfällt.
+- **Hintergrund und Release sind stabiler.** Ein lokaler Metadaten-Snapshot läuft in einem eigenen Thread; defekte Einstellungen beenden den Keep-alive nicht mehr still, ignorierte Bücher zählen nicht als ungeplante Aktionen, und HTTP-Fehler werden geschlossen.
+- **Der Release-Build bleibt dokumentiert und reproduzierbar.** Das ZIP enthält README und CHANGELOG; beim Entfernen von Docstrings bleibt die Textlänge erhalten. Die bewussten Kompatibilitätspfade für Config und IDs bleiben bestehen.
 
 ## 0.1.06
 
-- Lesestatus und Lesefortschritt werden kontobezogen gespeichert; `#tolino_read` und `#tolino_progress` zeigen nur den Stand des aktiven Kontos, fehlende Werte bleiben leer. Die neue Spalte `#tolino_progress` (0–100, optional mit Position) zeigt auch Cloud-Lesestände und Gelesen-Marken; unbekannte Abrufe lassen sie unverändert, ein erfolgreicher Abruf ohne Bookmark leert sie.
-- Der Vergleich extrahiert ISBNs aus tolino-Produktkennungen, ordnet unsichere Treffer konservativ zu und entfernt veraltete Cloud-IDs samt altem Lesestand.
-- Der Prepare-Zustand wird vor der Migration gesichert und nur bei Änderung einmal geschrieben. Parallele Konto-Wechsel bleiben getrennt; Token-Rotation und Keep-alive sind abgesichert.
-- Der Release-Build entfernt Kommentare und Docstrings; Download-, Browser- und Qt6-Randfälle sind gehärtet.
-- Behebt doppelt gezeichnete Auswahlkästchen im Vergleichsfenster; der Indikator wird einmal mittig gezeichnet.
+- **Lesestatus und Fortschritt sind kontobezogen.** `#tolino_read` und die neue Spalte `#tolino_progress` (0–100, optional mit Position) zeigen nur den Stand des aktiven Kontos; fehlende Werte bleiben leer. Unbekannte Cloud-Werte bleiben unverändert, ein erfolgreicher Abruf ohne Bookmark leert den Fortschritt.
+- **Die Zuordnung wird vorsichtiger.** ISBNs werden aus tolino-Produktkennungen erkannt, unsichere Treffer nur konservativ zugeordnet; veraltete Cloud-IDs und deren alter Lesestand werden entfernt.
+- **Der Prepare-Zustand überlebt Migrationen und parallele Kontowechsel.** Er wird vor der Migration gesichert und nur bei Änderung geschrieben; Token-Rotation und Keep-alive bleiben abgesichert.
+- **Build und Randfälle sind gehärtet.** Der Release-Build entfernt Kommentare und Docstrings; Downloads, Browser-Anmeldung und Qt6-Sonderfälle wurden stabilisiert.
+- **Das Vergleichsfenster zeichnet Auswahlkästchen nur noch einmal.** Der doppelte Indikator ist behoben.
 
 ## 0.1.05
 
-- Der Build entfernt Kommentare, behält aber Code, Kodierung und Zeilennummern.
-- Zustands-, Speicher- und Anmeldefehler werden sauber gemeldet; beschädigte Zustandseinträge stoppen den Sync nicht.
-- Browser-/Token-Verwaltung, Qt6-Enums, Transport und Konto-Kontext wurden gestrafft.
+- **Der Build entfernt Kommentare, aber keinen Code.** Docstrings, Kodierung und Zeilennummern bleiben erhalten.
+- **Fehler werden sauber gemeldet.** Zustands-, Speicher- und Anmeldefehler sind sichtbar; beschädigte Zustandseinträge stoppen den Sync nicht.
+- **Intern gestrafft.** Browser-/Token-Verwaltung, Qt6-Enums, Transport und Konto-Kontext wurden vereinfacht, ohne das Verhalten zu ändern.
 
 ## 0.1.04
 
-- `#tolino_read` ist nur noch informativ; Lesestatusänderungen werden ausschliesslich im Vergleichsfenster ausgewählt.
-- Behebt Qt6-Probleme mit Spaltenbreiten und Dialogcodes; ergänzt einen PyQt6-Offscreen-Test.
+- **`#tolino_read` ist nur noch informativ.** Lesestatusänderungen werden ausschliesslich im Vergleichsfenster ausgewählt und an das aktive tolino-Konto übertragen.
+- **Der automatische bidirektionale Abgleich entfällt.** So werden unterschiedliche Calibre- und Cloud-Stände nicht unbemerkt übertragen; der Sync führt Metadaten- und Upload-Schritte getrennt aus.
+- **Qt6-Probleme sind behoben.** Spaltenbreiten und Dialogcodes funktionieren unter Qt6; ein Offscreen-Test prüft den Vergleichsdialog mit echten Qt-Widgets.
 
 ## 0.1.03
 
-- Neue Ignorieren-Spalte `#tolino_ignore` und je Calibre-Spalte ein eigener Anlegen-Knopf.
-- Zugangsdaten liegen nur noch im Konto; das Token-Feld zeigt keine gespeicherten Werte an.
+- **Ignorierte Bücher bleiben lokal.** Die optionale Spalte `#tolino_ignore` verhindert Upload und Änderungen; die Bücher bleiben sichtbar und ihre Cloud-Kopie wird weiterhin zugeordnet. Solange die Spalte fehlt, weist der Vergleich darauf hin.
+- **Jede Calibre-Spalte bekommt einen eigenen Anlegen-Knopf.** Er legt nur die fehlende Spalte an und lässt vorhandene unberührt; danach ist ein Calibre-Neustart nötig.
+- **Zugangsdaten liegen nur im Konto.** Das Token-Feld zeigt keine gespeicherten Werte; ein leeres Feld lässt den Zugang unberührt, «Abmelden» löscht ihn.
 
 ## 0.1.02
 
-- Mehrkonten-Unterstützung für `#tolino_id`, gestraffte Browser-/Token-Verwaltung und Serien-Sammlungen.
+- **Mehrere Konten teilen sich `#tolino_id`.** Die Zuordnung wird pro Konto gespeichert, ohne die anderen Konten zu überschreiben.
+- **Browser- und Token-Verwaltung sind einfacher.** Rotierte Refresh-Tokens lassen sich weiterhin nicht wiederverwenden.
+- **Cloud-Bestand, Sync-Planung und Datenbankzugriffe wurden gestrafft.** Der Serienabgleich bleibt erhalten; die Browser-Anmeldung wartet bis zum Timeout auf einen neuen Zugang.
 
 ## 0.1.01
 
-- Buchdownloads im Hintergrund, zuverlässigeres Füllen von `#tolino_id` und gehärtete Download-Weiterleitungen.
+- **`#tolino_id` wird bei einem einzelnen Konto wieder zuverlässig gefüllt.**
+- **Downloads laufen im Hintergrund.** EPUB und PDF werden passend gespeichert.
+- **Weiterleitungen geben keine Download-Zugangsdaten preis.** Refresh-Timeouts lösen Einmal-Tokens nicht erneut ein.
+- **Der Abschlussbericht zählt nur neu geschriebene Sammlungen.**
 
 ## 0.1.00
 
-- Erste Version: Abgleich von Büchern, Metadaten, Lesestatus und Serien sowie kontobezogene Anmeldung und Cloud-Downloads.
+- **Erste Version für den Abgleich zwischen Calibre und tolino.** Bücher und Metadaten werden übertragen, Lesestatus und Serien-Sammlungen synchronisiert sowie Cloud-Bücher heruntergeladen.
+- **Änderungen werden vor dem Start ausgewählt.** Cloud-Löschungen und das Ersetzen vorhandener Kopien werden ausdrücklich angezeigt und bestätigt.
+- **Konten bleiben getrennt.** Refresh-Tokens sind gegen parallele Verwendung geschützt; die Anmeldung läuft über den tolino Web Reader im eigenen Browserprofil.
+- **Unsaubere Fälle werden abgefangen.** Fehlende Upload-Formate, unsichere Cloud-Zuordnungen und unvollständige Bestände führen nicht zu stillem Datenverlust.
+- **Installation und Build sind reproduzierbar.** Transport, Fehlercodes, Datenschutz- und Installationshinweise sind dokumentiert.
