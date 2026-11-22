@@ -864,5 +864,10 @@ class SyncDashboard(DashboardParts, QDialog):
         # here could freeze the close for minutes.
         self.login_thread = None
         self.login_worker = None
-        self._save_visible_account()
+        # Schliesst nur, wenn die sichtbaren Einstellungen gesichert sind:
+        # `_save_settings` meldet den Fehler und der Dialog bleibt offen,
+        # damit die Eingaben nicht mit dem Fenster verschwinden.
+        if not self._save_settings():
+            event.ignore()
+            return
         event.accept()

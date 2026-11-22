@@ -4,7 +4,7 @@ Synchronisiert Bücher, Metadaten, Lesestatus und Fortschritt zwischen Calibre u
 
 Aktuelle Version: **0.1.09** (Quelle: [`__init__.py`](__init__.py)).
 
-0.1.09 schliesst das Dashboard per Esc wie das Fensterkreuz (laufende Worker werden abgebrochen, sichtbare Einstellungen noch gesichert); der übrige Code ist ohne Verhaltensänderung gestrafft. Config-Speicher, Konten und Tokens bleiben unverändert.
+0.1.09 schliesst das Dashboard per Esc wie das Fensterkreuz (laufende Worker werden abgebrochen, sichtbare Einstellungen noch gesichert; schlägt das Sichern fehl, bleibt das Fenster offen); der übrige Code ist ohne Verhaltensänderung gestrafft. Config-Speicher, Konten und Tokens bleiben unverändert.
 
 ## Installation
 

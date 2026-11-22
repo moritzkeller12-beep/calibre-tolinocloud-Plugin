@@ -2,7 +2,7 @@
 
 ## 0.1.09
 
-- Esc schliesst das Dashboard wie das Fensterkreuz über `closeEvent`: ein laufender Worker wird abgebrochen, die sichtbaren Einstellungen werden noch gesichert.
+- Esc schliesst das Dashboard wie das Fensterkreuz über `closeEvent`: ein laufender Worker wird abgebrochen, die sichtbaren Einstellungen werden noch gesichert. Schlägt das Sichern fehl, bleibt das Fenster offen und meldet den Fehler, statt die Eingaben zu verlieren.
 - Reine Straffung ohne Verhaltensänderung: tote Status- und Gruppenvergleiche sowie ein unerreichbarer Sondenstatus im Browser-Finder entfernt, doppelte Sortierschlüssel zusammengefasst und ein doppelter Test gestrichen (363 → 362 Tests bei gleicher Abdeckung). Die CI prüft zusätzlich Python 3.10.
 
 ## 0.1.08

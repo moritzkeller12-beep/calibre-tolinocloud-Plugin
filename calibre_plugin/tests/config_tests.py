@@ -14,6 +14,22 @@ class ConfigCase(PreferencesCase):
     """Jeder Test bekommt einen eigenen Einstellungsspeicher."""
 
 
+class StoreDoubleTests(unittest.TestCase):
+    """Das Test-Doppel schreibt erst bei ``commit()``, wie Calibres Vorbild."""
+
+    def test_update_touches_memory_only_until_commit(self):
+        store = config.JSONConfig("store-double")
+        store.update({"a": 1})
+        self.assertEqual(1, store["a"])
+        self.assertFalse(os.path.exists(store.file_path))
+        store.commit()
+        with open(store.file_path, encoding="utf-8") as handle:
+            self.assertEqual({"a": 1}, json.load(handle))
+        dict.clear(store)
+        store.refresh()
+        self.assertEqual(1, store["a"])
+
+
 class AccountTests(ConfigCase):
     """Mehrere Konten bleiben getrennt; die Auswahl aendert keine Werte."""
 

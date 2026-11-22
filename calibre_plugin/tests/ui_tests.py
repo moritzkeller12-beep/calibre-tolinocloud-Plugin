@@ -143,6 +143,36 @@ class EscapeCloseTests(unittest.TestCase):
         self.assertEqual(["closed", "saved"], events)
         self.assertEqual(QDialog.DialogCode.Rejected, dashboard.result())
 
+    def test_a_failed_save_keeps_the_window_open(self):
+        """Ein Speicherfehler beim Schliessen darf die Eingaben nicht verlieren."""
+        from PyQt6.QtWidgets import QLineEdit
+
+        base = self.ui.dashboard.SyncDashboard
+        messages = []
+
+        class Dashboard(base):
+            """Ohne Widget-Aufbau; der Speicher schlaegt fehl."""
+
+            def _build_ui(self):
+                self.hardware = QLineEdit()
+
+            def load_values(self):
+                pass
+
+            def _save_visible_account(self, values=None):
+                return False
+
+            def _save_failed(self, title):
+                messages.append(title)
+
+        dashboard = Dashboard(None)
+        dashboard.account_name = "A"
+        self.addCleanup(dashboard.deleteLater)
+        dashboard.show()
+        self.assertFalse(dashboard.close())
+        self.assertEqual(["Einstellungen nicht gespeichert"], messages)
+        self.assertTrue(dashboard.isVisible())
+
 
 class ReadingMirrorTests(unittest.TestCase):
     """Lesestatus und Fortschritt sind getrennte Spalten."""

@@ -15,13 +15,13 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Ziele ausserhalb des Plugins: Modulname oder Funktionsname.
 ALLOWED_PATTERNS = (
-    r"^calibre_plugin\.tolino\.",          # HTTP-Client (Netz)
-    r"^calibre_plugin\.cdp",               # Browser-Fenster/DevTools
     r"^(urllib|http|ssl|socket|subprocess|shutil|os|sys|time|datetime|"
     r"logging|copy|json|re|zipfile|pathlib|io)(\.|$)",
     r"^(qt|PyQt5|PyQt6|calibre)\.",
+    # Dieselben Grenzen aus einem Plugin-Modul heraus gepatcht, etwa
+    # ``calibre_plugin.cdp.subprocess.Popen`` oder ``tolino.time.sleep``.
+    r"\.(os|subprocess|socket|tempfile|time)\.[a-z_][a-z_0-9]*$",
     r"^fcntl\.flock$",                    # Dateisperre
-    r"\.time\.(monotonic|time|sleep)$",   # Uhr
 )
 
 # Funktionsnamen, die eine Systemgrenze darstellen (egal aus welchem Modul).
@@ -31,7 +31,15 @@ ALLOWED_NAMES = frozenset((
     "TolinoClient", "login",           # Netz/Anmeldung (TOKEN_VAULT.login)
     "check_stored_login",              # Zugangspruefung (Netz)
     "urlopen", "_http_get_json",       # HTTP
+    "_DOWNLOAD_OPENER",                # Download ohne Anmeldedaten
+    "log_warning",                     # Logging
     "Popen", "which", "find_browsers", "in_flatpak_sandbox",  # Browser
+    # CDP-Grenze: Fenster, Ziel, Debug-Port und Prozesszustand liegen
+    # ausserhalb des Plugins; die Namen sind deshalb einzeln genannt.
+    "close_grabber_window", "grab_once_from_grabber",
+    "grabber_window_state", "launch_reader_window",
+    "_endpoint_answers", "_evaluate_in_target", "_group_alive",
+    "_open_target", "_wait_for_debug_port", "read_idb_tokens",
     "grab_live_refresh",               # interaktiver Browser-Login
     "info_dialog", "error_dialog",     # modale Qt-Dialoge
     "getText",                         # modaler Eingabedialog (Qt)

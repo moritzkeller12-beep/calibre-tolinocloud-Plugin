@@ -70,11 +70,9 @@ def _install_calibre_config_stub():
             self._flush()
 
         def update(self, *args, **kwargs):
-            # Calibres ``update`` committet nicht. Der Ersatz schreibt aber
-            # sofort, damit ein geseedeter Stand einen ``refresh`` ueberlebt;
-            # ``commit`` bleibt dabei der einzige gezaehlte Schreibvorgang.
+            # Wie Calibres Vorbild: ``update`` aendert nur den Speicherstand.
+            # Ein fehlendes ``commit`` im Produktivcode faellt damit auf.
             super().update(*args, **kwargs)
-            self._flush()
 
         def commit(self):
             self._flush()
