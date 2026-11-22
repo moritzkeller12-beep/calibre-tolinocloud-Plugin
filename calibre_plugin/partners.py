@@ -1,4 +1,7 @@
 """Tolino shops and their stable partner-ID mappings."""
+from urllib.parse import urlsplit
+
+from .jwt import payload
 
 WEBREADER_URL = "https://webreader.mytolino.com/library/"
 WEBREADER_TOKEN_HEADERS = {
@@ -50,3 +53,31 @@ PARTNERS = {
         "token_url": "https://www.ebook.de/oauth/token",
     },
 }
+
+
+def _host(value):
+    """Host aus einer URL oder einem blossen Hostnamen, ohne ``www.``."""
+    text = str(value or "").strip()
+    return (urlsplit(text if "//" in text else "//" + text).hostname
+            or "").casefold().removeprefix("www.")
+
+
+def partner_from_token(token):
+    """Buchhändler aus dem ``iss``-Claim eines Tokens (None = unbekannt).
+
+    Ein Issuer, den ``urlsplit()`` nicht parsen kann (etwa kaputte
+    IPv6-Klammern), ist kein Buchhändler: der manuelle Rückfall bleibt so
+    erreichbar, statt den Aufrufer mit einem ``ValueError`` zu verlassen.
+    """
+    try:
+        host = _host((payload(token) or {}).get("iss"))
+    except ValueError:
+        return None
+    return next((partner_id for partner_id, values in PARTNERS.items()
+                 if host and _host(values["token_url"]) == host), None)
+
+
+# Gemeinsame Meldung für Browser-Anmeldung und Handeingabe (Code B03).
+UNKNOWN_SHOP = ("Im Zugang ist kein Buchhändler erkennbar. Bitte in den "
+                "Einstellungen den Buchhändler wählen und den Zugang von Hand "
+                "eintragen. ")

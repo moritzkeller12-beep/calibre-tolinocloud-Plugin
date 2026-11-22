@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 from build_plugin import (FILES, ICON, MARKER, ROOT, SOURCE, build_plugin,
-                          strip_docstrings, strip_source)
+                          strip_source)
 
 
 def _docstring_owners(text):
@@ -20,7 +20,8 @@ def _docstring_owners(text):
 class PluginArchiveTests(unittest.TestCase):
     def test_build_includes_plugin_modules_and_excludes_test_runner(self):
         self.assertIn("token_vault.py", FILES)
-        self.assertIn("plan.py", FILES)
+        self.assertIn("planning.py", FILES)
+        self.assertIn("ui_dialogs.py", FILES)
         self.assertNotIn("test_sync.py", FILES)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -72,7 +73,6 @@ class PluginArchiveTests(unittest.TestCase):
                   b"def answer():\n"
                   b'    """Antwort."""\n'
                   b"    return 42  # auch weg\n")
-        self.assertEqual(len(source), len(strip_docstrings(source)))
         stripped = strip_source(source)
         self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
         self.assertNotIn(b"Doc.", stripped)
@@ -86,6 +86,50 @@ class PluginArchiveTests(unittest.TestCase):
         self.assertEqual(42, namespace["answer"]())
         # Nicht zerlegbarer Quelltext wird unverändert ausgeliefert.
         self.assertEqual(b"x = (\n", strip_source(b"x = (\n"))
+
+    def test_a_module_docstring_before_a_future_import_is_removed(self):
+        """Ein ``0``-Platzhalter machte den Future-Import ungueltig."""
+        source = (b'"""Modul."""\n'
+                  b"# Hinweis\n"
+                  b"from __future__ import annotations\n"
+                  b"X = 1\n")
+        stripped = strip_source(source)
+        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+        self.assertNotIn(b"Modul.", stripped)
+        self.assertEqual(b"from __future__ import annotations",
+                         stripped.splitlines()[2])
+        namespace = {}
+        exec(compile(stripped, "<test>", "exec"), namespace)
+        self.assertEqual(1, namespace["X"])
+        # Leere Rumpfe behalten ihren Platzhalter.
+        self.assertIn(b"    0\n", strip_source(
+            b'class Leer:\n    """Nur Text."""\n'))
+
+    def test_a_docstring_followed_by_a_comment_is_still_stripped(self):
+        source = (b"def answer():\n"
+                  b'    """Antwort."""  # Hinweis\n'
+                  b"    return 42\n")
+        stripped = strip_source(source)
+        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+        self.assertNotIn(b"Antwort", stripped)
+        self.assertNotIn(b"Hinweis", stripped)
+        self.assertEqual(b"    return 42", stripped.splitlines()[2])
+        namespace = {}
+        exec(compile(stripped, "<test>", "exec"), namespace)
+        self.assertEqual(42, namespace["answer"]())
+
+    def test_a_module_docstring_does_not_precede_a_future_import(self):
+        source = (b'"""Modul.\nBeschreibung."""  # Hinweis\n'
+                  b"from __future__ import annotations\n"
+                  b"class Empty:\n"
+                  b'    """Klasse."""\n'
+                  b"def empty():\n"
+                  b'    """Funktion."""\n')
+        stripped = strip_source(source)
+        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+        self.assertEqual([], _docstring_owners(stripped))
+        self.assertNotIn(b"Hinweis", stripped)
+        compile(stripped, "<test>", "exec")
 
     def test_the_documented_version_matches_the_plugin_version(self):
         """README und CHANGELOG zeigen dieselbe Nummer wie __init__.py."""

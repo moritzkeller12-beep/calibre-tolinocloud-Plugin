@@ -1,1445 +1,639 @@
-"""Dashboard, Konten und Anmelde-Vorpruefung."""
+"""Was nach einem Sync-Lauf gesichert und dem Nutzer gemeldet wird.
 
-import calibre_plugin.tolino as tolino_module
-import calibre_plugin.token_vault as vault_module
+Der Lauf ist vorbei (Client und Thread), geprüft werden Ergebnis-Sicherung,
+Konto-Zuordnung der Spalten und die Rückmeldung je Ausgang. Worker und
+Dashboard sind echte Objekte bzw. das vorhandene Dashboard-Doppel.
+"""
+from contextlib import contextmanager
+import types
 import unittest
-from . import ui_base_tests
-from .. import config
-from ..partners import PARTNERS
-from ..identifiers import calibre_key
-from ..library import (DEFAULT_LIBRARY_SCOPE, TOLINO_COLUMN,
-                       TOLINO_PROGRESS_COLUMN, TOLINO_READ_COLUMN)
-from ..run_context import RunContext
-from ..tolino import TolinoAuthError
-from ._support import (
-    FakeSignal, FakeText, _ReadingDb, dashboard_stub, start_cdp_stubs,
-    stop_cdp_stubs, ui_module_for)
+import uuid
 from unittest.mock import patch
 
-
-# Der Einzellauf richtet die CDP-Stubs selbst ein.
-setUpModule = start_cdp_stubs
-tearDownModule = stop_cdp_stubs
-
-class DashboardAccountSwitchTests(unittest.TestCase):
-    """Mehrere Konten: Umschalten direkt auf der ersten Seite.
-
-    Feldbefund: «Kann man die Kontoauswahl, sofern mehrere Konten
-    vorhanden, ebenfalls auf die erste Seite bringen?» Die Zeile erscheint
-    nur bei mehr als einem Konto – sonst wäre sie nur Ballast.
-    """
-
-    class Combo:
-        """Minimaler Qt-Nachbau für Kombobox, Eingabe und Label."""
-
-        def __init__(self, *_args, **_kwargs):
-            self.items = []
-            self.current_index = 0
-            self.visible = True
-            self.text_value = ""
-
-        def blockSignals(self, value):
-            self.blocked = value
-
-        def clear(self):
-            self.items = []
-
-        def addItem(self, text, data=None):
-            self.items.append((text, data))
-
-        def setCurrentIndex(self, index):
-            self.current_index = index
-
-        def currentData(self):
-            return self.itemData(self.current_index)
-
-        def findData(self, data):
-            return next((index for index, (_text, item) in enumerate(self.items)
-                         if item == data), -1)
-
-        def itemData(self, index):
-            if 0 <= index < len(self.items):
-                return self.items[index][1]
-            return None
-
-        def setVisible(self, value):
-            self.visible = value
-
-        def setText(self, text):
-            self.text_value = text
-
-        def text(self):
-            return self.text_value
-
-        def setToolTip(self, text):
-            self.tooltip = text
-
-        def setEnabled(self, value):
-            self.enabled = value
-
-        def setChecked(self, value):
-            self.checked = bool(value)
-
-        def isChecked(self):
-            return getattr(self, "checked", False)
-
-        def setRange(self, *_args):
-            pass
-
-        def setValue(self, _value):
-            pass
-
-    def _dashboard(self):
-        dashboard = dashboard_stub()
-        for name in ("account_select", "account_quick", "partner", "hardware",
-                     "refresh", "formats", "account_quick_label", "status",
-                     "progress", "progress_label", "primary", "covers",
-                     "deletions", "tolino_column"):
-            setattr(dashboard, name, self.Combo())
-        dashboard.thread = None
-        return dashboard
-
-    @staticmethod
-    def _accounts(count):
-        return [{"name": "erstes", "partner_id": 1, "hardware_id": "hw-1",
-                 "refresh_token": "token-1",
-                 "state": {}},
-                {"name": "zweites", "partner_id": 2, "hardware_id": "hw-2",
-                 "refresh_token": "",
-                 "state": {}}][:count]
-
-    def _run(self, count, active="erstes"):
-        """load_values/switch_account mit gefälschten Einstellungen."""
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        original = (config.PREFERENCES, ui_module.dashboard.hardware_id,
-                    config.set_active_account)
-
-        def restore():
-            (config.PREFERENCES, ui_module.dashboard.hardware_id) = original[:2]
-            ui_module._restore_stubs_for_tests()
-
-        # Erst NACH dem Test zurücknehmen: sonst ist der Umbau weg, bevor
-        # der Test umschaltet.
-        self.addCleanup(restore)
-        calls = []
-        config.PREFERENCES = config.JSONConfig("test")
-        config.PREFERENCES.update({"accounts": self._accounts(count),
-                                   "active_account": active})
-        ui_module.dashboard.hardware_id = lambda: "auto-hw"
-        real_set_active = original[2]
-
-        def record(name):
-            calls.append(("active", name))
-            return real_set_active(name)
-
-        ui_module.dashboard.set_active_account = record
-        dashboard = self._dashboard()
-        dashboard.partner.items = [("%s" % pid, pid)
-                                   for pid in sorted(PARTNERS)]
-        # Die echten Methoden an das gefälschte Fenster binden: geprüft
-        # wird ihr Verhalten, nicht ein Nachbau davon.
-        for name in ("load_values", "switch_account", "update_status",
-                     "_selected_account", "_stored_refresh", "_typed_refresh",
-                     "_effective_refresh"):
-            setattr(dashboard, name,
-                    getattr(ui_module.dashboard.SyncDashboard, name).__get__(dashboard))
-        dashboard._save_visible_account = lambda: calls.append(("save", None))
-        dashboard.load_values()
-        return ui_module, dashboard, calls
-
-    def test_one_account_hides_the_row(self):
-        _ui_module, dashboard, _calls = self._run(1)
-        self.assertFalse(dashboard.account_quick.visible)
-        self.assertFalse(dashboard.account_quick_label.visible)
-        self.assertEqual([("erstes", "erstes")], dashboard.account_quick.items)
-
-    def test_two_accounts_show_the_row_on_the_first_page(self):
-        _ui_module, dashboard, _calls = self._run(2)
-        self.assertTrue(dashboard.account_quick.visible)
-        self.assertTrue(dashboard.account_quick_label.visible)
-        self.assertEqual([("erstes", "erstes"), ("zweites", "zweites")],
-                         dashboard.account_quick.items)
-        self.assertEqual(0, dashboard.account_quick.current_index)
-        self.assertEqual(0, dashboard.account_select.current_index)
-
-    def test_switching_on_the_first_page_moves_the_active_account(self):
-        _ui_module, dashboard, calls = self._run(2)
-        self.assertTrue(dashboard.switch_account("zweites"))
-        # Erst sichern, dann umschalten.
-        self.assertEqual([("save", None), ("active", "zweites")], calls)
-        self.assertEqual("zweites", dashboard.account_name)
-        # Beide Auswahlen zeigen dasselbe Konto -- sonst arbeitet der
-        # Plugin mit dem vorherigen weiter.
-        self.assertEqual(1, dashboard.account_quick.current_index)
-        self.assertEqual(1, dashboard.account_select.current_index)
-        # Buchhändler, Hardware-ID und Zugang kommen vom neuen Konto.
-        self.assertEqual(2, dashboard.partner.currentData())
-        self.assertEqual("hw-2", dashboard.hardware.text())
-        self.assertEqual("", dashboard.refresh.text())
-        self.assertEqual("Nicht angemeldet.", dashboard.status.text_value)
-        self.assertFalse(dashboard.primary.enabled)
-
-    def test_book_key_index_uses_the_library_scope(self):
-        from ..identifiers import calibre_key
-        from ..library import library_scope
-
-        ui_module, dashboard, _calls = self._run(1)
-
-        class Api:
-            def all_book_ids(self):
-                return (1,)
-
-            def all_field_for(self, _field, _book_ids):
-                return {1: "Der Schwarm"}
-
-        database = type("Db", (), {
-            "library_id": "library-a", "new_api": Api()})()
-        dashboard.gui = type("Gui", (), {"current_db": database})()
-        book_ids, mapping = ui_module.dashboard._book_key_index(dashboard)
-        scoped = calibre_key(1, library_scope(database))
-        self.assertEqual([1], book_ids)
-        self.assertEqual(1, mapping[scoped])
-        self.assertNotIn("calibre-1", mapping)
-
-    def test_book_key_index_does_not_shadow_a_real_uuid(self):
-        from ..identifiers import calibre_key
-        from ..library import library_scope
-
-        uuid = "33333333-3333-4333-8333-333333333333"
-        ui_module, dashboard, _calls = self._run(1)
-
-        class Api:
-            def all_book_ids(self):
-                return (1,)
-
-            def all_field_for(self, _field, _book_ids):
-                return {1: uuid}
-
-        database = type("Db", (), {
-            "library_id": "library-a", "new_api": Api()})()
-        dashboard.gui = type("Gui", (), {"current_db": database})()
-        _book_ids, mapping = ui_module.dashboard._book_key_index(dashboard)
-        self.assertEqual(1, mapping[uuid])
-        self.assertNotIn(calibre_key(1, library_scope(database)), mapping)
-
-    def test_switching_to_the_same_or_unknown_account_does_nothing(self):
-        _ui_module, dashboard, calls = self._run(2)
-        self.assertFalse(dashboard.switch_account("erstes"))
-        self.assertFalse(dashboard.switch_account("gibt-es-nicht"))
-        self.assertFalse(dashboard.switch_account(""))
-        self.assertEqual([], calls)
-
-    def test_reading_columns_follow_the_selected_account(self):
-        uuid = "33333333-3333-3333-3333-333333333333"
-        _ui_module, dashboard, _calls = self._run(2)
-        config.save_account("erstes", {"state": {uuid: {
-            "tolino_id": "t1", "calibre_id": 1,
-            "reading": {"read": True, "progress": {
-                "percent": 100, "current": "350", "last": "350",
-                "position": "Ops/A.html"}}}}}, active="erstes")
-        config.save_account("zweites", {"state": {uuid: {
-            "tolino_id": "t1", "calibre_id": 1,
-            "reading": {"read": False, "progress": {
-                "percent": 37, "current": "130", "last": "350",
-                "position": "Ops/B.html"}}}}}, active="zweites")
-
-        db = _ReadingDb({1: uuid})
-        dashboard.gui = type("Gui", (), {"current_db": db})()
-        self.assertTrue(dashboard.switch_account("zweites"))
-        self.assertIs(False, db.values[TOLINO_READ_COLUMN][1])
-        self.assertEqual(37, db.values[TOLINO_PROGRESS_COLUMN][1])
-        self.assertTrue(dashboard.switch_account("erstes"))
-        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
-        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
-
-    def test_switching_to_an_account_without_values_clears_the_old_ones(self):
-        uuid = "44444444-4444-4444-4444-444444444444"
-        _ui_module, dashboard, _calls = self._run(2)
-        config.save_account("erstes", {"state": {uuid: {
-            "tolino_id": "t1", "calibre_id": 1,
-            "reading": {"read": True, "progress": {"percent": 100}}}}},
-            active="erstes")
-        config.save_account("zweites", {"state": {uuid: {
-            "tolino_id": "t1", "calibre_id": 1}}}, active="zweites")
-
-        db = _ReadingDb({1: uuid}, read={1: True}, progress={1: 100})
-        dashboard.gui = type("Gui", (), {"current_db": db})()
-        self.assertTrue(dashboard.switch_account("zweites"))
-        self.assertIsNone(db.values[TOLINO_READ_COLUMN][1])
-        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
-        self.assertTrue(dashboard.switch_account("erstes"))
-        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
-        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
-
-    def test_reading_columns_follow_books_without_real_uuid(self):
-        title = "Der Schwarm"
-        other = "Ein anderes Buch"
-        _ui_module, dashboard, _calls = self._run(2)
-        # Ohne echte UUID greift der bibliotheksbezogene Calibre-ID-Fallback;
-        # ein alter ungescopter Titel-Schlüssel wird nicht mehr ausgewertet.
-        fallback = calibre_key(1, DEFAULT_LIBRARY_SCOPE)
-        config.save_account("erstes", {"state": {fallback: {
-            "tolino_id": "t1", "calibre_id": 1,
-            "reading": {"read": True, "progress": {"percent": 100}}}}},
-            active="erstes")
-        config.save_account("zweites", {"state": {}}, active="zweites")
-
-        db = _ReadingDb({1: title, 2: other},
-                        read={1: True, 2: False}, progress={1: 100, 2: 42})
-        dashboard.gui = type("Gui", (), {"current_db": db})()
-        self.assertTrue(dashboard.switch_account("zweites"))
-        self.assertIsNone(db.values[TOLINO_READ_COLUMN][1])
-        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][1])
-        self.assertIsNone(db.values[TOLINO_READ_COLUMN][2])
-        self.assertIsNone(db.values[TOLINO_PROGRESS_COLUMN][2])
-        self.assertTrue(dashboard.switch_account("erstes"))
-        self.assertIs(True, db.values[TOLINO_READ_COLUMN][1])
-        self.assertEqual(100, db.values[TOLINO_PROGRESS_COLUMN][1])
-        self.assertIsNone(db.values[TOLINO_READ_COLUMN][2])
-
-    def test_account_switch_stays_available_while_a_comparison_runs(self):
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-
-        class Widget:
-            def setEnabled(self, value):
-                self.enabled = value
-
-        dialog = dashboard_stub()
-        dialog.account_quick = Widget()
-        dialog.account_select = Widget()
-        dialog.thread = None
-        dialog.prepare_thread = None
-        ui_module.common._apply_busy(dialog, True)
-        self.assertFalse(dialog.account_quick.enabled)
-        # `_apply_busy` läuft vor dem Setzen des Threads. Sobald der Lauf
-        # sichtbar ist, muss die Kontoauswahl wieder bedienbar sein.
-        dialog.thread = object()
-        ui_module.common._apply_busy(dialog, True)
-        self.assertTrue(dialog.account_quick.enabled)
-        self.assertTrue(dialog.account_select.enabled)
-        dialog.thread = None
-        ui_module.common._apply_busy(dialog, True)
-        self.assertFalse(dialog.account_quick.enabled)
-
-class ColumnSetupButtonTests(unittest.TestCase):
-    """Je Calibre-Spalte ein Knopf in den Einstellungen."""
-
-    def _ui(self):
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        return ui_module
-
-    @staticmethod
-    def _dashboard(ui_module, calls):
-        """Stub ohne Qt-Aufbau, aber mit den echten Methoden gebunden."""
-        cls = ui_module.dashboard.SyncDashboard
-        dashboard = dashboard_stub()
-        dashboard.gui = type("Gui", (), {"current_db": object()})()
-        dashboard.update_status = lambda: calls.append("status")
-        dashboard.create_columns = cls.create_columns.__get__(dashboard)
-        return dashboard
-
-    def test_one_button_creates_only_its_own_column(self):
-        from unittest.mock import patch
-        ui_module = self._ui()
-        calls, boxes, seen = [], [], []
-        dashboard = self._dashboard(ui_module, calls)
-
-        def fake_create(_db, labels):
-            seen.append(list(labels))
-            return list(labels)
-
-        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
-                   fake_create), \
-             patch("calibre_plugin.ui_dashboard.column_state",
-                   lambda _db: {"id": True, "read": True,
-                                "ignore": True}), \
-             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            dashboard.create_columns("tolino_ignore")
-        # Genau diese eine Spalte wird angelegt -- nicht alle drei.
-        self.assertEqual([["tolino_ignore"]], seen)
-        self.assertIn("#tolino_ignore", boxes[0][2])
-        self.assertIn("neu starten", boxes[0][2])
-        # Calibre kennt die neue Spalte erst nach einem Neustart; hier
-        # wird kein Spaltenstatus vorgetäuscht.
-        self.assertEqual([], calls)
-
-    def test_an_existing_column_says_so_and_changes_nothing(self):
-        from unittest.mock import patch
-        ui_module = self._ui()
-        calls, boxes = [], []
-        dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns",
-                   lambda _db, _labels: []), \
-             patch("calibre_plugin.ui_dashboard_parts.info_dialog",
-                   lambda *args, **kwargs: boxes.append(args)):
-            dashboard.create_columns("tolino_read")
-        self.assertIn("schon vorhanden", boxes[0][2])
-        self.assertIn("#tolino_read", boxes[0][2])
-        self.assertEqual([], calls)
-
-    def test_a_refused_creation_is_reported_instead_of_crashing(self):
-        from unittest.mock import patch
-
-        def boom(_db, _labels):
-            raise RuntimeError(
-                "Diese Calibre-Version kennt create_custom_column nicht.")
-
-        ui_module = self._ui()
-        calls, errors = [], []
-        dashboard = self._dashboard(ui_module, calls)
-        with patch("calibre_plugin.ui_dashboard_parts.create_custom_columns", boom), \
-             patch("calibre_plugin.ui_dashboard_parts.log_warning",
-                   lambda _text: None), \
-             patch("calibre_plugin.ui_dashboard_parts.error_dialog",
-                   lambda *args, **kwargs: errors.append(args)):
-            dashboard.create_columns("tolino_id")
-        self.assertIn("create_custom_column", errors[0][2])
-        self.assertEqual([], calls)
-
-class DashboardPrimaryActionTests(unittest.TestCase):
-    """Hauptknopf und Anmeldeknopf getrennt.
-
-    Feldbefund: «Bring mir den Anmeldeknopf auf die erste Seite zurück.»
-    Vorher war das Anmelden nur ein Zustand des Hauptknopfes – bei
-    gespeichertem, aber abgelaufenem Zugang war es damit nicht erreichbar.
-    """
-
-    @staticmethod
-    def _dashboard(token="", running=False):
-        class LineEdit:
-            def __init__(self, value):
-                self.value = value
-
-            def text(self):
-                return self.value
-
-        class Widget:
-            def setText(self, text):
-                self.text_value = text
-
-            def setVisible(self, value):
-                self.visible = value
-
-            def setEnabled(self, value):
-                self.enabled = value
-
-            def setToolTip(self, text):
-                self.tooltip = text
-
-        dashboard = dashboard_stub()
-        dashboard.thread = object() if running else None
-        dashboard.refresh = LineEdit(token)
-        # Der Zugang kommt aus dem Konto: der Stub sagt, was drin steht.
-        dashboard._effective_refresh = lambda: token
-        dashboard.status = Widget()
-        dashboard.progress = Widget()
-        dashboard.progress_label = Widget()
-        dashboard.primary = Widget()
-        dashboard.login_button = Widget()
-        return dashboard
-
-    def _update_status(self):
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        try:
-            return ui_module.dashboard.SyncDashboard.update_status
-        finally:
-            ui_module._restore_stubs_for_tests()
-
-    def test_compare_button_follows_the_login_state(self):
-        """Ohne Zugang wartet der Hauptknopf, mit Zugang ist er bereit."""
-        update_status = self._update_status()
-        waiting = self._dashboard("")
-        update_status(waiting)
-        self.assertEqual("Bibliothek vergleichen …",
-                         waiting.primary.text_value)
-        self.assertFalse(waiting.primary.enabled)
-        self.assertIn("anmelden", waiting.primary.tooltip)
-        self.assertEqual("Nicht angemeldet.", waiting.status.text_value)
-        self.assertEqual("Bei tolino anmelden",
-                         waiting.login_button.text_value)
-        ready = self._dashboard("token-1")
-        update_status(ready)
-        self.assertEqual("Bibliothek vergleichen …",
-                         ready.primary.text_value)
-        self.assertTrue(ready.primary.enabled)
-        self.assertEqual("Angemeldet.", ready.status.text_value)
-        self.assertEqual("Anmeldung prüfen", ready.login_button.text_value)
-
-    def test_a_running_sync_turns_the_button_into_cancel(self):
-        update_status = self._update_status()
-        dashboard = self._dashboard("token-1", running=True)
-        update_status(dashboard)
-        self.assertEqual("Abbrechen", dashboard.primary.text_value)
-        self.assertTrue(dashboard.primary.enabled)
-        self.assertTrue(dashboard.progress.visible)
-        self.assertIn("Synchronisierung läuft", dashboard.status.text_value)
-
-class SettingsLockTests(unittest.TestCase):
-    """Der Einstellungs-Speicher wird aus zwei Threads benutzt.
-
-    Der Dialog speichert im GUI-Thread, der Keep-alive rotiert den Token im
-    Hintergrund. `save_account` liest UND schreibt den ganzen Konto-Block --
-    ohne Lock kann ein Lesen-Aendern-Schreiben die Rotation des anderen
-    Threads verlieren.
-    """
+from .. import config
+from ..comparison import compare_inventory
+from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
+                      TOLINO_READ_COLUMN, library_scope)
+from ..run_context import RunContext
+from ._support import (CalibreDatabase, SyncThread, break_settings,
+                       dashboard_stub, real_qt_stub, ui_module_for)
+
+UUID = "11111111-1111-4111-8111-111111111111"
+OTHER = "22222222-2222-4222-8222-222222222222"
+
+
+class OrchestrationCase(unittest.TestCase):
+    """Frischer Einstellungsspeicher und geladenes UI-Modul je Test."""
 
     def setUp(self):
-        self.original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test")
-        config.PREFERENCES.update({
-            "accounts": [{"name": "konto", "partner_id": 4,
-                          "hardware_id": "hw", "refresh_token": "tok", "state": {}}],
-            "active_account": "konto",
-        })
-        self.addCleanup(setattr, config, "PREFERENCES", self.original)
+        self._original = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
+        self.addCleanup(setattr, config, "PREFERENCES", self._original)
+        # Ein Sync-Lauf setzt gespeicherte Konten voraus; nur so kann der
+        # Zustand am Ende auch geschrieben werden.
+        for name in ("A", "B"):
+            config.save_account(name, {"refresh_token": "tok-%s" % name})
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
-    def test_two_new_accounts_do_not_share_the_state_dict(self):
-        """dict(DEFAULT_ACCOUNT) kopierte den Zustand nur flach."""
-        first = config._account({"name": "eins"})
-        second = config._account({"name": "zwei"})
-        self.assertIsNot(first["state"], second["state"])
-        first["state"]["11111111-1111-4111-8111-111111111111"] = {"tolino_id": "t1"}
-        self.assertEqual({}, second["state"])
-        self.assertEqual({}, config.DEFAULT_ACCOUNT["state"])
+    def worker(self, account="A", outcome=None, updates=((1, "neu-1"),)):
+        """Echter SyncWorker nach dem Lauf: nur sein Ergebnis zählt."""
+        context = RunContext.from_values(
+            {"account_name": account, "preferred_formats": ["EPUB"]},
+            columns={"id": True, "read": True, "progress": True})
+        worker = self.ui.workers.SyncWorker(context, [], [], state={})
+        worker.account_name = account
+        worker.outcome = dict(outcome if outcome is not None
+                              else {"uploaded": 1})
+        worker.updates = list(updates)
+        worker.read_updates = [(1, True)]
+        worker.progress_updates = [(1, 42)]
+        return worker
 
-    def test_ui_and_token_metadata_do_not_copy_book_state(self):
-        import copy
-        real_deepcopy = copy.deepcopy
-
-        def guarded(value):
-            if isinstance(value, dict):
-                raise AssertionError("Buchzustand wurde unnötig kopiert")
-            return real_deepcopy(value)
-
-        with patch("calibre_plugin.config.copy.deepcopy", guarded):
-            values = config.settings()
-            self.assertNotIn("state", values["accounts"][0])
-            self.assertTrue(config.set_active_account("konto"))
-            self.assertEqual(("tok",), config.account_secrets("konto"))
-            self.assertTrue(config.save_refresh_token("konto", "neu"))
-            self.assertEqual("neu", config.account_summary(
-                "konto")["refresh_token"])
-
-    def test_save_account_waits_for_the_settings_lock(self):
-        import threading
-        started = threading.Event()
-        done = threading.Event()
-
-        def worker():
-            started.set()
-            config.save_account("zweites", {"hardware_id": "hw-2"})
-            done.set()
-
-        with config._SETTINGS_LOCK:
-            thread = threading.Thread(target=worker)
-            thread.start()
-            self.assertTrue(started.wait(5))
-            # Solange der Lock haelt, kommt der Hintergrund-Thread nicht durch.
-            self.assertFalse(done.wait(0.3))
-        thread.join(5)
-        # Nach dem Freigeben laeuft er durch.
-        self.assertTrue(done.is_set())
-        self.assertEqual("hw-2",
-                         config.account_by_name("zweites")["hardware_id"])
-
-    def test_settings_lock_is_reentrant(self):
-        """save_account ruft intern settings() und save_account -- ohne
-        Reentranz wuerde das Plugin in einen Deadlock laufen."""
-        lock = config._SETTINGS_LOCK
-        self.assertTrue(lock.acquire(blocking=False))
-        try:
-            self.assertTrue(lock.acquire(blocking=False))
-            lock.release()
-        finally:
-            lock.release()
-
-    def test_parallel_writes_never_lose_an_account(self):
-        import threading
-        errors = []
-
-        def worker(index):
-            try:
-                name = "konto-%d" % index
-                for _ in range(20):
-                    config.save_account(name, {"hardware_id": "hw-%d" % index})
-            except Exception as exc:  # pragma: no cover - unerwarteter Testfehler
-                errors.append(exc)
-
-        threads = [threading.Thread(target=worker, args=(index,))
-                   for index in range(8)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(10)
-        self.assertEqual([], errors)
-        names = {item["name"] for item in config.settings()["accounts"]}
-        self.assertEqual({"konto"} | {"konto-%d" % index for index in range(8)},
-                         names)
-
-class TokenRotationWriteBackTests(unittest.TestCase):
-    """Der Keep-alive rotiert den gespeicherten Zugang im Hintergrund,
-    das Eingabefeld weiss davon nichts.
-
-    Der Dialog schrieb den alten Token beim Schliessen oder Kontowechsel
-    zurueck -- danach lehnt Tolino ihn als verbraucht ab («invalid_grant» /
-    «reuse exceeded»). Ein UNVERAENDERTES Feld darf die Rotation deshalb nie
-    ueberschreiben; nur eine eigene Eingabe zaehlt.
-    """
-
-    Combo = DashboardAccountSwitchTests.Combo
-
-    def _ui(self, token="alt-token"):
-        ui_module = ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None)
-        original = (config.PREFERENCES, ui_module.dashboard.hardware_id)
-        config.PREFERENCES = config.JSONConfig("test")
-        config.PREFERENCES.update({
-            "accounts": [{"name": "konto", "partner_id": 4,
-                          "hardware_id": "hw-1", "refresh_token": token, "state": {}}],
-            "active_account": "konto",
-        })
-        ui_module.dashboard.hardware_id = lambda: "auto-hw"
-
-        def restore():
-            (config.PREFERENCES, ui_module.dashboard.hardware_id) = original
-            ui_module._restore_stubs_for_tests()
-
-        self.addCleanup(restore)
+    def dashboard(self, worker, database, account="A", visible=None):
         dashboard = dashboard_stub()
-        for name in ("account_select", "account_quick", "partner", "hardware",
-                     "refresh", "formats", "account_quick_label", "status",
-                     "progress", "progress_label", "primary", "covers",
-                     "deletions", "tolino_column"):
-            setattr(dashboard, name, self.Combo())
-        dashboard.thread = None
-        dashboard.partner.items = [(str(pid), pid)
-                                   for pid in sorted(PARTNERS)]
-        # Die ECHTEN Methoden an das gefaelschte Fenster binden.
-        for name in ("load_values", "values", "_selected_account",
-                     "update_status", "_stored_refresh", "_typed_refresh",
-                     "_effective_refresh", "store_refresh",
-                     "logout", "_save_visible_account"):
-            setattr(dashboard, name,
-                    getattr(ui_module.dashboard.SyncDashboard, name).__get__(dashboard))
-        dashboard.load_values()
-        return ui_module, dashboard
-
-    def _rotate(self, token):
-        config.save_account("konto", {"refresh_token": token}, active="konto")
-
-    def _stored(self, name="konto"):
-        return config.account_by_name(name)["refresh_token"]
-
-    def test_an_untouched_field_never_overwrites_the_rotated_token(self):
-        """Das Feld traegt den Token nicht mehr; das Konto ist die Quelle."""
-        _ui_module, dashboard = self._ui("alt-token")
-        self.assertEqual("", dashboard.refresh.text())
-        self._rotate("rotiert")
-        # Gerechnet wird mit dem GESPEICHERTEN (frisch rotierten) Zugang.
-        self.assertEqual("rotiert", dashboard._effective_refresh())
-        self.assertNotIn("refresh_token", dashboard.values())
-        # Und das Speichern beim Schliessen verbrennt die Rotation nicht.
-        dashboard._save_visible_account()
-        self.assertEqual("rotiert", self._stored())
-
-    def test_own_input_wins_over_the_stored_one(self):
-        """Ein eingetippter Token gewinnt; ein leeres Feld aendert nichts."""
-        _ui_module, dashboard = self._ui("alt-token")
-        self._rotate("rotiert")
-        dashboard.refresh.setText("selbst-eingetragen")
-        self.assertEqual("selbst-eingetragen", dashboard._typed_refresh())
-        # `values()` traegt keine Zugangsdaten; gespeichert wird ausdruecklich.
-        self.assertNotIn("refresh_token", dashboard.values())
-        dashboard.store_refresh("selbst-eingetragen")
-        self.assertEqual("selbst-eingetragen", self._stored())
-        # Feld geleert: der gespeicherte Zugang bleibt -- abgemeldet wird
-        # ausdruecklich ueber den Knopf.
-        dashboard.refresh.setText("")
-        self.assertNotIn("refresh_token", dashboard.values())
-        dashboard._save_visible_account()
-        self.assertEqual("selbst-eingetragen", self._stored())
-
-    def test_adopted_token_survives_a_later_rotation(self):
-        """Ein uebernommener Token steht danach im Konto -- eine spaetere
-        Rotation im Hintergrund darf ihn nicht ueberschreiben."""
-        _ui_module, dashboard = self._ui("alt-token")
-        dashboard.store_refresh("frisch-gelesen")
-        self.assertEqual("frisch-gelesen", self._stored())
-        self._rotate("rotiert-2")
-        self.assertEqual("rotiert-2", dashboard._effective_refresh())
-        self.assertNotIn("refresh_token", dashboard.values())
-        dashboard._save_visible_account()
-        self.assertEqual("rotiert-2", self._stored())
-
-    def test_logout_clears_the_stored_access(self):
-        """Abmelden loescht den Zugang -- ohne das Feld zu benutzen."""
-        _ui_module, dashboard = self._ui("alt-token")
-        dashboard.logout()
-        self.assertEqual("", self._stored())
-        self.assertEqual("", dashboard.refresh.text())
-
-    def test_the_visible_hardware_field_is_the_manual_override(self):
-        _ui_module, dashboard = self._ui()
-        config.save_account("konto", {"hardware_id": "adoptiert"},
-                            active="konto")
-        self.assertEqual("hw-1", dashboard.values()["hardware_id"])
-        dashboard.hardware.setText("manuell")
-        self.assertEqual("manuell", dashboard.values()["hardware_id"])
-
-    def test_adopted_hardware_survives_stale_fields_and_token_storage(self):
-        _ui_module, dashboard = self._ui()
-        config.save_account("konto", {"hardware_id": "adoptiert"},
-                            active="konto")
-        dashboard._save_visible_account()
-        self.assertEqual("adoptiert",
-                         config.account_by_name("konto")["hardware_id"])
-        dashboard.hardware.setText("manuell")
-        dashboard._hardware_edited = True
-        dashboard._save_visible_account()
-        self.assertEqual("manuell",
-                         config.account_by_name("konto")["hardware_id"])
-
-        _ui_module, dashboard = self._ui("alt-token")
-        config.save_account("konto", {"hardware_id": "adopted"},
-                            active="konto")
-        dashboard.hardware.setText("hw-1")
-        dashboard.store_refresh("neu")
-        self.assertEqual("adopted",
-                         config.account_by_name("konto")["hardware_id"])
-
-    def test_a_missing_account_never_saves_another_accounts_state(self):
-        """Ist der angezeigte Name weg, darf nicht das aktive Konto
-        unter diesem Namen gespeichert werden."""
-        _ui_module, dashboard = self._ui("alt-token")
-        dashboard.account_name = "verschwunden"
-        values = dashboard.values()
-        self.assertEqual("", values["account_name"])
-        dashboard._save_visible_account(values)
-        self.assertEqual("alt-token", self._stored("konto"))
-
-    def test_saving_the_visible_values_keeps_a_concurrent_state_write(self):
-        """Der Snapshot ohne Zustand darf keinen Worker-Fortschritt ersetzen."""
-        _ui_module, dashboard = self._ui("alt-token")
-        self.assertNotIn("state", dashboard.values())
-        values = dashboard.values()
-        config.save_account(
-            "konto", {"state": {"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {"tolino_id": "neu"}}}, active="konto")
-        dashboard._save_visible_account(values)
-        self.assertEqual({"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {"tolino_id": "neu"}},
-                         config.account_by_name("konto")["state"])
-
-class LoginPreflightTests(unittest.TestCase):
-    """Der Anmeldeknopf prueft zuerst den GESPEICHERTEN Zugang.
-
-    Feldwunsch: «Zuerst pruefen, ob die aktuellen Logindaten noch
-    funktionieren, bevor ein neuer Loginprozess beginnt.» Die Pruefung
-    laeuft still im Hintergrund; das Browser-Fenster geht nur auf, wenn
-    Tolino den Zugang ablehnt oder er nicht pruefbar war.
-    """
-
-    # --- tolino.check_stored_login --------------------------------------
-
-    @staticmethod
-    def _patch_client(records, token="tok-1", hardware="hw-1",
-                      error=None, rotate=True):
-        """Replace the vault's client factory with a deterministic fake."""
-        class FakeClient:
-            def __init__(self, partner, hw, refresh, token_callback=None,
-                         hardware_callback=None):
-                records.append((partner, hw, refresh))
-                self.refresh = refresh
-                self.token_callback = token_callback
-
-            def login(self):
-                if error is not None:
-                    raise error
-                if rotate:
-                    self.refresh = token + "-rotated"
-                    self.token_callback(self.refresh)
-                    records.append(("persisted", self.refresh))
-                return self.refresh
-
-        return patch.multiple(
-            "calibre_plugin.token_vault",
-            TolinoClient=FakeClient,
-            account_summary=lambda _name: ({} if token is None else {
-                "refresh_token": token, "hardware_id": hardware}),
-            account_secrets=lambda _name: () if token is None else (token,),
-        )
-
-    def test_a_working_access_is_renewed_and_saved(self):
-        records = []
-        with self._patch_client(records):
-            status, detail = vault_module.check_stored_login("konto", 4)
-        self.assertEqual(("valid", ""), (status, detail))
-        self.assertEqual((4, "hw-1", "tok-1"), records[0])
-        self.assertEqual(("persisted", "tok-1-rotated"), records[1])
-
-    def test_a_successful_check_does_not_return_a_token_to_the_ui(self):
-        records = []
-        with self._patch_client(records, rotate=False):
-            status, detail = vault_module.check_stored_login("konto", 4)
-        self.assertEqual(("valid", ""), (status, detail))
-        self.assertEqual((4, "hw-1", "tok-1"), records[0])
-
-    def test_a_rejected_access_reports_the_reason_without_the_token(self):
-        records = []
-        error = TolinoAuthError(
-            "invalid_grant: refresh_token tok-1 wurde abgelehnt")
-        with self._patch_client(records, error=error):
-            status, detail = vault_module.check_stored_login("konto", 4)
-        self.assertEqual("invalid", status)
-        self.assertNotIn("tok-1", detail)
-        self.assertIn("[REDACTED]", detail)
-        self.assertIn("invalid_grant", detail)
-
-    def test_without_a_stored_token_nothing_is_asked(self):
-        with self._patch_client([], token=None):
-            status, detail = vault_module.check_stored_login("konto", 4)
-        self.assertEqual("invalid", status)
-        self.assertIn("Bitte bei tolino anmelden", detail)
-
-    def test_a_locked_vault_blocks_the_check(self):
-        # Der Zugang ist ungeprüft, nicht abgelehnt; das gilt auch ohne Wartezeit.
-        for kwargs in ({}, {"lock_timeout": 0}):
-            with self.subTest(kwargs=kwargs):
-                records = []
-                with self._patch_client(records):
-                    with vault_module.TOKEN_VAULT._lock:
-                        status, detail = vault_module.check_stored_login(
-                            "konto", 4, **kwargs)
-                self.assertEqual(("busy", ""), (status, detail))
-                self.assertEqual([], records)
-
-    def test_a_late_401_uses_the_latest_stored_refresh_token(self):
-        stored = {"refresh_token": "saved-old", "hardware_id": "hw-1"}
-        requested = []
-
-        class RefreshClient:
-            def __init__(self, partner, hardware, refresh, **callbacks):
-                self.refresh = refresh
-                self.hardware = hardware
-                self.token_callback = callbacks.get("token_callback")
-
-            def login(self):
-                return self._login()
-
-            def _login(self):
-                requested.append(self.refresh)
-                if len(requested) == 1:
-                    self.refresh = "rotated"
-                    self.token_callback(self.refresh)
-                return self.refresh
-
-        from ..token_vault import TOKEN_VAULT
-        with patch.multiple(
-                "calibre_plugin.token_vault",
-                TolinoClient=RefreshClient,
-                account_summary=lambda _name: dict(stored),
-                save_refresh_token=lambda _name, value: stored.update(
-                    refresh_token=value)):
-            client = TOKEN_VAULT.login("konto", 4)
-            stored["refresh_token"] = "rotated-by-keepalive"
-            client.access = None
-            TOKEN_VAULT.relogin(client)
-        self.assertEqual(["saved-old", "rotated-by-keepalive"], requested)
-
-    def test_the_rotation_lock_is_released_afterwards(self):
-        with self._patch_client([]):
-            vault_module.check_stored_login("konto", 4)
-        self.assertTrue(vault_module.TOKEN_VAULT._lock.acquire(blocking=False))
-        vault_module.TOKEN_VAULT._lock.release()
-
-    # --- Der Anmeldeknopf -----------------------------------------------
-
-    class Field:
-        def __init__(self, value=""):
-            self.value = value
-            self.enabled = True
-
-        def text(self):
-            return self.value
-
-        def setText(self, value):
-            self.value = value
-
-        def setEnabled(self, value):
-            self.enabled = value
-
-        def setToolTip(self, value):
-            self.tooltip = value
-
-        def setDefault(self, value):
-            self.is_default = value
-
-        def setFocus(self):
-            self.focused = True
-
-    def _ui(self):
-        ui_module = ui_module_for(self)
-        ui_module.dashboard.hardware_id = lambda: "auto-hw"
-        return ui_module
-
-    @staticmethod
-    def _fake_qt(ui_module):
-        """QThread und beide Worker durch Recorder ersetzen."""
-
-        Signal = FakeSignal
-
-        class Thread:
-            def __init__(self, parent=None):
-                self.started = Signal()
-                self.finished = Signal()
-                self.starts = 0
-
-            def start(self):
-                self.starts += 1
-                self.started.fire()
-
-            def isRunning(self):
-                return self.starts > 0
-
-            def quit(self, *args):
-                self.quits = getattr(self, "quits", 0) + 1
-
-            def deleteLater(self, *args):
-                self.deleted = True
-
-        class CheckWorker:
-            def __init__(self, context):
-                self.context = context
-                self.valid = Signal()
-                self.invalid = Signal()
-                self.busy = Signal()
-
-            def moveToThread(self, thread):
-                self.moved_to = thread
-
-            def run(self):
-                pass
-
-        class LoginWorker:
-            def __init__(self, account_name, partner_id, hardware):
-                self.arguments = (account_name, partner_id, hardware)
-                self.progress = Signal()
-                self.completed = Signal()
-                self.failed = Signal()
-
-            def moveToThread(self, thread):
-                self.moved_to = thread
-
-            def run(self):
-                pass
-
-        ui_module.dashboard.QThread = Thread
-        ui_module.dashboard.SessionCheckWorker = CheckWorker
-        ui_module.dashboard.BrowserLoginWorker = LoginWorker
-        return Thread, CheckWorker, LoginWorker
-
-    @staticmethod
-    def _boxes(ui_module, seen):
-        """QMessageBox.information/warning als Recorder.
-
-        Der Aufruf im Dialog beginnt mit `self`, danach folgen Titel und
-        Text -- die Zusicherungen lesen deshalb Index 1 und 2.
-        """
-
-        def record(*args, **kwargs):
-            seen.append(args)
-
-        ui_module.dashboard.QMessageBox = type("QMessageBox", (), {
-            "information": staticmethod(record),
-            "warning": staticmethod(record),
-        })
-
-    def _dashboard(self, ui_module, token="tok-1"):
-        dashboard = dashboard_stub()
-        dashboard.account_name = "konto"
-        dashboard.login_thread = None
-        dashboard.login_worker = None
-        dashboard.refresh = self.Field(token)
-        dashboard.hardware = self.Field("hw-1")
-        dashboard.primary = self.Field()
-        dashboard.status = self.Field()
-        dashboard.update_status = lambda: None
-        dashboard.settings_values = {
-            "account_name": "konto", "partner_id": 4,
-            "hardware_id": "hw-1", "refresh_token": token,
-        }
-        dashboard.columns = {}
-        dashboard.values = lambda: dashboard.settings_values
-        # Der Zugang kommt aus dem Konto: der Stub sagt, was drin steht.
-        dashboard._stored_refresh = lambda: token
-        dashboard._typed_refresh = lambda: ""
-        dashboard._effective_refresh = lambda: token
-        # Die beiden Ergebnis-Slots des Anmeldefensters: hier nur Empfaenger.
-        dashboard.login_completed = lambda *args: None
-        dashboard.login_failed = lambda *args: None
-        names = ("browser_login", "_check_stored_login",
-                 "_start_login_window", "_login_running",
-                 "login_still_valid", "login_rejected", "login_check_busy",
-                 "_login_cleanup", "store_refresh", "_login_progress")
-        for name in names:
-            setattr(dashboard, name,
-                    getattr(ui_module.dashboard.SyncDashboard, name).__get__(dashboard))
+        dashboard.account_name = account
+        dashboard.worker = worker
+        dashboard.gui = types.SimpleNamespace(current_db=database)
+        dashboard.finished = []
+        dashboard.finish_thread = lambda: dashboard.finished.append(True)
+        if visible is not None:
+            dashboard.isVisible = lambda: visible
         return dashboard
 
-    def test_without_a_stored_token_the_window_opens_right_away(self):
-        ui_module = self._ui()
-        self._fake_qt(ui_module)
-        dashboard = self._dashboard(ui_module, token="")
-        opened = []
-        dashboard._start_login_window = lambda values: opened.append(values)
-        dashboard.browser_login()
-        self.assertEqual(["konto"],
-                         [context.account_name for context in opened])
-        self.assertIsNone(dashboard.login_thread)
+    def stored_ids(self, account="A", tolino_id="neu-1"):
+        """Die Konto-Zuordnung eintragen, die der Lauf gesichert hat."""
+        config.save_account(account, {"state": {
+            UUID: {"tolino_id": tolino_id}}})
 
-    def test_with_a_token_the_stored_access_is_checked_first(self):
-        ui_module = self._ui()
-        Thread, CheckWorker, _ = self._fake_qt(ui_module)
-        dashboard = self._dashboard(ui_module)
-        opened = []
-        dashboard._start_login_window = lambda values: opened.append(values)
+    def method(self, name):
+        """Echte Dashboard-Methode an ein Doppel binden."""
+        return self.ui.dashboard.SyncDashboard.__dict__[name].__get__
+
+    def sync_completed(self, dashboard, updates):
+        method = self.ui.dashboard.SyncDashboard.sync_completed
+        return method.__get__(dashboard)(updates)
+
+    def sync_failed(self, dashboard, message):
+        method = self.ui.dashboard.SyncDashboard.sync_failed
+        return method.__get__(dashboard)(message)
+
+
+def full_database(fail=()):
+    database = CalibreDatabase(
+        {TOLINO_COLUMN: {"datatype": "text"},
+         TOLINO_READ_COLUMN: {"datatype": "bool"},
+         TOLINO_PROGRESS_COLUMN: {"datatype": "int"}},
+        fail=set(fail), books=[1])
+    database.api.values[("uuid", 1)] = UUID
+    return database
+
+
+class PersistTests(OrchestrationCase):
+    """Calibre-Spalten schreiben nur unter dem Konto des Laufs."""
+
+    def test_reading_columns_only_for_the_displayed_account(self):
+        worker = self.worker(account="B")
+        self.stored_ids("B")
+        database = full_database()
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database, account="A"), worker.updates)
+        self.assertEqual([], failures)
+        self.assertEqual([TOLINO_COLUMN],
+                         [column for column, _values in database.api.writes])
+
+        database = full_database()
+        worker = self.worker(account="A")
+        self.stored_ids("A")
+        self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual([TOLINO_COLUMN, TOLINO_READ_COLUMN,
+                          TOLINO_PROGRESS_COLUMN],
+                         [column for column, _values in database.api.writes])
+
+    def test_a_failing_column_is_named(self):
+        worker = self.worker()
+        self.stored_ids()
+        dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
+        failures = self.ui.sync_results.persist_sync_result(
+            dashboard, worker.updates)
+        self.assertEqual(["tolino-IDs"], failures)
+
+    def test_the_cleanup_callback_runs_even_when_a_column_fails(self):
+        """Geprueft wird `finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
+        worker = self.worker()
+        self.stored_ids()
+        dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
+        outcome, failures = self.ui.sync_results.finish_sync(
+            dashboard, worker.updates)
+        self.assertEqual({"uploaded": 1}, outcome)
+        self.assertEqual(["tolino-IDs"], failures)
+        self.assertTrue(dashboard.finished)
+
+    def test_a_late_result_keeps_the_finished_worker(self):
+        """closeEvent leert `worker`; das Ergebnis des Laufs zaehlt trotzdem."""
+        worker = self.worker()
+        self.stored_ids()
+        dashboard = self.dashboard(worker, full_database())
+        dashboard.worker = None
+        outcome, failures = self.ui.sync_results.finish_sync(
+            dashboard, worker.updates, worker)
+        self.assertEqual({"uploaded": 1}, outcome)
+        self.assertEqual([], failures)
+        self.assertTrue(dashboard.finished)
+
+    def test_a_book_without_a_stored_id_clears_its_column(self):
+        """Nach dem Loeschen steht im Konto keine Zuordnung mehr."""
+        worker = self.worker(updates=((1, ""),))
+        database = full_database()
+        database.api.values[(TOLINO_COLUMN, 1)] = '{"A": "alt"}'
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual([], failures)
+        self.assertEqual((TOLINO_COLUMN, {1: ""}), database.api.writes[0])
+
+    def test_an_unknown_column_is_simply_skipped(self):
+        worker = self.worker()
+        self.stored_ids()
+        database = CalibreDatabase({TOLINO_COLUMN: {"datatype": "text"}},
+                                   books=[1])
+        database.api.values[("uuid", 1)] = UUID
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual([], failures)
+        self.assertEqual([TOLINO_COLUMN],
+                         [column for column, _values in database.api.writes])
+
+    def test_a_changed_library_is_not_written_and_the_abort_is_reported(self):
+        worker = self.worker()
+        worker.context = RunContext.from_values(
+            {"account_name": "A", "preferred_formats": ["EPUB"]},
+            columns={"id": True, "read": True, "progress": True},
+            library_scope="fremde-bibliothek")
+        database = full_database()
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual(["Bibliothek gewechselt – Lauf abgebrochen"], failures)
+        self.assertEqual([], database.api.writes)
+
+    def test_the_library_of_the_start_snapshot_is_written(self):
+        worker = self.worker()
+        self.stored_ids()
+        database = full_database()
+        worker.context = RunContext.from_values(
+            {"account_name": "A", "preferred_formats": ["EPUB"]},
+            columns={"id": True, "read": True, "progress": True},
+            library_scope=library_scope(database))
+        failures = self.ui.sync_results.persist_sync_result(
+            self.dashboard(worker, database), worker.updates)
+        self.assertEqual([], failures)
+        self.assertEqual([TOLINO_COLUMN, TOLINO_READ_COLUMN,
+                          TOLINO_PROGRESS_COLUMN],
+                         [column for column, _values in database.api.writes])
+
+
+class MirrorTests(OrchestrationCase):
+    """Kontowechsel zeigt genau ein Konto; unklare Werte leeren nichts."""
+
+    def reading_database(self):
+        database = CalibreDatabase(
+            {TOLINO_READ_COLUMN: {"datatype": "bool"},
+             TOLINO_PROGRESS_COLUMN: {"datatype": "int"}}, books=[1, 2])
+        database.api.values[("uuid", 1)] = UUID
+        database.api.values[("uuid", 2)] = OTHER
+        return database
+
+    def test_an_account_switch_clears_the_progress_of_the_previous_one(self):
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            UUID: {"tolino_id": "d1",
+                   "reading": {"progress": {"percent": 42}}}}})
+        config.save_account("B", {"refresh_token": "tok-B", "state": {}})
+        database = self.reading_database()
+        dashboard = self.dashboard(self.worker(), database)
+
+        self.ui.sync_results.mirror_account_reading(dashboard, "A")
+        self.assertEqual(42,
+                         database.api.values[(TOLINO_PROGRESS_COLUMN, 1)])
+        self.ui.sync_results.mirror_account_reading(dashboard, "B")
+        self.assertIsNone(
+            database.api.values[(TOLINO_PROGRESS_COLUMN, 1)])
+
+    def test_an_unknown_comparison_progress_keeps_the_column(self):
+        database = self.reading_database()
+        database.api.values[(TOLINO_PROGRESS_COLUMN, 1)] = 42
+        dashboard = self.dashboard(self.worker(), database)
+        rows = compare_inventory(
+            {1: {"uuid": UUID, "title": "T", "authors": "A",
+                 "isbn": "", "formats": ["EPUB"]}},
+            {UUID: {"tolino_id": "d1"}},
+            [{"tolino_id": "d1", "title": "T", "authors": "A",
+              "isbn": ""}], ["EPUB"])
+        self.ui.sync_results.mirror_comparison_reading(dashboard, rows)
+        self.assertEqual(42,
+                         database.api.values[(TOLINO_PROGRESS_COLUMN, 1)])
+
+
+class ReportTests(OrchestrationCase):
+    """Jeder Ausgang hat seine eigene Rückmeldung; geschlossen bleibt still."""
+
+    @contextmanager
+    def recorded(self):
+        """Beide Dialoge mitschneiden, statt sie anzuzeigen."""
+        calls = {"info": [], "error": []}
+        with patch("calibre_plugin.sync_results.info_dialog",
+                   lambda *args, **kwargs: calls["info"].append(args)), \
+                patch("calibre_plugin.sync_results.error_dialog",
+                      lambda *args, **kwargs: calls["error"].append(args)):
+            yield calls
+
+    def test_a_successful_run_reports_its_result(self):
+        worker = self.worker()
+        dashboard = self.dashboard(worker, full_database())
+        with self.recorded() as recorded:
+            self.sync_completed(dashboard, worker.updates)
+        self.assertEqual("Fertig", recorded["info"][0][1])
+        self.assertIn("hochgeladen", recorded["info"][0][2])
+        self.assertEqual([], recorded["error"])
+        self.assertTrue(dashboard.finished)
+
+    def test_a_cancelled_run_reports_a_cancellation(self):
+        worker = self.worker(outcome={"cancelled": True})
+        dashboard = self.dashboard(worker, full_database())
+        with self.recorded() as recorded:
+            self.sync_completed(dashboard, worker.updates)
+        self.assertIn("Abgebrochen", recorded["info"][0][2])
+        self.assertEqual([], recorded["error"])
+
+    def test_a_partial_failure_gets_its_own_heading(self):
+        worker = self.worker(outcome={"uploaded": 1, "failed": 1})
+        dashboard = self.dashboard(worker, full_database())
+        with self.recorded() as recorded:
+            self.sync_completed(dashboard, worker.updates)
+        self.assertEqual("Teilweise fehlgeschlagen", recorded["error"][0][1])
+        self.assertIn("Teilweise abgeschlossen", recorded["error"][0][2])
+
+    def test_an_error_message_wins_over_a_cancel_flag(self):
+        worker = self.worker()
+        dashboard = self.dashboard(worker, full_database())
+        with self.recorded() as recorded:
+            self.ui.sync_results.report_sync(
+                dashboard, {"failed": 1, "cancelled": True}, [],
+                "Netz weg", True)
+        self.assertEqual("Fehlgeschlagen", recorded["error"][0][1])
+        self.assertEqual([], recorded["info"])
+
+    def test_a_cancel_without_a_message_stays_a_cancel(self):
+        worker = self.worker()
+        dashboard = self.dashboard(worker, full_database())
+        with self.recorded() as recorded:
+            self.ui.sync_results.report_sync(
+                dashboard, {}, [], self.ui.common.CANCEL_MESSAGE, True)
+        self.assertIn("Abgebrochen", recorded["info"][0][1])
+        self.assertEqual([], recorded["error"])
+
+    def test_a_closed_window_gets_no_dialog(self):
+        worker = self.worker()
+        dashboard = self.dashboard(worker, full_database(), visible=False)
+        with self.recorded() as recorded:
+            self.sync_completed(dashboard, worker.updates)
+        self.assertEqual(([], []), (recorded["info"], recorded["error"]))
+        self.assertTrue(dashboard.finished)
+
+    def test_a_failed_run_keeps_the_ids_of_completed_uploads(self):
+        worker = self.worker(outcome={"failed": 1})
+        self.stored_ids()
+        database = full_database()
+        dashboard = self.dashboard(worker, database)
+        with self.recorded() as recorded:
+            self.sync_failed(dashboard, "Die Verbindung ist fehlgeschlagen.")
+        self.assertIn(TOLINO_COLUMN,
+                      [column for column, _values in database.api.writes])
+        self.assertIn("Die Verbindung ist fehlgeschlagen",
+                      recorded["error"][0][2])
+        self.assertTrue(dashboard.finished)
+
+
+class FakeField:
+    """Ein minimales Eingabefeld: merkt sich, ob es geleert wurde."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def text(self):
+        return self.value
+
+    def setText(self, value):
+        self.value = value
+
+
+class SettingsSaveTests(OrchestrationCase):
+    """Ein nicht gespeicherter Stand meldet keinen Erfolg."""
+
+    def test_a_token_that_cannot_be_saved_stays_in_the_field(self):
+        config.save_account("A", {"refresh_token": ""})
+        field = FakeField("tok-neu")
+        dashboard = types.SimpleNamespace(
+            account_name="A", refresh=field,
+            partner=types.SimpleNamespace(currentData=lambda: 1),
+            _partner_chosen=True, _hardware_edited=False,
+            hardware=types.SimpleNamespace(text=lambda: "hw"),
+            update_status=lambda: None)
+        break_settings(self)
+        store = self.ui.dashboard.SyncDashboard.store_refresh.__get__(dashboard)
+        with patch("calibre_plugin.ui_dashboard.error_dialog") as shown:
+            self.assertFalse(store("tok-neu"))
+        self.assertTrue(shown.called)
+        self.assertEqual("tok-neu", field.value)
+
+    def test_a_failed_settings_save_does_not_switch_the_account(self):
+        config.save_account("A", {"refresh_token": "tok-A"}, active="A")
+        config.save_account("B", {"refresh_token": "tok-B"})
+        combo = types.SimpleNamespace(
+            signals=[], index=1,
+            blockSignals=lambda value: combo.signals.append(value),
+            findData=lambda value: 0 if value == "A" else -1,
+            setCurrentIndex=lambda index: setattr(combo, "index", index))
+        loaded = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", account_names=["A", "B"], login_thread=None,
+            account_select=combo, _hardware_edited=False,
+            values=lambda: {"account_name": "A", "hardware_id": "hw",
+                            config.PREFERRED_FORMATS: ["EPUB"]},
+            load_values=lambda: loaded.append(True))
+        # Der echte Speicherpfad scheitert; nur `_save_visible_account`
+        # bleibt hier echt, damit Wertaufbereitung und Commit geprueft sind.
+        dashboard._save_visible_account = self.method(
+            "_save_visible_account")(dashboard)
+        break_settings(self)
+        with patch.object(self.ui.dashboard, "error_dialog"):
+            self.assertFalse(dashboard.switch_account("B"))
+        self.assertEqual("A", dashboard.account_name)
+        # Die Auswahl geht zurueck, ohne die Felder neu zu laden.
+        self.assertEqual(([True, False], 0), (combo.signals, combo.index))
+        self.assertEqual([], loaded)
+        self.assertEqual("A", config.settings()["active_account"])
+
+    def dashboard_for_save(self, **attrs):
+        """Doppel mit den echten Speicher-Methoden; `_save_visible_account`
+        bleibt stubbar (die echten Pfade decken die Tests oben ab)."""
+        dashboard = types.SimpleNamespace(**attrs)
+        dashboard._save_visible_account = lambda: attrs.get("saved", True)
+        for name in ("_save_failed", "_save_settings", "close_settings",
+                     "new_account", "switch_account", "_partner_selected",
+                     "_restore_account_choice", "logout"):
+            setattr(dashboard, name, self.method(name)(dashboard))
+        return dashboard
+
+    def test_a_failed_save_keeps_the_settings_window_open(self):
+        accepted = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", saved=False, _typed_refresh=lambda: "",
+            settings_dialog=types.SimpleNamespace(
+                accept=lambda: accepted.append(True)))
+        with patch.object(self.ui.dashboard, "error_dialog") as shown:
+            dashboard.close_settings()
+        self.assertTrue(shown.called)
+        self.assertEqual([], accepted)
+
+    def test_a_new_account_is_not_created_when_the_save_fails(self):
+        loaded = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", account_names=["A"], saved=True,
+            load_values=lambda: loaded.append(True))
+        break_settings(self)
+        with patch.object(self.ui.dashboard.QInputDialog, "getText",
+                          lambda *_a: ("Neu", True)), \
+                patch.object(self.ui.dashboard, "error_dialog") as shown:
+            dashboard.new_account()
+        self.assertTrue(shown.called)
+        self.assertEqual([], loaded)
+
+    def test_a_partner_choice_does_not_touch_the_stored_login(self):
+        config.save_account("A", {"refresh_token": "tok-A", "partner_id": 1})
+        dashboard = self.dashboard_for_save(
+            account_name="A", _partner_chosen=False,
+            partner=types.SimpleNamespace(currentData=lambda: 2))
+        dashboard._partner_selected(1)
+        self.assertTrue(dashboard._partner_chosen)
+        # Gespeichert wird die Auswahl erst mit einem Ersatz-Token; der
+        # vorhandene Thalia-Zugang bleibt unangetastet.
+        self.assertEqual(1, config.account_summary("A")["partner_id"])
+        self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
+
+    def test_a_switch_that_cannot_be_stored_reloads_the_stored_account(self):
+        config.save_account("A", {"refresh_token": "tok-A"}, active="A")
+        loaded = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", account_names=["A", "Weg"], saved=True,
+            _hardware_edited=False, login_thread=None,
+            values=lambda: {"account_name": "A", "hardware_id": "hw",
+                            config.PREFERRED_FORMATS: ["EPUB"]},
+            load_values=lambda: loaded.append(True))
+        # «Weg» steht nur in der Liste der Oberflaeche: die Auswahl scheitert.
+        with patch.object(self.ui.dashboard, "error_dialog") as shown:
+            self.assertFalse(dashboard.switch_account("Weg"))
+        self.assertTrue(shown.called)
+        self.assertEqual([True], loaded)
+
+    def test_a_logout_that_cannot_be_stored_keeps_the_token(self):
+        shown = []
+        dashboard = self.dashboard_for_save(
+            account_name="A", refresh=FakeField("tok-A"),
+            update_status=lambda: shown.append("status"))
+        break_settings(self)
+        with patch.object(self.ui.dashboard, "error_dialog") as reported:
+            dashboard.logout()
+        self.assertTrue(reported.called)
+        # Nicht gesichert heisst: der Token gilt weiter, nichts meldet Erfolg.
+        self.assertEqual("tok-A", dashboard.refresh.value)
+        self.assertEqual([], shown)
+
+
+class LoginFlowTests(OrchestrationCase):
+    """Der Anmeldeknopf prüft zuerst und öffnet den Browser nur bei Bedarf."""
+
+    def dashboard(self, stored):
+        opened, checked = [], []
+        dashboard = types.SimpleNamespace(
+            account_name="A", login_thread=None, refresh=FakeField(""),
+            hardware=FakeField("hw"), formats=FakeField("EPUB"),
+            status=FakeField(""),
+            _selected_account=lambda: {"name": "A", "refresh_token": stored},
+            _check_stored_login=checked.append,
+            _start_login_window=opened.append)
+        for name in ("browser_login", "_login_running", "_stored_refresh",
+                     "_typed_refresh", "_effective_refresh", "values",
+                     "login_still_valid", "login_rejected", "_login_cleanup"):
+            setattr(dashboard, name, self.method(name)(dashboard))
+        dashboard.update_status = lambda: None
+        return dashboard, opened, checked
+
+    def test_without_a_stored_token_the_browser_window_opens(self):
+        config.save_account("A", {"refresh_token": ""})
+        dashboard, opened, checked = self.dashboard("")
+        dashboard.browser_login()
+        self.assertEqual(1, len(opened))
+        self.assertEqual([], checked)
+
+    def test_a_stored_token_is_checked_before_the_browser_opens(self):
+        dashboard, opened, checked = self.dashboard("tok-A")
         dashboard.browser_login()
         self.assertEqual([], opened)
-        self.assertIsInstance(dashboard.login_thread, Thread)
-        self.assertIsInstance(dashboard.login_worker, CheckWorker)
-        self.assertEqual(1, dashboard.login_thread.starts)
-        self.assertEqual("konto",
-                         dashboard.login_worker.context.account_name)
-        self.assertEqual(4, dashboard.login_worker.context.partner_id)
-        self.assertIs(dashboard.login_thread,
-                      dashboard.login_worker.moved_to)
-        self.assertIn("geprüft", dashboard.status.text())
-        self.assertFalse(dashboard.primary.enabled)
+        self.assertEqual(1, len(checked))
 
-    def test_a_working_access_skips_the_login_window(self):
-        ui_module = self._ui()
-        self._fake_qt(ui_module)
-        dashboard = self._dashboard(ui_module)
-        opened, saved, boxes = [], [], []
-        dashboard._start_login_window = lambda values: opened.append(values)
-        self._boxes(ui_module, boxes)
-        with patch("calibre_plugin.ui_dashboard.save_credentials",
-                   lambda *args: saved.append(args)):
-            dashboard.browser_login()
-            dashboard.login_worker.valid.fire()
-        self.assertEqual([], opened)
-        self.assertEqual([], saved)
-        # Der rotierte Token wurde schon durch den Client-Callback gespeichert.
-        self.assertEqual("tok-1", dashboard.refresh.text())
-        self.assertIn("Angemeldet.", dashboard.status.text())
-        # Knopf und Fenster sind wieder frei, die Pruefung ist beendet.
-        self.assertIsNone(dashboard.login_thread)
-        dashboard.progress = type("Widget", (), {"setVisible": lambda self, value: None})()
-        dashboard.progress_label = type("Widget", (), {"setVisible": lambda self, value: None})()
-        ui_module.dashboard.SyncDashboard.update_status(dashboard)
-        self.assertTrue(dashboard.primary.enabled)
-        self.assertIn("Angemeldet.", dashboard.status.text())
-        self.assertEqual([], boxes)
+    def test_a_rejected_check_opens_the_browser(self):
+        dashboard, opened, _checked = self.dashboard("tok-A")
+        dashboard.login_rejected("abgelehnt")
+        self.assertEqual(1, len(opened))
+        self.assertIn("neu anmelden", dashboard.status.value)
 
-    def test_a_rejected_access_opens_the_login_window(self):
-        ui_module = self._ui()
-        Thread, CheckWorker, LoginWorker = self._fake_qt(ui_module)
-        dashboard = self._dashboard(ui_module)
-        boxes, logged = [], []
-        self._boxes(ui_module, boxes)
-        with patch("calibre_plugin.ui_dashboard.log_warning",
-                   lambda message: logged.append(message)):
-            dashboard.browser_login()
-            check_thread = dashboard.login_thread
-            self.assertIsInstance(dashboard.login_worker, CheckWorker)
-            dashboard.login_worker.invalid.fire("invalid_grant (ohne Token)")
-        self.assertEqual([], boxes)
-        self.assertEqual(1, len(logged))
-        self.assertIn("invalid_grant", logged[0])
-        self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
-        # Der neue Anlauf ist ein eigener Thread, nicht der Pruef-Thread:
-        # die Ablehnung oeffnet wirklich das Anmeldefenster.
-        self.assertIsInstance(dashboard.login_thread, Thread)
-        self.assertIsNot(check_thread, dashboard.login_thread)
-        self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual(("konto", 4, "hw-1"),
-                         dashboard.login_worker.arguments)
-        self.assertEqual(1, dashboard.login_thread.starts)
-        self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
 
-    def test_a_busy_check_opens_nothing_and_keeps_the_token(self):
-        ui_module = self._ui()
-        self._fake_qt(ui_module)
-        dashboard = self._dashboard(ui_module)
-        opened, saved, boxes = [], [], []
-        dashboard._start_login_window = lambda values: opened.append(values)
-        self._boxes(ui_module, boxes)
-        with patch("calibre_plugin.ui_dashboard.save_credentials",
-                   lambda *args: saved.append(args)):
-            dashboard.browser_login()
-            dashboard.login_worker.busy.fire("")
-        self.assertEqual([], opened)
-        self.assertEqual([], saved)
-        self.assertEqual("tok-1", dashboard._effective_refresh())
-        self.assertIsNone(dashboard.login_thread)
-        self.assertIn("Anmeldung wird gerade erneuert", dashboard.status.text())
-        dashboard.progress = type("Widget", (), {"setVisible": lambda self, value: None})()
-        dashboard.progress_label = type("Widget", (), {"setVisible": lambda self, value: None})()
-        ui_module.dashboard.SyncDashboard.update_status(dashboard)
-        self.assertTrue(dashboard.primary.enabled)
-        self.assertEqual([], boxes)
+class ChainCase(OrchestrationCase):
+    """Gemeinsamer Aufbau der Kettentests -- selbst kein Testfall."""
 
-    def test_a_second_click_while_checking_is_ignored(self):
-        ui_module = self._ui()
-        check_thread = type("Thread", (), {
-            "isRunning": lambda self: True})()
-        dashboard = self._dashboard(ui_module)
-        dashboard.login_thread = check_thread
-        calls = []
-        dashboard._check_stored_login = lambda values: calls.append(values)
-        dashboard._start_login_window = lambda values: calls.append(values)
-        dashboard.browser_login()
-        self.assertEqual([], calls)
-        self.assertIs(check_thread, dashboard.login_thread)
-
-    def test_the_window_step_starts_its_own_sign_in(self):
-        ui_module = self._ui()
-        Thread, _, LoginWorker = self._fake_qt(ui_module)
-        dashboard = self._dashboard(ui_module)
-        dashboard._start_login_window(
-            RunContext.from_values(dashboard.values()))
-        self.assertIsInstance(dashboard.login_thread, Thread)
-        self.assertIsInstance(dashboard.login_worker, LoginWorker)
-        self.assertEqual(("konto", 4, "hw-1"),
-                         dashboard.login_worker.arguments)
-        self.assertEqual(1, dashboard.login_thread.starts)
-        self.assertFalse(dashboard.primary.enabled)
-        self.assertIn("Bitte im Browserfenster anmelden", dashboard.status.text())
-
-    def _run_check_worker(self, ui_module, result):
-        """`SessionCheckWorker.run()` mit gestubbter Pruefung laufen lassen.
-
-        `result` ist das, was `check_stored_login` liefert -- oder eine
-        Exception, die es stattdessen wirft. Zurueck kommen der Worker, die
-        gemeldeten Signale und die Argumente der Pruefung.
-        """
-
-        def check(*args, **kwargs):
-            calls.append((args, kwargs))
-            if isinstance(result, Exception):
-                raise result
-            return result
-
-        def signal(name):
-            return type("Signal", (), {
-                "emit": lambda self, *values:
-                    emitted.append((name,) + values)})()
-
-        emitted, calls = [], []
-        settings = {"partner_id": 4, "hardware_id": "hw-1",
-                    "refresh_token": "tok-1", "account_name": "konto"}
-        worker = ui_module.auth_workers.SessionCheckWorker(
-            RunContext.from_values(settings))
-        worker.valid, worker.invalid, worker.busy = (signal("valid"),
-                                                     signal("invalid"),
-                                                     signal("busy"))
-        ui_module.auth_workers.check_stored_login = check
-        with patch("calibre_plugin.run_context.account_secrets",
-                   lambda _name: ("tok-1",)):
-            worker.run()
-        return worker, emitted, calls
-
-    def test_the_worker_hands_the_stored_account_to_the_check(self):
-        ui_module = self._ui()
-        _worker, emitted, calls = self._run_check_worker(
-            ui_module, ("valid", ""))
-        args, kwargs = calls[0]
-        self.assertEqual(("konto", 4), args)
-        self.assertEqual({}, kwargs)
-        self.assertEqual([("valid",)], emitted)
-
-    def test_every_check_result_reaches_the_matching_slot(self):
-        ui_module = self._ui()
-        results = (("valid", ""), ("invalid", "Grund"), ("busy", ""))
-        reported = [self._run_check_worker(ui_module, result)[1]
-                    for result in results]
-        self.assertEqual([[("valid",)], [("invalid", "Grund")],
-                          [("busy", "")]], reported)
-
-    def test_a_failing_check_is_reported_as_a_rejection(self):
-        ui_module = self._ui()
-        _worker, emitted, _calls = self._run_check_worker(
-            ui_module, RuntimeError("kaputt mit tok-1"))
-        self.assertEqual(1, len(emitted))
-        self.assertEqual("invalid", emitted[0][0])
-        self.assertIn("kaputt", emitted[0][1])
-        # Auch der unerwartete Fehler verraet den Zugang nicht.
-        self.assertNotIn("tok-1", emitted[0][1])
-
-    def test_the_vault_persists_rotations_into_the_account(self):
-        original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test")
-        self.addCleanup(setattr, config, "PREFERENCES", original)
-        config.save_account("konto", {"refresh_token": "tok-1",
-                                      "hardware_id": "hw-1"}, active="konto")
-        config.save_refresh_token("konto", "tok-2")
-        account = config.account_by_name("konto")
-        self.assertEqual("tok-2", account["refresh_token"])
-        self.assertEqual("hw-1", account["hardware_id"])
-
-class LoginMessageTests(unittest.TestCase):
-    """P2: Erfolg in der Statuszeile, Ursachen klar getrennt."""
-
-    def _ui(self):
-        return ui_module_for(self)
-
-    def test_completion_needs_no_modal_dialog(self):
-        ui_module = self._ui()
-        boxes = []
-
-        dashboard = dashboard_stub()
-        dashboard.status = FakeText()
-        dashboard.hardware = FakeText()
-        dashboard.refresh = FakeText()
+    def dashboard(self, account="A"):
+        database = full_database()
+        dashboard = dashboard_stub(account_name=account,
+                                   hardware=FakeField("hw"),
+                                   refresh=FakeField(""))
+        dashboard.gui = types.SimpleNamespace(current_db=database)
+        dashboard.status = FakeField("")
+        dashboard.progress = types.SimpleNamespace(
+            setRange=lambda *args: None, setVisible=lambda *args: None,
+            setValue=lambda *args: None)
+        dashboard.progress_label = types.SimpleNamespace(
+            setText=lambda *args: None, setVisible=lambda *args: None)
         dashboard.update_status = lambda: None
-        dashboard._login_cleanup = lambda: None
-        dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
-            dashboard)
-        ui_module.dashboard.QMessageBox = type("Box", (), {
-            "information": staticmethod(lambda *args: boxes.append(args)),
-            "warning": staticmethod(lambda *args: boxes.append(args)),
-        })
-        try:
-            dashboard.login_completed("hw-neu")
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual([], boxes)
-        self.assertIn("Angemeldet.", dashboard.status.value)
+        dashboard.values = lambda: {"account_name": account,
+                                    "hardware_id": "hw",
+                                    config.PREFERRED_FORMATS: ["EPUB"]}
+        dashboard._effective_refresh = lambda: "tok-%s" % account
+        dashboard._save_visible_account = lambda *args: True
+        dashboard.snapshots, dashboard.prepared = [], []
+        dashboard.confirmed, dashboard.started = [], []
+        dashboard._start_local_snapshot = (
+            lambda *args: dashboard.snapshots.append(args))
+        dashboard._start_prepare_worker = (
+            lambda *args: dashboard.prepared.append(args))
+        dashboard._start_sync_worker = (
+            lambda *args: dashboard.started.append(args))
+        def confirm(*_args, **_kwargs):
+            dashboard.confirmed.append(True)
+            return choice()
 
-    def test_successful_login_leaves_the_close_warning_to_the_grabber(self):
-        """Das Schliessen samt Warnung liegt beim Grabber, nicht in der UI."""
-        ui_module = self._ui()
-        self.addCleanup(ui_module._restore_stubs_for_tests)
+        dashboard._confirm_comparison = confirm
+        for name in ("start_sync", "_snapshot_ready", "_prepare_ready",
+                     "_finish_progress_thread", "_finish_snapshot",
+                     "_finish_prepare", "_snapshot_failed", "_prepare_failed",
+                     "_failed"):
+            setattr(dashboard, name, self.method(name)(dashboard))
+        return dashboard, database
 
-        dashboard = dashboard_stub()
-        dashboard.status = FakeText()
-        dashboard.hardware = FakeText()
-        dashboard.refresh = FakeText()
-        dashboard.update_status = lambda: None
-        dashboard._login_cleanup = lambda: None
-        dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
-            dashboard)
+    def context(self, account="A"):
+        return RunContext.from_values(
+            {"account_name": account, "hardware_id": "hw",
+             "preferred_formats": ["EPUB"]})
 
-        with patch.object(ui_module.dashboard, "grabber_window_state",
-                          create=True) as alive:
-            dashboard.login_completed("hw-neu")
-        alive.assert_not_called()
-        self.assertNotIn("offen", dashboard.status.value)
-        self.assertIn("Angemeldet.", dashboard.status.value)
+    def payload(self, context):
+        return {"context": context, "metadata": {}, "state": {},
+                "comparison": [], "hardware": None}
 
-    def test_the_primary_button_becomes_the_next_step(self):
-        """Kein Dialog nach der Anmeldung -- der Hauptknopf ist der
-        naechste Schritt und hat den Fokus."""
-        ui_module = self._ui()
+class ChainTests(ChainCase):
+    """Der Weg vom lokalen Snapshot zum Worker -- einmal ganz, zweimal nicht."""
 
-        class Primary:
-            def __init__(self):
-                self.calls = []
+    def test_the_chain_from_the_library_to_the_worker(self):
+        dashboard, database = self.dashboard()
+        dashboard.start_sync()
+        self.assertEqual([database], [args[0] for args in dashboard.snapshots])
 
-            def setDefault(self, value):
-                self.calls.append(("default", value))
+        dashboard._snapshot_ready(self.payload(self.context()))
+        self.assertEqual(1, len(dashboard.prepared))
 
-            def setFocus(self):
-                self.calls.append(("focus",))
+        dashboard._prepare_ready(self.payload(self.context()))
+        self.assertEqual(1, len(dashboard.confirmed))
+        self.assertEqual(1, len(dashboard.started))
 
-        dashboard = dashboard_stub()
-        dashboard.status = FakeText()
-        dashboard.hardware = FakeText()
-        dashboard.refresh = FakeText()
-        dashboard.primary = Primary()
-        dashboard.update_status = lambda: None
-        dashboard._login_cleanup = lambda: None
-        dashboard.login_completed = ui_module.dashboard.SyncDashboard.login_completed.__get__(
-            dashboard)
-        dashboard.login_still_valid = ui_module.dashboard.SyncDashboard.login_still_valid.__get__(
-            dashboard)
-        try:
-            dashboard.login_completed("hw-neu")
-            self.assertEqual([("default", True), ("focus",)],
-                             dashboard.primary.calls)
-            dashboard.primary.calls = []
-            dashboard.login_still_valid()
-            self.assertEqual([("default", True), ("focus",)],
-                             dashboard.primary.calls)
-            self.assertIn("Angemeldet.", dashboard.status.value)
-        finally:
-            ui_module._restore_stubs_for_tests()
+    def test_a_failed_settings_save_stops_the_comparison(self):
+        dashboard, _database = self.dashboard()
+        shown = []
+        dashboard._save_visible_account = lambda *args: False
+        dashboard._save_failed = shown.append
+        dashboard.start_sync()
+        self.assertEqual([], dashboard.snapshots)
+        self.assertEqual(["Einstellungen nicht gespeichert"], shown)
 
-    def test_the_error_text_is_the_single_source_for_the_title(self):
-        ui_module = self._ui()
-        try:
-            guide = ui_module.common._login_failure_guidance
-            cases = (("B01", "Browser-Anmeldung nicht möglich"),
-                     ("N01", "Verbindung fehlgeschlagen"),
-                     ("A01", "Anmeldung erforderlich"))
-            for code, short in cases:
-                exc = tolino_module.TolinoAuthError("egal", code=code,
-                                                    short=short)
-                self.assertEqual(short, guide(exc))
-                self.assertNotIn("\n", ui_module.common.LOGIN_NEXT_STEP)
-                self.assertLessEqual(
-                    len(ui_module.common.LOGIN_NEXT_STEP), 100)
-            # Ohne Kurztext bleibt ein neutraler, umsetzbarer Titel.
-            self.assertEqual(
-                "Anmeldung nicht abgeschlossen",
-                guide(tolino_module.TolinoAuthError("egal")))
-        finally:
-            ui_module._restore_stubs_for_tests()
+    def test_a_cancelled_comparison_starts_no_worker(self):
+        dashboard, _database = self.dashboard()
+        dashboard._confirm_comparison = lambda *args, **kwargs: None
+        dashboard._prepare_ready(self.payload(self.context()))
+        self.assertEqual([], dashboard.started)
 
-    def test_failure_shows_the_step_but_never_the_technical_detail(self):
-        ui_module = self._ui()
-        boxes, logged = [], []
-
-        class Refresh:
-            @staticmethod
-            def text():
-                return "tok-geheim"
-
-        dashboard = dashboard_stub()
-        dashboard.status = FakeText()
-        dashboard.refresh = Refresh()
-        dashboard._stored_refresh = lambda: ""
-        dashboard._typed_refresh = lambda: "tok-geheim"
-        dashboard._login_cleanup = lambda: None
-        dashboard.login_failed = ui_module.dashboard.SyncDashboard.login_failed.__get__(
-            dashboard)
-        ui_module.dashboard.QMessageBox = type("Box", (), {
-            "information": staticmethod(lambda *args: boxes.append(args)),
-            "warning": staticmethod(lambda *args: boxes.append(args)),
-        })
-        cases = ((tolino_module.TolinoAuthError(
-                      "Kein Chromium-Browser gefunden (tok-geheim)", code="B01",
-                      short="Browser-Anmeldung nicht möglich"),
-                  "Browser-Anmeldung nicht möglich (Code B01)"),
-                 (RuntimeError("unerwartet: tok-geheim"),
-                  "Anmeldung nicht abgeschlossen (Code E99)"))
-        try:
-            with patch("calibre_plugin.ui_dashboard.log_warning",
-                       lambda text: logged.append(text)):
-                for error, title in cases:
-                    with self.subTest(error=error):
-                        dashboard.login_failed(error)
-                        self.assertEqual(title, boxes[-1][1])
-                        self.assertIn("Anmeldung erneut starten", boxes[-1][2])
-                        self.assertNotIn("tok-geheim", boxes[-1][2])
-                        self.assertIn("Anmeldung fehlgeschlagen.", dashboard.status.value)
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual(len(cases), len(boxes))
-        self.assertNotIn("tok-geheim", " ".join(logged))
-
-class AccountStateBindingTests(unittest.TestCase):
-    """Das im Dialog angezeigte Konto IST das Konto, dessen State
-    gelesen und geschrieben wird – nur eine Quelle je Konto, und die
-    Tolino-ID-Spalte folgt EINER Regel (nur bei genau einem Konto)."""
-
-    def test_account_by_name_ignores_the_active_account(self):
-        original = config.PREFERENCES
-        self.addCleanup(setattr, config, "PREFERENCES", original)
-        config.PREFERENCES = config.JSONConfig("test")
-        config.save_account("alpha", {"state": {"11111111-1111-4111-8111-111111111111": {"tolino_id": "id-a"}}},
-                            active="alpha")
-        config.save_account("beta", {"state": {"22222222-2222-4222-8222-222222222222": {"tolino_id": "id-b"}}},
-                            active="beta")
-        self.assertEqual({"11111111-1111-4111-8111-111111111111": {"tolino_id": "id-a"}},
-                         config.account_by_name("alpha")["state"])
-        self.assertEqual({"22222222-2222-4222-8222-222222222222": {"tolino_id": "id-b"}},
-                         config.account_by_name("beta")["state"])
-        self.assertEqual({}, config.account_by_name("gone"))
-
-    def test_duplicate_names_keep_both_accounts_accessible(self):
-        original = config.PREFERENCES
-        self.addCleanup(setattr, config, "PREFERENCES", original)
-        config.PREFERENCES = config.JSONConfig("test")
-        config.PREFERENCES.update({
-            "accounts": [{"name": "konto", "hardware_id": "hw-1"},
-                         {"name": "konto", "hardware_id": "hw-2"}],
-            "active_account": "konto",
-        })
-        self.assertEqual("hw-1",
-                         config.account_by_name("konto")["hardware_id"])
-        self.assertEqual("hw-2",
-                         config.account_by_name("konto-2")["hardware_id"])
-
-    def test_set_active_account_switches_without_touching_state(self):
-        original = config.PREFERENCES
-        try:
-            config.PREFERENCES = config.JSONConfig("test")
-            config.settings()
-            config.save_account(
-                "alpha", {"state": {"11111111-1111-4111-8111-111111111111": {"tolino_id": "id-a"}}},
-                active="alpha")
-            config.save_account(
-                "beta", {"state": {"22222222-2222-4222-8222-222222222222": {"tolino_id": "id-b"}}},
-                active="beta")
-            config.set_active_account("alpha")
-            values = config.settings()
-            self.assertEqual("alpha", values["active_account"])
-            self.assertEqual({"11111111-1111-4111-8111-111111111111": {"tolino_id": "id-a"}},
-                             config.account_by_name("alpha")["state"])
-            # Das andere Konto bleibt unberuehrt.
-            self.assertEqual({"22222222-2222-4222-8222-222222222222": {"tolino_id": "id-b"}},
-                             config.account_by_name("beta")["state"])
-        finally:
-            config.PREFERENCES = original
-
-    def test_the_columns_are_used_exactly_when_calibre_knows_them(self):
-        """Nur die Spalte entscheidet -- keine Einstellung schaltet sie ab.
-
-        Die Spalte enthaelt pro Buch ein Mapping, daher bleibt sie bei
-        mehreren Konten nutzbar.
-        """
-        from ..library import column_state
-
-        class Db:
-            field_metadata = {TOLINO_COLUMN: {},
-                              "#tolino_read": {"datatype": "bool"},
-                              "#tolino_progress": {"datatype": "int"}}
-
-        class NoColumn:
-            field_metadata = {}
-
-        self.assertTrue(column_state(Db())["id"])
-        self.assertTrue(column_state(Db())["read"])
-        self.assertTrue(column_state(Db())["progress"])
-        self.assertFalse(column_state(NoColumn())["id"])
-        self.assertFalse(column_state(NoColumn())["read"])
-        self.assertFalse(column_state(NoColumn())["progress"])
+    def test_a_comparison_of_another_account_is_not_shown(self):
+        dashboard, _database = self.dashboard(account="B")
+        dashboard._prepare_ready(self.payload(self.context("A")))
+        self.assertEqual(([], []), (dashboard.confirmed, dashboard.started))
+        self.assertIn("A", dashboard.status.value)
+        self.assertIn("B", dashboard.status.value)
 
 
-class BrowserLoginPersistenceTests(unittest.TestCase):
-    """Der Browser-Token überlebt ein sofort geschlossenes Dashboard."""
+class StageFailureTests(ChainCase):
+    """Fehler und Abbruch in der Kette: eine Meldung, kein Rest, klare Zeile."""
 
-    def test_worker_saves_credentials_before_reporting_completion(self):
-        ui_module = ui_module_for(self)
-        self.addCleanup(ui_module._restore_stubs_for_tests)
-        events = []
-        worker = ui_module.auth_workers.BrowserLoginWorker("konto", 4, "hw")
-        for name in ("progress", "completed", "failed"):
-            setattr(worker, name, type("Signal", (), {
-                "emit": lambda self, *args, _name=name:
-                    events.append((_name,) + args)})())
-        with patch.object(ui_module.auth_workers, "grab_live_refresh",
-                          lambda *args, **kwargs: ("tok", "hw")), \
-             patch.object(ui_module.auth_workers, "save_credentials",
-                          lambda *args: events.append(("save",) + args) or True):
-            worker.run()
-        self.assertEqual([
-            ("save", "konto", "tok", "hw"),
-            ("completed", "hw"),
-        ], events)
+    def failed_stage(self, stage, message, cancelled=False):
+        dashboard, _database = self.dashboard()
+        setattr(dashboard, stage + "_thread", SyncThread())
+        setattr(dashboard, stage + "_worker",
+                types.SimpleNamespace(cancelled=cancelled))
+        messages = []
+        with patch("calibre_plugin.sync_results.info_dialog",
+                   lambda *args, **kwargs: messages.append(("info", args[1]))), \
+                patch("calibre_plugin.sync_results.error_dialog",
+                      lambda *args, **kwargs:
+                      messages.append(("error", args[1]))):
+            getattr(dashboard, "_%s_failed" % stage)(message)
+        return dashboard, messages
+
+    def test_a_cancelled_stage_is_reported_and_leaves_no_thread(self):
+        dashboard, messages = self.failed_stage(
+            "snapshot", self.ui.dashboard.CANCEL_MESSAGE)
+        self.assertEqual([("info", "Abgebrochen")], messages)
+        self.assertIsNone(dashboard.snapshot_thread)
+        self.assertIsNone(dashboard.snapshot_worker)
+        self.assertEqual("", dashboard.status.value)
+
+    def test_a_rejected_login_moves_the_status_line_to_relogin(self):
+        dashboard, messages = self.failed_stage(
+            "prepare", "tolino hat die Anmeldung abgelehnt. (Code A01)")
+        self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
+        self.assertEqual(self.ui.dashboard.NEEDS_LOGIN_STATUS,
+                         dashboard.status.value)
+        self.assertIsNone(dashboard.prepare_thread)
+        self.assertIsNone(dashboard.prepare_worker)
+
+    def test_another_error_leaves_the_status_line_alone(self):
+        dashboard, messages = self.failed_stage("prepare", "Kein Netz")
+        self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
+        self.assertEqual("", dashboard.status.value)
+
+    def test_a_rejected_login_of_another_account_keeps_the_status_line(self):
+        dashboard, _database = self.dashboard()
+        dashboard.account_name = "B"
+        dashboard.prepare_thread = SyncThread()
+        dashboard.prepare_worker = types.SimpleNamespace(
+            cancelled=False, account_name="A")
+        messages = []
+        with patch("calibre_plugin.sync_results.error_dialog",
+                   lambda *args, **kwargs:
+                   messages.append(("error", args[1]))):
+            dashboard._prepare_failed("Anmeldung abgelehnt. (Code A01)")
+        self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
+        self.assertEqual("", dashboard.status.value)
+
+
+def choice():
+    """Leere, aber vollständige Auswahl aus dem Vergleichsfenster."""
+    return {"uploads": set(), "metadata": set(), "read_changes": [],
+            "cloud_deletions": []}
+
+
+if __name__ == "__main__":
+    unittest.main()

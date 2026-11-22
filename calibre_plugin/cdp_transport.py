@@ -1,6 +1,7 @@
 """Dependency-free websocket and DevTools HTTP transport helpers."""
 import base64
 from http.client import HTTPException
+import hashlib
 import json
 import secrets
 import socket
@@ -11,6 +12,15 @@ import time
 # Eine DevTools-Nachricht ist klein; ein Riesenframe ist ein Fehler, kein
 # Grund, beliebig viel Speicher zu belegen.
 _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
+# RFC 6455: der Server bestaetigt den Handshake mit diesem Digest.
+_WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _accept_value(key):
+    """Der erwartete ``Sec-WebSocket-Accept``-Wert zu einem Client-Key."""
+    return base64.b64encode(
+        hashlib.sha1(key.encode("ascii") + _WS_GUID).digest()).decode("ascii")
 
 
 # ---------------------------------------------------------------- WebSocket
@@ -49,10 +59,29 @@ class _Ws:
             sock.close()
             raise
         head, _, rest = data.partition(b"\r\n\r\n")
-        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+        lines = [line.strip() for line in head.split(b"\r\n") if line.strip()]
+        status_line = lines[0] if lines else b""
+        headers = {}
+        for line in lines[1:]:
+            name, separator, value = line.partition(b":")
+            if separator:
+                headers[name.strip().lower()] = value.strip()
+        # Nur eine echte 101-Antwort mit den Upgrade-Headern und dem
+        # richtigen Accept-Digest ist ein WebSocket. Ohne diese Pruefung
+        # wuerde auch eine fremde HTTP-Antwort als Verbindung gelten.
+        # `Connection` ist eine Kommaliste: nur ein eigener Eintrag zaehlt,
+        # nicht die Zeichenfolge irgendwo im Header.
+        connection_tokens = {
+            token.strip().lower()
+            for token in headers.get(b"connection", b"").split(b",")}
+        if (b" 101 " not in status_line
+                or headers.get(b"upgrade", b"").lower() != b"websocket"
+                or b"upgrade" not in connection_tokens
+                or headers.get(b"sec-websocket-accept", b"").decode(
+                    "latin-1") != _accept_value(key)):
             sock.close()
             raise OSError("websocket handshake rejected: %s"
-                          % head[:120].decode("ascii", "replace"))
+                          % status_line[:120].decode("ascii", "replace"))
         ws = _Ws(sock)
         ws.buf = rest
         return ws
@@ -94,30 +123,36 @@ class _Ws:
         out, self.buf = self.buf[:n], self.buf[n:]
         return out
 
+    def _read_frame(self, deadline, pending=0):
+        """Einen Frame lesen: ``(final, opcode, payload)``.
+
+        RFC 6455: FIN/Opcode und MASK/Länge belegen je ein Byte; ``pending``
+        ist die bereits gesammelte Fragmentgröße, damit die Obergrenze vor
+        dem Lesen der Nutzlast greift.
+        """
+        header = self._read_exact(2, deadline)
+        final = bool(header[0] & 0x80)
+        opcode = header[0] & 0x0F
+        length = header[1] & 0x7F
+        masked = header[1] & 0x80
+        if length == 126:
+            length = struct.unpack(">H", self._read_exact(2, deadline))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", self._read_exact(8, deadline))[0]
+        if length > _MAX_MESSAGE_BYTES or pending + length > _MAX_MESSAGE_BYTES:
+            raise OSError("websocket message too large")
+        mask = self._read_exact(4, deadline) if masked else b""
+        payload = self._read_exact(length, deadline)
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        return final, opcode, payload
+
     def recv_json(self, timeout=10):
         deadline = time.time() + max(1, timeout)
         fragmented = bytearray()
         fragmented_opcode = None
         while True:
-            # RFC 6455: FIN/Opcode und MASK/Länge belegen je ein Byte.
-            header = self._read_exact(2, deadline)
-            final = bool(header[0] & 0x80)
-            opcode = header[0] & 0x0F
-            length = header[1]
-            masked = length & 0x80
-            length &= 0x7F
-            if length == 126:
-                length = struct.unpack(">H", self._read_exact(2, deadline))[0]
-            elif length == 127:
-                length = struct.unpack(">Q", self._read_exact(8, deadline))[0]
-            if (length > _MAX_MESSAGE_BYTES
-                    or len(fragmented) + length > _MAX_MESSAGE_BYTES):
-                raise OSError("websocket message too large")
-            mask = self._read_exact(4, deadline) if masked else b""
-            payload = self._read_exact(length, deadline)
-            if mask:
-                payload = bytes(b ^ mask[i % 4]
-                                for i, b in enumerate(payload))
+            final, opcode, payload = self._read_frame(deadline, len(fragmented))
             if opcode == 0x8:  # close
                 raise OSError("websocket closed by peer")
             if opcode in (0x9, 0xA):  # answer ping; ignore pong
@@ -136,9 +171,12 @@ class _Ws:
                     continue
                 message = bytes(fragmented)
                 opcode = fragmented_opcode
-                fragmented_opcode = None
             else:
                 continue
+            # Die Nachricht ist vollstaendig: ihre Bytes duerfen nicht ins
+            # Groessenlimit der naechsten Nachricht einfliessen.
+            fragmented = bytearray()
+            fragmented_opcode = None
             if opcode == 0x1:
                 try:
                     return json.loads(message.decode("utf-8"))

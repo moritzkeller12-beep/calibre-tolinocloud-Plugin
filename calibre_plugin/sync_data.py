@@ -34,6 +34,11 @@ def _publication_path_parts(path, kind):
     return str(parts[2]), str(parts[4] if len(parts) > 4 else "")
 
 
+def _is_removal(item):
+    """Fehlt `op`, gilt der Eintrag als Hinzufuegen -- wie in der Cloud-API."""
+    return str((item or {}).get("op") or "add") == "remove"
+
+
 def tag_path_parts(path):
     """Return (book ID, tag ID) for valid publication tag paths."""
     return _publication_path_parts(path, "tags")
@@ -59,24 +64,28 @@ def active_tags(patches, category, name=None):
         if parts is None:
             continue
         key = (parts[0], str(value.get("name") or ""))
-        if str(item.get("op") or "add") == "remove":
+        if _is_removal(item):
             active.pop(key, None)
         else:
             active[key] = item
     return active
 
 
-def active_read_tags(patches):
-    """Aktive Gelesen-Marken in beiden Cloud-Schreibweisen."""
-    active = {}
-    for category in READ_TAG_CATEGORIES:
-        for key, item in active_tags(patches, category, READ_TAG).items():
-            active.setdefault(key, item)
-    return active
+def read_tag_patches(patches):
+    """Aktive Gelesen-Marken je (Buch, Kategorie) in beiden Schreibweisen.
+
+    Ein Buch kann beide Marken gleichzeitig tragen; dieses Mapping haelt
+    beide fuer das Entfernen.
+    """
+    return {(book_id, category): item
+            for category in READ_TAG_CATEGORIES
+            for (book_id, _name), item
+            in active_tags(patches, category, READ_TAG).items()}
 
 
 def read_ids(patches):
-    return {book_id for book_id, _name in active_read_tags(patches)}
+    """Buecher mit aktiver Gelesen-Marke -- in beiden Schreibweisen."""
+    return {book_id for book_id, _category in read_tag_patches(patches)}
 
 
 def bookmark_path_parts(path):
@@ -152,7 +161,7 @@ def reading_progress(patches):
         if parts is None:
             continue
         key = (parts[0], parts[1])
-        if str(item.get("op") or "add") == "remove":
+        if _is_removal(item):
             active.pop(key, None)
             continue
         entry = _bookmark_entry(item.get("value"))

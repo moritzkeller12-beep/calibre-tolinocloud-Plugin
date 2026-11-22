@@ -1,1516 +1,898 @@
-"""Tolino-Client, Transport, Tokens und Fehlertexte."""
+"""Anmeldung, Token-Rotation und Schreibpfade -- über echte Sockets.
 
-import base64
-import calibre_plugin.tolino as tolino_module
-import os
-import re
-import tempfile
+Der Client spricht einen Loopback-HTTP-Server an, statt `urlopen` zu
+ersetzen: geprüft wird, was tatsächlich über die Leitung geht (Formular,
+Kopfdaten, Rotationsreihenfolge, Multipart-Body, PATCH-Nutzlast). Das sind
+die Fehler, die den Nutzer ausloggen, einen Einmal-Token verbrennen oder
+falsche Daten in die Cloud schreiben.
+"""
+import contextlib
+import json
 import time
+import types
 import unittest
-from . import ui_base_tests, worker_base_tests
-from .. import config
-from ..partners import PARTNERS
-from ..tolino import TolinoAuthError, TolinoClient
-from ..sync_data import READ_TAG, active_tags, tag_id_from_patch
-from ..browser_login import grab_live_refresh
-from ._support import (compare_inventory, start_cdp_stubs, stop_cdp_stubs)
-from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request
+
+from .. import tolino as tolino_module
+from ..errors import TolinoApiError, TolinoAuthError, TolinoError
+from ..sync_data import READ_TAG
+from ..tolino import TolinoClient, report_error, sanitize_error
+from ._support import LocalHTTP, local_tolino_endpoints
+
+HARDWARE = "11111111-1111-4111-8111-111111111111"
+TOKEN_BODY = json.dumps({"access_token": "acc-1", "refresh_token": "rot-1",
+                         "expires_in": 3600}).encode()
 
 
-# Der Einzellauf richtet die CDP-Stubs selbst ein.
-setUpModule = start_cdp_stubs
-tearDownModule = stop_cdp_stubs
+def token_server(body=TOKEN_BODY, status=200, extra=None):
+    """Server, der den Token-Endpunkt bedient; alles andere sind Fehler."""
 
-class TolinoClientFeatureTests(unittest.TestCase):
-    """Tests for the cloud client: device list, download, sync-data
-    collections/read-state and refresh expiry tracking."""
+    def responder(method, path, headers, payload):
+        if path.startswith("/token/"):
+            if extra is not None:
+                return extra(method, path, headers, payload)
+            return status, {"Content-Type": "application/json"}, body
+        return 404, {}, b""
 
-    def _client(self):
-        return TolinoClient(4, "hardware", "refresh-token")
+    return LocalHTTP(responder)
 
-    def _login_client(self, token_response=None):
-        client = self._client()
 
-        class Response:
-            status = 200
+class LoginTests(unittest.TestCase):
+    """Der Refresh-Token ist einmalig: Reihenfolge und Meldung muessen stimmen."""
 
-            def __enter__(self):
-                return self
+    def test_login_exchanges_the_token_and_reports_the_rotation(self):
+        saved = []
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  token_callback=saved.append)
+            self.assertEqual("rot-1", client.login())
+            request = server.requests[0]
+        self.assertEqual(["rot-1"], saved)
+        self.assertIn("grant_type=refresh_token", request["body"].decode())
+        self.assertIn("refresh_token=start", request["body"].decode())
 
-            def __exit__(self, *args):
-                return False
+    def test_a_rejected_token_is_reported_and_cleared_once(self):
+        rejected = []
+        body = json.dumps({"error": "invalid_grant"}).encode()
+        with token_server(body=body, status=400) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  token_rejected_callback=rejected.append)
+            with self.assertRaises(TolinoAuthError) as caught:
+                client.login()
+        self.assertEqual("A01", caught.exception.code)
+        self.assertIn("abgelehnt", str(caught.exception))
+        self.assertEqual(["start"], rejected)
 
-            def read(self):
-                return token_response or (
-                    b'{"access_token":"access-secret",'
-                    b'"refresh_token":"rotated","expires_in":3600,'
-                    b'"refresh_expires_in":36000}')
+    def test_a_network_error_keeps_the_stored_token(self):
+        with token_server() as server:
+            origin = server.origin
+        # Server ist wieder zu: der Port antwortet nicht mehr.
+        with local_tolino_endpoints(origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoError) as caught:
+                client.login()
+        self.assertEqual("N01", caught.exception.code)
+        self.assertEqual("start", client.refresh)
 
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
+    def test_a_second_login_reuses_the_valid_access_token(self):
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
             client.login()
-        return client
-
-    def _device_list_client(self, devices_payload):
-        client = self._login_client()
-        captured = {}
-
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return devices_payload
-
-        def request(url_request, timeout):
-            captured["url"] = url_request.full_url
-            captured["body"] = url_request.data.decode("utf-8")
-            return Response()
-
-        with patch("calibre_plugin.tolino.urlopen", request):
-            hardware = client.fetch_hardware_id()
-        self.assertIn("handshake/devices/list", captured["url"])
-        self.assertIn("deviceListRequest", captured["body"])
-        self.assertIn("auth_token", captured["body"])
-        return hardware
-
-    def test_fetch_hardware_id_returns_most_recent_device(self):
-        payload = (b'{"deviceListResponse":{"devices":[{'
-                   b'"deviceId":"older","deviceLastUsage":"100"},{'
-                   b'"deviceId":"newest","deviceLastUsage":"200"}]}}')
-        self.assertEqual("newest", self._device_list_client(payload))
-
-    def test_fetch_hardware_id_rejects_empty_device_list(self):
-        from ..tolino import TolinoApiError
-        client = self._login_client()
-
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b'{"deviceListResponse":{"devices":[]}}'
-
-        with patch("calibre_plugin.tolino.urlopen", return_value=Response()):
-            with self.assertRaises(TolinoApiError):
-                client.fetch_hardware_id()
-
-    def _patching_client(self, responses):
-        """Client whose _request returns queued dict responses."""
-        client = self._login_client()
-        queue = list(responses)
-        calls = []
-
-        def fake_request(url, method="GET", data=None, form=False,
-                         authenticated=True, content_type=None):
-            calls.append({"url": url, "method": method, "data": data})
-            return queue.pop(0)
-
-        client._request = fake_request
-        return client, calls
-
-    def test_upload_cover_sends_the_required_control_block(self):
-        """Der Cover-Endpunkt verlangt control; ohne ihn antwortet er 400."""
-        client, calls = self._patching_client([{}])
-        client.upload_cover("b-1", b"\x89PNG\r\n\x1a\n", ".png")
-        self.assertEqual("POST", calls[0]["method"])
-        self.assertTrue(calls[0]["url"].endswith("/cover"))
-        body = calls[0]["data"]
-        self.assertIn(b'name="control"', body)
-        self.assertIn(b'"filesize":8', body)
-        self.assertRegex(body, rb'"transactionId":"[0-9a-f-]{36}"')
-        self.assertIn(b'name="deliverableId"', body)
-        self.assertIn(b"b-1", body)
-        self.assertIn(b'filename="cover.png"', body)
-
-    def test_add_to_collection_sends_tag_add_patch(self):
-        """Die Zuordnung wird mit der aktuellen Revision geschrieben.
-
-        Ohne Revision könnte der PATCH den vorhandenen Stand ersetzen und
-        damit fremde Marken (Lese-Status, andere Sammlungen) verlieren.
-        """
-        client, calls = self._patching_client([
-            {"revision": 7, "patches": []},   # Revision lesen
-            {"revision": 8},                  # add-Patch
-        ])
-        revision = client.add_to_collection("book-1", "SciFi")
-        self.assertEqual(8, revision)
-        self.assertEqual(2, len(calls))
-        self.assertEqual(7, calls[1]["data"]["revision"])
-        self.assertEqual("PATCH", calls[1]["method"])
-        self.assertIn("sync-data", calls[1]["url"])
-        patch = calls[1]["data"]["patches"][0]
-        self.assertEqual("add", patch["op"])
-        self.assertEqual("/publications/book-1/tags", patch["path"])
-        self.assertEqual("SciFi", patch["value"]["name"])
-        self.assertEqual("collection", patch["value"]["category"])
-
-    def test_add_to_collection_reuses_a_given_revision(self):
-        """Mehrere Zuordnungen brauchen nur ein Lesen."""
-        client, calls = self._patching_client([{"revision": 5}])
-        revision = client.add_to_collection("book-1", "SciFi", revision=4)
-        self.assertEqual(5, revision)
-        self.assertEqual(1, len(calls))
-        self.assertEqual(4, calls[0]["data"]["revision"])
-
-    def test_mark_read_uses_system_tag(self):
-        """Ein Buch: eine System-Marke, geschrieben mit der aktuellen
-        Revision – Sammlungen und andere Marken bleiben unberührt."""
-        client, calls = self._patching_client([
-            {"revision": 9, "patches": []},
-            {"revision": 10},
-        ])
-        revision = client.mark_read_many(["book-2"], finished=True)
-        self.assertEqual(10, revision)
-        self.assertEqual(9, calls[1]["data"]["revision"])
-        patch = calls[1]["data"]["patches"][0]
-        self.assertEqual("system", patch["value"]["category"])
-        self.assertEqual("collection_finished_readings_name",
-                         patch["value"]["name"])
-
-    def test_mark_read_many_writes_one_patch_for_all_books(self):
-        """Mehrere Bücher: ein Lesevorgang, ein PATCH, und schon markierte
-        Bücher werden nicht erneut geschrieben."""
-        already = {"op": "add", "path": "/publications/book-1/tags/6438286",
-                   "value": {"name": "collection_finished_readings_name",
-                             "category": "system", "revision": 3,
-                             "modified": 1}}
-        client, calls = self._patching_client([
-            {"revision": 12, "patches": [already]},
-            {"revision": 13},
-        ])
-        revision = client.mark_read_many(["book-1", "book-2"])
-        self.assertEqual(13, revision)
-        self.assertEqual(2, len(calls))
-        self.assertEqual(12, calls[1]["data"]["revision"])
-        self.assertEqual(["/publications/book-2/tags"],
-                         [item["path"] for item in calls[1]["data"]["patches"]])
-
-    def test_mark_read_many_clears_only_existing_marks(self):
-        """Ungelesen setzen: der Pfad trägt die Marken-ID der Cloud-Marke.
-
-        Feldbefund: ohne ID antwortet der Server mit HTTP 400
-        «missing mandatory unitid fragment inside property path for remove».
-        """
-        marked = {"op": "add", "path": "/publications/book-1/tags/6438286",
-                  "value": {"name": "collection_finished_readings_name",
-                            "category": "system", "revision": 3,
-                            "modified": 1}}
-        client, calls = self._patching_client([
-            {"revision": 12, "patches": [marked]},
-            {"revision": 13},
-        ])
-        client.mark_read_many(["book-1", "book-2"], finished=False)
-        patches = calls[1]["data"]["patches"]
-        self.assertEqual(["remove"], [item["op"] for item in patches])
-        self.assertEqual(3, patches[0]["value"]["revision"])
-        self.assertEqual("/publications/book-1/tags/6438286",
-                         patches[0]["path"])
-        self.assertEqual(12, calls[1]["data"]["revision"])
-
-    def test_mark_read_many_mixes_add_and_remove_in_one_patch(self):
-        """Zwei Bücher, zwei Richtungen: «gelesen» ohne ID (der Server
-        vergibt sie), «ungelesen» mit der ID der vorhandenen Marke."""
-        marked = {"op": "add", "path": "/publications/book-1/tags/6438286",
-                  "value": {"name": "collection_finished_readings_name",
-                            "category": "system", "revision": 3,
-                            "modified": 1}}
-        client, calls = self._patching_client([
-            {"revision": 12, "patches": [marked]},   # lesen
-            {"revision": 13},                        # entfernen
-            {"revision": 14, "patches": [marked]},   # wieder lesen
-            {"revision": 15},                        # hinzufügen
-        ])
-        client.mark_read_many(["book-1"], finished=False)
-        client.mark_read_many(["book-3"], finished=True)
-        removed = calls[1]["data"]["patches"]
-        added = calls[3]["data"]["patches"]
-        self.assertEqual(["/publications/book-1/tags/6438286"],
-                         [item["path"] for item in removed])
-        self.assertEqual(["/publications/book-3/tags"],
-                         [item["path"] for item in added])
-
-    def test_removing_a_mark_without_an_id_fails_loudly(self):
-        """Liefert der Server keine Marken-ID, gibt es kein Raten: der
-        Fehler kommt sofort und im Klartext, nicht als HTTP 400."""
-        from ..tolino import TolinoApiError
-        marked = {"op": "add", "path": "/publications/book-1/tags",
-                  "value": {"name": "collection_finished_readings_name",
-                            "category": "system", "revision": 3,
-                            "modified": 1}}
-        client, calls = self._patching_client([
-            {"revision": 12, "patches": [marked]},
-            {"revision": 13},
-        ])
-        with self.assertRaises(TolinoApiError) as caught:
-            client.mark_read_many(["book-1"], finished=False)
-        self.assertIn("Marken-ID", str(caught.exception))
-        self.assertEqual(1, len(calls))   # kein Schreibversuch
-
-    def test_mark_read_many_requires_ids(self):
-        from ..tolino import TolinoApiError
-        client, calls = self._patching_client([])
-        with self.assertRaises(TolinoApiError):
-            client.mark_read_many([])
-        self.assertEqual([], calls)
-
-    def test_update_metadata_merges_and_puts_upload_metadata(self):
-        existing = {"metadata": {"deliverableId": "b-1", "identifier": "b-1",
-                                 "title": "Alt"}}
-        saved = {"metadata": {"deliverableId": "b-1", "identifier": "b-1",
-                              "title": "Neu", "isbn": "123"}}
-        client, calls = self._patching_client([existing, {"ok": True}, saved])
-        result = client.update_metadata("b-1", {"title": "Neu", "isbn": "123"})
-        self.assertEqual("Neu", result["title"])
-        self.assertEqual("123", result["isbn"])
-        self.assertEqual("b-1", result["deliverableId"])
-        self.assertEqual("GET", calls[0]["method"])
-        self.assertIn("/meta", calls[0]["url"])
-        self.assertIn("deliverableId=b-1", calls[0]["url"])
-        self.assertEqual("PUT", calls[1]["method"])
-        payload = calls[1]["data"]
-        self.assertEqual("Neu", payload["uploadMetaData"]["title"])
-        self.assertEqual("b-1", payload["uploadMetaData"]["deliverableId"])
-        self.assertEqual("GET", calls[2]["method"])
-
-    def test_update_metadata_fails_if_read_back_keeps_old_title(self):
-        from ..tolino import TolinoApiError
-        existing = {"metadata": {"deliverableId": "b-1", "title": "Alt"}}
-        stale = {"metadata": {"deliverableId": "b-1", "title": "Alt"}}
-        client, calls = self._patching_client([existing, {"ok": True}, stale])
-        with self.assertRaises(TolinoApiError) as caught:
-            client.update_metadata("b-1", {"title": "Neu"})
-        self.assertEqual("N02", caught.exception.code)
-        self.assertEqual(["GET", "PUT", "GET"],
-                         [call["method"] for call in calls])
-
-    def test_update_metadata_requires_fields_and_metadata_response(self):
-        from ..tolino import TolinoApiError
-        client, _ = self._patching_client([])
-        with self.assertRaises(TolinoApiError):
-            client.update_metadata("b-1", {})
-        client2, _ = self._patching_client([{"unexpected": {}}])
-        with self.assertRaises(TolinoApiError):
-            client2.update_metadata("b-1", {"title": "x"})
-
-    def test_update_metadata_leaves_tags_and_read_state_alone(self):
-        """Titel/Autor/ISBN wandern über /meta – Sammlungen und die
-        Lese-Marke in der Cloud werden dabei nicht angefasst."""
-        existing = {"metadata": {
-            "deliverableId": "b-1", "title": "Alt",
-            "tags": [{"name": "Adamsberg", "category": "collection"},
-                     {"name": "collection_finished_readings_name",
-                      "category": "system"}]}}
-        updated = {"metadata": {
-            "deliverableId": "b-1", "title": "Neu",
-            "tags": [{"name": "Adamsberg", "category": "collection"},
-                     {"name": "collection_finished_readings_name",
-                      "category": "system"}]}}
-        client, calls = self._patching_client(
-            [existing, {"ok": True}, updated])
-        client.update_metadata("b-1", {"title": "Neu"})
-        self.assertEqual(["GET", "PUT", "GET"],
-                         [call["method"] for call in calls])
-        self.assertEqual([], [call for call in calls
-                              if "sync-data" in call["url"]])
-        sent = calls[1]["data"]["uploadMetaData"]
-        self.assertEqual("Neu", sent["title"])
-        # Die Marken aus der Cloud-Antwort bleiben unverändert erhalten.
-        self.assertEqual(
-            [{"name": "Adamsberg", "category": "collection"},
-             {"name": "collection_finished_readings_name", "category": "system"}],
-            sent["tags"])
-
-    def test_read_ids_reads_the_system_tag(self):
-        """Gelesen-Marken des Kontos – nur die System-Marke zählt, und eine
-        remove-Marke nimmt das Buch wieder heraus."""
-        patches = [
-            {"op": "add", "path": "/publications/b-1/tags",
-             "value": {"name": "collection_finished_readings_name",
-                       "category": "system"}},
-            {"op": "add", "path": "/publications/b-2/tags",
-             "value": {"name": "Adamsberg", "category": "collection"}},
-            {"op": "add", "path": "/publications/b-3/tags",
-             "value": {"name": "collection_finished_readings_name",
-                       "category": "system"}},
-            {"op": "remove", "path": "/publications/b-3/tags",
-             "value": {"name": "collection_finished_readings_name",
-                       "category": "system"}},
-        ]
-        client, calls = self._patching_client(
-            [{"revision": 5, "patches": patches}])
-        self.assertEqual({"b-1"}, client.read_ids())
-        self.assertEqual(1, len(calls))
-
-    def test_snapshot_serves_collections_and_read_state_once(self):
-        """Sammlungen und Lese-Status liegen in denselben Daten: EIN
-        Lesevorgang reicht (Feldbefund: nicht bei jedem Sync alles neu)."""
-        patches = [
-            {"op": "add", "path": "/publications/b-1/tags",
-             "value": {"name": "Adamsberg", "category": "collection"}},
-            {"op": "add", "path": "/publications/b-1/tags",
-             "value": {"name": "collection_finished_readings_name",
-                       "category": "system"}},
-        ]
-        client, calls = self._patching_client(
-            [{"revision": 5, "patches": patches}])
-        self.assertEqual({("b-1", "Adamsberg")}, client.collection_pairs())
-        self.assertEqual({"b-1"}, client.read_ids())
-        self.assertEqual(1, len(calls))
-
-    def test_snapshot_is_dropped_after_a_write(self):
-        """Nach einem Schreibvorgang wird neu gelesen – keine veraltete
-        Revision, kein zweiter Schreibversuch auf altem Stand."""
-        client, calls = self._patching_client([
-            {"revision": 5, "patches": []},   # snapshot
-            {"revision": 6},                  # add_to_collection
-            {"revision": 6, "patches": []},   # neuer snapshot
-        ])
-        client.collection_pairs()
-        client.add_to_collection("b-1", "SciFi")
-        client.read_ids()
-        self.assertEqual(3, len(calls))
-        self.assertEqual("PATCH", calls[1]["method"])
-
-    def test_mark_read_many_uses_the_snapshot(self):
-        """Der Bulk-Aufruf liest den Stand einmal und schreibt einmal."""
-        client, calls = self._patching_client([
-            {"revision": 7, "patches": []},
-            {"revision": 8},
-        ])
-        client.mark_read_many(["b-1", "b-2"])
-        self.assertEqual(2, len(calls))
-
-    def test_collection_pairs_reads_sync_data_patches(self):
-        patches = [
-            {"op": "add", "path": "/publications/b-1/tags",
-             "value": {"name": "Adamsberg", "category": "collection"}},
-            {"op": "add", "path": "/publications/b-2/tags",
-             "value": {"name": "SciFi", "category": "collection"}},
-            {"op": "remove", "path": "/publications/b-2/tags",
-             "value": {"name": "SciFi", "category": "collection"}},
-            {"op": "add", "path": "/publications/b-1/tags",
-             "value": {"name": "read", "category": "system"}},
-            {"op": "add", "path": "/somewhere/else",
-             "value": {"name": "X", "category": "collection"}},
-        ]
-        client, calls = self._patching_client(
-            [{"revision": 5, "patches": patches}])
-        self.assertEqual({("b-1", "Adamsberg")}, client.collection_pairs())
-        self.assertEqual("PATCH", calls[0]["method"])
-        self.assertIn("sync-data", calls[0]["url"])
-
-    def test_download_sends_credentials_only_to_pageplace_https_hosts(self):
-        client = self._login_client()
-        captured = []
-
-        class RawResponse:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def geturl(self):
-                return "https://example.invalid/book"
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b"content"
-
-        def run_download(url):
-            client._request = lambda *_args, **_kwargs: {
-                "DownloadInfo": {"contentUrl": url}}
-
-            def request(value, timeout):
-                captured.append((value.full_url, dict(value.headers),
-                                 dict(value.unredirected_hdrs)))
-                return RawResponse()
-
-            with patch("calibre_plugin.tolino.urlopen", request):
-                return client.download("book-1")
-
-        self.assertEqual(b"content", run_download("https://cdn.pageplace.de/file"))
-        trusted_headers = {key.casefold(): value
-                           for key, value in captured[-1][1].items()}
-        trusted_unredirected = {
-            key.casefold() for key in captured[-1][2]}
-        self.assertNotIn("t_auth_token", trusted_headers)
-        self.assertIn("t_auth_token", trusted_unredirected)
-        self.assertIn("hardware_id", trusted_unredirected)
-        self.assertIn("reseller_id", trusted_unredirected)
-
-        self.assertEqual(b"content", run_download("https://cdn.example/file"))
-        foreign_headers = {key.casefold(): value
-                           for key, value in captured[-1][1].items()}
-        self.assertNotIn("t_auth_token", foreign_headers)
-        self.assertNotIn("hardware_id", foreign_headers)
-        self.assertNotIn("reseller_id", foreign_headers)
-
-        from ..tolino import TolinoApiError
-        with self.assertRaises(TolinoApiError) as caught:
-            run_download("http://cdn.pageplace.de/file")
-        self.assertEqual("N02", caught.exception.code)
-
-    def test_download_credentials_are_not_forwarded_across_redirects(self):
-        from urllib.request import HTTPRedirectHandler, Request
-
-        request = Request("https://cdn.pageplace.de/file")
-        request.add_unredirected_header("t_auth_token", "secret-token")
-        request.add_unredirected_header("hardware_id", "device-id")
-        request.add_unredirected_header("reseller_id", "42")
-        redirect = HTTPRedirectHandler().redirect_request(
-            request, None, 302, "Found", {}, "https://attacker.example/collect")
-
-        self.assertIsNotNone(redirect)
-        forwarded = {key.casefold() for key in redirect.header_items()}
-        self.assertNotIn("t_auth_token", forwarded)
-        self.assertNotIn("hardware_id", forwarded)
-        self.assertNotIn("reseller_id", forwarded)
-
-    def test_download_resolves_content_url_and_returns_bytes(self):
-        client, calls = self._patching_client([
-            {"DownloadInfo": {"contentUrl": "https://cdn.example/epub"}},
-        ])
-        content = b"EPUB-BYTES"
-
-        class RawResponse:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def geturl(self):
-                return "https://example.invalid/book"
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return content
-
-        with patch("calibre_plugin.tolino.urlopen",
-                   return_value=RawResponse()):
-            data = client.download("b-9")
-        self.assertEqual(content, data)
-        self.assertIn("downloadinfo", calls[0]["url"])
-        # Die Cloud will die Kennung base64-kodiert; roh antwortet sie 404.
-        encoded = base64.b64encode(b"b-9").decode("ascii")
-        self.assertEqual(2, calls[0]["url"].count(encoded))
-        self.assertNotIn("/b-9/", calls[0]["url"])
-
-    def test_download_encodes_an_urn_id_without_leaking_path_separators(self):
-        client, calls = self._patching_client([
-            {"DownloadInfo": {"contentUrl": "https://cdn.example/epub"}},
-        ])
-
-        class RawResponse:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def geturl(self):
-                return "https://example.invalid/book"
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b"content"
-
-        urn = "urn:uuid:0f8fad5b-d9cb-469f-a165-70867728950e"
-        with patch("calibre_plugin.tolino.urlopen",
-                   return_value=RawResponse()):
-            client.download(urn)
-        url = calls[0]["url"]
-        self.assertEqual(2, url.count(
-            base64.b64encode(urn.encode("utf-8")).decode("ascii")))
-        self.assertTrue(url.endswith("/type/external-download"))
-
-class BoshDeviceRecoveryTests(unittest.TestCase):
-    """Ein authentifizierter BOSH-400 (leeres "{}") loest eine
-    Geraete-Recovery aus: das registrierte Geraet des Kontos wird
-    uebernommen, sonst wird unsere Hardware-ID per registerhw
-    registriert – dann genau EIN Retry.
-    """
-
-    INVENTORY_BODY = b'{"PublicationInventory": {"edata": []}}'
-
-    def _client(self, hardware="configured-hw"):
-        from ..tolino import TolinoClient
-        client = TolinoClient(4, hardware, "refresh-token-value")
-        client.access = "access-value"
-        client.expires_at = time.time() + 3600
-        return client
-
-    def _response(self, body, status=200):
-        outer_body, outer_status = body, status
-
-        class Response(object):
-            status = outer_status
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return outer_body
-        return Response()
-
-    def _error400(self, body):
-        from urllib.error import HTTPError
-        error = HTTPError("https://bosh.pageplace.de/bosh/rest/x", 400,
-                          "Bad Request", {}, None)
-        error.read = lambda: body
-        return error
-
-    def test_error_text_surfaces_response_info_message(self):
-        """BOSH meldet Fehler als ResponseInfo.message – ohne diesen
-        Schluessel zeigte die Meldung nur ein nutzloses "{}"."""
-        from ..tolino import TolinoApiError
-        client = self._client()
-
-        def fake_urlopen(request, timeout=None):
-            raise self._error400(
-                b'{"ResponseInfo": {"message": "hardware not registered"}}')
-
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=tolino_module.TolinoApiError("no devices")), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   return_value=False):
-            with self.assertRaises(TolinoApiError) as ctx:
-                client.inventory()
-        self.assertIn("hardware not registered", str(ctx.exception))
-
-    def test_inventory_adopts_registered_device_and_retries(self):
-        """Ein fremdes, konfiguriertes Geraet wird durch das
-        registrierte des Kontos ersetzt, danach folgt GENAU ein Retry."""
-        seen = []
-        adopted = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            if len(seen) == 1:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
-        client = self._client("stale-hw-000")
-        client.hardware_callback = adopted.append
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   side_effect=AssertionError("register must not run")):
-            data = client.inventory()
-        self.assertEqual([], data)
-        self.assertEqual(2, len(seen))
-        self.assertEqual(seen[0], seen[1])
-        self.assertEqual("12345678-1234-4abc-8def-1234567890ab",
-                         client.hardware)
-        self.assertEqual(["12345678-1234-4abc-8def-1234567890ab"], adopted)
-
-    def test_inventory_registers_hardware_when_device_list_unavailable(self):
-        """Ohne Geraeteliste wird die eigene Hardware-ID per registerhw
-        registriert (wie die Referenz-Clients), dann der Retry."""
-        seen = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append((request.full_url,
-                         {key.casefold(): value
-                          for key, value in request.headers.items()}))
-            if "registerhw" in request.full_url:
-                return self._response(b"{}")
-            inventory_calls = len([1 for url, _ in seen
-                                   if "inventory" in url])
-            if inventory_calls == 1:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
-        client = self._client("configured-hw")
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=tolino_module.TolinoApiError("no devices")), \
-             patch("calibre_plugin.tolino.time.sleep"):
-            data = client.inventory()
-        self.assertEqual([], data)
-        self.assertEqual(3, len(seen))
-        self.assertIn("/inventory/delta", seen[0][0])
-        self.assertIn("v2/registerhw", seen[1][0])
-        self.assertIn("/inventory/delta", seen[2][0])
-        register_headers = seen[1][1]
-        self.assertEqual("HTML5", register_headers.get("hardware_type"))
-        self.assertEqual("TOLINO_WEBREADER",
-                         register_headers.get("client_type"))
-        self.assertEqual("configured-hw", client.hardware)
-
-    def test_failed_hardware_callback_is_nonfatal_and_redacted(self):
-        client = self._client()
-        client.refresh = "refresh-secret"
-        client.access = "access-secret"
-        client.hardware_callback = lambda _hardware: (_ for _ in ()).throw(
-            RuntimeError("refresh-secret access-secret"))
-        with patch("calibre_plugin.tolino.log_warning") as warning:
-            client._notify_hardware()
-        message = warning.call_args.args[0]
-        self.assertIn("Geräte-ID", message)
-        self.assertNotIn("refresh-secret", message)
-        self.assertNotIn("access-secret", message)
-        self.assertIn("[REDACTED]", message)
-
-    def test_unexpected_recovery_error_is_not_hidden(self):
-        client = self._client()
-        with patch("calibre_plugin.tolino.urlopen",
-                   side_effect=self._error400(b"{}")), \
-             patch.object(client, "fetch_hardware_id",
-                          side_effect=RuntimeError("device bug")), \
-             patch.object(client, "_register_hardware") as register:
-            with self.assertRaisesRegex(RuntimeError, "device bug"):
-                client.inventory()
-        register.assert_not_called()
-        self.assertFalse(client._in_device_recovery)
-
-    def test_registered_current_device_raises_without_extra_calls(self):
-        """Ist das konfigurierte Geraet bereits das registrierte, kommt
-        kein Retry und kein registerhw – der echte Fehler 400 (andere
-        Ursache) bleibt sichtbar."""
-        from ..tolino import TolinoApiError
-        client = self._client("configured-hw")
-        seen = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            raise self._error400(b"{}")
-
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="configured-hw"), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   side_effect=AssertionError("register must not run")):
-            with self.assertRaises(TolinoApiError):
-                client.inventory()
-        self.assertEqual(1, len(seen))
-
-    def test_registration_settles_with_waiting_retries(self):
-        """Feldbefund: Der Verbindungstest direkt nach registerhw
-        warf noch 400 (die ID war noch nicht angekommen), der naechste
-        Klick Sekunden spaeter lief. Der erste Retry wartet jetzt kurz,
-        und es gibt GENAU EINEN zweiten Versuch danach."""
-        seen = []
-        sleeps = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            if "registerhw" in request.full_url:
-                return self._response(b"{}")
-            inventory_calls = len([1 for url in seen if "inventory" in url])
-            if inventory_calls <= 2:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
-        client = self._client("configured-hw")
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   side_effect=tolino_module.TolinoApiError("no devices")), \
-             patch("calibre_plugin.tolino.time.sleep",
-                   side_effect=sleeps.append):
-            data = client.inventory()
-        self.assertEqual([], data)
-        self.assertEqual(4, len(seen))
-        self.assertIn("/inventory/delta", seen[0])
-        self.assertIn("v2/registerhw", seen[1])
-        self.assertIn("/inventory/delta", seen[2])
-        self.assertIn("/inventory/delta", seen[3])
-        self.assertEqual([1.5, 1.5], sleeps)
-        # Danach ist die ID bekannt: der naechste Lauf braucht keine
-        # Recovery (Flag ist verbraucht).
-        self.assertFalse(client._hw_registered_now)
-
-    def test_adopted_device_needs_no_settle_wait(self):
-        """Uebernommenes, registriertes Geraet: kein Warten, weiterhin
-        genau ein direkter Retry."""
-        seen = []
-        sleeps = []
-
-        def fake_urlopen(request, timeout=None):
-            seen.append(request.full_url)
-            if len(seen) == 1:
-                raise self._error400(b"{}")
-            return self._response(self.INVENTORY_BODY)
-
-        client = self._client("stale-hw-000")
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-             patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                   return_value="12345678-1234-4abc-8def-1234567890ab"), \
-             patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                   side_effect=AssertionError("register must not run")), \
-             patch("calibre_plugin.tolino.time.sleep",
-                   side_effect=sleeps.append):
-            data = client.inventory()
-        self.assertEqual([], data)
-        self.assertEqual(2, len(seen))
-        self.assertEqual([], sleeps)
-        self.assertFalse(client._hw_registered_now)
-
-class SharedWebreaderPartnerTests(unittest.TestCase):
-    """Alle Shops mit dem gemeinsamen Web Reader verhalten sich wie
-    Orell Fuessli – ein Profil statt pro Partner nachgebauter
-    Einzelheiten.
-    """
-
-    def test_ebook_de_partner_matches_reference_config(self):
-        partner = PARTNERS[8]
-        self.assertEqual("eBook.de", partner["name"])
-        self.assertEqual("81", partner["reseller_id"])
-        self.assertEqual("ebookde0501html5readerV0001", partner["client_id"])
-        self.assertEqual("e-publishing", partner["scope"])
-        self.assertEqual("https://www.ebook.de/oauth/token",
-                         partner["token_url"])
-
-    def test_corrected_endpoints_match_reader_config(self):
-        self.assertEqual("https://www.hugendubel.de/oauth/token",
-                         PARTNERS[5]["token_url"])
-        self.assertEqual("webreader", PARTNERS[7]["client_id"])
-        self.assertEqual("SCOPE_BOSH", PARTNERS[7]["scope"])
-        self.assertEqual("https://www.buecher.de/auth/oauth2/token",
-                         PARTNERS[7]["token_url"])
-        self.assertEqual("webreader", PARTNERS[2]["client_id"])
-        self.assertEqual("https://www.thalia.at/auth/oauth2/token",
-                         PARTNERS[2]["token_url"])
-
-    def test_token_post_carries_reader_origin(self):
-        """Der Token-POST sieht bei allen Shops aus wie der des Readers."""
-        for pid in (1, 5, 8):
-            captured = {}
-
-            class Response:
-                status = 200
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *args):
-                    return False
-
-                def read(self):
-                    return b'{"access_token":"a","expires_in":3600}'
-
-            def request(request, timeout, _captured=captured):
-                _captured.update(
-                    {key.casefold(): value
-                     for key, value in request.headers.items()})
-                return Response()
-
-            with patch("calibre_plugin.tolino.urlopen", request):
-                TolinoClient(pid, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
-                             "refresh-token").login()
-            self.assertEqual("https://webreader.mytolino.com",
-                             captured.get("origin"), pid)
-            self.assertEqual("https://webreader.mytolino.com/",
-                             captured.get("referer"), pid)
-
-    def test_authenticated_requests_send_webreader_client(self):
-        for pid in (1, 4, 5):
-            captured = {}
-
-            class Response:
-                status = 200
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *args):
-                    return False
-
-                def read(self):
-                    return b"{}"
-
-            def request(request, timeout, _captured=captured):
-                _captured.update(
-                    {key.casefold(): value
-                     for key, value in request.headers.items()})
-                return Response()
-
-            with patch("calibre_plugin.tolino.urlopen", request):
-                client = TolinoClient(pid, "3xxA-00BCD-EFGHI-JKLMN-OPQRh",
-                                      "refresh-token")
-                client.access = "access-token"
-                client.expires_at = time.time() + 60
-                client._request(
-                    "https://bosh.pageplace.de/bosh/rest/inventory/delta")
-            self.assertEqual("TOLINO_WEBREADER",
-                             captured.get("client_type"), pid)
-            self.assertEqual("5.2.0", captured.get("client_version"), pid)
-            self.assertEqual(PARTNERS[pid]["reseller_id"],
-                             captured.get("reseller_id"), pid)
-
-    def test_grab_live_refresh_reports_a_missing_chromium(self):
-        """Shops auf dem gemeinsamen Reader: fehlt Chromium, wird der
-        Fehler sichtbar statt still ein fremder Browser geoeffnet."""
-        for pid in (1, 5, 8):
-            with self.assertRaises(TolinoAuthError) as ctx:
-                grab_live_refresh(pid, "test_hardware")
-            self.assertIn("Kein Chromium-Browser gefunden",
-                          str(ctx.exception))
-
-class RequestRetryBudgetTests(unittest.TestCase):
-    """Statt des Tri-States True/1/False in `_retry` hat jede der drei
-    Rettungen einen eigenen, sichtbaren Zaehler (Neuanmeldung, Geraete-
-    Recovery, WAF-Warteversuch)."""
-
-    @staticmethod
-    def _bot_error():
-        from urllib.error import HTTPError
-        error = HTTPError("https://example.invalid/token", 403, "Forbidden",
-                          {}, None)
-        error.read = lambda: (b"<!doctype html><title>Zugriff geblockt"
-                              b"</title>")
-        return error
-
-    def test_non_token_403_is_not_an_auth_failure(self):
-        from urllib.error import HTTPError
-        from ..tolino import TolinoApiError, TolinoClient
-
-        error = HTTPError("https://bosh.pageplace.de/bosh/rest/upload", 403,
-                          "Forbidden", {}, None)
-        self.addCleanup(error.close)
-        error.read = lambda: b"quota exceeded"
-        client = TolinoClient(4, "hardware", "refresh-token")
-        client.access = "access-token"
-        retry = {"auth": True, "hardware": True, "waf": 0}
-        with self.assertRaises(TolinoApiError) as caught:
-            client._handle_http_error(
-                error, b"quota exceeded", error.url, True, retry)
-        self.assertEqual("N03", caught.exception.code)
-        self.assertEqual("access-token", client.access)
-
-    def test_waf_budget_counts_down_and_then_raises(self):
-        from ..tolino import _WAF_RETRY_SECONDS, TolinoAuthError, TolinoClient
-        sleeps = []
-
-        def fake_urlopen(request, timeout=None):
-            raise self._bot_error()
-
-        with patch("calibre_plugin.tolino.urlopen",
-                   side_effect=fake_urlopen), \
-                patch("calibre_plugin.tolino.time.sleep",
-                      side_effect=sleeps.append):
-            client = TolinoClient(4, "hardware", "old-refresh")
+            client.login()
+            requests = len(server.requests)
+        self.assertEqual(1, requests)
+
+    def test_an_unknown_partner_is_rejected(self):
+        with self.assertRaises(TolinoError):
+            TolinoClient(99, HARDWARE, refresh="start")
+
+
+class ErrorTextTests(unittest.TestCase):
+    """Fehlertexte nennen den Grund, aber nie Zugangsdaten."""
+
+    def test_tokens_and_tracebacks_are_redacted(self):
+        exc = TolinoError("abgelehnt für tok-123", code="A01")
+        text = sanitize_error(exc, ("tok-123",))
+        self.assertNotIn("tok-123", text)
+        self.assertIn("abgelehnt", text)
+
+    def test_a_broken_token_response_is_an_auth_error(self):
+        body = json.dumps({"refresh_token": "rot-1"}).encode()
+        with token_server(body=body) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
             with self.assertRaises(TolinoAuthError):
                 client.login()
-        # Genau die zwei Warteversuche der Kaskade, dann der sichtbare Fehler.
-        self.assertEqual(list(_WAF_RETRY_SECONDS), sleeps)
 
-    def test_bosh_400_attempts_device_recovery(self):
-        """Ein BOSH-400 versucht, die registrierte Geräte-ID zu übernehmen."""
-        from urllib.error import HTTPError
 
-        from ..tolino import TolinoApiError, TolinoClient
-        error = HTTPError("https://bosh.pageplace.de/bosh/rest/x", 400,
-                          "Bad Request", {}, None)
-        error.read = lambda: b"{}"
-        client = TolinoClient(4, "stale-hw", "refresh-token-value")
-        client.access = "access-value"
-        client.expires_at = time.time() + 3600
+JSON_HEADERS = {"Content-Type": "application/json"}
 
-        def fake_urlopen(request, timeout=None):
-            raise error
 
-        with patch("calibre_plugin.tolino.urlopen", fake_urlopen), \
-                patch("calibre_plugin.tolino.TolinoClient.fetch_hardware_id",
-                      return_value="registered-hw"), \
-                patch("calibre_plugin.tolino.TolinoClient._register_hardware",
-                      return_value=False):
-            with self.assertRaises(TolinoApiError):
-                client._request("https://bosh.pageplace.de/bosh/rest/x")
-        # Die Recovery lief trotz verbrauchtem Auth-Retry ...
-        self.assertEqual("registered-hw", client.hardware)
+def json_reply(payload):
+    return 200, JSON_HEADERS, json.dumps(payload).encode()
 
-class ErrorCodeTests(unittest.TestCase):
-    """Fehlercodes: kurzer Nutzertext, Details nur im Log."""
 
-    def test_short_text_hides_the_server_body_but_the_log_keeps_it(self):
-        exc = tolino_module.TolinoApiError(
-            "Tolino-Fehler (HTTP 500): <html>boom</html>", code="N03",
-            short="Tolino meldet einen Fehler (HTTP 500).")
-        with patch.object(tolino_module, "log_warning") as log:
-            shown = tolino_module.report_error(exc)
-        self.assertEqual("Tolino meldet einen Fehler (HTTP 500). (Code N03)",
-                         shown)
-        self.assertIn("boom", log.call_args[0][0])
-        self.assertIn("Tolino-Fehler (HTTP 500)", str(exc))
+DEVICES_BODY = json.dumps({"deviceListResponse": {"devices": [
+    {"deviceId": HARDWARE, "deviceLastUsage": "2026-01-01"}]}}).encode()
 
-    def test_secrets_never_reach_the_dialog_the_log_or_the_history(self):
-        secrets = ("refresh-secret-123", "password-secret-123",
-                   "cookie-secret-123", "access-secret-123")
-        exc = tolino_module.TolinoAuthError(
-            "refresh_token=%s password=%s Cookie: session=%s"
-            % secrets[:3], code="A01",
-            detail="access_token=%s" % secrets[3])
-        with patch.object(tolino_module, "log_warning") as log:
-            shown = tolino_module.report_error(exc, "Test", secrets)
-        log_text = log.call_args[0][0]
-        blob = " ".join([shown, log_text])
-        for secret in secrets:
-            self.assertNotIn(secret, blob)
-        self.assertIn("[REDACTED]", log_text)
 
-    def test_unexpected_errors_get_e99_and_a_traceback_in_the_log(self):
-        with patch.object(tolino_module, "log_warning") as log:
-            try:
-                raise ValueError("kaputt")
-            except ValueError as exc:
-                shown = tolino_module.report_error(exc, "Test")
-        self.assertIn("(Code E99)", shown)
-        self.assertIn("kaputt", shown)
-        logged = " ".join(call[0][0] for call in log.call_args_list)
-        self.assertIn("Traceback", logged)
+def devices_reply(_method, _path, _headers, _payload):
+    return 200, JSON_HEADERS, DEVICES_BODY
 
-    def test_code_without_message_defaults_to_e99(self):
-        self.assertEqual("E99", tolino_module.TolinoError("x").code)
 
-    def test_error_codes_and_docs_stay_in_sync(self):
-        """Genutzte Codes stehen in der Liste; die README verweist dorthin."""
-        base = Path(__file__).resolve().parent.parent
-        error_list = (base.parent / "docs" / "fehlercodes.md").read_text(
-            encoding="utf-8")
-        readme = (base.parent / "README.md").read_text(encoding="utf-8")
-        used = set()
-        for path in base.rglob("*.py"):
-            if "/tests/" in str(path):
-                continue
-            used |= set(re.findall(r'code\s*=\s*"([A-Z][0-9]{2})"',
-                                   path.read_text(encoding="utf-8")))
-        used.discard("E99")
-        documented = set(re.findall(r"^\| ([A-Z][0-9]{2}) \|", error_list,
-                                    re.MULTILINE))
-        documented.discard("E99")
-        self.assertTrue(used)
-        self.assertEqual(documented, used)
-        for code in sorted(used):
-            self.assertIn("| %s |" % code, error_list, code)
-        self.assertIn("| E99 |", error_list)
-        self.assertIn("docs/fehlercodes.md", readme)
-        self.assertNotIn("| A02 |", readme)
+def token_and(devices):
+    """Server: Token-Endpunkt normal, jeder andere Pfad an `devices`."""
 
-class UserTextTests(unittest.TestCase):
-    """Einheitliche, kurze Nutzertexte."""
+    def responder(method, path, headers, payload):
+        if path.startswith("/token/"):
+            return 200, JSON_HEADERS, TOKEN_BODY
+        return devices(method, path, headers, payload)
 
-    def test_reported_message_is_one_clean_line(self):
-        """Genau «Text (Code A01)» – ohne Zeilenumbruch und ohne Traceback."""
-        exc = tolino_module.TolinoAuthError(
-            "Die Tolino-Sitzung ist beendet. " + tolino_module.RELOGIN,
-            code="A01", detail="HTTP 400: Token is not active")
-        with patch.object(tolino_module, "log_warning") as log:
-            shown = tolino_module.report_error(exc, "Vorbereitung")
+    return responder
+
+
+class ReportErrorTests(unittest.TestCase):
+    """Die Meldung im Dialog ist eine Zeile -- mit Code, ohne Zugangsdaten."""
+
+    def test_the_short_text_and_the_code_form_the_user_message(self):
+        exc = TolinoApiError(
+            "Serverfehler", code="N03",
+            short="tolino meldet einen Fehler (HTTP 400).",
+            detail="Body mit tok-123")
         self.assertEqual(
-            "Die Tolino-Sitzung ist beendet. Bitte bei tolino anmelden. "
-            "(Code A01)", shown)
-        logged = log.call_args[0][0]
-        self.assertIn("A01", logged)
-        self.assertIn("Token is not active", logged)
-        self.assertNotIn("Token is not active", shown)
-        self.assertNotIn("Traceback", shown)
+            "tolino meldet einen Fehler (HTTP 400). (Code N03)",
+            report_error(exc, "Sync", ("tok-123",)))
 
-    def test_auth_errors_keep_their_traceback_chain_in_the_log(self):
-        """A01 und Co.: Dialog eine Zeile, die Kette samt Werten nur im Log."""
-        secret = "geheimwert-77"
-        try:
-            try:
-                raise tolino_module.TolinoApiError("HTTP 400: %s" % secret,
-                                                  code="N03")
-            except tolino_module.TolinoApiError as inner:
-                raise tolino_module.TolinoAuthError(
-                    "Die Tolino-Sitzung ist beendet. " + tolino_module.RELOGIN,
-                    code="A01", detail="HTTP 400") from inner
-        except tolino_module.TolinoAuthError as exc:
-            with patch.object(tolino_module, "log_warning") as log:
-                shown = tolino_module.report_error(
-                    exc, "Vorbereitung", (secret,))
-        calls = [call[0][0] for call in log.call_args_list]
-        self.assertEqual(1, shown.count("\n") + 1)
-        self.assertTrue(shown.endswith("(Code A01)"))
-        self.assertTrue(any(c.startswith("Tolino-Details") for c in calls), calls)
-        blob = " ".join(calls)
-        self.assertIn("Traceback", blob)
-        self.assertIn("direct cause", blob)
-        self.assertNotIn(secret, blob)
-        self.assertNotIn(secret, shown)
-
-    def test_report_error_without_a_traceback_logs_a_single_line(self):
-        """Ohne Traceback (z. B. selbst gebaute Meldung) bleibt es eine Zeile."""
-        exc = tolino_module.TolinoError("Fehler ohne Traceback", code="E99")
-        with patch.object(tolino_module, "log_warning") as log:
-            shown = tolino_module.report_error(exc)
-        self.assertEqual(1, log.call_count)
-        self.assertEqual("Fehler ohne Traceback (Code E99)", shown)
+    def test_an_unexpected_error_gets_the_generic_code(self):
+        self.assertEqual("Unerwarteter Fehler: kaputt (Code E99)",
+                         report_error(RuntimeError("kaputt"), "Lauf"))
 
 
-class DownloadMetadataTests(unittest.TestCase):
-    """Der Speichern-Dialog braucht keine Metadaten."""
+class RetryTests(unittest.TestCase):
+    """Einmal nutzbare Tokens: jede Wiederholung laeuft genau einmal."""
 
-    class Response:
-        @staticmethod
-        def read():
-            return b"EPUB-DATA"
+    def test_a_401_renews_the_access_token_and_repeats_the_call(self):
+        calls = {"token": 0, "devices": 0}
 
-        @staticmethod
-        def geturl():
-            return "https://example.invalid/book"
+        def responder(method, path, headers, payload):
+            if path.startswith("/token/"):
+                calls["token"] += 1
+                return 200, JSON_HEADERS, json.dumps({
+                    "access_token": "acc-%d" % calls["token"],
+                    "refresh_token": "rot-%d" % calls["token"],
+                    "expires_in": 3600}).encode()
+            calls["devices"] += 1
+            if calls["devices"] == 1:
+                return 401, {}, b'{"error": "expired"}'
+            return devices_reply(method, path, headers, payload)
 
-        def __enter__(self):
-            return self
+        with LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            self.assertEqual(HARDWARE, client.fetch_hardware_id())
+            sent = [request["headers"].get("t_auth_token")
+                    for request in server.requests
+                    if request["path"].endswith("/handshake/devices/list")]
+        self.assertEqual(2, calls["token"])
+        self.assertEqual(["acc-1", "acc-2"], sent)
 
-        def __exit__(self, *args):
-            return False
+    def test_a_403_at_the_token_endpoint_waits_and_retries(self):
+        calls = {"token": 0}
 
-    @staticmethod
-    def _client():
-        from ..tolino import TolinoClient
-        client = TolinoClient(4, "hw", "refresh-token")
-        client.access = "access"
-        client._request = (lambda *args, **kwargs:
-                           {"DownloadInfo": {"contentUrl":
-                                             "https://example.invalid/book"}})
-        return client
+        def responder(_method, path, _headers, _payload):
+            if not path.startswith("/token/"):
+                return 404, {}, b""
+            calls["token"] += 1
+            if calls["token"] == 1:
+                # Nur eine echte Bot-Prüfung rechtfertigt die Wartezeit.
+                return 403, {}, b"<html><body>captcha</body></html>"
+            return 200, JSON_HEADERS, TOKEN_BODY
 
-    def test_upload_handles_null_metadata_response_as_missing_id(self):
-        client = self._client()
-        client._multipart = lambda *_args, **_kwargs: (b"body", "multipart/form-data")
-        client._request = lambda *_args, **_kwargs: {"metadata": None}
-        from ..tolino import TolinoApiError
-        with tempfile.NamedTemporaryFile(suffix=".epub") as source:
-            with self.assertRaises(TolinoApiError) as caught:
-                client.upload(source.name)
-        self.assertEqual("N02", caught.exception.code)
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            self.assertEqual("rot-1", client.login())
+        self.assertEqual(2, calls["token"])
+        self.assertEqual([2.0], [call.args[0] for call in slept.call_args_list])
 
-    def test_download_does_not_fetch_inventory(self):
-        client = self._client()
-        client.inventory = lambda: (_ for _ in ()).throw(
-            AssertionError("download must not load inventory"))
-        with patch("calibre_plugin.tolino.urlopen",
-                   return_value=self.Response()):
-            content = client.download("d-1")
-        self.assertEqual(b"EPUB-DATA", content)
-
-class MultipartMemoryTests(unittest.TestCase):
-    """Peak memory of the in-memory multipart body for a large EPUB.
-
-    The transport is stdlib-only (urllib) and sends one contiguous body. A
-    file is therefore held about twice (file bytes + joined body) -- this
-    test pins that bound so a future change cannot silently hold several
-    copies, and checks that the large payload is still encoded correctly.
-    """
-
-    def test_large_upload_body_is_correct_and_bounded(self):
-        import tracemalloc
-        from ..tolino import TolinoClient
-        size = 20 * 1024 * 1024
-        with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
-            tmp.write(b"EPUB" * (size // 4))
-            path = tmp.name
-        try:
-            tracemalloc.start()
-            with open(path, "rb") as source:
-                payload = source.read()
-            body, content_type = TolinoClient._multipart(
-                {"deliverableId": "abc"}, payload, path)
-            _current, peak = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-        finally:
-            os.unlink(path)
-        self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
-        self.assertIn(b'name="deliverableId"', body)
-        self.assertIn(b'filename="', body)
-        self.assertIn(b"Content-Type: application/epub+zip", body)
-        self.assertTrue(body.endswith(b"--\r\n"))
-        self.assertGreater(len(body), size)
-        # ~2x the file (bytes + joined body), never a multiple of it.
-        self.assertLess(peak, size * 3)
-
-
-class MultipartMimeTypeTests(unittest.TestCase):
-    """Bekannte Buchformate brauchen keine System-MIME-Datenbank."""
-
-    def test_multipart_headers_keep_mime_and_sanitize_filename(self):
-        from ..tolino import TolinoClient
-        with patch("calibre_plugin.tolino.mimetypes.guess_type",
-                   return_value=(None, None)):
-            body, _content_type = TolinoClient._multipart(
-                {}, b"data", "book.epub")
-        self.assertIn(b"Content-Type: application/epub+zip", body)
-        body, _content_type = TolinoClient._multipart(
-            {}, b"data", 'bad"name\r\n.epub')
-        self.assertIn(b'filename="bad_name__.epub"', body)
-        self.assertNotIn(b'filename="bad"name', body)
-
-
-class SyncDataResponseShapeTests(unittest.TestCase):
-    """Die sync-data-Antwort des Servers trägt die Marken-ID im Pfad.
-
-    Gelesen-Marken und Sammlungen kommen als
-    ``/publications/<Buch-ID>/tags/<Marken-ID>`` zurück – die Marken-ID
-    vergibt der Server. Der Plugin schrieb nur die Form ohne Marken-ID und
-    verlangte beim Lesen genau vier Pfadteile: damit war jede Server-Marke
-    unsichtbar. Folge: die Spalte «Gelesen» blieb leer, obwohl die Cloud die
-    Bücher als gelesen führte, und jede Serie schien bei jedem Lauf zu
-    fehlen.
-    """
-
-    PUB = "bosh_8_000000000000000000000000000001"
-    READ = {"op": "replace",
-            "path": "/publications/%s/tags/6438286" % PUB,
-            "value": {"revision": "1-abc", "modified": 17,
-                      "name": "collection_finished_readings_name",
-                      "category": "system"}}
-    SERIES = {"op": "replace",
-              "path": "/publications/%s/tags/6438287" % PUB,
-              "value": {"revision": "1-def", "modified": 18,
-                        "name": "Brunetti", "category": "collection"}}
-    OWN_ADD = {"op": "add", "path": "/publications/%s/tags" % PUB,
-               "value": {"modified": 19, "name": "SciFi",
-                         "category": "collection"}}
-
-    def _client(self, patches, revision="42"):
-        """Client mit echter Antwortform als Lesegrundlage."""
-        client = TolinoClient(4, "hardware", "refresh-token")
-        calls = []
-
-        def fake_request(url, method="GET", data=None, form=False,
-                         authenticated=True, content_type=None):
-            calls.append({"url": url, "method": method, "data": data})
-            return {"revision": revision, "patches": list(patches)}
-
-        client._request = fake_request
-        return client, calls
-
-    def test_read_ids_understands_the_server_path_with_tag_id(self):
-        client, calls = self._client([self.READ, self.OWN_ADD])
-        self.assertEqual({self.PUB}, client.read_ids())
-        self.assertEqual(1, len(calls))
-
-    def test_collection_pairs_understands_the_server_path_with_tag_id(self):
-        client, _ = self._client([self.SERIES, self.OWN_ADD])
-        self.assertEqual({(self.PUB, "Brunetti"), (self.PUB, "SciFi")},
-                         client.collection_pairs())
-
-    def test_read_state_and_collections_come_from_one_read(self):
-        client, calls = self._client([self.READ, self.SERIES])
-        self.assertEqual({self.PUB}, client.read_ids())
-        self.assertEqual({(self.PUB, "Brunetti")}, client.collection_pairs())
-        self.assertEqual(1, len(calls))
-
-    def test_progress_by_id_reads_the_bookmark_patch(self):
-        progress = {"op": "replace",
-                    "path": "/publications/%s/bookmark/12" % self.PUB,
-                    "value": {"currentPosition": "192",
-                              "lastPosition": "590", "progress": 0.3288,
-                              "position": "Ops/017.html#point(/1/4/74:0)",
-                              "modified": 100}}
-        client, calls = self._client([progress])
-        result = client.progress_by_id()
-        self.assertEqual(33, result[self.PUB]["percent"])
-        self.assertEqual("192", result[self.PUB]["current"])
-        self.assertEqual("590", result[self.PUB]["last"])
-        self.assertEqual(1, len(calls))
-        # Lesestatus und Fortschritt teilen denselben Snapshot.
-        self.assertEqual(set(), client.read_ids())
-        self.assertEqual(1, len(calls))
-
-    def test_remove_with_tag_id_takes_the_book_out_again(self):
-        removed = {"op": "remove",
-                   "path": "/publications/%s/tags/6438286" % self.PUB,
-                   "value": {"revision": "1-abc",
-                             "name": "collection_finished_readings_name",
-                             "category": "system"}}
-        client, _ = self._client([self.READ, removed])
-        self.assertEqual(set(), client.read_ids())
-
-    def test_foreign_paths_and_malformed_patches_are_ignored(self):
-        patches = [
-            {"op": "replace", "path": "/publications/%s/bookmark/12" % self.PUB,
-             "value": {"progress": 0.4}},
-            {"op": "replace", "path": "/publications//tags/1",
-             "value": {"name": "collection_finished_readings_name",
-                       "category": "system"}},
-            {"op": "replace", "path": "/publications/%s/tags/1" % self.PUB},
-            "kein dict",
-        ]
-        client, _ = self._client(patches)
-        self.assertEqual(set(), client.read_ids())
-        self.assertEqual(set(), client.collection_pairs())
-
-    def test_mark_read_many_skips_books_the_server_already_calls_read(self):
-        """Die Server-Form wird erkannt: eine vorhandene Marke wird nicht
-        noch einmal geschrieben."""
-        client, calls = self._client([self.READ], revision="43")
-        self.assertEqual("43", client.mark_read_many([self.PUB]))
-        self.assertEqual(1, len(calls))
-
-    def test_mark_read_uses_the_revision_of_a_real_response(self):
-        client, calls = self._client([self.SERIES], revision="77")
-        client.mark_read_many(["neues-buch"])
-        self.assertEqual(2, len(calls))
-        self.assertEqual("77", calls[1]["data"]["revision"])
-        self.assertEqual("/publications/neues-buch/tags",
-                         calls[1]["data"]["patches"][0]["path"])
-
-    def test_cloud_read_state_reaches_the_comparison_rows(self):
-        """Von der Server-Antwort bis zur angehakten Spalte – der Fall aus
-        dem Feldbericht."""
-        client, _ = self._client([self.READ])
-        book = {"uuid": "11111111-1111-4111-8111-111111111111", "title": "Feuerprobe", "authors": "Donna Leon",
-                "isbn": "", "formats": ["EPUB"], "last_modified": "1",
-                "format_signatures": {"EPUB": "1:1"}}
-        inventory = [{"deliverableId": self.PUB,
-                      "epubMetaData": {"title": "Feuerprobe",
-                                       "author": [{"name": "Donna Leon"}]}}]
-        rows = compare_inventory({1: book}, {"11111111-1111-4111-8111-111111111111": {"tolino_id": self.PUB}},
-                                 inventory, ["EPUB"],
-                                 read_ids=client.read_ids())
-        row = rows[0]
-        self.assertTrue(row["read"].cloud)
-        self.assertTrue(row["read"])
-        self.assertEqual(self.PUB, row["tolino_id"])
-
-class TagStateReducerTests(unittest.TestCase):
-    """Add/Remove-Patches werden als Verlauf ausgewertet (P1/D)."""
-
-    BOOK = "book-1"
-
-    @staticmethod
-    def _patch(op, name, category="system", tag_id="1", book="book-1"):
-        path = "/publications/%s/tags" % book
-        if tag_id is not None:
-            path += "/%s" % tag_id
-        return {"op": op, "path": path,
-                "value": {"revision": "r-%s" % op, "name": name,
-                          "category": category}}
-
-    def test_add_remove_leaves_no_tag(self):
-        patches = [self._patch("add", "gelesen"),
-                   self._patch("remove", "gelesen")]
-        self.assertIsNone(active_tags(
-            patches, "system", "gelesen").get((self.BOOK, "gelesen")))
-
-    def test_add_remove_add_leaves_an_active_tag(self):
-        patches = [self._patch("add", "gelesen"),
-                   self._patch("remove", "gelesen"),
-                   self._patch("add", "gelesen", tag_id="2")]
-        active = active_tags(
-            patches, "system", "gelesen").get((self.BOOK, "gelesen"))
-        self.assertIsNotNone(active)
-        self.assertEqual("2", tag_id_from_patch(active))
-
-    def test_other_books_and_foreign_tags_stay_untouched(self):
-        patches = [
-            self._patch("add", "gelesen", book="book-2"),
-            self._patch("add", "SciFi", category="collection"),
-            self._patch("add", "gelesen"),
-            self._patch("remove", "gelesen", book="book-2"),
-        ]
-        active = active_tags(
-            patches, "system", "gelesen").get((self.BOOK, "gelesen"))
-        self.assertIsNotNone(active)
-        pairs = active_tags(patches, "collection")
-        self.assertEqual({("book-1", "SciFi")}, set(pairs))
-
-    def test_mark_read_does_not_add_an_already_active_tag(self):
-        client = TolinoClient(4, "hardware", "refresh-token")
-        patches = [self._patch("add", READ_TAG),
-                   self._patch("remove", READ_TAG),
-                   self._patch("add", READ_TAG, tag_id="3")]
-        client.sync_snapshot = lambda: ("rev", patches)
-        calls = []
-        client._sync_patch = lambda payload: calls.append(payload) or {"revision": "r"}
-        client.mark_read_many([self.BOOK])
-        self.assertEqual([], calls)  # effektiv gelesen: kein Schreibvorgang
-
-    def test_read_ids_accepts_the_collection_form(self):
-        client = TolinoClient(4, "hardware", "refresh-token")
-        patches = [self._patch("add", READ_TAG, category="collection"),
-                   self._patch("add", "SciFi", category="collection",
-                               tag_id="2")]
-        client.sync_snapshot = lambda: ("rev", patches)
-        self.assertEqual({self.BOOK}, client.read_ids())
-
-    def test_unmark_removes_a_collection_mark_with_its_category(self):
-        client = TolinoClient(4, "hardware", "refresh-token")
-        client.sync_snapshot = lambda: (
-            "rev", [self._patch("add", READ_TAG, category="collection",
-                                tag_id="9")])
-        calls = []
-        client._sync_patch = lambda payload: calls.append(payload) or {
-            "revision": "new"}
-        client.mark_read_many([self.BOOK], finished=False)
-        patch = calls[0]["patches"][0]
-        self.assertEqual("remove", patch["op"])
-        self.assertEqual("collection", patch["value"]["category"])
-        self.assertEqual("/publications/%s/tags/9" % self.BOOK,
-                         patch["path"])
-
-    def test_unmark_removes_only_the_active_tag_id(self):
-        client = TolinoClient(4, "hardware", "refresh-token")
-        patches = [self._patch("add", READ_TAG, tag_id="1"),
-                   self._patch("remove", READ_TAG, tag_id="1"),
-                   self._patch("add", READ_TAG, tag_id="7")]
-        client.sync_snapshot = lambda: ("rev", patches)
-        calls = []
-        client._sync_patch = lambda payload: calls.append(payload) or {"revision": "r"}
-        client.mark_read_many([self.BOOK], finished=False)
-        self.assertEqual(1, len(calls))
-        patch = calls[0]["patches"][0]
-        self.assertEqual("remove", patch["op"])
-        self.assertEqual("/publications/%s/tags/7" % self.BOOK, patch["path"])
-
-class PersistCredentialsDedupTests(unittest.TestCase):
-    """Token und Hardware-ID werden mit config.save_credentials gespeichert."""
-
-    @staticmethod
-    def _ui_module():
-        return ui_base_tests.ToolbarIconTests._load_ui_module(
-            lambda *args, **kwargs: None,
-            qt_stub={"pyqtSignal":
-                     worker_base_tests.SyncWorkerCollectionTests._signal_descriptor()[0]})
-
-    def test_save_credentials_writes_token_and_hardware(self):
-        original = config.PREFERENCES
-        try:
-            config.PREFERENCES = config.JSONConfig("test")
-            config.save_account("konto", {}, active="konto")
-            config.save_account("default", {}, active="default")
-            config.save_credentials("konto", "tok-1", "hw-1")
-            account = config.account_by_name("konto")
-            self.assertEqual("tok-1", account["refresh_token"])
-            self.assertEqual("hw-1", account["hardware_id"])
-            # Der Keep-alive rotiert alle Konten: das aktive bleibt stehen.
-            self.assertEqual("default", config.settings()["active_account"])
-        finally:
-            config.PREFERENCES = original
-
-    def test_save_credentials_without_a_name_does_nothing(self):
-        original = config.PREFERENCES
-        try:
-            config.PREFERENCES = config.JSONConfig("test")
-            config.save_credentials("", "tok", "hw")
-            active = config.settings()["active_account"]
-            self.assertEqual("", config.account_by_name(active)["refresh_token"])
-        finally:
-            config.PREFERENCES = original
-
-    def test_save_refresh_token_keeps_the_hardware_id(self):
-        original = config.PREFERENCES
-        try:
-            config.PREFERENCES = config.JSONConfig("test")
-            config.save_account("konto", {"refresh_token": "alt",
-                                          "hardware_id": "hw"},
-                                active="konto")
-            config.save_refresh_token("konto", "neu")
-            account = config.account_by_name("konto")
-            self.assertEqual("neu", account["refresh_token"])
-            self.assertEqual("hw", account["hardware_id"])
-        finally:
-            config.PREFERENCES = original
-
-    def test_failed_token_rotation_save_stops_login_without_exposing_tokens(self):
-        logs = []
+    def test_a_failing_token_callback_stops_the_login(self):
         def fail(_token):
-            raise OSError("old-secret new-secret access-secret")
+            raise OSError("Platte voll")
 
-        client = TolinoClient(4, "hw", "old-secret", token_callback=fail)
-        with self.assertRaises(TolinoAuthError) as caught:
-            client._apply_token_response({"access_token": "access-secret",
-                                          "refresh_token": "new-secret"})
-        with patch("calibre_plugin.tolino.log_warning", logs.append):
-            shown = tolino_module.report_error(caught.exception, "Login")
-        self.assertIn("erneuerte Zugang", shown)
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  token_callback=fail)
+            with self.assertRaises(TolinoAuthError) as caught:
+                client.login()
+        self.assertEqual("A01", caught.exception.code)
         self.assertIsNone(client.access)
-        for secret in ("old-secret", "new-secret", "access-secret"):
-            self.assertNotIn(secret, shown + " ".join(logs))
 
-    def test_clear_refresh_token_keeps_hardware_and_state(self):
-        original = config.PREFERENCES
-        try:
-            config.PREFERENCES = config.JSONConfig("test")
-            config.save_account("konto", {
-                "refresh_token": "alt", "hardware_id": "hw",
-                "state": {"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}},
-            }, active="konto")
-            self.assertTrue(config.clear_refresh_token("konto"))
-            account = config.account_by_name("konto")
-            self.assertEqual("", account["refresh_token"])
-            self.assertEqual("hw", account["hardware_id"])
-            self.assertEqual({"11111111-1111-4111-8111-111111111111": {"tolino_id": "t1"}}, account["state"])
-            self.assertFalse(config.clear_refresh_token("fehlt"))
-        finally:
-            config.PREFERENCES = original
+    def test_a_token_callback_that_returns_false_stops_the_login(self):
+        spent = []
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  token_callback=lambda _token: False,
+                                  token_rejected_callback=spent.append)
+            with self.assertRaises(TolinoAuthError) as caught:
+                client.login()
+        self.assertEqual("A01", caught.exception.code)
+        self.assertIsNone(client.access)
+        # Der neue Token bleibt im Speicher; der bisherige gespeicherte wird
+        # nicht geloescht -- ein Schreibfehler sagt nichts ueber seine
+        # Gueltigkeit aus, und der Nutzer soll nicht ohne Not draussen sein.
+        self.assertEqual("rot-1", client.refresh)
+        self.assertEqual([], spent)
 
-    def test_token_vault_only_clears_explicitly_rejected_tokens(self):
-        from urllib.error import HTTPError
-        from ..token_vault import TokenVault
+    def test_a_failed_update_retry_does_not_confirm_hardware_on_inventory(self):
+        saved = []
+        update_ids = []
 
-        cases = ((400, b'{"error":"invalid_grant",'
-                       b'"error_description":"reuse exceeded"}', ""),
-                 (500, b"temporary failure", "alt"))
-        original = config.PREFERENCES
-        try:
-            for status, body, expected in cases:
-                with self.subTest(status=status):
-                    config.PREFERENCES = config.JSONConfig("test")
-                    config.save_account("konto", {
-                        "refresh_token": "alt", "hardware_id": "hw",
-                    }, active="konto")
-                    error = HTTPError("https://example.invalid/token", status,
-                                      "Error", {}, None)
-                    error.read = lambda _body=body: _body
-                    with patch("calibre_plugin.tolino.urlopen", side_effect=error):
-                        with self.assertRaises(TolinoAuthError):
-                            TokenVault().login("konto", 4)
-                    account = config.account_by_name("konto")
-                    self.assertEqual(expected, account["refresh_token"])
-                    self.assertEqual("hw", account["hardware_id"])
-        finally:
-            config.PREFERENCES = original
+        def responder(method, path, headers, payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            if path.endswith("/devices/list"):
+                return devices_reply(method, path, headers, payload)
+            if "/inventory/delta" in path:
+                return 200, JSON_HEADERS, b'{"PublicationInventory": {"edata": []}}'
+            if method == "GET":
+                return 200, JSON_HEADERS, b'{"metadata": {}}'
+            update_ids.append(headers["hardware_id"])
+            return 400, {}, b"{}"
 
-    def test_dashboard_stores_a_manually_entered_token(self):
-        ui_module = self._ui_module()
+        with LocalHTTP(responder) as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, "old-hardware", refresh="start",
+                                  hardware_callback=saved.append)
+            with self.assertRaises(TolinoError):
+                client.update_metadata("book", {"title": "Neu"})
+            self.assertEqual([], client.inventory())
+        self.assertEqual(["old-hardware", HARDWARE], update_ids)
+        self.assertEqual([], saved)
+        self.assertFalse(client._hw_adopted)
 
-        class Field:
-            def __init__(self, value=""):
-                self.value = value
-
-            def text(self):
-                return self.value
-
-            def setText(self, value):
-                self.value = value
+    def test_a_failed_call_does_not_confirm_the_adopted_id(self):
+        def refuse(_method, _path, _headers, _payload):
+            return 500, {}, b""
 
         saved = []
-        dashboard = type("Dashboard", (), {})()
-        dashboard.account_name = "konto"
-        # Das Feld ist leer: der Token kommt ins Konto, nicht in die UI.
-        dashboard.refresh = Field("")
-        dashboard.hardware = Field("hw-alt")
-        dashboard.update_status = lambda: None
-        try:
-            with patch("calibre_plugin.ui_dashboard.save_credentials",
-                       lambda *args: saved.append(args)):
-                ui_module.dashboard.SyncDashboard.store_refresh(
-                    dashboard, "tok-neu")
-        finally:
-            ui_module._restore_stubs_for_tests()
-        self.assertEqual([("konto", "tok-neu", "hw-alt")], saved)
+        with LocalHTTP(token_and(refuse)) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  hardware_callback=saved.append)
+            client.hardware = "adopted"
+            client._hw_adopted = True
+            # Gueltiger Zugang: der Fehler kommt aus dem Geraete-Aufruf, nicht
+            # aus einer Anmeldung (die wuerde die ID schon bestaetigen).
+            client.access = "acc-1"
+            client.expires_at = time.time() + 3600
+            with self.assertRaises(TolinoError):
+                client.fetch_hardware_id()
+        self.assertEqual([], saved)
+        # Auch ein spaeterer erfolgreicher Bestandsaufruf darf die ID nicht
+        # mehr bestaetigen: die Wiederholung dieses Aufrufs ist gescheitert.
+        self.assertFalse(client._hw_adopted)
+
+    def test_a_400_adopts_the_registered_id_and_repeats_the_call(self):
+        """Unbekannte Geräte-ID: die registrierte übernehmen, dann einmal neu."""
+        calls = {"devices": 0}
+
+        def responder(_method, path, _headers, _payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            calls["devices"] += 1
+            if calls["devices"] == 1:
+                return 400, {}, b'{"error": "unknown hardware"}'
+            return 200, JSON_HEADERS, json.dumps({"deviceListResponse": {
+                "devices": [{"deviceId": "reg-1",
+                              "deviceLastUsage": "2026-01-01"}]}}).encode()
+
+        saved = []
+        with patch("calibre_plugin.tolino.time.sleep"), \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  hardware_callback=saved.append)
+            self.assertEqual("reg-1", client.fetch_hardware_id())
+            sent = [request["headers"].get("hardware_id")
+                    for request in server.requests
+                    if request["path"].endswith("/devices/list")]
+        # Erster Aufruf, Suche nach der registrierten ID, Wiederholung.
+        self.assertEqual(3, calls["devices"])
+        self.assertEqual([HARDWARE, HARDWARE, "reg-1"], sent)
+        self.assertEqual(["reg-1"], saved)
+
+    def test_a_hardware_callback_that_returns_false_is_reported(self):
+        calls = 0
+
+        def responder(method, path, headers, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return 400, {}, b"{}"
+            return devices_reply(method, path, headers, payload)
+
+        with LocalHTTP(token_and(responder)) as server, \
+                local_tolino_endpoints(server.origin), patch(
+                    "calibre_plugin.tolino.log_warning") as warned:
+            client = TolinoClient(1, "old-hardware", refresh="start",
+                                  hardware_callback=lambda _hardware: False)
+            client.fetch_hardware_id()
+        self.assertEqual(1, warned.call_count)
+        self.assertIn("Geräte-ID", str(warned.call_args[0][0]))
+
+    def test_a_400_for_the_registered_id_is_not_retried(self):
+        """Schon die registrierte ID: der 400 hat eine andere Ursache."""
+        calls = {"devices": 0}
+
+        def responder(method, path, headers, payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            calls["devices"] += 1
+            if calls["devices"] == 1:
+                return 400, {}, b"{}"
+            return devices_reply(method, path, headers, payload)
+
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoApiError) as caught:
+                client.fetch_hardware_id()
+        self.assertEqual("N03", caught.exception.code)
+        self.assertEqual(2, calls["devices"])
+        self.assertFalse(slept.called)
+        self.assertEqual(HARDWARE, client.hardware)
+
+    def test_a_second_rejection_after_registering_stops_the_call(self):
+        """Registrierung gelingt, der Server lehnt trotzdem ab: Ende, kein Kreis."""
+        calls = {"devices": 0, "register": 0}
+
+        def responder(_method, path, _headers, _payload):
+            if path.startswith("/token/"):
+                return 200, JSON_HEADERS, TOKEN_BODY
+            if path.endswith("/registerhw"):
+                calls["register"] += 1
+                return 200, JSON_HEADERS, b"{}"
+            calls["devices"] += 1
+            if calls["devices"] == 2:
+                # Leere Geräteliste: es gibt nichts zu übernehmen.
+                return 200, JSON_HEADERS, b'{"deviceListResponse": {"devices": []}}'
+            return 400, {}, b"{}"
+
+        with patch("calibre_plugin.tolino.time.sleep"), \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoApiError) as caught:
+                client.fetch_hardware_id()
+        self.assertEqual("N03", caught.exception.code)
+        # Ein Versuch nach der Registrierung, danach der Warte-Versuch.
+        self.assertEqual((1, 4), (calls["register"], calls["devices"]))
+        self.assertEqual(HARDWARE, client.hardware)
+
+    def test_a_403_without_a_bot_check_is_not_repeated(self):
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                token_server(body=b'{"error": "forbidden"}',
+                             status=403) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoAuthError) as caught:
+                client.login()
+        self.assertEqual("A01", caught.exception.code)
+        self.assertEqual(1, len(server.requests))
+        self.assertFalse(slept.called)
+
+    def test_a_403_away_from_the_token_endpoint_is_no_login_error(self):
+        def responder(_method, _path, _headers, _payload):
+            return 403, {}, b"quota exceeded"
+
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(token_and(responder)) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            client.access, client.expires_at = "acc-1", time.time() + 3600
+            with self.assertRaises(TolinoApiError) as caught:
+                client.fetch_hardware_id()
+        self.assertEqual("N03", caught.exception.code)
+        self.assertFalse(slept.called)
+
+    def test_the_bot_check_retries_stop_at_the_limit(self):
+        def responder(_method, _path, _headers, _payload):
+            return 403, {}, b"<html>captcha</html>"
+
+        with patch("calibre_plugin.tolino.time.sleep") as slept, \
+                LocalHTTP(responder) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            with self.assertRaises(TolinoAuthError):
+                client.login()
+        limit = len(tolino_module._WAF_RETRY_SECONDS)
+        self.assertEqual(limit + 1, len(server.requests))
+        self.assertEqual(limit, slept.call_count)
+
+
+class Backend:
+    """Kleine Loopback-Cloud: Upload, Metadaten, sync-data, Löschen, Download."""
+
+    def __init__(self):
+        self.metadata = {}
+        self.revision = 7
+        self.patches = []
+        self.patch_bodies = []
+        self.upload_reply = {"metadata": {"deliverableId": "neu-1"}}
+        self.download_info = {"DownloadInfo": {
+            "contentUrl": "https://example.invalid/buch.epub"}}
+        self.inventory = {"PublicationInventory": {"edata": []}}
+        self.sync_response = None
+        self.ignore_put = False
+        self.hide_metadata = False
+        self.deleted = []
+        self.cover_posts = []
+        self.server = LocalHTTP(self.respond)
+
+    def respond(self, method, path, headers, payload):
+        if path.startswith("/bosh/rest/upload"):
+            return json_reply(self.upload_reply)
+        if path.startswith("/bosh/rest/meta/"):
+            query = parse_qs(urlsplit(path).query)
+            deliverable = query.get("deliverableId", [""])[0]
+            if method == "PUT":
+                if not self.ignore_put:
+                    sent = json.loads(payload or b"{}")
+                    self.metadata.setdefault(deliverable, {}).update(
+                        sent.get("uploadMetaData") or {})
+                return json_reply({})
+            if self.hide_metadata:
+                return json_reply({})
+            return json_reply({
+                "metadata": dict(self.metadata.get(deliverable, {}))})
+        if path.startswith("/bosh/rest/inventory/delta"):
+            return json_reply(self.inventory)
+        if path.startswith("/bosh/rest/sync-data"):
+            body = json.loads(payload or b"{}")
+            self.patch_bodies.append(body)
+            if self.sync_response is not None:
+                return json_reply(self.sync_response)
+            if body.get("patches"):
+                self.revision += 1
+            return json_reply({"revision": self.revision,
+                               "patches": self.patches})
+        if path.startswith("/bosh/rest/cover"):
+            self.cover_posts.append({"headers": headers, "body": payload})
+            return json_reply({})
+        if path.startswith("/bosh/rest/deletecontent"):
+            self.deleted.append(path)
+            return json_reply({})
+        if path.startswith("/bosh/rest/cloud/downloadinfo"):
+            return json_reply(self.download_info)
+        return 404, {}, b""
+
+
+@contextlib.contextmanager
+def write_client(backend):
+    """Client gegen die Loopback-Cloud; Zugang gesetzt, kein Token-Tausch."""
+    with backend.server as server, local_tolino_endpoints(server.origin):
+        client = TolinoClient(1, HARDWARE, refresh="start")
+        client.access, client.expires_at = "acc-1", time.time() + 3600
+        yield client
+
+
+def sent_body(backend, index):
+    return json.loads(backend.server.requests[index]["body"] or b"{}")
+
+
+def read_tag_path(book_id, tag_id=None):
+    path = "/publications/%s/tags" % book_id
+    return "%s/%s" % (path, tag_id) if tag_id else path
+
+
+class UploadTests(unittest.TestCase):
+    """Ein Upload muss als vollständiger Multipart-Body ankommen."""
+
+    def test_the_file_is_sent_as_multipart_and_its_new_id_returned(self):
+        backend = Backend()
+        with write_client(backend) as client, self.temporary_epub() as path:
+            self.assertEqual("neu-1", client.upload(path))
+        request = backend.server.requests[0]
+        self.assertEqual("POST", request["method"])
+        self.assertTrue(request["path"].endswith("/upload"))
+        self.assertIn("multipart/form-data; boundary=",
+                      request["headers"]["content-type"])
+        self.assertIn(b'filename="Buch.epub"', request["body"])
+        self.assertIn(b"EPUB-DATEN", request["body"])
+        self.assertIn(b"application/epub+zip", request["body"])
+        self.assertEqual("acc-1", request["headers"]["t_auth_token"])
+
+    def test_an_unconfirmed_upload_is_an_error(self):
+        backend = Backend()
+        backend.upload_reply = {"metadata": {}}
+        with write_client(backend) as client, self.temporary_epub() as path:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.upload(path)
+        self.assertEqual("N02", caught.exception.code)
+        self.assertIn("deliverableId", str(caught.exception))
+
+    def temporary_epub(self):
+        """Wegwerf-Datei mit EPUB-Inhalt, damit der MIME-Typ echt ist."""
+        import tempfile, pathlib
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = pathlib.Path(directory.name, "Buch.epub")
+        path.write_bytes(b"EPUB-DATEN")
+        return contextlib.nullcontext(str(path))
+
+
+class CoverTests(unittest.TestCase):
+    """Cover-Upload: Control-Block und Deliverable-ID wie vom Server erwartet."""
+
+    def test_the_cover_is_sent_with_control_block_and_deliverable(self):
+        backend = Backend()
+        data = b"\x89PNG\r\n\x1a\nCOVERDATEN"
+        with write_client(backend) as client:
+            client.upload_cover("d1", data, ".png")
+        self.assertEqual(1, len(backend.cover_posts))
+        post = backend.cover_posts[0]
+        body = post["body"]
+        self.assertIn("multipart/form-data; boundary=",
+                      post["headers"]["content-type"])
+        self.assertIn(b'name="deliverableId"', body)
+        self.assertIn(b"d1", body)
+        self.assertIn(b'name="control"', body)
+        self.assertIn(b'"filesize":%d' % len(data), body)
+        self.assertIn(b'filename="cover.png"', body)
+        self.assertIn(data, body)
+
+
+class MetadataTests(unittest.TestCase):
+    """Metadaten werden gemerged und nur nach Read-back bestätigt."""
+
+    def test_fields_are_merged_and_read_back(self):
+        backend = Backend()
+        backend.metadata["d1"] = {"title": "Alt", "author": "A", "isbn": ""}
+        with write_client(backend) as client:
+            result = client.update_metadata(
+                "d1", {"title": "Neu", "isbn": "9780306406157"})
+        self.assertEqual({"title": "Neu", "author": "A",
+                          "isbn": "9780306406157"}, result)
+        self.assertEqual(["GET", "PUT", "GET"],
+                         [r["method"] for r in backend.server.requests])
+        self.assertEqual({"title": "Neu", "author": "A",
+                          "isbn": "9780306406157"},
+                         sent_body(backend, 1)["uploadMetaData"])
+
+    def test_a_silently_ignored_update_is_reported(self):
+        backend = Backend()
+        backend.metadata["d1"] = {"title": "Alt"}
+        backend.ignore_put = True
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.update_metadata("d1", {"title": "Neu"})
+        self.assertEqual("N02", caught.exception.code)
+        self.assertIn("nicht best", str(caught.exception))
+
+    def test_an_empty_update_never_reaches_the_network(self):
+        backend = Backend()
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.update_metadata("d1", {})
+        self.assertEqual("E99", caught.exception.code)
+        self.assertEqual([], backend.server.requests)
+
+    def test_a_book_without_metadata_in_the_cloud_is_an_error(self):
+        backend = Backend()
+        backend.hide_metadata = True
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.update_metadata("unbekannt", {"title": "Neu"})
+        self.assertEqual("N02", caught.exception.code)
+        self.assertIn("keine Metadaten", str(caught.exception))
+
+
+class FakeResponse:
+    """Opener-Antwort an der Netznaht; liefert die fertigen Bytes."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def read(self):
+        return self.data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def download_backend(content_url):
+    backend = Backend()
+    backend.download_info = {"DownloadInfo": {"contentUrl": content_url}}
+    return backend
+
+
+def credentials(request):
+    """ALLE Kopfzeilen: regulaere und nicht weiterleitbare."""
+    return ({name.lower() for name in request.headers}
+            | {name.lower() for name in request.unredirected_hdrs})
+
+
+def content_opener(payload):
+    """Opener-Doppel nur fuer den Inhalt; die lokale Cloud bleibt echt."""
+    seen = []
+
+    def open_(request, timeout=None, **_kwargs):
+        seen.append(request)
+        return FakeResponse(payload)
+
+    return types.SimpleNamespace(open=open_), seen
+
+
+class DownloadContentTests(unittest.TestCase):
+    """Der Inhalt kommt als Bytes -- Zugangsdaten nur an pageplace."""
+
+    def test_the_downloaded_bytes_are_returned(self):
+        backend = download_backend("https://cdn.pageplace.de/buch.epub")
+        opener, seen = content_opener(b"EPUB-INHALT")
+        with write_client(backend) as client, patch(
+                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
+            self.assertEqual(b"EPUB-INHALT", client.download("d1"))
+        request = seen[0]
+        self.assertEqual("https://cdn.pageplace.de/buch.epub",
+                         request.full_url)
+        self.assertIn("t_auth_token", credentials(request))
+        # Der Zugangstoken darf einer Weiterleitung NICHT folgen.
+        self.assertIn("t_auth_token",
+                      {name.lower() for name in request.unredirected_hdrs})
+        self.assertNotIn("t_auth_token",
+                         {name.lower() for name in request.headers})
+
+    def test_a_foreign_cdn_gets_no_credentials(self):
+        backend = download_backend("https://cdn.example.test/buch.epub")
+        opener, seen = content_opener(b"PDF")
+        with write_client(backend) as client, patch(
+                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
+            self.assertEqual(b"PDF", client.download("d1"))
+        headers = credentials(seen[0])
+        for name in ("t_auth_token", "hardware_id", "reseller_id"):
+            self.assertNotIn(name, headers)
+
+    
+
+
+class RedirectTests(unittest.TestCase):
+    """Eine unsichere Weiterleitung wird abgelehnt, bevor sie kontaktiert wird.
+
+    Der Handler sitzt in `_DOWNLOAD_OPENER`; `download` folgt jeder
+    Weiterleitung nur ueber ihn.
+    """
+
+    def handler(self):
+        return tolino_module._SafeRedirects()
+
+    def test_an_https_target_is_followed(self):
+        request = Request("https://cdn.example.test/buch.epub")
+        followed = self.handler().redirect_request(
+            request, None, 302, {}, {},
+            "https://cdn.example.test/neu.epub")
+        self.assertEqual("https://cdn.example.test/neu.epub",
+                         followed.full_url)
+
+    def test_a_plain_http_target_is_refused(self):
+        response = types.SimpleNamespace(closed=False)
+        response.close = lambda: setattr(response, "closed", True)
+        request = Request("https://cdn.example.test/buch.epub")
+        with self.assertRaises(TolinoApiError) as caught:
+            self.handler().redirect_request(
+                request, response, 302, {}, {},
+                "http://cdn.example.test/neu.epub")
+        self.assertEqual("N02", caught.exception.code)
+        self.assertTrue(response.closed)
+
+
+class ReadMarkTests(unittest.TestCase):
+    """Gelesen-Marken: ein PATCH mit der aktuellen Revision, nie doppelt."""
+
+    def test_all_books_are_marked_in_one_patch_with_the_read_revision(self):
+        backend = Backend()
+        with write_client(backend) as client:
+            self.assertEqual(8, client.mark_read_many(["d1", "d2", "d1"]))
+        body = backend.patch_bodies[-1]
+        self.assertEqual(7, body["revision"])
+        self.assertEqual([read_tag_path("d1"), read_tag_path("d2")],
+                         [entry["path"] for entry in body["patches"]])
+        for entry in body["patches"]:
+            self.assertEqual("add", entry["op"])
+            self.assertEqual(READ_TAG, entry["value"]["name"])
+            self.assertEqual("system", entry["value"]["category"])
+
+    def test_unreading_removes_only_the_mark_that_exists(self):
+        backend = Backend()
+        backend.patches = [
+            {"op": "add", "path": read_tag_path("d1", "tag-9"),
+             "value": {"name": READ_TAG, "category": "system",
+                       "revision": 3}},
+            {"op": "add", "path": "/publications/d2/tags/tag-8",
+             "value": {"name": "Grenzwelten", "category": "collection"}},
+        ]
+        with write_client(backend) as client:
+            client.mark_read_many(["d1", "d2"], finished=False)
+        body = backend.patch_bodies[-1]
+        self.assertEqual(1, len(body["patches"]))
+        entry = body["patches"][0]
+        self.assertEqual(("remove", read_tag_path("d1", "tag-9")),
+                         (entry["op"], entry["path"]))
+        self.assertEqual(("system", 3),
+                         (entry["value"]["category"],
+                          entry["value"]["revision"]))
+
+    def test_a_missing_revision_is_never_sent_as_null(self):
+        backend = Backend()
+        backend.revision = None
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.mark_read_many(["d1"])
+        self.assertEqual("N02", caught.exception.code)
+        # Nur der lesende PATCH ging raus; ohne Revision wird nicht geschrieben.
+        self.assertEqual([{"revision": None, "patches": []}],
+                         backend.patch_bodies)
+
+    def test_unreading_removes_both_cloud_spellings(self):
+        backend = Backend()
+        backend.patches = [
+            {"op": "add", "path": read_tag_path("d1", "tag-1"),
+             "value": {"name": READ_TAG, "category": "system",
+                       "revision": 3}},
+            {"op": "add", "path": read_tag_path("d1", "tag-2"),
+             "value": {"name": READ_TAG, "category": "collection",
+                       "revision": 4}},
+        ]
+        with write_client(backend) as client:
+            client.mark_read_many(["d1"], finished=False)
+        body = backend.patch_bodies[-1]
+        self.assertEqual(
+            [("remove", "system", "tag-1"),
+             ("remove", "collection", "tag-2")],
+            [(entry["op"], entry["value"]["category"],
+              entry["path"].rsplit("/", 1)[-1])
+             for entry in body["patches"]])
+
+    def test_an_empty_revision_passed_on_is_refused(self):
+        backend = Backend()
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.add_to_collection("d1", "Serie", revision="")
+        self.assertEqual("N02", caught.exception.code)
+        self.assertEqual([], backend.patch_bodies)
+
+    def test_a_malformed_snapshot_is_not_an_empty_read_state(self):
+        backend = Backend()
+        backend.sync_response = {}
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.read_ids()
+            with self.assertRaises(TolinoApiError):
+                client.mark_read_many(["d1"])
+        self.assertEqual("N02", caught.exception.code)
+        # Nur lesende PATCHes, kein Schreibvorgang mit leerem Bestand.
+        self.assertTrue(all(body["patches"] == []
+                            for body in backend.patch_bodies))
+
+    def test_an_already_read_book_causes_no_write(self):
+        backend = Backend()
+        backend.patches = [{"op": "add", "path": read_tag_path("d1"),
+                            "value": {"name": READ_TAG,
+                                      "category": "system"}}]
+        with write_client(backend) as client:
+            self.assertEqual(7, client.mark_read_many(["d1"]))
+        self.assertEqual([], backend.patch_bodies[-1]["patches"])
+
+    def test_marking_without_a_book_is_an_error(self):
+        backend = Backend()
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.mark_read_many(["", "  "])
+        self.assertEqual("E99", caught.exception.code)
+        self.assertEqual([], backend.server.requests)
+
+    def test_a_collection_is_added_with_the_current_revision(self):
+        backend = Backend()
+        with write_client(backend) as client:
+            self.assertEqual(8, client.add_to_collection("d1", "Grenzwelten"))
+        body = backend.patch_bodies[-1]
+        self.assertEqual(7, body["revision"])
+        self.assertEqual({"op": "add", "path": read_tag_path("d1")},
+                         {key: body["patches"][0][key]
+                          for key in ("op", "path")})
+        self.assertEqual(("Grenzwelten", "collection"),
+                         (body["patches"][0]["value"]["name"],
+                          body["patches"][0]["value"]["category"]))
+
+
+class SyncSnapshotCacheTests(unittest.TestCase):
+    """Ein Lesevorgang bedient beide Abfragen; ein Schreibvorgang verwirft ihn."""
+
+    def test_reads_share_one_snapshot_and_a_write_forces_a_new_one(self):
+        backend = Backend()
+        backend.patches = [{"op": "add", "path": read_tag_path("d1"),
+                            "value": {"name": READ_TAG, "category": "system"}}]
+        with write_client(backend) as client:
+            self.assertEqual({"d1"}, client.read_ids())
+            self.assertEqual(set(), client.collection_pairs())
+            client.add_to_collection("d1", "Grenzwelten")
+            self.assertEqual({"d1"}, client.read_ids())
+        reads = [body for body in backend.patch_bodies
+                 if body == {"revision": None, "patches": []}]
+        # Zwei lesende Abrufe: vor und nach dem Schreibvorgang.
+        self.assertEqual(2, len(reads))
+
+
+class InventoryTests(unittest.TestCase):
+    """Ein teilweise defekter Bestand ist kein gueltiger Bestand."""
+
+    def test_a_complete_inventory_is_returned(self):
+        backend = Backend()
+        backend.inventory = {"PublicationInventory": {"edata": [
+            {"deliverableId": "d1", "title": "Gut", "authors": "Autor"}]}}
+        with write_client(backend) as client:
+            self.assertEqual(["d1"],
+                             [row["tolino_id"] for row in client.inventory()])
+
+    def test_a_partly_broken_inventory_is_refused(self):
+        backend = Backend()
+        backend.inventory = {"PublicationInventory": {"edata": [
+            {"deliverableId": "d1", "title": "Gut"},
+            {"title": "Ohne Kennung"}]}}
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.inventory()
+        self.assertEqual("N02", caught.exception.code)
+        self.assertIn("unvollständig", str(caught.exception))
+
+
+class DeleteAndDownloadTests(unittest.TestCase):
+    """Löschen und Download nennen genau eine Kennung -- kodiert, nie roh."""
+
+    def test_delete_names_the_deliverable(self):
+        backend = Backend()
+        with write_client(backend) as client:
+            client.delete("d 1/ä")
+        self.assertEqual(1, len(backend.deleted))
+        self.assertIn("deliverableId=d%201/%C3%A4", backend.deleted[0])
+
+    def test_the_download_info_asks_for_the_base64_id(self):
+        backend = Backend()
+        opener = content_opener(b"x")[0]
+        with write_client(backend) as client, patch(
+                "calibre_plugin.tolino._DOWNLOAD_OPENER", opener):
+            self.assertEqual(b"x", client.download("d1"))
+        # Literaler Wire-Wert: ein Fehler in der Kodierung darf den Sollwert
+        # nicht mitverfaelschen (base64("d1") = "ZDE=", URL-kodiert).
+        self.assertEqual(
+            "/bosh/rest/cloud/downloadinfo/ZDE%3D/ZDE%3D/type/external-download",
+            backend.server.requests[0]["path"])
+
+    def test_a_download_without_a_link_is_an_error(self):
+        backend = Backend()
+        backend.download_info = {"DownloadInfo": {}}
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.download("d1")
+        self.assertEqual("N02", caught.exception.code)
+        self.assertIn("Download-Link", str(caught.exception))
+
+    def test_an_http_download_link_is_refused(self):
+        backend = Backend()
+        backend.download_info = {"DownloadInfo": {
+            "contentUrl": "http://example.invalid/buch.epub"}}
+        with write_client(backend) as client:
+            with self.assertRaises(TolinoApiError) as caught:
+                client.download("d1")
+        self.assertEqual("N02", caught.exception.code)
+        self.assertIn("HTTPS", caught.exception.short)
+
+
+if __name__ == "__main__":
+    unittest.main()

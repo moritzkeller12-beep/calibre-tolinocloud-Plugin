@@ -7,11 +7,28 @@ sofort zurueck; niemand sonst haelt eine zweite Kopie.
 import contextlib
 import threading
 
-from .config import (account_secrets, account_summary, clear_refresh_token,
-                     save_hardware_id, save_refresh_token, settings)
+from .config import (account_secrets, account_summary,
+                     clear_refresh_token_if_unchanged, save_hardware_id,
+                     save_refresh_token, settings, settings_write_lock,
+                     settings_writable)
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
-                     log_info, log_warning, normalize_refresh_token,
-                     sanitize_error)
+                     TolinoError, log_info, log_warning,
+                     normalize_refresh_token, sanitize_error)
+
+
+def _lock_busy(exc):
+    """Der gemeinsame Vault-Lock war belegt -- kein Fehler des Kontos."""
+    return isinstance(exc, TolinoAuthError) and exc.code == "S91"
+
+
+def _partner_number(value):
+    """Buchhaendler-Nummer des Kontos; ohne Angabe der Standardpartner."""
+    if value is None:
+        return 1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 class TokenVault:
@@ -20,21 +37,46 @@ class TokenVault:
     def __init__(self):
         self._lock = threading.Lock()
 
-    def login(self, account_name, partner_id, lock_timeout=5):
-        """Return a logged-in client; the lock covers only the login phase."""
-        with self._held_lock(lock_timeout):
+    def login(self, account_name, partner_id=None, lock_timeout=5, *,
+              keepalive=False):
+        """Login-Client; der Shop steht im Konto (``partner_id`` nur als Ersatz).
+        """
+        guard = settings_write_lock() if keepalive else contextlib.nullcontext()
+        with self._held_lock(lock_timeout), guard:
             values = self._stored_credentials(account_name)
             client = TolinoClient(
-                partner_id, values["hardware_id"], values["refresh_token"],
+                partner_id or values["partner_id"], values["hardware_id"],
+                values["refresh_token"],
                 token_callback=lambda token: save_refresh_token(
                     account_name, token),
                 hardware_callback=lambda hardware: save_hardware_id(
                     account_name, hardware))
-            client.token_rejected_callback = lambda: clear_refresh_token(
-                account_name)
-            if not values["hardware_id"]:
-                # Die erzeugte ID gehoert ins Konto, sonst wechselt sie je Lauf.
-                save_hardware_id(account_name, client.hardware)
+            # Nur der tatsaechlich eingeloeste Token darf verschwinden: ein
+            # paralleler Refresh (Keep-alive, zweite Instanz) oder ein
+            # `relogin()` kann inzwischen einen anderen gespeichert haben.
+            client.token_rejected_callback = (
+                lambda rejected: clear_refresh_token_if_unchanged(
+                    account_name, rejected))
+            if not values["hardware_id"] and not save_hardware_id(
+                    account_name, client.hardware):
+                # Die erzeugte ID gehoert ins Konto, sonst wechselt sie je Lauf
+                # und tolino zaehlt jedes Mal ein neues Geraet.
+                raise TolinoError(
+                    "Die Geräte-ID konnte nicht gespeichert werden. Ohne sie "
+                    "gilt jeder Lauf als neues Gerät; bitte die "
+                    "Einstellungsdatei prüfen und erneut anmelden.",
+                    short="Die Geräte-ID konnte nicht gespeichert werden.",
+                    detail="Einstellungen konnten nicht geschrieben werden.")
+            # Der Tausch selbst muss speicherbar sein: ein rotierter
+            # Einmal-Token waere sonst verbrannt, bevor er im Konto steht.
+            if not settings_writable():
+                raise TolinoError(
+                    "Die Einstellungen sind nicht beschreibbar; der Zugang "
+                    "wird nicht erneuert.",
+                    short="Die Einstellungen konnten nicht gespeichert "
+                          "werden. " + RELOGIN,
+                    detail="Token-Tausch ohne speicherbare Rotation "
+                           "abgelehnt.")
             # Erst anmelden, dann den Vault einhaengen: `login()` wuerde
             # sonst ueber `relogin()` den bereits gehaltenen Lock anfordern.
             client.login()
@@ -61,7 +103,8 @@ class TokenVault:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
                                   code="A01")
         return {"refresh_token": refresh,
-                "hardware_id": str(account.get("hardware_id") or "")}
+                "hardware_id": str(account.get("hardware_id") or ""),
+                "partner_id": _partner_number(account.get("partner_id"))}
 
     def relogin(self, client, timeout=30):
         """Refresh once under the shared lock using the freshest saved token.
@@ -72,6 +115,18 @@ class TokenVault:
         """
         with self._held_lock(timeout):
             values = self._stored_credentials(client.account_name)
+            if values["partner_id"] != client.partner_id:
+                # Der gespeicherte Token gilt fuer den Buchhaendler des
+                # Kontos. Ein Client fuer einen anderen Shop darf ihn nicht
+                # einloesen: der Server lehnte ihn ab und der Vault loeschte
+                # einen gueltigen Token.
+                raise TolinoAuthError(
+                    "Das gespeicherte Konto gehoert zu einem anderen "
+                    "Buchhändler (Partner %s statt %s). "
+                    % (values["partner_id"], client.partner_id) + RELOGIN,
+                    code="A01",
+                    short="Die Anmeldung gehört zu einem anderen Buchhändler.",
+                    detail="Bitte mit dem hinterlegten Buchhändler anmelden.")
             client.refresh = values["refresh_token"]
             client.hardware = values["hardware_id"] or client.hardware
             # `_login()` meldet den neuen Token ueber den Callback, der ihn
@@ -80,6 +135,12 @@ class TokenVault:
 
     def keepalive_refresh(self):
         """Refresh saved accounts; return only the number of rotations."""
+        if not settings_writable():
+            # Ein Token, dessen Rotation nicht gespeichert werden kann, waere
+            # verbrannt: lieber gar nicht erst einloesen.
+            log_warning("Tolino-Keep-alive: Einstellungen sind nicht "
+                        "speicherbar; es wird nichts erneuert.")
+            return 0
         try:
             accounts = settings()["accounts"]
         except Exception:
@@ -89,14 +150,17 @@ class TokenVault:
         rotated = 0
         for account in accounts:
             name = str(account.get("name") or "")
-            if not name or not str(account.get("refresh_token") or "").strip():
+            # Dieselbe Normalisierung wie im Login: was danach leer ist,
+            # waere ohnehin ein «nicht angemeldet».
+            if not name or not normalize_refresh_token(
+                    account.get("refresh_token")):
                 continue
             try:
-                self.login(name, account.get("partner_id"), lock_timeout=0)
+                self.login(name, lock_timeout=0, keepalive=True)
                 rotated += 1
             except Exception as exc:
-                # Ein belegter Lock (S91) ist kein Fehler -- nächste Runde.
-                if isinstance(exc, TolinoAuthError) and exc.code == "S91":
+                # Ein belegter Lock ist kein Fehler -- nächste Runde.
+                if _lock_busy(exc):
                     continue
                 log_warning("Tolino-Keep-alive fehlgeschlagen (%s): %s"
                             % (name, sanitize_error(
@@ -157,12 +221,12 @@ def stop_token_keepalive(timeout=2):
         return True
 
 
-def check_stored_login(account_name, partner_id, lock_timeout=5):
+def check_stored_login(account_name, partner_id=None, lock_timeout=5):
     """Check one saved account through the shared refresh-token lock."""
     try:
         TOKEN_VAULT.login(account_name, partner_id, lock_timeout)
         return "valid", ""
     except Exception as exc:
-        if isinstance(exc, TolinoAuthError) and exc.code == "S91":
+        if _lock_busy(exc):
             return "busy", ""
         return "invalid", sanitize_error(exc, account_secrets(account_name))

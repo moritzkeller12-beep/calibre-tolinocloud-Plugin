@@ -46,9 +46,8 @@ def is_valid_isbn(value):
     if len(digits) == 10:
         total = 0
         for index, character in enumerate(digits):
-            if character == "X":
-                if index != 9:
-                    return False
+            # Das X steht nur an letzter Stelle fuer die Pruefziffer 10.
+            if character == "X" and index == 9:
                 digit = 10
             elif character.isdigit():
                 digit = int(character)
@@ -151,8 +150,3 @@ def authors_match(left, right):
     if _has_umlaut(left) or _has_umlaut(right):
         return _tokens_match(author_tokens(left), author_tokens(right))
     return False
-
-
-def normalized_authors(value):
-    """Return a stable author lookup key."""
-    return " ".join(author_tokens(value))

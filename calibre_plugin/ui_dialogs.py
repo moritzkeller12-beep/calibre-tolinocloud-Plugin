@@ -1,13 +1,14 @@
 """Dialoge für den tolino-Bibliotheksvergleich."""
+import os
 import re
 from typing import NamedTuple
 
-from .ui_common import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                        QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-                        QMenu, QPushButton, QTableWidget, QTableWidgetItem,
-                        QVBoxLayout, QStyledItemDelegate, QEvent, Qt,
-                        _set_enabled, gui_guard, start_call)
-from .planning_values import plural
+from qt.core import (QCheckBox, QComboBox, QDialog, QEvent, QFileDialog,
+                     QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox,
+                     QPushButton, QStyledItemDelegate, QTableWidget,
+                     QTableWidgetItem, QVBoxLayout, Qt)
+from .ui_common import _set_enabled, gui_guard, start_call
+from .planning import plural
 from calibre.gui2 import error_dialog, info_dialog
 from .comparison import comparison_sort_key, sort_comparison_rows
 from .library import TOLINO_IGNORE_COLUMN
@@ -27,6 +28,26 @@ def _by_title(row):
 def _by_authors(row):
     return (str(row.get("authors") or "").casefold(),
             str(row.get("title") or "").casefold())
+
+
+def download_target(path, data):
+    """Dateiendung an den gelieferten Inhalt anpassen (EPUB/PDF)."""
+    path = str(path)
+    if path.casefold().endswith(".epub") and data[:4] == b"%PDF":
+        return path[:-5] + ".pdf"
+    if path.casefold().endswith(".pdf") and data[:4] == b"PK\x03\x04":
+        return path[:-4] + ".epub"
+    return path
+
+
+def _confirm_overwrite(parent, path):
+    """Rueckfrage vor dem Ueberschreiben einer vorhandenen Datei."""
+    buttons = QMessageBox.StandardButton
+    answer = QMessageBox.question(
+        parent, "Datei überschreiben",
+        "Die Datei\n%s\nexistiert bereits. Überschreiben?" % path,
+        buttons.Yes | buttons.No, buttons.No)
+    return answer == buttons.Yes
 
 
 def _by_field(field):
@@ -79,15 +100,27 @@ class _Column(NamedTuple):
 _READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
 _READ_COLUMN_TOOLTIP = ("Auswahl = gelesen; keine Auswahl = ungelesen. Die "
                         "Calibre-Spalte #tolino_read ist nur informativ.")
+class _ActionSpec(NamedTuple):
+    """Eine Auswahlspalte: Schlüssel, Titel, Tooltip, Sortierung, Texte."""
+
+    key: str
+    label: str
+    tooltip: str
+    sort_key: object
+    feedback: tuple
+
+
 # EINE Quelle fuer Spalten, Auswahlschluessel und Rueckmeldungstexte.
 _ACTION_SPECS = (
-    ("upload", "Upload", "Buchdatei in die Cloud hochladen.",
-     comparison_sort_key, ("Upload aktiviert", "Upload deaktiviert")),
-    ("metadata", "Metadaten",
-     "Titel, Autor und ISBN ohne Upload aktualisieren.",
-     _metadata_first, ("Metadaten aktiviert", "Metadaten deaktiviert")),
-    ("read", "Gelesen", _READ_COLUMN_TOOLTIP, _read_first,
-     ("Als gelesen markiert", "Als ungelesen markiert")),
+    _ActionSpec("upload", "Upload", "Buchdatei in die Cloud hochladen.",
+                comparison_sort_key,
+                ("Upload aktiviert", "Upload deaktiviert")),
+    _ActionSpec("metadata", "Metadaten",
+                "Titel, Autor und ISBN ohne Upload aktualisieren.",
+                _metadata_first,
+                ("Metadaten aktiviert", "Metadaten deaktiviert")),
+    _ActionSpec("read", "Gelesen", _READ_COLUMN_TOOLTIP, _read_first,
+                ("Als gelesen markiert", "Als ungelesen markiert")),
 )
 
 
@@ -177,14 +210,15 @@ class InventoryDialog(QDialog):
     Sammelaktionen sind getrennt erreichbar.
     """
 
-    ACTION_KEYS = tuple(spec[0] for spec in _ACTION_SPECS)
+    ACTION_KEYS = tuple(spec.key for spec in _ACTION_SPECS)
     ACTION_COLUMNS = tuple(
-        _Column(spec[1], spec[2], spec[3]) for spec in _ACTION_SPECS)
+        _Column(spec.label, spec.tooltip, spec.sort_key)
+        for spec in _ACTION_SPECS)
     ACTION_LABELS = {
-        (spec[0], enabled): spec[4][0 if enabled else 1]
+        (spec.key, enabled): spec.feedback[0 if enabled else 1]
         for spec in _ACTION_SPECS for enabled in (True, False)
     }
-    ACTION_TOOLTIPS = {spec[0]: spec[2] for spec in _ACTION_SPECS}
+    ACTION_TOOLTIPS = {spec.key: spec.tooltip for spec in _ACTION_SPECS}
     ACTION_TOOLTIPS["read"] = (_READ_TOOLTIP
                                + " Im ausgewählten tolino-Konto änderbar.")
     DATA_COLUMNS = (
@@ -431,7 +465,7 @@ class InventoryDialog(QDialog):
             "Überträgt die ausgewählten Änderungen.")
         cancel = QPushButton("Abbrechen")
         cancel.setToolTip(
-            "Schließt den Vergleich, ohne Änderungen.")
+            "Schliesst den Vergleich, ohne Änderungen.")
         confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
         self.confirm = confirm
@@ -494,7 +528,7 @@ class InventoryDialog(QDialog):
         if column in range(len(self.ACTION_COLUMNS)):
             self._choice_changed(item.row(), column)
 
-    def _clear_selection(self):
+    def clear_all_selection(self):
         """Auswahl und Löschmarkierungen in einem Schritt zurücksetzen."""
         for row in self.rows:
             row.pop("delete_cloud", None)
@@ -503,29 +537,22 @@ class InventoryDialog(QDialog):
             state.chosen = state.cloud
         self._rebuild_table(self.rows)
 
-    def _set_selection(self, chooser):
-        """Auswahl in einem Schritt setzen (Zeilen und Zellen synchron).
+    def apply_recommended(self):
+        """Die vorgeschlagenen Aktionen für alle Zeilen auswählen.
 
-        Der Lesestatus bleibt bei Empfehlungen unverändert. Zum Löschen
-        markierte Zeilen bleiben unberührt.
+        Zeilen und Zellen bleiben synchron. Der Lesestatus bleibt bei
+        Empfehlungen unverändert; zum Löschen markierte Zeilen unberührt.
         """
         for index, row in enumerate(self.rows):
             caps = row_capabilities(row)
             if not caps["usable"]:
                 continue
-            wanted = tuple(chooser(row))
+            wanted = tuple(self.default_actions(row))
             for column, key in enumerate(self.ACTION_KEYS[:2]):
                 checked = bool(wanted[column]) and caps[key]
                 row[key] = checked
                 self._set_check_quietly(index, column, checked)
         self._update_summary()
-
-    def apply_recommended(self):
-        """Die vorgeschlagenen Aktionen für alle Zeilen auswählen."""
-        self._set_selection(self.default_actions)
-
-    def clear_all_selection(self):
-        self._clear_selection()
 
     def automatic_actions_enabled(self):
         """Tun Automatiken ohne Auswahl WIRKLICH etwas?
@@ -991,19 +1018,23 @@ class InventoryDialog(QDialog):
         path = self._download_path
         self._end_action()
         data = bytes(result or b"")
-        is_pdf = data[:4] == b"%PDF"
-        is_epub = data[:4] == b"PK\x03\x04"
-        if path.casefold().endswith(".epub") and is_pdf:
-            path = path[:-5] + ".pdf"
-        elif path.casefold().endswith(".pdf") and is_epub:
-            path = path[:-4] + ".epub"
-        if not (is_pdf or is_epub):
+        if data[:4] not in (b"%PDF", b"PK\x03\x04"):
             # Eine HTML-Fehlerseite oder ein leerer Body ist kein Buch.
             error_dialog(
                 self, "Download ungültig",
                 "Die Cloud-Antwort ist keine EPUB- oder PDF-Datei. "
                 "Gespeichert wurde nichts.", show=True)
             return
+        target = download_target(path, data)
+        if target != path and os.path.exists(target):
+            # Die nachtraeglich angepasste Endung darf keine vorhandene
+            # Datei ohne Rueckfrage ueberschreiben.
+            if not _confirm_overwrite(self, target):
+                info_dialog(self, "Nicht gespeichert",
+                            "Es wurde nichts gespeichert.", show=True,
+                            show_copy_button=False)
+                return
+        path = target
         try:
             with open(path, "wb") as handle:
                 handle.write(data)

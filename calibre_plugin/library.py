@@ -24,26 +24,18 @@ DEFAULT_LIBRARY_SCOPE = hashlib.sha256(
 def library_scope(database):
     """Return a stable short namespace for one Calibre library.
 
-    `library_id` is preferred; `dbpath` is the fallback for older Calibre
-    versions. Hashing keeps the state key short and avoids embedding a
-    filesystem path in preferences. If both are unavailable, a fixed
-    placeholder scope keeps fallback keys namespaced instead of recreating
+    `library_id` is the stable scope; a library that has none is still
+    distinguished by its ``dbpath``. Hashing keeps the state key short and
+    avoids embedding a path in preferences. Without either identifier a
+    fixed placeholder keeps fallback keys namespaced instead of recreating
     the old unscoped ``calibre-<id>`` form.
     """
-    raw = (getattr(database, "library_id", "")
-           or getattr(database, "dbpath", ""))
-    text = str(raw or "").strip()
+    text = str(getattr(database, "library_id", "") or "").strip()
+    if not text:
+        text = str(getattr(database, "dbpath", "") or "").strip()
     if not text:
         return DEFAULT_LIBRARY_SCOPE
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-
-
-def _column_value(metadata):
-    """Read the raw Calibre custom-column value."""
-    getter = getattr(metadata, "get", None)
-    if callable(getter):
-        return getter(TOLINO_COLUMN, "") or ""
-    return ""
 
 
 def _decode_tolino_ids(value):
@@ -69,12 +61,6 @@ def _encode_tolino_ids(ids):
                       separators=(",", ":")) if ids else ""
 
 
-def metadata_tolino_id(metadata, account_name=None):
-    """Read this account's ID from its account-map column."""
-    account_ids = _decode_tolino_ids(_column_value(metadata))
-    return str(account_ids.get(str(account_name), "") or "").strip()
-
-
 def _column_available(database, column, datatypes):
     fields = database.field_metadata
     return column in fields and fields[column].get("datatype") in datatypes
@@ -89,15 +75,9 @@ def bool_column_available(database, column):
     return _column_available(database, column, ("bool",))
 
 
-def integer_column_available(database, column):
-    """True, wenn Calibre ``column`` als Zahl (int/float) kennt."""
-    return _column_available(database, column, ("int", "float"))
-
-
 def bool_column_value(metadata, column):
     """Ja/Nein-Wert einer Spalte: True, False oder None (leer/unbekannt)."""
-    getter = getattr(metadata, "get", None)
-    value = getter(column, None) if callable(getter) else None
+    value = metadata.get(column, None)
     if isinstance(value, bool):
         return value
     text = str(value if value is not None else "").strip().casefold()
@@ -130,15 +110,28 @@ CUSTOM_COLUMNS = (
 COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein",
                      "int": "Zahl", "float": "Zahl"}
 
-# In dieser Calibre-Sitzung angelegte Spalten. Calibre fuehrt eine neue
-# Spalte in `field_metadata` erst nach einem Neustart -- ohne diesen Merker
-# wollte ein zweiter Klick dieselben Spalten erneut anlegen.
-CREATED_COLUMNS = set()
+# Spalten, die dieses Plugin in DIESER Calibre-Sitzung angelegt hat -- je
+# Bibliothek, denn ein Bibliothekswechsel bringt eine andere field_metadata.
+# Calibre fuehrt eine neue Spalte erst nach einem Neustart in
+# `field_metadata`; ohne diesen Merker wollte ein zweiter Klick dieselbe
+# Spalte erneut anlegen.
+CREATED_COLUMNS = {}
+
+
+def _library_key(database):
+    """Kennung der Bibliothek; LibraryDatabase/Cache tragen dbpath."""
+    for holder in (database, getattr(database, "new_api", None)):
+        dbpath = getattr(holder, "dbpath", None)
+        if isinstance(dbpath, str) and dbpath:
+            return dbpath
+    return id(database)
 
 
 def _column_present(database, label):
     """True, wenn die Spalte in der Bibliothek (oder in dieser Sitzung) da ist."""
-    return label in CREATED_COLUMNS or ("#" + label) in database.field_metadata
+    if label in CREATED_COLUMNS.get(_library_key(database), ()):
+        return True
+    return ("#" + label) in database.field_metadata
 
 
 def create_custom_columns(database, labels=None):
@@ -153,8 +146,10 @@ def create_custom_columns(database, labels=None):
     legt so ein Knopf je Spalte nur SEINE Spalte an. Fehlt nichts, wird
     auch die Calibre-Schnittstelle nicht befragt.
 
-    Eine neu angelegte Spalte ist in der laufenden Oberflaeche erst nach
-    einem Neustart von Calibre nutzbar.
+    Calibre fuehrt eine neue Spalte erst nach einem Neustart in
+    ``field_metadata``; bis dahin bleibt sie fuer dieses Plugin unbekannt
+    und wird nicht beschrieben. Der Merker ``CREATED_COLUMNS`` verhindert
+    nur, dass ein zweiter Klick dieselbe Spalte erneut anlegen will.
     """
     wanted = None if labels is None else set(labels)
     selected = (CUSTOM_COLUMNS if wanted is None else
@@ -176,7 +171,8 @@ def create_custom_columns(database, labels=None):
     created = []
     for label, name, datatype in missing:
         create(label, name, datatype, False, editable=True, display={})
-        CREATED_COLUMNS.add(label)
+        CREATED_COLUMNS.setdefault(
+            _library_key(database), set()).add(label)
         created.append(label)
     return created
 
@@ -190,8 +186,8 @@ def column_state(database):
     """
     return {"id": TOLINO_COLUMN in database.field_metadata,
             "read": bool_column_available(database, TOLINO_READ_COLUMN),
-            "progress": integer_column_available(
-                database, TOLINO_PROGRESS_COLUMN)}
+            "progress": _column_available(
+                database, TOLINO_PROGRESS_COLUMN, ("int", "float"))}
 
 
 _SKIP = object()
@@ -253,11 +249,12 @@ def update_progress_status(database, updates):
 
 
 def update_tolino_ids(database, updates, account_name=None):
-    """Merge this account's IDs into the shared Calibre custom column.
+    """Spiegele die IDs dieses Kontos in die gemeinsame Calibre-Spalte.
 
-    A historic plain value is replaced by the account map after a warning;
-    it cannot be assigned to an account safely and would otherwise block
-    the per-account updates.
+    Fuehrend fuer den Abgleich ist allein der Konto-State; ``#tolino_id``
+    zeigt nur, was dort steht. Die Spalte speichert ausschliesslich die
+    Konto-Zuordnung: ein blanker Wert liesse sich keinem Konto sicher
+    zuordnen und wird durch diesen Schreibvorgang ersetzt.
     """
     if not updates or TOLINO_COLUMN not in database.field_metadata:
         return 0
@@ -266,15 +263,12 @@ def update_tolino_ids(database, updates, account_name=None):
         return 0
     api = database.new_api
     values = {}
-    legacy_replaced = False
     for book_id, tolino_id in updates:
         if book_id is None or not api.has_id(book_id):
             continue
         new_id = str(tolino_id or "").strip()
-        raw = api.field_for(TOLINO_COLUMN, book_id)
-        if raw and not str(raw).strip().startswith("{"):
-            legacy_replaced = True
-        account_ids = _decode_tolino_ids(raw)
+        account_ids = _decode_tolino_ids(
+            api.field_for(TOLINO_COLUMN, book_id))
         if new_id:
             account_ids[account_name] = new_id
         else:
@@ -283,10 +277,6 @@ def update_tolino_ids(database, updates, account_name=None):
     if not values:
         return 0
     api.set_field(TOLINO_COLUMN, values)
-    if legacy_replaced:
-        from .tolino import log_warning
-        log_warning("Alte Einzel-ID in #tolino_id wurde durch die "
-                    "kontobezogene Zuordnung ersetzt.")
     return len(values)
 
 

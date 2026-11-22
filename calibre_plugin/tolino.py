@@ -10,7 +10,8 @@ import traceback
 import uuid
 from urllib.error import HTTPError
 from urllib.parse import urlencode, quote as _url_quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import (HTTPRedirectHandler, Request, build_opener,
+                           urlopen)
 
 from .errors import TolinoApiError, TolinoAuthError, TolinoError
 from .inventory import parse_inventory
@@ -140,6 +141,32 @@ _BOT_CHECK_MARKERS = (
     "zugriff geblockt", "access denied", "captcha", "cloudfront",
     "request blocked", "<!doctype html",
 )
+
+
+class _SafeRedirects(HTTPRedirectHandler):
+    """Prueft ein Weiterleitungsziel, bevor urllib es kontaktiert.
+
+    Die Pruefung des finalen Links nach `urlopen` kommt zu spaet: urllib
+    hat das Ziel dann bereits angesprochen. Der Handler lehnt eine unsichere
+    Weiterleitung deshalb schon beim Folgen ab.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urlsplit(str(newurl))
+        if target.scheme.casefold() != "https" or not target.hostname:
+            # Der abgelehnte Antwort-Stream wird nicht mehr gebraucht und
+            # sonst erst vom Garbage Collector geschlossen.
+            if fp is not None:
+                fp.close()
+            raise TolinoApiError(
+                "Der Download wurde auf eine unsichere URL umgeleitet.",
+                code="N02",
+                short="tolino hat einen unsicheren Download-Link geliefert.")
+        return HTTPRedirectHandler.redirect_request(
+            self, req, fp, code, msg, headers, newurl)
+
+
+_DOWNLOAD_OPENER = build_opener(_SafeRedirects())
 
 
 def _raise_transport_error(exc, secrets):
@@ -275,17 +302,24 @@ class TolinoClient:
         self.token_vault = None
         self._in_device_recovery = False
         self._hw_registered_now = False
+        # Eine uebernommene Geraete-ID wird erst gespeichert, wenn der
+        # Wiederholungsversuch bestaetigt, dass sie funktioniert.
+        self._hw_adopted = False
         self._login_lock = threading.Lock()
         # Ein Lesevorgang der sync-data reicht, bis etwas geschrieben wird:
         # Lese-Status und Sammlungen brauchen dieselben Daten.
         self._sync_cache = None
 
+    def _access_valid(self):
+        """Ein noch gueltiger Zugang erspart einen zweiten Token-Tausch."""
+        return bool(self.access) and time.time() < self.expires_at
+
     def login(self):
         # A valid access token avoids spending the rotating refresh token twice.
-        if self.access and time.time() < self.expires_at:
+        if self._access_valid():
             return self.refresh
         with self._login_lock:
-            if self.access and time.time() < self.expires_at:
+            if self._access_valid():
                 return self.refresh
             if self.token_vault is None:
                 return self._login()
@@ -299,29 +333,57 @@ class TolinoClient:
             raise TolinoAuthError("Ungültige Anmelde-Antwort.", code="A01", detail="kein access_token")
         previous_refresh = self.refresh
         self.access = data["access_token"]
-        new_refresh = data.get("refresh_token", self.refresh)
+        new_refresh = normalize_refresh_token(
+            data.get("refresh_token") or self.refresh)
+        if not new_refresh:
+            # Ein leerer Ersatz waere der Verlust der Anmeldung: der
+            # gespeicherte Token bleibt unangetastet.
+            self.access = None
+            self.expires_at = 0
+            raise TolinoAuthError("Ungültige Anmelde-Antwort.", code="A01",
+                                  detail="kein refresh_token")
         # Den rotierten Single-Use-Token vor weiteren Anfragen speichern.
         self.refresh = new_refresh
         if new_refresh != previous_refresh and self.token_callback:
             try:
-                self.token_callback(self.refresh)
+                # Rueckgabe ``False`` heisst: nicht gespeichert. ``None`` ist
+                # bei allgemeinen Callbacks dagegen ein normaler Erfolg.
+                stored = self.token_callback(self.refresh)
+                detail = ""
             except Exception as exc:
-                detail = sanitize_error(exc, (previous_refresh, new_refresh, self.access))
+                stored, detail = False, sanitize_error(
+                    exc, (previous_refresh, new_refresh, self.access))
+            if stored is False:
+                # Der neue Token ist gueltig, aber nicht gesichert: die
+                # Anmeldung darf nicht als gelungen gelten. Den bisherigen
+                # gespeicherten Token nicht loeschen -- der Schreibfehler
+                # sagt nichts ueber seine Gueltigkeit aus.
                 self.access = None
+                self.expires_at = 0
                 raise TolinoAuthError(
                     "Der erneuerte Zugang konnte nicht gespeichert werden. " + RELOGIN,
-                    code="A01", detail=detail) from None
+                    code="A01",
+                    detail=detail or "Einstellungen konnten nicht geschrieben werden."
+                ) from None
 
-        self.expires_at = time.time() + max(0, int(data.get("expires_in", 3600)) - 60)
+        try:
+            lifetime = int(data.get("expires_in") or 3600)
+        except (TypeError, ValueError):
+            lifetime = 3600
+        self.expires_at = time.time() + max(0, lifetime - 60)
         return self.refresh
 
     def _login(self):
         if not self.refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN, code="A01")
+        # Der Token, der hier wirklich eingeloest wird. Nur er darf bei einer
+        # Ablehnung geloescht werden -- der Vault kann inzwischen einen
+        # anderen (per `relogin` geladenen) gespeichert haben.
+        used_refresh = self.refresh
         payload = {
             "client_id": self.partner["client_id"],
             "grant_type": "refresh_token",
-            "refresh_token": self.refresh,
+            "refresh_token": used_refresh,
             "scope": self.partner["scope"],
         }
         try:
@@ -337,7 +399,7 @@ class TolinoClient:
                 # A stale refresh token must never be tried again.
                 self.refresh = self.access = None
                 self.expires_at = 0
-                self._notify_token_rejected()
+                self._notify_token_rejected(used_refresh)
             if session_ended:
                 raise TolinoAuthError(
                     "Die tolino-Sitzung ist beendet. " + RELOGIN,
@@ -346,50 +408,70 @@ class TolinoClient:
                 raise TolinoAuthError(
                     "tolino hat die gespeicherte Anmeldung abgelehnt. " + RELOGIN,
                     code="A01", detail=detail) from exc
+            if getattr(exc, "code", None) == "N01":
+                # Ein Netzfehler ist keine abgelehnte Anmeldung: der Token
+                # bleibt gültig und die Oberfläche verlangt keinen Neu-Login.
+                raise
             raise TolinoAuthError(
                 "Anmeldung bei tolino fehlgeschlagen: %s" % exc, code="A01",
                 short="Die Anmeldung bei tolino ist fehlgeschlagen.")
 
         return self._apply_token_response(data)
 
-    def _notify_token_rejected(self):
-        """Den abgelehnten Token aus der Config loeschen lassen."""
+    def _notify_token_rejected(self, rejected=""):
+        """Den abgelehnten Token aus der Config loeschen lassen.
+
+        ``rejected`` ist der in diesem Versuch verwendete Token; nur er darf
+        verschwinden, falls inzwischen ein anderer gespeichert ist.
+        """
         callback = self.token_rejected_callback
         if callback:
             try:
-                callback()
+                callback(rejected)
             except Exception as exc:
                 log_warning("Abgelehnter Token konnte nicht geloescht "
-                            "werden: %s" % sanitize_error(exc))
+                            "werden: %s" % sanitize_error(exc, (rejected,)))
 
     def _request(self, url, method="GET", data=None, form=False,
                  authenticated=True, content_type=None, _extra_headers=None):
         retry = {"auth": True, "hardware": True, "waf": 0}
-        while True:
-            if authenticated and (not self.access
-                                  or time.time() >= self.expires_at):
-                self.login()
-            request = self._build_request(url, method, data, form,
-                                          authenticated, content_type,
-                                          _extra_headers)
-            try:
-                with urlopen(request, timeout=self.timeout) as response:
-                    self.last_error_text = None
-                    raw = response.read()
-            except HTTPError as exc:
-                # HTTPError is itself a response wrapper; leaving it open
-                # leaks the socket until the garbage collector runs.
+        try:
+            while True:
+                if authenticated and (not self.access
+                                      or time.time() >= self.expires_at):
+                    self.login()
+                request = self._build_request(url, method, data, form,
+                                              authenticated, content_type,
+                                              _extra_headers)
                 try:
-                    raw_detail = exc.read().decode("utf-8", "replace")
-                finally:
-                    exc.close()
-                # Kehrt nur zurück, wenn ein weiterer Versuch erlaubt ist.
-                self._handle_http_error(exc, raw_detail,
-                                        url, authenticated, retry)
-                continue
-            except OSError as exc:
-                _raise_transport_error(exc, (self.refresh, self.access))
-            return _decode_json(raw)
+                    with urlopen(request, timeout=self.timeout) as response:
+                        self.last_error_text = None
+                        raw = response.read()
+                except HTTPError as exc:
+                    # HTTPError is itself a response wrapper; leaving it open
+                    # leaks the socket until the garbage collector runs.
+                    try:
+                        raw_detail = exc.read().decode("utf-8", "replace")
+                    finally:
+                        exc.close()
+                    # Kehrt nur zurück, wenn ein weiterer Versuch erlaubt ist.
+                    self._handle_http_error(exc, raw_detail,
+                                            url, authenticated, retry)
+                    continue
+                except OSError as exc:
+                    _raise_transport_error(exc, (self.refresh, self.access))
+                data = _decode_json(raw)
+                # Nur ein AUTHENTIFIZIERTER Aufruf bestaetigt die uebernommene
+                # Geraete-ID: der Token-Tausch selbst nutzt sie nicht.
+                if authenticated and not retry["hardware"]:
+                    self._confirm_adopted_hardware()
+                return data
+        except Exception:
+            # Kein erfolgreicher Aufruf in DIESEM Versuch: eine uebernommene
+            # Geraete-ID bleibt ungespeichert, statt spaeter von einem
+            # beliebigen erfolgreichen Bestandsaufruf bestaetigt zu werden.
+            self._hw_adopted = False
+            raise
 
     def _build_request(self, url, method, data, form, authenticated,
                        content_type, extra_headers):
@@ -493,16 +575,12 @@ class TolinoClient:
         if self._retry_http_hardware(exc, url, authenticated, retry):
             return
 
-        # Ein 403 ausserhalb des Token-Endpunkts ist meist eine Rechte- oder
-        # Quotabeschränkung. Nur der Token-Endpunkt spricht von Anmeldung;
-        # ein einzelner Upload darf deshalb nicht den ganzen Lauf beenden.
-        if exc.code == 403 and url != self.partner.get("token_url"):
-            raise TolinoApiError(
-                "tolino-Fehler (HTTP 403): %s" % self.last_error_text,
-                code="N03",
-                short="tolino meldet einen Fehler (HTTP 403).")
-
-        if exc.code in (401, 403):
+        # Nur 401 und ein 403 am Token-Endpunkt sind eine Anmeldefrage. Ein
+        # 403 anderswo ist meist eine Rechte- oder Quotabeschränkung; ein
+        # einzelner Upload darf deshalb nicht den ganzen Lauf beenden.
+        if (exc.code == 401
+                or (exc.code == 403
+                    and url == self.partner.get("token_url"))):
             if self._retry_http_waf(exc, url, retry):
                 return
             self._raise_http_auth_error(exc)
@@ -518,14 +596,18 @@ class TolinoClient:
         Eine unbekannte Hülle ist ein Fehler, keine leere Bibliothek: sonst
         sähe der Vergleich eine Bibliothek ohne Bücher und plante Duplikate.
         """
-        records, problems, ok = parse_inventory(
+        records, problems, complete = parse_inventory(
             self._request(BASE_URL + "/inventory/delta?strip=true"))
         if problems:
             log_warning("Tolino-Inventar: %s" % "; ".join(problems))
-        if not ok:
+        if not complete:
+            # Ein unvollstaendiger Bestand wuerde die Zuordnung zu den
+            # fehlenden Datensaetzen loeschen und spaeter einen doppelten
+            # Upload planen.
             raise TolinoApiError(
-                "Die Cloud-Antwort enthält kein PublicationInventory.",
-                code="N02")
+                "Der Bestand von tolino ist unvollständig (%s)."
+                % "; ".join(problems), code="N02",
+                short="tolino hat einen unvollständigen Bestand geliefert.")
         return records
 
     @staticmethod
@@ -646,15 +728,40 @@ class TolinoClient:
             raise TolinoApiError("Gerät ohne deviceId.", code="N02", short="Die Geräteliste von tolino ist unvollständig.")
         return str(hardware)
 
+    def _confirm_adopted_hardware(self):
+        """Eine uebernommene Geraete-ID erst nach einem geglueckten Aufruf sichern.
+
+        Die Wiederbelebung laeuft bei jedem HTTP 400 -- auch wenn der 400
+        gar nichts mit der Hardware zu tun hat (etwa ein abgelehnter
+        Metadaten-Patch). Wuerde die ID sofort gespeichert, tauschte ein
+        solcher Fehler die Geraete-ID im Konto, ohne dass die ID je
+        funktioniert hat.
+        """
+        if not self._hw_adopted:
+            return
+        self._hw_adopted = False
+        self._notify_hardware()
+
     def _notify_hardware(self):
-        """Tell the UI about an adopted hardware id; never raises."""
-        callback = getattr(self, "hardware_callback", None)
-        if callback:
-            try:
-                callback(self.hardware)
-            except Exception as exc:
-                log_warning("Geräte-ID konnte nicht gespeichert werden: %s"
-                            % sanitize_error(exc, (self.refresh, self.access)))
+        """Tell the UI about an adopted hardware id; never raises.
+
+        ``False`` vom Callback heisst «nicht gespeichert»: die uebernommene ID
+        waere dann nur im Speicher und der naechste Lauf erzeugte wieder eine
+        neue. Das ist ein Fehlschlag und kein stiller Erfolg.
+        """
+        callback = self.hardware_callback
+        if not callback:
+            return
+        try:
+            stored = callback(self.hardware)
+            detail = ""
+        except Exception as exc:
+            stored, detail = False, sanitize_error(
+                exc, (self.refresh, self.access))
+        if stored is False:
+            log_warning("Geräte-ID konnte nicht gespeichert werden: %s"
+                        % (detail or "Einstellungen konnten nicht "
+                           "geschrieben werden."))
 
     def _register_hardware(self):
         """Register this hardware id at the BOSH service (reference flow)."""
@@ -688,7 +795,7 @@ class TolinoClient:
                     # cause -- do not mask it behind a pointless retry.
                     return False
                 self.hardware = registered
-                self._notify_hardware()
+                self._hw_adopted = True
                 return True
             registered_ok = self._register_hardware()
             self._hw_registered_now = bool(registered_ok)
@@ -728,15 +835,9 @@ class TolinoClient:
             request.add_unredirected_header(
                 "reseller_id", self.partner["reseller_id"])
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                get_final_url = getattr(response, "geturl", None)
-                final_url = urlsplit(get_final_url() if callable(get_final_url)
-                                     else content_url)
-                if final_url.scheme.casefold() != "https" or not final_url.hostname:
-                    raise TolinoApiError(
-                        "Der Download wurde auf eine unsichere URL umgeleitet.",
-                        code="N02",
-                        short="tolino hat einen unsicheren Download-Link geliefert.")
+            # `_SafeRedirects` prueft jede Weiterleitung, bevor sie folgt.
+            with _DOWNLOAD_OPENER.open(request,
+                                       timeout=self.timeout) as response:
                 content = response.read()
         except OSError as exc:
             if isinstance(exc, HTTPError):
@@ -765,8 +866,16 @@ class TolinoClient:
         """
         if self._sync_cache is None:
             data = self._sync_patch({"revision": None, "patches": []})
-            self._sync_cache = (data.get("revision"),
-                                data.get("patches") or [])
+            revision, patches = data.get("revision"), data.get("patches")
+            # Eine unvollstaendige Antwort ist kein leerer Lesestand: sonst
+            # gaelte jedes Buch als ungelesen. Der Aufrufer behandelt den
+            # Fehler als «unbekannt».
+            if revision in (None, "") or not isinstance(patches, (list, tuple)):
+                raise TolinoApiError(
+                    "Die Cloud-Antwort zu den Markierungen ist unvollständig.",
+                    code="N02",
+                    short="Die Antwort von tolino ist unvollständig.")
+            self._sync_cache = (revision, list(patches))
         return self._sync_cache
 
     def read_ids(self):
@@ -795,9 +904,15 @@ class TolinoClient:
         damit fremde Marken (Lese-Status, andere Sammlungen) verlieren.
         Die Revision wird deshalb gelesen und mitgeschickt.
         """
-        if revision is not None:
-            return revision
-        revision, _patches = self.sync_snapshot()
+        if revision is None:
+            revision, _patches = self.sync_snapshot()
+        if revision in (None, ""):
+            # Ein PATCH ohne Revision kann vorhandene Marken ersetzen.
+            raise TolinoApiError(
+                "Die Cloud hat keine Revision zu den Markierungen geliefert.",
+                code="N02",
+                short="Die Antwort von tolino ist unvollständig; bitte neu "
+                      "vergleichen.")
         return revision
 
     def add_to_collection(self, book_id, collection_name, revision=None):
@@ -819,28 +934,37 @@ class TolinoClient:
         Bereits gesetzte Marken werden nicht erneut geschrieben, fehlende
         beim Entfernen übersprungen.
         """
-        ids = [str(book_id) for book_id in book_ids or []
-               if str(book_id or "").strip()]
+        # Doppelte IDs würden denselben Patch mehrfach erzeugen. `dict`
+        # behält die erste Reihenfolge und entfernt nur echte Duplikate.
+        ids = list(dict.fromkeys(
+            str(book_id) for book_id in book_ids or []
+            if str(book_id or "").strip()))
         if not ids:
             raise TolinoApiError(
                 "Gelesen-Markierung ohne Buch.", code="E99",
                 short="Es wurde kein Buch ausgewählt.")
         revision, patches = self.sync_snapshot()
-        active = _sync_data.active_read_tags(patches)
+        active = _sync_data.read_tag_patches(patches)
         updates = []
         for book_id in ids:
-            existing = active.get((str(book_id), _sync_data.READ_TAG))
+            # Beide Schreibweisen direkt nachschlagen: das Mapping ist schon
+            # nach (Buch, Kategorie) indiziert.
+            book = str(book_id)
+            marks = [(category, active.get((book, category)))
+                     for category in _sync_data.READ_TAG_CATEGORIES]
+            marks = [(category, item) for category, item in marks if item]
             if finished:
-                if existing is None:
+                if not marks:
                     updates.append(_sync_data.tag_patch(
                         "add", book_id, _sync_data.READ_TAG, "system"))
-            elif existing is not None:
-                category = str(
-                    (existing.get("value") or {}).get("category") or "system")
+                continue
+            # Beide Schreibweisen entfernen: der Reader legt die Marke je
+            # nach Quelle als System- oder Sammlungs-Tag ab.
+            for category, item in marks:
                 updates.append(_sync_data.tag_patch(
                     "remove", book_id, _sync_data.READ_TAG, category,
-                    revision=existing["value"].get("revision"),
-                    tag_id=_sync_data.tag_id_from_patch(existing)))
+                    revision=item["value"].get("revision"),
+                    tag_id=_sync_data.tag_id_from_patch(item)))
         if not updates:
             return revision
         data = self._sync_patch({"revision": revision, "patches": updates})
