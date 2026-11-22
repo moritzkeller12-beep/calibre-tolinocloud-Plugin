@@ -223,6 +223,27 @@ class TokenTests(ConfigCase):
         self.assertEqual({"tolino_id": "neu"},
                          config.account_by_name("A")["state"]["b1"])
 
+    def test_a_stored_entry_of_the_new_copy_keeps_its_values(self):
+        """Der andere Lauf hat die Ersatzkopie schon gelesen: nicht verwerfen."""
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
+        base = {"b1": {"tolino_id": "alt"}}
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "neu"}}, base))
+        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
+                         config.account_by_name("A")["state"]["b1"])
+
+    def test_a_local_change_does_not_move_to_a_foreign_copy(self):
+        """Lokale Lesedaten der alten Kopie bleiben bei der neuen Kopie weg."""
+        config.save_account("A", {"refresh_token": "tok-A", "state": {
+            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
+        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
+        self.assertTrue(config.save_state(
+            "A", {"b1": {"tolino_id": "alt", "reading": {"read": True}}},
+            base))
+        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
+                         config.account_by_name("A")["state"]["b1"])
+
     def test_a_field_removed_locally_disappears_from_the_stored_state(self):
         config.save_account("A", {"refresh_token": "tok-A", "state": {
             "b1": {"tolino_id": "alt", "collections": ["Serie"]}}})

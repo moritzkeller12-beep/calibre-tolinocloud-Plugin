@@ -213,6 +213,8 @@ class SyncWorker(QObject):
                 str(record.get("tolino_id")) for record in client.inventory()
                 if isinstance(record, dict)}
         except TolinoAuthError:
+            # Eine abgelehnte Anmeldung heisst nicht «schon geloescht»: der
+            # Lauf muss daran scheitern, statt die Loeschung zu ueberspringen.
             raise
         except TolinoError:
             return False

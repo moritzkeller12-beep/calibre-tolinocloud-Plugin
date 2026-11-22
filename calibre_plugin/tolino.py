@@ -154,6 +154,10 @@ class _SafeRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urlsplit(str(newurl))
         if target.scheme.casefold() != "https" or not target.hostname:
+            # Der abgelehnte Antwort-Stream wird nicht mehr gebraucht und
+            # sonst erst vom Garbage Collector geschlossen.
+            if fp is not None:
+                fp.close()
             raise TolinoApiError(
                 "Der Download wurde auf eine unsichere URL umgeleitet.",
                 code="N02",
@@ -329,7 +333,15 @@ class TolinoClient:
             raise TolinoAuthError("Ungültige Anmelde-Antwort.", code="A01", detail="kein access_token")
         previous_refresh = self.refresh
         self.access = data["access_token"]
-        new_refresh = data.get("refresh_token", self.refresh)
+        new_refresh = normalize_refresh_token(
+            data.get("refresh_token") or self.refresh)
+        if not new_refresh:
+            # Ein leerer Ersatz waere der Verlust der Anmeldung: der
+            # gespeicherte Token bleibt unangetastet.
+            self.access = None
+            self.expires_at = 0
+            raise TolinoAuthError("Ungültige Anmelde-Antwort.", code="A01",
+                                  detail="kein refresh_token")
         # Den rotierten Single-Use-Token vor weiteren Anfragen speichern.
         self.refresh = new_refresh
         if new_refresh != previous_refresh and self.token_callback:
@@ -342,11 +354,12 @@ class TolinoClient:
                 stored, detail = False, sanitize_error(
                     exc, (previous_refresh, new_refresh, self.access))
             if stored is False:
-                # Ein nicht gespeicherter Einmal-Token ist verloren: die
-                # Anmeldung darf nicht als gelungen gelten.
-                self.refresh = self.access = None
+                # Der neue Token ist gueltig, aber nicht gesichert: die
+                # Anmeldung darf nicht als gelungen gelten. Den bisherigen
+                # gespeicherten Token nicht loeschen -- der Schreibfehler
+                # sagt nichts ueber seine Gueltigkeit aus.
+                self.access = None
                 self.expires_at = 0
-                self._notify_token_rejected(previous_refresh)
                 raise TolinoAuthError(
                     "Der erneuerte Zugang konnte nicht gespeichert werden. " + RELOGIN,
                     code="A01",
@@ -454,11 +467,10 @@ class TolinoClient:
                     self._confirm_adopted_hardware()
                 return data
         except Exception:
-            if not retry["auth"] or not retry["hardware"]:
-                # Der Wiederholungsversuch hat die uebernommene
-                # Geraete-ID nicht bewiesen: sie bleibt
-                # ungespeichert, statt spaeter zufaellig bestaetigt zu werden.
-                self._hw_adopted = False
+            # Kein erfolgreicher Aufruf in DIESEM Versuch: eine uebernommene
+            # Geraete-ID bleibt ungespeichert, statt spaeter von einem
+            # beliebigen erfolgreichen Bestandsaufruf bestaetigt zu werden.
+            self._hw_adopted = False
             raise
 
     def _build_request(self, url, method, data, form, authenticated,

@@ -9,8 +9,8 @@ import threading
 
 from .config import (account_secrets, account_summary,
                      clear_refresh_token_if_unchanged, save_hardware_id,
-                     save_refresh_token, settings, settings_readable,
-                     settings_write_lock)
+                     save_refresh_token, settings, settings_write_lock,
+                     settings_writable)
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
                      TolinoError, log_info, log_warning,
                      normalize_refresh_token, sanitize_error)
@@ -19,6 +19,16 @@ from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
 def _lock_busy(exc):
     """Der gemeinsame Vault-Lock war belegt -- kein Fehler des Kontos."""
     return isinstance(exc, TolinoAuthError) and exc.code == "S91"
+
+
+def _partner_number(value):
+    """Buchhaendler-Nummer des Kontos; ohne Angabe der Standardpartner."""
+    if value is None:
+        return 1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 class TokenVault:
@@ -33,8 +43,6 @@ class TokenVault:
         """
         guard = settings_write_lock() if keepalive else contextlib.nullcontext()
         with self._held_lock(lock_timeout), guard:
-            if keepalive and not settings_readable():
-                raise TolinoError("Einstellungen konnten nicht gelesen werden.")
             values = self._stored_credentials(account_name)
             client = TolinoClient(
                 partner_id or values["partner_id"], values["hardware_id"],
@@ -59,6 +67,16 @@ class TokenVault:
                     "Einstellungsdatei prüfen und erneut anmelden.",
                     short="Die Geräte-ID konnte nicht gespeichert werden.",
                     detail="Einstellungen konnten nicht geschrieben werden.")
+            # Der Tausch selbst muss speicherbar sein: ein rotierter
+            # Einmal-Token waere sonst verbrannt, bevor er im Konto steht.
+            if not settings_writable():
+                raise TolinoError(
+                    "Die Einstellungen sind nicht beschreibbar; der Zugang "
+                    "wird nicht erneuert.",
+                    short="Die Einstellungen konnten nicht gespeichert "
+                          "werden. " + RELOGIN,
+                    detail="Token-Tausch ohne speicherbare Rotation "
+                           "abgelehnt.")
             # Erst anmelden, dann den Vault einhaengen: `login()` wuerde
             # sonst ueber `relogin()` den bereits gehaltenen Lock anfordern.
             client.login()
@@ -86,7 +104,7 @@ class TokenVault:
                                   code="A01")
         return {"refresh_token": refresh,
                 "hardware_id": str(account.get("hardware_id") or ""),
-                "partner_id": account.get("partner_id") or 1}
+                "partner_id": _partner_number(account.get("partner_id"))}
 
     def relogin(self, client, timeout=30):
         """Refresh once under the shared lock using the freshest saved token.
@@ -97,6 +115,18 @@ class TokenVault:
         """
         with self._held_lock(timeout):
             values = self._stored_credentials(client.account_name)
+            if values["partner_id"] != client.partner_id:
+                # Der gespeicherte Token gilt fuer den Buchhaendler des
+                # Kontos. Ein Client fuer einen anderen Shop darf ihn nicht
+                # einloesen: der Server lehnte ihn ab und der Vault loeschte
+                # einen gueltigen Token.
+                raise TolinoAuthError(
+                    "Das gespeicherte Konto gehoert zu einem anderen "
+                    "Buchhändler (Partner %s statt %s). "
+                    % (values["partner_id"], client.partner_id) + RELOGIN,
+                    code="A01",
+                    short="Die Anmeldung gehört zu einem anderen Buchhändler.",
+                    detail="Bitte mit dem hinterlegten Buchhändler anmelden.")
             client.refresh = values["refresh_token"]
             client.hardware = values["hardware_id"] or client.hardware
             # `_login()` meldet den neuen Token ueber den Callback, der ihn
@@ -105,11 +135,11 @@ class TokenVault:
 
     def keepalive_refresh(self):
         """Refresh saved accounts; return only the number of rotations."""
-        if not settings_readable():
+        if not settings_writable():
             # Ein Token, dessen Rotation nicht gespeichert werden kann, waere
             # verbrannt: lieber gar nicht erst einloesen.
             log_warning("Tolino-Keep-alive: Einstellungen sind nicht "
-                        "lesbar; es wird nichts erneuert.")
+                        "speicherbar; es wird nichts erneuert.")
             return 0
         try:
             accounts = settings()["accounts"]

@@ -204,11 +204,14 @@ def persist_sync_result(dialog, updates, worker=None):
                         "wurde nichts gespeichert.")
             return ["Bibliothek gewechselt – Lauf abgebrochen"]
     failures = []
-    id_updates = _stored_id_updates(dialog, updates, account_name)
     writers = [
+        # Die Zuordnungen erst hier bestimmen: nur so gilt ein Fehler beim
+        # Lesen des Kontos als Fehler dieser einen Spalte, und ohne
+        # tolino-ID-Spalte wird gar nichts vorbereitet.
         ("id", "tolino-IDs",
          lambda db: update_tolino_ids(
-             db, id_updates, account_name=account_name)),
+             db, _stored_id_updates(dialog, updates, account_name),
+             account_name=account_name)),
     ]
     if account_name and account_name == dialog_account:
         writers.extend([

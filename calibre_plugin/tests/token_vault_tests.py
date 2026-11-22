@@ -14,7 +14,7 @@ from .. import config
 from ..errors import TolinoAuthError, TolinoError
 from ..token_vault import (TOKEN_VAULT, check_stored_login,
                            start_token_keepalive, stop_token_keepalive)
-from ..tolino import BUSY_MESSAGE
+from ..tolino import BUSY_MESSAGE, TolinoClient
 from ._support import LocalHTTP, break_settings, local_tolino_endpoints
 
 JSON_HEADERS = {"Content-Type": "application/json"}
@@ -113,6 +113,32 @@ class LoginTests(VaultCase):
                 TOKEN_VAULT.login("A")
         self.assertEqual("A01", caught.exception.code)
         self.assertEqual("", config.account_summary("A")["refresh_token"])
+
+    def test_the_exchange_itself_refuses_unreadable_settings(self):
+        """Auch ohne Keep-alive-Vorpruefung darf kein Token verbrannt werden."""
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "start",
+                                  "hardware_id": "hw-A"})
+        break_settings(self)
+        with self.vault(server):
+            with self.assertRaises(TolinoError):
+                TOKEN_VAULT.login("A")
+        self.assertEqual([], server.server.requests)
+        self.assertEqual("start", config.account_summary("A")["refresh_token"])
+
+    def test_relogin_does_not_use_a_token_of_another_partner(self):
+        """Der Token gilt fuer den Buchhaendler des Kontos, nicht den Client."""
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "start", "partner_id": 2,
+                                  "hardware_id": "hw-A"})
+        client = TolinoClient(1, "hw-A", refresh="start")
+        client.account_name = "A"
+        with self.vault(server):
+            with self.assertRaises(TolinoAuthError) as caught:
+                TOKEN_VAULT.relogin(client)
+        self.assertEqual("A01", caught.exception.code)
+        self.assertEqual([], server.server.requests)
+        self.assertEqual("start", config.account_summary("A")["refresh_token"])
 
     def test_relogin_uses_the_token_saved_in_the_meantime(self):
         # Der Client kennt nach dem Login nur rot-1; der Server lehnt genau

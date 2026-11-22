@@ -221,8 +221,11 @@ class RetryTests(unittest.TestCase):
                 client.login()
         self.assertEqual("A01", caught.exception.code)
         self.assertIsNone(client.access)
-        self.assertIsNone(client.refresh)
-        self.assertEqual(["start"], spent)
+        # Der neue Token bleibt im Speicher; der bisherige gespeicherte wird
+        # nicht geloescht -- ein Schreibfehler sagt nichts ueber seine
+        # Gueltigkeit aus, und der Nutzer soll nicht ohne Not draussen sein.
+        self.assertEqual("rot-1", client.refresh)
+        self.assertEqual([], spent)
 
     def test_a_failed_update_retry_does_not_confirm_hardware_on_inventory(self):
         saved = []
@@ -248,6 +251,28 @@ class RetryTests(unittest.TestCase):
             self.assertEqual([], client.inventory())
         self.assertEqual(["old-hardware", HARDWARE], update_ids)
         self.assertEqual([], saved)
+        self.assertFalse(client._hw_adopted)
+
+    def test_a_failed_call_does_not_confirm_the_adopted_id(self):
+        def refuse(_method, _path, _headers, _payload):
+            return 500, {}, b""
+
+        saved = []
+        with LocalHTTP(token_and(refuse)) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start",
+                                  hardware_callback=saved.append)
+            client.hardware = "adopted"
+            client._hw_adopted = True
+            # Gueltiger Zugang: der Fehler kommt aus dem Geraete-Aufruf, nicht
+            # aus einer Anmeldung (die wuerde die ID schon bestaetigen).
+            client.access = "acc-1"
+            client.expires_at = time.time() + 3600
+            with self.assertRaises(TolinoError):
+                client.fetch_hardware_id()
+        self.assertEqual([], saved)
+        # Auch ein spaeterer erfolgreicher Bestandsaufruf darf die ID nicht
+        # mehr bestaetigen: die Wiederholung dieses Aufrufs ist gescheitert.
         self.assertFalse(client._hw_adopted)
 
     def test_a_400_adopts_the_registered_id_and_repeats_the_call(self):
@@ -656,12 +681,15 @@ class RedirectTests(unittest.TestCase):
                          followed.full_url)
 
     def test_a_plain_http_target_is_refused(self):
+        response = types.SimpleNamespace(closed=False)
+        response.close = lambda: setattr(response, "closed", True)
         request = Request("https://cdn.example.test/buch.epub")
         with self.assertRaises(TolinoApiError) as caught:
             self.handler().redirect_request(
-                request, None, 302, {}, {},
+                request, response, 302, {}, {},
                 "http://cdn.example.test/neu.epub")
         self.assertEqual("N02", caught.exception.code)
+        self.assertTrue(response.closed)
 
 
 class ReadMarkTests(unittest.TestCase):

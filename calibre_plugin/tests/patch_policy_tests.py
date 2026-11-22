@@ -18,7 +18,7 @@ ALLOWED_PATTERNS = (
     r"^calibre_plugin\.tolino\.",          # HTTP-Client (Netz)
     r"^calibre_plugin\.cdp",               # Browser-Fenster/DevTools
     r"^(urllib|http|ssl|socket|subprocess|shutil|os|sys|time|datetime|"
-    r"logging|copy|json|re|zipfile|pathlib|io)\.",
+    r"logging|copy|json|re|zipfile|pathlib|io)(\.|$)",
     r"^(qt|PyQt5|PyQt6|calibre)\.",
     r"^fcntl\.flock$",                    # Dateisperre
     r"\.time\.(monotonic|time|sleep)$",   # Uhr
@@ -35,11 +35,17 @@ ALLOWED_NAMES = frozenset((
     "grab_live_refresh",               # interaktiver Browser-Login
     "info_dialog", "error_dialog",     # modale Qt-Dialoge
     "getText",                         # modaler Eingabedialog (Qt)
+    "grab_live_refresh",               # Browserfenster (Anmeldung)
+    "_lock_handle", "_read_frame",     # Sperrdatei (Dateisystem), Rahmen
     "_aes",                            # optionale Krypto-Abhaengigkeit
     "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL",  # Anmelde-Zeitfenster
 ))
 
 SKIP_FILES = {"patch_policy_tests.py"}
+
+# Steuerargumente von ``patch.multiple`` sind keine Attribute des Moduls.
+_MULTIPLE_CONTROLS = frozenset(("spec", "create", "spec_set", "autospec",
+                                "new_callable"))
 
 
 def _call_name(call):
@@ -53,17 +59,19 @@ def _call_name(call):
     return ".".join(reversed(parts))
 
 
-def _patch_member(name):
+def _patch_member(name, aliases=frozenset()):
     """``patch``, ``patch.object`` oder ``patch.multiple`` -- sonst None.
 
     Der Modul-Alias (``mock.patch``) ist bewusst egal: entscheidend ist das
-    Glied ``patch`` und die jeweils verwendete Form.
+    Glied ``patch`` und die jeweils verwendete Form. Direkt importiert
+    (``from unittest.mock import patch``) fehlt das Modul davor; dann traegt
+    der Import-Alias die Erkennung.
     """
     parts = name.split(".")
-    if len(parts) >= 2 and parts[-1] == "patch":
+    if parts[-1] == "patch":
         return "patch"
-    if len(parts) >= 2 and parts[-2] == "patch" and parts[-1] in (
-            "object", "multiple"):
+    if (parts[-1] in ("object", "multiple") and len(parts) >= 2
+            and (parts[-2] == "patch" or parts[-2] in aliases)):
         return parts[-1]
     return None
 
@@ -77,6 +85,11 @@ def _patch_aliases(tree):
                 if alias.name == "patch":
                     aliases.add(alias.asname or alias.name)
     return aliases
+
+
+def _module_name(node):
+    """Modulname, wenn der Zielausdruck ein einfacher Name ist -- sonst leer."""
+    return node.id if isinstance(node, ast.Name) else ""
 
 
 def _argument(value):
@@ -97,28 +110,39 @@ def _targets(node, aliases=frozenset()):
         if not isinstance(child, ast.Call):
             continue
         name = _call_name(child)
-        member = _patch_member(name)
-        if member is None:
-            root, _, suffix = name.partition(".")
-            if root in aliases:
-                member = {"": "patch", "object": "object",
-                          "multiple": "multiple"}.get(suffix)
+        member = _patch_member(name, aliases)
+        if member is None and name in aliases:
+            member = "patch"
         if member == "patch":
             args = child.args[:1] + [
                 keyword.value for keyword in child.keywords
                 if keyword.arg == "target"]
+            found.extend(item for item in map(_argument, args) if item)
         elif member == "object":
             # ``patch.object(modul, "name")``: das Attribut ist das Ziel.
-            args = child.args[1:2] + [
-                keyword.value for keyword in child.keywords
+            # Ein einfacher Modulname qualifiziert es, damit ``os.name``
+            # erlaubt bleibt; bei anderem Ausdruck zaehlt nur das Attribut.
+            module = _module_name(child.args[0]) if child.args else ""
+            attributes = list(map(_argument, child.args[1:2])) + [
+                _argument(keyword.value) for keyword in child.keywords
                 if keyword.arg == "attribute"]
+            found.extend(module + "." + item if module else item
+                         for item in attributes if item)
         elif member == "multiple":
-            args = child.args[:1] + [
-                keyword.value for keyword in child.keywords
-                if keyword.arg == "target"]
-        else:
-            continue
-        found.extend(item for item in map(_argument, args) if item)
+            # ``patch.multiple(modul, name=...)``: das Modul und jedes
+            # gepatchte Attribut sind Ziele, Steuerargumente nicht.
+            module = next((_argument(item) for item in child.args[:1]
+                           if _argument(item)), "")
+            module = module or next(
+                (_argument(keyword.value) for keyword in child.keywords
+                 if keyword.arg == "target"), "")
+            if module:
+                found.append(module)
+            found.extend("%s.%s" % (module, keyword.arg)
+                         for keyword in child.keywords
+                         if module and keyword.arg
+                         and keyword.arg != "target"
+                         and keyword.arg not in _MULTIPLE_CONTROLS)
     return found
 
 
@@ -163,9 +187,21 @@ mock.patch.object(module, "qualified_object")
 mock.patch.multiple("qualified_multiple", value=1)
 """)
         self.assertEqual(
-            ["direct_object", "direct_multiple", "alias_object",
-             "alias_multiple", "qualified_object", "qualified_multiple"],
+            ["module.direct_object", "direct_multiple",
+             "direct_multiple.value", "module.alias_object",
+             "alias_multiple", "alias_multiple.value",
+             "module.qualified_object", "qualified_multiple",
+             "qualified_multiple.value"],
             _targets(tree, _patch_aliases(tree)))
+
+    def test_module_level_patches_on_os_are_allowed(self):
+        """``os.name`` bleibt erlaubt; die Steuerargumente zaehlen nicht."""
+        tree = ast.parse(
+            'patch.multiple("os", name="nt", spec=True)\n'
+            'patch.object(os, "name", "nt")\n')
+        targets = _targets(tree, _patch_aliases(tree))
+        self.assertEqual(["os", "os.name", "os.name"], targets)
+        self.assertEqual([], [item for item in targets if not _allowed(item)])
 
     def test_only_system_boundaries_are_patched(self):
         bad = offenders()

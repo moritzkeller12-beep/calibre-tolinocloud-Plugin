@@ -35,18 +35,18 @@ def _lock_handle(handle):
     """Advisory lock on the settings lock file, where the OS supports it.
 
     Die Sperre endet mit dem Schliessen der Datei -- ein eigenes Entsperren
-    ist weder noetig noch plattformuebergreifend gleich.
+    ist weder noetig noch plattformuebergreifend gleich. Ein Fehler beim
+    Sperren wird weitergegeben: ungesperrt zu schreiben koennte fremde Token
+    ueberschreiben. Fehlt der Sperrmechanismus ganz, bleibt es beim
+    Prozess-Lock.
     """
-    try:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    except ImportError:
-        pass
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
 
 
 @contextlib.contextmanager
@@ -55,8 +55,11 @@ def _settings_file_lock():
 
     Ohne Sperrdatei (unschreibbares Verzeichnis, fehlendes ``fcntl``) bleibt
     nur `_SETTINGS_LOCK`: der eigene Prozess ist trotzdem geschuetzt, ein
-    fremder Schreiber aber nicht ausgeschlossen. Verschachtelte Aufrufe
-    (etwa `_write_account` aus `save_state`) sperren nicht erneut.
+    fremder Schreiber aber nicht ausgeschlossen. Scheitert dagegen das
+    Sperren selbst, wird der ``OSError`` weitergegeben und der Schreibvorgang
+    bricht ab -- ungesperrt zu schreiben ersetzte sonst einen fremden Stand.
+    Verschachtelte Aufrufe (etwa `_write_account` aus `save_state`) sperren
+    nicht erneut.
     """
     depth = getattr(_LOCK_STATE, "depth", 0)
     if depth:
@@ -70,19 +73,26 @@ def _settings_file_lock():
     if path:
         try:
             handle = open(str(path) + ".lock", "a+b")
-            if os.fstat(handle.fileno()).st_size == 0:
-                # msvcrt sperrt ein Byte; eine leere Datei liesse sich nicht
-                # sperren.
-                handle.write(b"\0")
-                handle.flush()
         except OSError:
-            if handle is not None:
-                handle.close()
+            # Keine Sperrdatei (unschreibbares Verzeichnis): best effort.
             handle = None
-    try:
         if handle is not None:
-            _lock_handle(handle)
-        _LOCK_STATE.depth = 1
+            try:
+                if os.fstat(handle.fileno()).st_size == 0:
+                    # msvcrt sperrt ein Byte; eine leere Datei liesse sich
+                    # nicht sperren.
+                    handle.write(b"\0")
+                    handle.flush()
+                _lock_handle(handle)
+            except ImportError:
+                pass
+            except OSError:
+                # Gesperrt wurde nicht: ungesperrt weiterzuschreiben koennte
+                # einen fremden Stand ersetzen. Der Aufrufer bricht ab.
+                handle.close()
+                raise
+    _LOCK_STATE.depth = 1
+    try:
         yield
     finally:
         _LOCK_STATE.depth = 0
@@ -222,6 +232,34 @@ def settings_readable():
         return _reload()
 
 
+def settings_writable():
+    """True nur, wenn ein Schreibvorgang jetzt committen koennte.
+
+    Geprueft wird ohne zu schreiben: die Einstellungsdatei muss sich zum
+    Schreiben oeffnen lassen und die Sperrdatei anlegbar sein. Ein Token,
+    dessen Rotation danach nicht gespeichert werden kann, waere verbrannt.
+    """
+    path = getattr(PREFERENCES, "file_path", None)
+    if not path or not settings_readable():
+        return False
+    try:
+        with open(str(path), "r+b"):
+            pass
+    except FileNotFoundError:
+        # Noch keine Datei: der Commit legt sie an, wenn das Verzeichnis
+        # beschreibbar ist.
+        if not os.access(os.path.dirname(str(path)) or ".", os.W_OK):
+            return False
+    except OSError:
+        return False
+    try:
+        with open(str(path) + ".lock", "a+b"):
+            pass
+    except OSError:
+        return False
+    return True
+
+
 def settings():
     """Aktuelles Konto und Metadaten -- ohne Buchzustände zu kopieren."""
     with _SETTINGS_LOCK:
@@ -249,7 +287,8 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
     zusammengefuehrt haben: sie schreiben genau diesen Stand.
 
     Laden und Commit laufen unter beiden Sperren: ein fremder Prozess kann
-    die Datei zwischen `_reload()` und `_commit()` nicht mehr aendern.
+    die Datei zwischen `_reload()` und `_commit()` nicht mehr aendern. Laesst
+    sich die Sperrdatei nicht halten, bricht der Schreibvorgang ab.
     """
     with _SETTINGS_LOCK, _settings_file_lock():
         name = str(name or "").strip()
@@ -320,40 +359,57 @@ def save_account(name, values, active=None, preferred_formats=None,
             allow_virtual_default=True)
 
 
-def _copy_changed(before, entry):
-    """True, wenn die beiden Eintraege zu verschiedenen Cloud-Kopien gehoeren."""
-    old = str(before.get("tolino_id") or "").strip()
-    new = str(entry.get("tolino_id") or "").strip()
-    return old != new
+def _cloud_id(entry):
+    """Die tolino-ID eines Eintrags; leer heisst «keine Kopie»."""
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("tolino_id") or "").strip()
 
 
 def _merged_entry(before, entry, current):
     """Ein Buch feldweise zusammenfuehren: nur eigene Aenderungen setzen.
 
-    Kopiegebundene Felder duerfen nur von der resultierenden ID stammen.
+    Kopiegebundene Felder (Lesestand, Sammlungen, Metadaten-Bestaetigung)
+    gelten nur fuer die Kopie, auf die der Eintrag am Ende zeigt. Wechselt
+    die tolino-ID, bleibt der gespeicherte Stand der alten Kopie aussen vor
+    -- und der eigene ebenfalls, falls der gespeicherte Stand schon auf die
+    neue Kopie zeigt. Nur bei gleicher Cloud-ID werden diese Felder
+    uebernommen.
     """
     merged = dict(current) if isinstance(current, dict) else {}
-    changes = (set(entry) if not isinstance(before, dict) else
-               {field for field in set(before) | set(entry)
-                if before.get(field) != entry.get(field)})
-    if "tolino_id" in changes:
-        result_copy = entry
-    else:
-        result_copy = merged
-    if _copy_changed(merged, result_copy):
+    base = before if isinstance(before, dict) else {}
+    id_changed = _cloud_id(base) != _cloud_id(entry)
+    # Die Kopie, auf die der zusammengefuehrte Eintrag zeigen wird.
+    copy_id = _cloud_id(entry) if id_changed else (
+        _cloud_id(merged) or _cloud_id(entry))
+    if _cloud_id(current) != copy_id:
+        # Der gespeicherte Stand gehoert zu einer anderen Cloud-Kopie.
         for field in COPY_BOUND_FIELDS:
             merged.pop(field, None)
-    local_matches = not _copy_changed(entry, result_copy)
-    local_replaced = isinstance(before, dict) and _copy_changed(before, entry)
-    for field in changes:
-        if field in COPY_BOUND_FIELDS and (
-                not local_matches or (local_replaced and field not in entry)):
-            # Eine Entfernung beim Kopiewechsel betrifft nur die alte Kopie.
+    local_copy = _cloud_id(entry) == copy_id
+    base_copy = _cloud_id(base) or copy_id
+    for field in set(base) | set(entry):
+        if field == "tolino_id" or base.get(field) == entry.get(field):
+            continue  # lokal unveraendert: der gespeicherte Wert gilt
+        if field in COPY_BOUND_FIELDS and not (
+                local_copy and base_copy == copy_id):
+            # Weder der eigene Wert noch seine Entfernung beschreibt die
+            # resultierende Kopie: der gespeicherte Stand bleibt.
             continue
         if field in entry:
             merged[field] = entry[field]
         else:
             merged.pop(field, None)
+    # Neue Kopie oder noch unbekannter gespeicherter Eintrag: die tolino-ID
+    # gehoert zum Eintrag, nicht zu einer Kopie-Feld-Aenderung. Eine schon
+    # gespeicherte ID bleibt stehen, sonst kaeme die eigene Kopie zurueck.
+    if id_changed:
+        if "tolino_id" in entry:
+            merged["tolino_id"] = entry["tolino_id"]
+        else:
+            merged.pop("tolino_id", None)
+    elif merged and "tolino_id" in entry and "tolino_id" not in merged:
+        merged["tolino_id"] = entry["tolino_id"]
     return merged
 
 

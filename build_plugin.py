@@ -32,14 +32,16 @@ def _docstring_spans(tokens):
     Die Tokenfolge ist in jeder Python-Version gleich; ``ast`` fuehrt
     Docstrings seit 3.14 nicht mehr als eigene Knoten. Ein Kommentar vor dem
     abschliessenden NEWLINE (etwa ``# Hinweis`` hinter einem String) aendert
-    nichts an der Anweisungsgrenze und wird deshalb uebersprungen.
+    nichts an der Anweisungsgrenze und wird deshalb uebersprungen. Das dritte
+    Element ist True fuer den Modul-Docstring.
     """
     spans, previous = [], tokenize.ENCODING
     for index, token in enumerate(tokens):
         if (token.type == tokenize.STRING
                 and previous in (tokenize.NEWLINE, tokenize.ENCODING)
                 and _next_significant(tokens, index) == tokenize.NEWLINE):
-            spans.append((token.start, token.end))
+            spans.append((token.start, token.end,
+                          previous == tokenize.ENCODING))
         if token.type not in _SKIPPED:
             previous = token.type
     return spans
@@ -64,20 +66,20 @@ def _strip_comments(text, tokens):
 def _blank_docstrings(text, spans):
     """Docstrings entfernen; die Zeilenzahl bleibt gleich.
 
-    Ein Platzhalter haelt Klassen- und Funktionsruempfe gueltig. Auf
-    Modulebene darf vor einem Future-Import keine Anweisung stehen.
+    Das ``0`` haelt eine Klasse am Leben, deren Rumpf nur ein Docstring war.
+    Der Modul-Docstring verschwindet dagegen ganz: ein ``0`` als erste
+    Anweisung machte einen folgenden ``from __future__``-Import ungueltig.
     """
     starts, offset = [], 0
     for line in text.splitlines(keepends=True):
         starts.append(offset)
         offset += len(line)
-    for (start_row, start_col), (end_row, end_col) in sorted(spans,
-                                                             reverse=True):
+    for (start_row, start_col), (end_row, end_col), module in sorted(
+            spans, reverse=True):
         start = starts[start_row - 1] + start_col
         end = starts[end_row - 1] + end_col
         kept = "".join(char for char in text[start:end][1:] if char in "\r\n")
-        placeholder = "0" if start_col else ""
-        text = text[:start] + placeholder + kept + text[end:]
+        text = text[:start] + ("" if module else "0") + kept + text[end:]
     return text
 
 

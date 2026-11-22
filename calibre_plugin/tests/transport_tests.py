@@ -1,7 +1,6 @@
 """Tests for the dependency-free WebSocket framing transport."""
 import base64
 import hashlib
-import io
 import json
 import socket
 import struct
@@ -219,16 +218,25 @@ class WebSocketTransportTests(unittest.TestCase):
         self.assertTrue(seen[0][2])
         self.assertEqual(b"ping-data", seen[0][3])
 
-    def test_a_completed_message_does_not_count_towards_the_next_one(self):
+    def test_a_skipped_message_does_not_count_towards_the_next_one(self):
         """Der Fragmentpuffer wird nach jeder Nachricht geleert."""
-        size = 16 * 1024 * 1024
-        # Eine fragmentierte Binaernachricht wird uebersprungen. Die danach
-        # gelesene JSON-Nachricht nutzt das volle erlaubte Limit fuer sich.
-        frames = (b"\x02\x01a\x80\x01b\x81\x7f" + struct.pack(">Q", size)
-                  + b'{"id": 2}'.ljust(size))
-        sock = FakeSocket(None)
-        sock.recv = io.BytesIO(frames).read
-        self.assertEqual({"id": 2}, _Ws(sock).recv_json(timeout=3))
+        ws = _Ws(None)
+        frames = iter([
+            (False, 0x2, b'{"id": '),
+            (True, 0x0, b"1}"),
+            (True, 0x1, b'{"id": 2}'),
+        ])
+        pending = []
+
+        def read_frame(_deadline, pending_size=0):
+            pending.append(pending_size)
+            return next(frames)
+
+        with patch.object(_Ws, "_read_frame", staticmethod(read_frame)):
+            # Die fragmentierte Binaernachricht wird im selben Aufruf
+            # uebersprungen; zurueck kommt die Textnachricht danach.
+            self.assertEqual({"id": 2}, ws.recv_json(timeout=1))
+        self.assertEqual([0, 7, 0], pending)
 
     def test_an_oversized_frame_is_rejected_before_reading_the_payload(self):
         """Die Laengenangabe darf keinen beliebig grossen Puffer anfordern."""
