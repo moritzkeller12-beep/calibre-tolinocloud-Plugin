@@ -133,6 +133,10 @@ def _targets(node, aliases=frozenset()):
             # gepatchte Attribut sind Ziele, Steuerargumente nicht.
             module = next((_argument(item) for item in child.args[:1]
                            if _argument(item)), "")
+            if not module and child.args:
+                # ``patch.multiple(module, name=...)`` mit einem Modulobjekt
+                # statt eines Import-Strings, wie bei ``patch.object``.
+                module = _module_name(child.args[0])
             module = module or next(
                 (_argument(keyword.value) for keyword in child.keywords
                  if keyword.arg == "target"), "")
@@ -202,6 +206,15 @@ mock.patch.multiple("qualified_multiple", value=1)
         targets = _targets(tree, _patch_aliases(tree))
         self.assertEqual(["os", "os.name", "os.name"], targets)
         self.assertEqual([], [item for item in targets if not _allowed(item)])
+
+    def test_patch_multiple_on_a_module_object_is_still_a_verdict(self):
+        """Ein Modulobjekt statt String darf die gepatchte Funktion nicht
+        verstecken; Steuerargumente bleiben aussen vor."""
+        tree = ast.parse(
+            "patch.multiple(module, interne_funktion=ersatz, spec=True)\n")
+        targets = _targets(tree, _patch_aliases(tree))
+        self.assertEqual(["module", "module.interne_funktion"], targets)
+        self.assertFalse(_allowed("module.interne_funktion"))
 
     def test_only_system_boundaries_are_patched(self):
         bad = offenders()
