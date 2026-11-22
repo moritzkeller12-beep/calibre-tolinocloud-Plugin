@@ -107,7 +107,7 @@ def dashboard_stub(**attrs):
     return types.SimpleNamespace(**values)
 
 
-def load_ui_module(get_icons_result, qt_stub):
+def ui_module_for(test_case, qt_stub):
     """Import ui.py with Calibre and Qt imports stubbed.
 
     `qt_stub` kommt aus `real_qt_stub()`: Widgets, Tabellen, Enums und
@@ -139,7 +139,7 @@ def load_ui_module(get_icons_result, qt_stub):
     calibre_gui2 = types.ModuleType("calibre.gui2")
     calibre_gui2.error_dialog = None
     calibre_gui2.info_dialog = None
-    calibre_gui2.get_icons = lambda name, context=None: get_icons_result
+    calibre_gui2.get_icons = lambda name, context=None: None
     calibre_actions = types.ModuleType("calibre.gui2.actions")
     calibre_actions.InterfaceAction = object
     calibre.gui2 = calibre_gui2
@@ -201,14 +201,8 @@ def load_ui_module(get_icons_result, qt_stub):
             else:
                 sys.modules[name] = module
     ui_module._restore_stubs_for_tests = restore_stubs
+    test_case.addCleanup(ui_module._restore_stubs_for_tests)
     return ui_module
-
-
-def ui_module_for(test_case, qt_stub):
-    """UI-Modul für einen Test laden und die Stubs danach zurücknehmen."""
-    module = load_ui_module(lambda *args, **kwargs: None, qt_stub=qt_stub)
-    test_case.addCleanup(module._restore_stubs_for_tests)
-    return module
 
 
 class UiCase(unittest.TestCase):

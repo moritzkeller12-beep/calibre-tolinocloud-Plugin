@@ -102,8 +102,8 @@ def start_worker(dialog, worker, thread, thread_name, worker_name,
     for signal, slot in extra_slots:
         signal.connect(slot)
     thread.finished.connect(thread.deleteLater)
-    _keep_thread_alive(thread)
-    _keep_worker_alive(thread, worker)
+    _retain(_THREADS, thread, thread.finished)
+    _retain(_WORKERS, worker, thread.finished)
     setattr(dialog, thread_name, thread)
     setattr(dialog, worker_name, worker)
     thread.start()
@@ -140,23 +140,15 @@ def _discard_item(collection, item):
             return
 
 
-def _keep_thread_alive(thread):
-    """Retain a thread until Qt reports that it has finished."""
-    if not any(kept is thread for kept in _THREADS):
-        _THREADS.append(thread)
-        thread.finished.connect(lambda: _discard_item(_THREADS, thread))
+def _retain(collection, item, finished):
+    """Keep `item` referenced until the signal `finished` fires.
 
-
-def _keep_worker_alive(thread, worker):
-    """Keep the worker referenced until its thread reports `finished`.
-
-    `closeEvent` drops `self.login_worker` while the sign-in thread keeps
-    running. Without this reference Qt could collect the QObject while its
-    `run()` method is still executing in that thread.
+    `closeEvent` drops its worker reference while a sign-in thread keeps
+    running; without this guard Qt could collect the QObject mid-`run()`.
     """
-    if not any(kept is worker for kept in _WORKERS):
-        _WORKERS.append(worker)
-        thread.finished.connect(lambda: _discard_item(_WORKERS, worker))
+    if not any(kept is item for kept in collection):
+        collection.append(item)
+        finished.connect(lambda: _discard_item(collection, item))
 
 
 def _stop_thread(thread, timeout_ms=3000):
@@ -176,7 +168,7 @@ def _stop_thread(thread, timeout_ms=3000):
             thread.setParent(None)
         except Exception:
             pass
-        _keep_thread_alive(thread)
+        _retain(_THREADS, thread, thread.finished)
         try:
             if thread.isFinished():
                 _discard_item(_THREADS, thread)
