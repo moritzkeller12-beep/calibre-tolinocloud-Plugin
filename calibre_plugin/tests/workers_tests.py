@@ -12,7 +12,7 @@ from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..planning import MetaUpdateRecord, SyncJob
 from ..run_context import RunContext
 from ._support import (CalibreDatabase, PreferencesCase, break_settings,
-                       real_qt_stub, ui_module_for)
+                       execute_worker, real_qt_stub, record, ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -107,14 +107,7 @@ class WorkerCase(PreferencesCase):
     def run_worker(self, client, jobs=(), removals=(), **kwargs):
         worker = self.ui.workers.SyncWorker(self.context, list(jobs),
                                             list(removals), **kwargs)
-        emitted = {}
-        worker.completed.connect(
-            lambda *args: emitted.setdefault("completed", args))
-        worker.failed.connect(
-            lambda message: emitted.setdefault("failed", message))
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        emitted = execute_worker(worker, client, self.ui, "completed")
         return worker, emitted
 
     def job(self, book_id, book_uuid, path, title="Titel", old_id=None):
@@ -172,13 +165,8 @@ class UploadTests(WorkerCase):
         client = FakeClient()
         worker = self.ui.workers.SyncWorker(
             self.context, [self.job(1, UUID, "/buch.epub")], [])
-        emitted = {}
-        worker.completed.connect(
-            lambda *args: emitted.setdefault("completed", args))
         worker.cancel()
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        emitted = execute_worker(worker, client, self.ui, "completed")
         self.assertEqual([], client.uploads)
         self.assertEqual([], worker.updates)
         self.assertTrue(worker.outcome["cancelled"])
@@ -431,11 +419,7 @@ class FailureTests(WorkerCase):
     def test_an_authentication_error_stops_the_run(self):
         worker = self.ui.workers.SyncWorker(
             self.context, [self.job(1, UUID, "/buch.epub")], [])
-        emitted = {}
-        worker.completed.connect(
-            lambda *args: emitted.setdefault("completed", args))
-        worker.failed.connect(
-            lambda message: emitted.setdefault("failed", message))
+        emitted = record(worker, "completed", "failed")
         with patch.object(self.ui.workers.TOKEN_VAULT, "login",
                           side_effect=TolinoAuthError("abgelaufen", code="A01")):
             worker.run()
@@ -566,11 +550,7 @@ class LocalSnapshotTests(WorkerCase):
     def run_snapshot(self, database):
         worker = self.ui.workers.LocalMetadataWorker(
             database, self.context, {"marke": True})
-        emitted = {}
-        worker.ready.connect(
-            lambda payload: emitted.setdefault("ready", payload))
-        worker.failed.connect(
-            lambda message: emitted.setdefault("failed", message))
+        emitted = record(worker, "ready", "failed")
         worker.run()
         return worker, emitted
 

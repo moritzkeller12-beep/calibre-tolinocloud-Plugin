@@ -13,8 +13,8 @@ from unittest.mock import patch
 from ..comparison import compare_inventory
 from ..errors import TolinoError
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, RecordingFileDialog, dashboard_stub,
-                       real_qt_stub, ui_module_for)
+from ._support import (CalibreDatabase, RecordingFileDialog, UiCase,
+                       dashboard_stub, real_qt_stub, ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 
@@ -52,11 +52,8 @@ def select_rows(table, rows):
         model.select(table.model().index(row, 0), flags)
 
 
-class CreateColumnTests(unittest.TestCase):
+class CreateColumnTests(UiCase):
     """Ein Knopf legt genau seine Spalte an -- und nennt den Neustart."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def _dashboard(self, database):
         cls = self.ui.dashboard.SyncDashboard
@@ -86,11 +83,8 @@ class CreateColumnTests(unittest.TestCase):
         self.assertIn("schon vorhanden", boxes[0][2])
 
 
-class EscapeCloseTests(unittest.TestCase):
+class EscapeCloseTests(UiCase):
     """Esc schliesst wie das Fensterkreuz: `closeEvent` laeuft wirklich."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def test_escape_runs_close_event_and_saves_the_visible_account(self):
         """Esc schliesst wie das Fensterkreuz: `closeEvent` laeuft und `exec()`
@@ -174,11 +168,8 @@ class EscapeCloseTests(unittest.TestCase):
         self.assertTrue(dashboard.isVisible())
 
 
-class ReadingMirrorTests(unittest.TestCase):
+class ReadingMirrorTests(UiCase):
     """Lesestatus und Fortschritt sind getrennte Spalten."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def test_a_failing_column_does_not_block_the_other_write(self):
         database = CalibreDatabase(
@@ -193,11 +184,8 @@ class ReadingMirrorTests(unittest.TestCase):
         self.assertEqual([("#tolino_progress", {2: 42})], database.api.writes)
 
 
-class InventoryDialogTests(unittest.TestCase):
+class InventoryDialogTests(UiCase):
     """Vergleichsfenster: Aufbau, Auswahl je Zeile, Gelesen-Markierung."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def _dialog(self, rows=None):
         return self.ui.dialogs.InventoryDialog(
@@ -308,11 +296,8 @@ def two_books():
     return compare_inventory({1: first, 2: second}, {}, cloud, ["EPUB"])
 
 
-class DestructiveSelectionTests(unittest.TestCase):
+class DestructiveSelectionTests(UiCase):
     """Loeschen ist destruktiv: nur ausgewaehlte, konkrete Cloud-Kopien."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def dialog(self, rows=None):
         return self.ui.dialogs.InventoryDialog(

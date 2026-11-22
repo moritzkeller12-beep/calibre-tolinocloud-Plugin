@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from .. import config
 from ..errors import TolinoAuthError
-from ._support import SyncThread, real_qt_stub, ui_module_for
+from ._support import SyncThread, UiCase
 
 
 class WorkerDouble:
@@ -26,11 +26,11 @@ class WorkerDouble:
         self.runs += 1
 
 
-class ThreadLifecycleTests(unittest.TestCase):
-    """Referenzen bleiben bis finished -- auch nach einem Timeout."""
+class CommonCase(UiCase):
+    """Thread- und Worker-Listen nach dem Test wiederherstellen."""
 
     def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
+        super().setUp()
         self.common = self.ui.common
         self._saved = (list(self.common._THREADS),
                        list(self.common._WORKERS))
@@ -39,6 +39,10 @@ class ThreadLifecycleTests(unittest.TestCase):
     def _restore(self):
         self.common._THREADS[:] = self._saved[0]
         self.common._WORKERS[:] = self._saved[1]
+
+
+class ThreadLifecycleTests(CommonCase):
+    """Referenzen bleiben bis finished -- auch nach einem Timeout."""
 
     def start(self, thread=None, worker=None):
         dialog = types.SimpleNamespace()
@@ -82,19 +86,8 @@ class ThreadLifecycleTests(unittest.TestCase):
         self.assertTrue(thread.stopped)
 
 
-class CallWorkerTests(unittest.TestCase):
+class CallWorkerTests(CommonCase):
     """start_call fuehrt den Aufruf aus und beendet den Thread ueber Signale."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
-        self.common = self.ui.common
-        self._saved = (list(self.common._THREADS),
-                       list(self.common._WORKERS))
-        self.addCleanup(self._restore)
-
-    def _restore(self):
-        self.common._THREADS[:] = self._saved[0]
-        self.common._WORKERS[:] = self._saved[1]
 
     def test_the_result_reaches_the_dialog_and_stops_the_thread(self):
         dialog = types.SimpleNamespace()
@@ -119,11 +112,8 @@ class CallWorkerTests(unittest.TestCase):
         self.assertTrue(dialog._call_thread.stopped)
 
 
-class AuthWorkerTests(unittest.TestCase):
+class AuthWorkerTests(UiCase):
     """Anmelde-Worker: erst speichern, dann melden."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def worker(self, **patches):
         module = self.ui.auth_workers

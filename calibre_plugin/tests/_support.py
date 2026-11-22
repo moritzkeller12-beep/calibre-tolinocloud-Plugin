@@ -53,6 +53,24 @@ def break_settings(case):
     config.PREFERENCES.file_path = broken
 
 
+def record(worker, *names):
+    """Signale eines Workers mitschreiben: Name -> Argument(e)."""
+    emitted = {}
+    for name in names:
+        getattr(worker, name).connect(
+            lambda *args, name=name: emitted.setdefault(
+                name, args[0] if len(args) == 1 else args))
+    return emitted
+
+
+def execute_worker(worker, client, ui, success="ready"):
+    """Worker mit ersetztem Login ausfuehren, Signale mitschreiben."""
+    emitted = record(worker, success, "failed")
+    with patch.object(ui.workers.TOKEN_VAULT, "login", return_value=client):
+        worker.run()
+    return emitted
+
+
 class FakeSignal:
     """Minimales Qt-Signal: Slots verbinden, ausloesen, ``fire``-Alias."""
 
@@ -191,6 +209,13 @@ def ui_module_for(test_case, qt_stub):
     module = load_ui_module(lambda *args, **kwargs: None, qt_stub=qt_stub)
     test_case.addCleanup(module._restore_stubs_for_tests)
     return module
+
+
+class UiCase(unittest.TestCase):
+    """Geladenes UI-Modul mit echtem PyQt6 fuer einen Test."""
+
+    def setUp(self):
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
 
 # --- Echte Qt-Oberflaeche fuer die Dialogtests -------------------------

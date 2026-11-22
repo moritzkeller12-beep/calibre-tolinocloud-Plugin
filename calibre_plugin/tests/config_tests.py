@@ -1,13 +1,11 @@
 """Konten und Tokens: Trennung, Rotation und verspaetete Rueckmeldungen."""
 import json
 import os
-import shutil
-import tempfile
 import unittest
 from unittest.mock import patch
 
 from .. import config
-from ._support import PreferencesCase
+from ._support import PreferencesCase, break_settings
 
 
 class ConfigCase(PreferencesCase):
@@ -144,9 +142,7 @@ class ExternalChangeTests(ConfigCase):
         path = self.file_path()
         with open(path, "rb") as handle:
             before = handle.read()
-        unreadable = tempfile.mkdtemp(prefix="tolino-unreadable-")
-        self.addCleanup(shutil.rmtree, unreadable, True)
-        config.PREFERENCES.file_path = unreadable
+        break_settings(self)
         # Lesen bleibt beim letzten guten Stand ...
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
         # ... und ein Schreibvorgang bricht ab, statt zu ueberschreiben.

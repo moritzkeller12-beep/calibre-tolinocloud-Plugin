@@ -119,8 +119,8 @@ class FakeTolinoClient:
         self.refresh_in = self.refresh
 
 
-class ExchangeTests(unittest.TestCase):
-    """Welcher gelesene Token eingeloest wird und welcher nicht."""
+class FakeClientCase(unittest.TestCase):
+    """Der Netzwerk-Client ist durch das Doppel ersetzt, Zaehler frisch."""
 
     def setUp(self):
         FakeTolinoClient.instances = []
@@ -129,6 +129,10 @@ class ExchangeTests(unittest.TestCase):
                         FakeTolinoClient)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+
+class ExchangeTests(FakeClientCase):
+    """Welcher gelesene Token eingeloest wird und welcher nicht."""
 
     def test_the_freshest_refresh_token_of_a_known_shop_is_used(self):
         access = jwt(iat=2000, typ="Access")
@@ -171,16 +175,8 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(1, len(FakeTolinoClient.instances))
 
 
-class GrabFlowTests(unittest.TestCase):
+class GrabFlowTests(FakeClientCase):
     """Der Wartepfad endet mit Token, Zeitueberschreitung oder Fensterschluss."""
-
-    def setUp(self):
-        FakeTolinoClient.instances = []
-        FakeTolinoClient.failure = None
-        patcher = patch("calibre_plugin.browser_login.TolinoClient",
-                        FakeTolinoClient)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def test_a_successful_grab_returns_token_partner_and_closes(self):
         with patch("calibre_plugin.cdp.launch_reader_window"), \

@@ -6,12 +6,12 @@ Kontospeicherung laufen im Produktivcode.
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
 
 from .. import config
 from ..errors import TolinoAuthError, TolinoError
 from ..run_context import RunContext
-from ._support import PreferencesCase, real_qt_stub, ui_module_for
+from ._support import (PreferencesCase, execute_worker, real_qt_stub,
+                       ui_module_for)
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER = "22222222-2222-4222-8222-222222222222"
@@ -70,13 +70,7 @@ class PrepareCase(PreferencesCase):
         worker = self.ui.workers.PrepareWorker(
             self.context, {1: dict(BOOK)} if metadata is None else metadata,
             {} if state is None else state)
-        emitted = {}
-        worker.ready.connect(lambda payload: emitted.setdefault("ready", payload))
-        worker.failed.connect(lambda message: emitted.setdefault("failed", message))
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
-        return worker, emitted
+        return worker, execute_worker(worker, client, self.ui)
 
 
 class ComparisonTests(PrepareCase):
@@ -186,13 +180,8 @@ class CancelAndStaleTests(PrepareCase):
     def test_a_cancel_before_the_cloud_call_reports_cancellation(self):
         client = FakeClient([CLOUD])
         worker = self.ui.workers.PrepareWorker(self.context, {1: dict(BOOK)}, {})
-        emitted = {}
-        worker.ready.connect(lambda payload: emitted.setdefault("ready", payload))
-        worker.failed.connect(lambda message: emitted.setdefault("failed", message))
         worker.cancel()
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        emitted = execute_worker(worker, client, self.ui)
         self.assertNotIn("ready", emitted)
         self.assertEqual(self.ui.common.CANCEL_MESSAGE, emitted["failed"])
         self.assertEqual([], client.calls)

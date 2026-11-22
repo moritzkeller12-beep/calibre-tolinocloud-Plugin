@@ -544,10 +544,9 @@ class InventoryDialog(QDialog):
             if not caps["usable"]:
                 continue
             wanted = tuple(self.default_actions(row))
-            for column, key in enumerate(self.ACTION_KEYS[:2]):
-                checked = bool(wanted[column]) and caps[key]
-                row[key] = checked
-                self._set_check_quietly(index, column, checked)
+            for key, wanted_value in zip(self.ACTION_KEYS[:2], wanted):
+                self._set_row_choice(index, key,
+                                     bool(wanted_value) and caps[key], caps)
         self._update_summary()
 
     def automatic_actions_enabled(self):
