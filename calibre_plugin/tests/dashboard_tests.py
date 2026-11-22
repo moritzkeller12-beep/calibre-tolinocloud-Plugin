@@ -6,7 +6,6 @@ Dashboard sind echte Objekte bzw. das vorhandene Dashboard-Doppel.
 """
 from contextlib import contextmanager
 import types
-import unittest
 from unittest.mock import patch
 
 from .. import config
@@ -623,7 +622,3 @@ def choice():
     """Leere, aber vollständige Auswahl aus dem Vergleichsfenster."""
     return {"uploads": set(), "metadata": set(), "read_changes": [],
             "cloud_deletions": []}
-
-
-if __name__ == "__main__":
-    unittest.main()

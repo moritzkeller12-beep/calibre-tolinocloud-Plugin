@@ -224,7 +224,3 @@ class GrabFlowTests(FakeClientCase):
         self.assertEqual("B02", caught.exception.code)
         self.assertIn("kein gültiger Zugang", str(caught.exception))
         self.assertTrue(close.called)
-
-
-if __name__ == "__main__":
-    unittest.main()

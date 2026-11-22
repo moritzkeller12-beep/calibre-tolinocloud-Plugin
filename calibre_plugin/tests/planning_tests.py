@@ -531,7 +531,3 @@ class ReadingStateTests(unittest.TestCase):
         self.assertTrue(state[UUID]["reading"]["read"])
         self.assertEqual({"percent": 10}, state[UUID]["reading"]["progress"])
         self.assertEqual({"tolino_id": "alt"}, state["calibre-1-abc"])
-
-
-if __name__ == "__main__":
-    unittest.main()

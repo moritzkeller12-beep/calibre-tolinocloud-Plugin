@@ -949,7 +949,3 @@ class DeleteAndDownloadTests(unittest.TestCase):
                 client.download("d1")
         self.assertEqual("N02", caught.exception.code)
         self.assertIn("HTTPS", caught.exception.short)
-
-
-if __name__ == "__main__":
-    unittest.main()

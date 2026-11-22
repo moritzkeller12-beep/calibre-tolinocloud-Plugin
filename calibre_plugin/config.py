@@ -549,13 +549,15 @@ def _rotation_stamp(token, now=None):
 
 
 def save_credentials(account_name, refresh_token, hardware, partner_id=None):
-    """Persist a rotated refresh token, hardware ID and detected shop.
+    """Persist a new login: refresh token, hardware ID and detected shop.
 
-    Das aktive Konto bleibt unberührt: der Keep-alive rotiert alle Konten,
-    ein Token-Rotationsschritt darf die Auswahl nicht umschalten.
+    Ein neuer Zugang ersetzt die Sitzung: der Access-Token des vorherigen
+    tolino-Kontos darf nicht weiterverwendet werden. Das aktive Konto bleibt
+    unberührt: ein neuer Zugang darf die Auswahl nicht umschalten.
     """
     values = {"refresh_token": refresh_token, "hardware_id": hardware,
-              "refresh_rotated_at": _rotation_stamp(refresh_token)}
+              "refresh_rotated_at": _rotation_stamp(refresh_token),
+              "access_token": "", "access_expires_at": 0}
     if partner_id:
         values["partner_id"] = partner_id
     return _update_account(account_name, values)

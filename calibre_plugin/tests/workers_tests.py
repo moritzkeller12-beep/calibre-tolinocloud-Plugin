@@ -3,7 +3,6 @@
 Der Worker wird mit einem Client-Doppel an der Netznaht ausgeführt; alles
 andere (Planung, Zustand, Signale, Bericht) ist Produktivcode.
 """
-import unittest
 from unittest.mock import patch
 
 from .. import config
@@ -572,7 +571,3 @@ class LocalSnapshotTests(WorkerCase):
         _worker, emitted = self.run_snapshot(database)
         self.assertEqual({"failed"}, set(emitted))
         self.assertIn("Bibliothek gesperrt", emitted["failed"])
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -75,7 +75,3 @@ class DecryptTests(unittest.TestCase):
             # Ein danebenliegender Klartext ist kein Blob und braucht keinen
             # Decoder -- er bleibt unveraendert verwendbar.
             self.assertEqual("", _decrypt_reader_blob(TOKEN_PLAIN))
-
-
-if __name__ == "__main__":
-    unittest.main()

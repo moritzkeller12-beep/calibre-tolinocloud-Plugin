@@ -8,7 +8,6 @@ import contextlib
 import json
 import os
 import time
-import unittest
 from urllib.parse import parse_qs
 
 from .. import config
@@ -330,6 +329,21 @@ class KeepaliveTests(VaultCase):
             self.assertEqual(0, TOKEN_VAULT.keepalive_refresh(only_due=True))
         self.assertEqual([], server.server.requests)
 
+    def test_a_due_account_is_rotated_even_with_a_valid_access_token(self):
+        """Der Keep-alive tauscht den faelligen Refresh-Token wirklich."""
+        server = TokenServer()
+        now = time.time()
+        token = jwt_token({"iat": int(now) - 3600, "exp": int(now) + 300})
+        config.save_account("A", {
+            "refresh_token": token, "refresh_rotated_at": now - 3600,
+            "hardware_id": "hw", "access_token": "acc-gut",
+            "access_expires_at": now + 1800})
+        self.assertEqual(0, TOKEN_VAULT.due_in("A"))
+        with self.vault(server):
+            self.assertEqual(1, TOKEN_VAULT.keepalive_refresh(only_due=True))
+        self.assertEqual([token], server.used_tokens)
+        self.assertEqual("rot-1", config.account_summary("A")["refresh_token"])
+
     def test_the_round_follows_the_token_lifetime(self):
         now = time.time()
         config.save_account("A", {
@@ -358,7 +372,3 @@ class KeepaliveTests(VaultCase):
         finally:
             stop_token_keepalive()
         self.assertTrue(stop_token_keepalive())
-
-
-if __name__ == "__main__":
-    unittest.main()

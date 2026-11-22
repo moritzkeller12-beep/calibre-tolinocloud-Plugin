@@ -168,7 +168,3 @@ class IgnoreAndScopeTests(unittest.TestCase):
             type("Db", (), {"dbpath": "/b"})()))
         self.assertEqual(DEFAULT_LIBRARY_SCOPE,
                          library_scope(type("Db", (), {})()))
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -223,7 +223,3 @@ class ErrorMessageTests(unittest.TestCase):
                            return_value=sandbox):
                     message = missing_browser_error(status)
                 self.assertIn(expected, message)
-
-
-if __name__ == "__main__":
-    unittest.main()

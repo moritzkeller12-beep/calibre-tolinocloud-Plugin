@@ -433,7 +433,3 @@ class ReaderTargetTests(unittest.TestCase):
     def test_a_malformed_target_list_is_no_reader(self):
         self.assertEqual((None, False), cdp._reader_target(None, 5555))
         self.assertEqual((None, False), cdp._reader_target(["kaputt"], 5555))
-
-
-if __name__ == "__main__":
-    unittest.main()

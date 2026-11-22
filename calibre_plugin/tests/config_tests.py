@@ -55,6 +55,20 @@ class AccountTests(PreferencesCase):
         config.save_account("B", {"refresh_token": "tok-B"})
         self.assertEqual(["PDF"], config.settings()["preferred_formats"])
 
+    def test_a_new_login_drops_the_previous_access_token(self):
+        """Ein neuer Zugang darf nicht den Bearer des alten Kontos erben."""
+        config.save_account("A", {"refresh_token": "tok-A"})
+        config.save_access_token("A", "acc-A", 4102444800)
+        self.assertTrue(config.save_credentials("A", "tok-neu", "hw"))
+        tokens = config.account_tokens("A")
+        self.assertEqual("", tokens["access_token"])
+        self.assertEqual(0, tokens["access_expires_at"])
+        # Eine gewoehnliche Rotation behaelt den noch gueltigen Access-Token.
+        config.save_access_token("A", "acc-neu", 4102444800)
+        self.assertTrue(config.save_refresh_token("A", "tok-rot"))
+        self.assertEqual("acc-neu",
+                         config.account_tokens("A")["access_token"])
+
     def test_a_removed_account_is_not_recreated_by_a_late_callback(self):
         config.save_account("A", {"refresh_token": "tok-A"})
         config.save_account("B", {"refresh_token": "tok-B"})
@@ -281,7 +295,3 @@ class TokenTests(PreferencesCase):
                 self.assertTrue(config.save_state("A", local, base))
                 self.assertEqual(local["b1"] if stored_id == "alt" else stored,
                                  config.account_by_name("A")["state"]["b1"])
-
-
-if __name__ == "__main__":
-    unittest.main()

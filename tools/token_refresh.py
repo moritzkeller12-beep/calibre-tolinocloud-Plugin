@@ -24,7 +24,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-PLUGIN_ZIP = "tolino_cloud_sync.zip"
+# Calibre legt das installierte Plugin unter seinem Plugin-Namen ab.
+PLUGIN_ZIP = "Tolino Cloud Sync.zip"
 PACKAGE = "calibre_plugins"
 MODULE = "tolino_cloud_sync"
 # Laeuft in Calibres Python: dort gibt es calibre.utils.config, das die

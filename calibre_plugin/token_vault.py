@@ -54,12 +54,14 @@ class TokenVault:
     def __init__(self):
         self._lock = threading.Lock()
 
-    def login(self, account_name, partner_id=None, lock_timeout=5):
+    def login(self, account_name, partner_id=None, lock_timeout=5,
+              force=False):
         """Login-Client; der Shop steht im Konto (``partner_id`` nur als Ersatz).
 
         Der Lock gilt fuer Lesen, Tausch und Speichern der Rotation -- auch
         fuer eine zweite Calibre-Instanz. Ein noch gueltiger Access-Token
-        beendet den Aufruf, ohne die Einstellungen zu brauchen.
+        beendet den Aufruf, ohne die Einstellungen zu brauchen; ``force``
+        erzwingt dagegen den Tausch des Refresh-Tokens (Keep-alive).
         """
         with self._held_lock(lock_timeout), settings_write_lock():
             values = self._stored_credentials(account_name)
@@ -101,7 +103,7 @@ class TokenVault:
                     detail="Einstellungen konnten nicht geschrieben werden.")
             # Erst anmelden, dann den Vault einhaengen: `login()` wuerde
             # sonst ueber `relogin()` den bereits gehaltenen Lock anfordern.
-            client.login()
+            client.login(force=force)
             client.account_name = account_name
             client.token_vault = self
         return client
@@ -210,7 +212,8 @@ class TokenVault:
 
         Mit ``only_due`` bleiben Konten aus, deren Token noch lange gilt:
         jede Rotation ist ein Einmal-Tausch und soll nur passieren, wenn die
-        Laufzeit es verlangt.
+        Laufzeit es verlangt. Ein faelliges Konto wird auch dann getauscht,
+        wenn sein Access-Token noch gilt -- sonst liefe der Refresh-Token ab.
         """
         if not settings_writable():
             # Ein Token, dessen Rotation nicht gespeichert werden kann, waere
@@ -237,7 +240,7 @@ class TokenVault:
                 if due is not None and due > 0:
                     continue
             try:
-                self.login(name, lock_timeout=0)
+                self.login(name, lock_timeout=0, force=True)
                 rotated += 1
             except Exception as exc:
                 # Ein belegter Lock ist kein Fehler -- nächste Runde.

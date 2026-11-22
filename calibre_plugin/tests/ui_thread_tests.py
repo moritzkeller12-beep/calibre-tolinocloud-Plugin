@@ -4,7 +4,6 @@ Kein echter QThread, keine Wartezeiten: geprueft wird, wann Referenzen
 gehalten und wann sie freigegeben werden.
 """
 import types
-import unittest
 from unittest.mock import patch
 
 from .. import config
@@ -194,7 +193,3 @@ class AuthWorkerTests(UiCase):
             worker.run()
         self.assertEqual(1, len(messages))
         self.assertIn("kaputt", messages[0])
-
-
-if __name__ == "__main__":
-    unittest.main()

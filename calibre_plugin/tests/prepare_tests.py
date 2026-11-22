@@ -3,7 +3,6 @@
 Der Client ist ein Doppel an der Netznaht; Vergleich, Zustandsfuehrung und
 Kontospeicherung laufen im Produktivcode.
 """
-import unittest
 
 from .. import config
 from ..errors import TolinoAuthError, TolinoError
@@ -197,7 +196,3 @@ class CancelAndStaleTests(PrepareCase):
             FakeClient(inventory_error=TolinoError("weg")), state=state)
         self.assertNotIn("ready", emitted)
         self.assertEqual("weg", state[UUID]["tolino_id"])
-
-
-if __name__ == "__main__":
-    unittest.main()

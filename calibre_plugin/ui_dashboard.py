@@ -845,7 +845,13 @@ class SyncDashboard(DashboardParts, QDialog):
         self.close()
 
     def closeEvent(self, event):
-        """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
+        """Schliessen: erst sichern, dann Worker beenden, nie blockieren."""
+        # Schliesst nur, wenn die sichtbaren Einstellungen gesichert sind:
+        # `_save_settings` meldet den Fehler und der Dialog bleibt offen --
+        # samt Worker-Referenzen, damit ein erneuter Versuch moeglich ist.
+        if not self._save_settings():
+            event.ignore()
+            return
         if _active_work_thread(self):
             self.cancel_sync()
         for thread_name, worker_name in (
@@ -864,10 +870,4 @@ class SyncDashboard(DashboardParts, QDialog):
         # here could freeze the close for minutes.
         self.login_thread = None
         self.login_worker = None
-        # Schliesst nur, wenn die sichtbaren Einstellungen gesichert sind:
-        # `_save_settings` meldet den Fehler und der Dialog bleibt offen,
-        # damit die Eingaben nicht mit dem Fenster verschwinden.
-        if not self._save_settings():
-            event.ignore()
-            return
         event.accept()

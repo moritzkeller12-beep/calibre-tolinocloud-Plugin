@@ -4,9 +4,11 @@
 
 - **Anmeldung bleibt auch bei parallelen Calibre-Instanzen stabil.** Login, Relogin und Token-Erneuerung teilen sich eine Dateisperre; unter Windows wird auch eine längere Sperre abgewartet, statt die Anmeldung abzubrechen.
 - **Sitzungen halten länger und erneuern sparsamer.** Ein gültiger Access-Token wird mit Ablaufzeit gespeichert und wiederverwendet. Keep-alive und Gültigkeitsprüfung richten sich nach der echten Token-Laufzeit; bei starker Uhrabweichung gilt die relative Laufzeit. Beim Erneuern wird der Scope des Tokens mitgeschickt; nach einer Ablehnung wird einmal der inzwischen gespeicherte Token versucht, und nur der abgelehnte Token verschwindet.
+- **Neue Anmeldung erbt keinen alten Zugang.** Nach einem neuen Login gilt der gespeicherte Access-Token des vorherigen Kontos nicht weiter; eine reine Token-Erneuerung behält ihn.
+- **Fällige Sitzungen werden wirklich erneuert.** Der Keep-alive tauscht den Refresh-Token auch dann, wenn noch ein gültiger Access-Token vorliegt — sonst würde die Sitzung trotz laufendem Keep-alive ablaufen.
 - **Zugangsdaten und Hintergrund-Refresh sind abgesichert.** Einstellungs- und Sperrdatei sind unter POSIX nur für den Benutzer lesbar. `tools/token_refresh.py` erneuert fällige Konten auch ohne geöffnetes Calibre.
 - **Cloud-Antworten ohne Patch gelten als leerer Stand.** Antwortet tolino mit gültiger Revision, aber ohne `patches`, wertet das Plugin das als leere Markierungsliste statt als Fehler. Fehlende Revision, `patches: null` oder ein falscher Typ brechen weiterhin mit einem Hinweis ab.
-- **Das Dashboard schliesst kontrolliert.** Esc nutzt denselben Weg wie das Fensterkreuz: Ein laufender Sync wird abgebrochen, sichtbare Einstellungen werden gesichert. Scheitert das Speichern, bleibt das Fenster mit einer Meldung offen.
+- **Das Dashboard schliesst kontrolliert.** Esc nutzt denselben Weg wie das Fensterkreuz: Zuerst werden die sichtbaren Einstellungen gesichert, erst danach wird ein laufender Sync abgebrochen. Scheitert das Speichern, bleibt das Fenster mit einer Meldung offen.
 - **Intern aufgeräumt.** Private Helfer mit nur einem Aufrufer und doppelte Testschritte wurden zusammengeführt, die README auf Installation, Benutzung und Entwicklung reduziert; die CI prüft zusätzlich Python 3.10.
 
 ## 0.1.08

@@ -245,7 +245,3 @@ class WebSocketTransportTests(unittest.TestCase):
                       + struct.pack(">Q", 16 * 1024 * 1024 + 1))
         with self.assertRaisesRegex(OSError, "too large"):
             _Ws(left).recv_json(timeout=3)
-
-
-if __name__ == "__main__":
-    unittest.main()

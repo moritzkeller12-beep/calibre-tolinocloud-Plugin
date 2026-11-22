@@ -133,7 +133,3 @@ class ReadingProgressTests(unittest.TestCase):
             base + [bookmark("d1", "neu", 200, op="remove")])["d1"]["percent"])
         self.assertEqual(80, reading_progress(
             base + [bookmark("d1", "alt", 100, op="remove")])["d1"]["percent"])
-
-
-if __name__ == "__main__":
-    unittest.main()

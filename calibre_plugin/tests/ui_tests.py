@@ -143,8 +143,15 @@ class EscapeCloseTests(UiCase):
             state["timed_out"] = True
             QDialog.reject(dashboard)
 
-        QTimer.singleShot(1500, force_close)
-        dashboard.exec()
+        guard = QTimer()
+        guard.setSingleShot(True)
+        guard.timeout.connect(force_close)
+        guard.start(1500)
+        try:
+            dashboard.exec()
+        finally:
+            # Nach `exec()` darf der Timer nicht mehr auf das Fenster zugreifen.
+            guard.stop()
         self.assertFalse(state["timed_out"], "exec() lief nach Esc weiter")
         # Genau einmal, und das Speichern erst nach dem Abbruch im closeEvent.
         self.assertEqual(["closed", "saved"], events)
@@ -640,7 +647,3 @@ class ConfirmationTests(unittest.TestCase):
         text = self.question_text()
         self.assertIn("Der Schwarm", text)
         self.assertNotIn("Ohne Kopie", text)
-
-
-if __name__ == "__main__":
-    unittest.main()

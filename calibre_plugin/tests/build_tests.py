@@ -144,6 +144,12 @@ class PluginArchiveTests(unittest.TestCase):
             text = (ROOT / name).read_text(encoding="utf-8")
             self.assertIn(version, text, name)
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_the_token_refresh_tool_defaults_to_calibres_plugin_zip_name(self):
+        """Calibre installiert das Plugin als ``<Name>.zip`` (siehe README)."""
+        tree = ast.parse((ROOT / "tools" / "token_refresh.py")
+                         .read_text(encoding="utf-8"))
+        constant = next(node.value for node in tree.body
+                        if isinstance(node, ast.Assign)
+                        and any(getattr(target, "id", "") == "PLUGIN_ZIP"
+                                for target in node.targets))
+        self.assertEqual(ast.literal_eval(constant), "Tolino Cloud Sync.zip")

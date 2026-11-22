@@ -341,12 +341,17 @@ class TolinoClient:
         """Ein noch gueltiger Zugang erspart einen zweiten Token-Tausch."""
         return bool(self.access) and time.time() < self.expires_at
 
-    def login(self):
-        # A valid access token avoids spending the rotating refresh token twice.
-        if self._access_valid():
+    def login(self, force=False):
+        """Login; ``force`` tauscht auch bei noch gueltigem Access-Token.
+
+        Ein gueltiger Access-Token erspart sonst einen zweiten Tausch des
+        Einmal-Tokens. Der Keep-alive muss dagegen faellige Refresh-Token
+        wirklich rotieren.
+        """
+        if not force and self._access_valid():
             return self.refresh
         with self._login_lock:
-            if self._access_valid():
+            if not force and self._access_valid():
                 return self.refresh
             if self.token_vault is None:
                 return self._login()
