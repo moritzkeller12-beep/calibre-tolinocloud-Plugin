@@ -4,23 +4,30 @@ import copy
 import json
 import os
 import threading
+import time
 
 from calibre.utils.config import JSONConfig
 
 from .comparison import COPY_BOUND_FIELDS
+from .jwt import issued_at as _issued_at, lifetime_seconds as _lifetime
 
 # Der bisherige Store bleibt der aktive Datenspeicher: Der neue Namespace
 # aus dem 0.1.08-Entwicklungsstand wurde vor der Verteilung zurückgenommen.
 PREFERENCE_NAMESPACE = "plugins/Tolino Cloud Sync Lite"
 PREFERENCES = JSONConfig(PREFERENCE_NAMESPACE)
 DEFAULT_ACCOUNT_NAME = "default"
-ACCOUNT_KEYS = ("partner_id", "hardware_id", "refresh_token", "state")
+ACCOUNT_KEYS = ("partner_id", "hardware_id", "refresh_token",
+                "refresh_rotated_at", "access_token", "access_expires_at",
+                "state")
 PREFERRED_FORMATS = "preferred_formats"
 DEFAULT_ACCOUNT = {
     "name": DEFAULT_ACCOUNT_NAME,
     "partner_id": 1,
     "hardware_id": "",
     "refresh_token": "",
+    "refresh_rotated_at": 0,
+    "access_token": "",
+    "access_expires_at": 0,
     "state": {},
 }
 _SETTINGS_LOCK = threading.RLock()
@@ -29,6 +36,21 @@ _UNSET = object()
 # kann dieselbe Datei schreiben. Wo verfuegbar, schuetzt eine zusaetzliche
 # Dateisperre das Laden, Vergleichen und Schreiben.
 _LOCK_STATE = threading.local()
+
+
+def _restrict_permissions(path):
+    """Die Einstellungsdatei gehoert nur dem Eigentuemer (best effort).
+
+    Sie enthaelt den einzigen gespeicherten Refresh-Token; Calibre legt sie
+    mit der Standard-umask an. Windows kennt keine POSIX-Rechte -- dort
+    bleibt der Schutz beim Benutzerprofil.
+    """
+    if not path or os.name == "nt":
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _lock_handle(handle):
@@ -77,6 +99,7 @@ def _settings_file_lock():
             # Keine Sperrdatei (unschreibbares Verzeichnis): best effort.
             handle = None
         if handle is not None:
+            _restrict_permissions(str(path) + ".lock")
             try:
                 if os.fstat(handle.fileno()).st_size == 0:
                     # msvcrt sperrt ein Byte; eine leere Datei liesse sich
@@ -156,8 +179,9 @@ def _reload():
 
 
 def _commit():
-    """Schreiben abschliessen."""
+    """Schreiben abschliessen; die Datei bleibt Eigentum des Nutzers."""
     PREFERENCES.commit()
+    _restrict_permissions(getattr(PREFERENCES, "file_path", None))
 
 
 def load_state(raw):
@@ -462,6 +486,19 @@ def _account_record(name):
     return None
 
 
+def account_tokens(account_name):
+    """Zugang eines Kontos inkl. Access-Token -- nur fuer Client und Vault.
+
+    Bewusst getrennt von `account_summary`: die Oberflaeche sieht weiterhin
+    nur Buchhaendler, Geraete-ID und Refresh-Token.
+    """
+    with _SETTINGS_LOCK:
+        _reload()
+        source = _account_record(account_name) or {}
+    return {key: source.get(key, DEFAULT_ACCOUNT[key])
+            for key in ACCOUNT_KEYS if key != "state"}
+
+
 def account_by_name(name):
     """Return one account without copying every other account's state."""
     with _SETTINGS_LOCK:
@@ -504,13 +541,31 @@ def set_active_account(name):
         return True
 
 
+def _rotation_stamp(token, now=None):
+    """Zeitpunkt, ab dem die Laufzeit eines neuen Tokens zaehlt.
+
+    ``iat`` nennt die Ausstellung durch den Server und ist damit der
+    ehrlichste Startpunkt (ein aus dem Browser uebernommener Token ist schon
+    aelter als der Plugin-Lauf). Geglaubt wird er nur, wenn das Alter zur
+    Laufzeit des Tokens passt -- sonst ist die lokale Uhr falsch gestellt und
+    der Speicherzeitpunkt ist die sichere Naeherung.
+    """
+    now = time.time() if now is None else now
+    issued = _issued_at(token)
+    lifetime = _lifetime(token)
+    if issued and lifetime and 0 <= now - issued <= lifetime:
+        return issued
+    return now
+
+
 def save_credentials(account_name, refresh_token, hardware, partner_id=None):
     """Persist a rotated refresh token, hardware ID and detected shop.
 
     Das aktive Konto bleibt unberührt: der Keep-alive rotiert alle Konten,
     ein Token-Rotationsschritt darf die Auswahl nicht umschalten.
     """
-    values = {"refresh_token": refresh_token, "hardware_id": hardware}
+    values = {"refresh_token": refresh_token, "hardware_id": hardware,
+              "refresh_rotated_at": _rotation_stamp(refresh_token)}
     if partner_id:
         values["partner_id"] = partner_id
     return _update_account(account_name, values)
@@ -526,8 +581,24 @@ def save_refresh_token(account_name, token):
     """
     token = str(token or "").strip()
     if token:
-        return _update_account(account_name, {"refresh_token": token})
+        return _update_account(account_name, {
+            "refresh_token": token,
+            "refresh_rotated_at": _rotation_stamp(token)})
     return False
+
+
+def save_access_token(account_name, token, expires_at):
+    """Den Access-Token samt Ablaufzeit sichern.
+
+    Nicht fatal: der Access-Token ist ersetzbar, ein misslungenes Speichern
+    kostet beim naechsten Start nur einen Token-Tausch.
+    """
+    try:
+        expires = float(expires_at or 0)
+    except (TypeError, ValueError):
+        expires = 0.0
+    return _update_account(account_name, {
+        "access_token": str(token or ""), "access_expires_at": expires})
 
 
 def clear_refresh_token_if_unchanged(account_name, rejected_token):
@@ -549,8 +620,11 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
         if rejected and current and current != rejected:
             return False
         # Ein entferntes Konto darf ein verspaeteter Callback nicht anlegen.
-        return _update_account(account_name, {"refresh_token": ""},
-                               allow_virtual_default=False)
+        # Mit dem Refresh-Token ist auch der Access-Token dieser Sitzung tot.
+        return _update_account(account_name, {
+            "refresh_token": "", "refresh_rotated_at": 0,
+            "access_token": "", "access_expires_at": 0},
+            allow_virtual_default=False)
 
 
 def save_hardware_id(account_name, hardware):
@@ -560,8 +634,10 @@ def save_hardware_id(account_name, hardware):
 
 def account_secrets(account_name):
     """Bekannte Geheimnisse eines Kontos fuer die Log-Redaktion."""
-    token = _stored_token(account_name)
-    return (token,) if token else ()
+    values = account_tokens(account_name)
+    tokens = (str(values.get("refresh_token") or ""),
+              str(values.get("access_token") or ""))
+    return tuple(token for token in tokens if token)
 
 
 def remove_account(name):
