@@ -1,5 +1,15 @@
 # Änderungen
 
+## Unveröffentlicht
+
+- Anmeldung bleibt länger gültig: der Keep-alive richtet sich nach der Laufzeit des gespeicherten Refresh-Tokens (ein Fünftel Vorlauf, höchstens alle 45, mindestens alle 5 Minuten) und beginnt mit einer sofortigen Prüfung statt nach einer vollen Wartezeit; Konten mit noch gültigem Access-Token werden übersprungen.
+- Ein gültiger Access-Token wird mit Ablaufzeit gespeichert. Ein Start innerhalb dieser Zeit tauscht nicht und verbraucht damit keine Rotation des Einmal-Tokens.
+- Die Gültigkeit wird gegen `expires_in` **und** die `iat`/`exp`-Claims gerechnet; weicht die lokale Uhr stark ab, gilt die relative Laufzeit (Warnung im Log) statt eines scheinbar ewig gültigen oder sofort abgelaufenen Tokens.
+- Beim Erneuern wird kein hartkodierter Scope mehr mitgeschickt, sondern der Scope des ausgestellten Tokens (RFC 6749, §6); ein abweichender Wert konnte die Erneuerung mit `invalid_scope` scheitern lassen.
+- Nach `invalid_grant`/`reuse exceeded` wird einmal der inzwischen gespeicherte Token versucht, bevor die Ablehnung gilt; gelöscht wird weiterhin nur der wirklich abgelehnte Token. Ein per 401 oder Ablehnung verworfener Access-Token verschwindet auch aus den Einstellungen.
+- Einstellungsdatei und Sperrdatei werden auf `0600` gesetzt (POSIX).
+- Neu: `tools/token_refresh.py` erneuert fällige Konten ohne geöffnetes Calibre (systemd-Timer, Cron, Aufgabenplanung) — siehe README.
+
 ## 0.1.09
 
 - Esc schliesst das Dashboard wie das Fensterkreuz über `closeEvent`: ein laufender Worker wird abgebrochen, die sichtbaren Einstellungen werden noch gesichert. Schlägt das Sichern fehl, bleibt das Fenster offen und meldet den Fehler, statt die Eingaben zu verlieren.

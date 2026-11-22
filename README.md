@@ -21,9 +21,52 @@ Plugin am Zugang. Danach **Bibliothek vergleichen …** wählen, gewünschte Akt
 
 Fehlermeldungen enthalten einen Code; die Abhilfe steht in der [Fehlercodeliste](docs/fehlercodes.md).
 
+## Anmeldung haltbar halten
+
+Solange Calibre läuft, erneuert das Plugin den Zugang nach der Laufzeit des
+gespeicherten Refresh-Tokens (ein Fünftel Vorlauf, spätestens alle 45, mindestens
+alle 5 Minuten) und beginnt mit einer sofortigen Prüfung. Ein noch gültiger
+Access-Token wird mitgespeichert, damit ein Start keinen unnötigen Tausch
+auslöst; beim Erneuern gilt der Scope des ausgestellten Tokens, kein
+hartkodierter Wert.
+
+Wer Calibre überwiegend geschlossen hat, lässt den Zugang von einem
+System-Timer erneuern. `tools/token_refresh.py` startet Calibres eigene Python,
+lädt das installierte Plugin aus seinem ZIP und tauscht nur fällige Konten —
+sonst passiert kein Netzaufruf. Der Takt darf deshalb kurz sein und sollte
+unter der Idle-Grenze des Buchhändlers liegen:
+
+```ini
+# ~/.config/systemd/user/tolino-refresh.service
+[Unit]
+Description=tolino-Zugang erneuern
+
+[Service]
+Type=oneshot
+ExecStart=%h/calibre-tolinocloud-plugin/tools/token_refresh.py
+
+# ~/.config/systemd/user/tolino-refresh.timer
+[Unit]
+Description=tolino-Zugang regelmäßig erneuern
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`systemctl --user enable --now tolino-refresh.timer`. Ohne Systemd genügt Cron
+(`*/5 * * * * /pfad/zu/tools/token_refresh.py`), unter Windows die
+Aufgabenplanung mit demselben Skript. Findet das Skript das Plugin-ZIP nicht,
+nennt `--plugin` den Pfad, ein abweichendes Calibre-Verzeichnis `--config-dir`.
+
 ## Entwicklung
 
-Tests: `python3 -X dev -m unittest calibre_plugin.test_sync`
+Tests: `python3 -X dev -m unittest calibre_plugin.test_sync` (mit Calibres
+Python: `calibre-debug -c` mit demselben Modul).
 
 Die Dialogtests laufen mit echtem PyQt6 im Offscreen-Modus
 (`QT_QPA_PLATFORM=offscreen`); ohne PyQt6 werden sie übersprungen. Echte

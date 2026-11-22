@@ -6,6 +6,7 @@ Kopfdaten, Rotationsreihenfolge, Multipart-Body, PATCH-Nutzlast). Das sind
 die Fehler, die den Nutzer ausloggen, einen Einmal-Token verbrennen oder
 falsche Daten in die Cloud schreiben.
 """
+import base64
 import contextlib
 import json
 import time
@@ -24,6 +25,13 @@ from ._support import LocalHTTP, local_tolino_endpoints
 HARDWARE = "11111111-1111-4111-8111-111111111111"
 TOKEN_BODY = json.dumps({"access_token": "acc-1", "refresh_token": "rot-1",
                          "expires_in": 3600}).encode()
+
+
+def jwt_token(claims):
+    """JWT-foermiger Token mit frei waehlbaren Claims (ohne Signatur)."""
+    segment = base64.urlsafe_b64encode(
+        json.dumps(claims).encode("utf-8")).decode("ascii").rstrip("=")
+    return "eyJhbGciOiJub25lIn0." + segment + ".sig"
 
 
 def token_server(body=TOKEN_BODY, status=200, extra=None):
@@ -85,9 +93,75 @@ class LoginTests(unittest.TestCase):
             requests = len(server.requests)
         self.assertEqual(1, requests)
 
+    def test_a_rejected_token_is_retried_once_with_the_stored_one(self):
+        # Der Parallel-Lauf (Keep-alive, zweite Instanz) hat inzwischen
+        # rotiert: der gespeicherte Token gilt, der abgelehnte nicht mehr.
+        used = []
+
+        def exchange(method, path, headers, payload):
+            used.append(parse_qs(payload.decode("utf-8"))["refresh_token"][0])
+            if used[-1] == "alt":
+                return (400, {"Content-Type": "application/json"},
+                        json.dumps({"error": "invalid_grant"}).encode())
+            return 200, {"Content-Type": "application/json"}, TOKEN_BODY
+
+        with token_server(extra=exchange) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="alt",
+                                  stored_token_callback=lambda: "neu")
+            self.assertEqual("rot-1", client.login())
+        self.assertEqual(["alt", "neu"], used)
+
     def test_an_unknown_partner_is_rejected(self):
         with self.assertRaises(TolinoError):
             TolinoClient(99, HARDWARE, refresh="start")
+
+
+class FreshnessTests(unittest.TestCase):
+    """Ablauf, Uhr und Scope entscheiden, wie lange ein Login haelt."""
+
+    def test_an_unknown_scope_is_not_sent(self):
+        # Ein hartkodierter Scope kann vom ausgestellten abweichen und die
+        # Erneuerung mit invalid_scope scheitern lassen.
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            client.login()
+            body = parse_qs(server.requests[0]["body"].decode("utf-8"))
+        self.assertNotIn("scope", body)
+        self.assertIn("client_id", body)
+
+    def test_the_scope_of_the_token_is_reused(self):
+        token = jwt_token({"iat": int(time.time()),
+                           "exp": int(time.time()) + 3600,
+                           "scope": "SCOPE_BOSH offline_access"})
+        with token_server() as server, local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh=token)
+            client.login()
+            body = parse_qs(server.requests[0]["body"].decode("utf-8"))
+        self.assertEqual(["SCOPE_BOSH offline_access"], body["scope"])
+
+    def test_a_shorter_claim_wins_over_expires_in(self):
+        now = time.time()
+        access = jwt_token({"iat": int(now), "exp": int(now) + 120})
+        body = json.dumps({"access_token": access, "refresh_token": "rot-1",
+                           "expires_in": 3600}).encode()
+        with token_server(body=body) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            client.login()
+        self.assertLessEqual(client.expires_at, now + 120)
+
+    def test_a_clock_far_from_the_claims_uses_expires_in(self):
+        now = time.time()
+        access = jwt_token({"iat": int(now) + 86400,
+                           "exp": int(now) + 86400 + 3600})
+        body = json.dumps({"access_token": access, "refresh_token": "rot-1",
+                           "expires_in": 3600}).encode()
+        with token_server(body=body) as server, \
+                local_tolino_endpoints(server.origin):
+            client = TolinoClient(1, HARDWARE, refresh="start")
+            client.login()
+        self.assertAlmostEqual(now + 3600 - 300, client.expires_at, delta=10)
 
 
 class ErrorTextTests(unittest.TestCase):

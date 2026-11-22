@@ -15,6 +15,10 @@ from urllib.request import (HTTPRedirectHandler, Request, build_opener,
 
 from .errors import TolinoApiError, TolinoAuthError, TolinoError
 from .inventory import parse_inventory
+from .jwt import (expires_at as token_expires_at,
+                  issued_at as token_issued_at,
+                  lifetime_seconds as token_lifetime,
+                  payload as token_payload)
 from .partners import (PARTNERS, WEBREADER_CLIENT_TYPE,
                        WEBREADER_CLIENT_VERSION, WEBREADER_TOKEN_HEADERS)
 from . import sync_data as _sync_data
@@ -137,6 +141,13 @@ def _download_token(deliverable_id):
 _REGISTER_SETTLE_SECONDS = 1.5
 # Feldbefund: Der erste Token-Aufruf kann am Bot-Schutz scheitern.
 _WAF_RETRY_SECONDS = (2.0, 5.0)
+# Gueltigkeitsvorlauf: ein Zehntel der Laufzeit, zwischen 30 s und 5 min.
+_ACCESS_MARGIN_MIN = 30
+_ACCESS_MARGIN_MAX = 300
+# Liegt der Ausstellungszeitpunkt des Tokens weiter als das von der lokalen
+# Uhr entfernt, ist die Uhr falsch gestellt; dann zaehlt nur die relative
+# Laufzeit aus ``expires_in``.
+_CLOCK_SKEW_TOLERANCE = 300
 
 class _SafeRedirects(HTTPRedirectHandler):
     """Prueft ein Weiterleitungsziel, bevor urllib es kontaktiert.
@@ -240,6 +251,42 @@ def normalize_hardware_id(value):
     return text
 
 
+def _access_margin(lifetime):
+    """Vorlauf vor dem Ablauf: ein Zehntel, aber 30 s bis 5 min."""
+    return min(_ACCESS_MARGIN_MAX, max(_ACCESS_MARGIN_MIN, int(lifetime) // 10))
+
+
+def _access_deadline(access_token, lifetime, now=None):
+    """Ablaufzeit des Access-Tokens (unix seconds) aus Antwort und Claims.
+
+    ``expires_in`` kommt vom Server und gilt unabhaengig von der lokalen
+    Uhr. Der ``exp``-Claim wird zusaetzlich genutzt, wenn das Token gerade
+    ausgestellt wurde -- dann darf er nur verkuerzen, nie verlaengern. Weicht
+    der Ausstellungszeitpunkt deutlich von der lokalen Uhr ab, ist die Uhr
+    falsch gestellt: dann wuerde der Claim einen Token scheinbar ewig gelten
+    lassen (jeder Aufruf laeuft in ein 401) oder sofort als abgelaufen
+    melden (jeder Aufruf tauscht).
+    """
+    now = time.time() if now is None else now
+    lifetime = max(0, int(lifetime or 0))
+    margin = _access_margin(lifetime or 3600)
+    deadline = now + max(0, lifetime - margin)
+    issued, claim = token_issued_at(access_token), token_expires_at(access_token)
+    if claim is None:
+        return deadline
+    if issued is not None and abs(issued - now) > _CLOCK_SKEW_TOLERANCE:
+        log_warning("Tolino-Zugang: die Uhr weicht von den Token-Zeiten ab; "
+                    "die Gültigkeit wird relativ gerechnet.")
+        return deadline
+    return min(deadline, claim - margin)
+
+
+def _refresh_scope(token):
+    """Scope des ausgestellten Tokens -- oder "" (dann nicht mitschicken)."""
+    scope = (token_payload(token) or {}).get("scope")
+    return scope.strip() if isinstance(scope, str) else ""
+
+
 def _decode_json(raw):
     """Antwort-Body als JSON; ein leerer Body ist ein leeres Dict."""
     if not raw:
@@ -276,7 +323,9 @@ class TolinoClient:
 
     def __init__(self, partner_id, hardware, refresh=None, timeout=45,
                  token_callback=None, hardware_callback=None,
-                 token_rejected_callback=None):
+                 token_rejected_callback=None, access=None,
+                 access_expires_at=0, access_callback=None,
+                 stored_token_callback=None):
         try:
             partner_id = int(partner_id)
         except (TypeError, ValueError):
@@ -288,15 +337,23 @@ class TolinoClient:
         self.hardware = normalize_hardware_id(hardware) or hardware_id()
         self.refresh = normalize_refresh_token(refresh)
         self.timeout = timeout
-        self.access = None
-        self.expires_at = 0
+        # Der Access-Token ist Wegwerfware; gespeichert spart er beim Start
+        # einen Tausch und damit eine Rotation des Einmal-Tokens.
+        self.access = str(access or "") or None
+        self.expires_at = float(access_expires_at or 0)
         self.last_error_text = None
         self.token_callback = token_callback
         self.hardware_callback = hardware_callback
         self.token_rejected_callback = token_rejected_callback
+        self.access_callback = access_callback
+        # Der einzige Weg zum gespeicherten Token: der Vault reicht hier
+        # seinen lock-freien Reader herein, auch fuer den ersten Tausch.
+        self.stored_token_callback = stored_token_callback
         self.token_vault = None
+        self.account_name = ""
         self._in_device_recovery = False
         self._hw_registered_now = False
+        self._reuse_retried = False
         # Eine uebernommene Geraete-ID wird erst gespeichert, wenn der
         # Wiederholungsversuch bestaetigt, dass sie funktioniert.
         self._hw_adopted = False
@@ -362,11 +419,30 @@ class TolinoClient:
                 ) from None
 
         try:
-            lifetime = int(data.get("expires_in") or 3600)
+            lifetime = int(data.get("expires_in") or 0)
         except (TypeError, ValueError):
-            lifetime = 3600
-        self.expires_at = time.time() + max(0, lifetime - 60)
+            lifetime = 0
+        if lifetime <= 0:
+            # Ohne expires_in gilt die Laufzeit aus dem Token selbst.
+            lifetime = int(token_lifetime(self.access) or 3600)
+        self.expires_at = _access_deadline(self.access, lifetime)
+        # Ein neuer Token darf wieder einen Versuch mit einem inzwischen
+        # gespeicherten Refresh-Token bekommen.
+        self._reuse_retried = False
+        self._notify_access()
         return self.refresh
+
+    def _notify_access(self, token=None, expires_at=None):
+        """Den Access-Token zum Speichern melden; diese Naht wirft nie."""
+        callback = self.access_callback
+        if not callback:
+            return
+        try:
+            callback(self.access if token is None else token,
+                     self.expires_at if expires_at is None else expires_at)
+        except Exception as exc:
+            log_warning("Access-Token konnte nicht gespeichert werden: %s"
+                        % sanitize_error(exc, (self.refresh, self.access)))
 
     def _login(self):
         if not self.refresh:
@@ -379,8 +455,15 @@ class TolinoClient:
             "client_id": self.partner["client_id"],
             "grant_type": "refresh_token",
             "refresh_token": used_refresh,
-            "scope": self.partner["scope"],
         }
+        # Ohne ``scope`` gilt der beim Ausstellen verwendete (RFC 6749, 6).
+        # Ein hartkodierter Wert waere geraten: weicht er vom echten Scope ab,
+        # scheitert die Erneuerung mit invalid_scope -- und das sieht aus wie
+        # eine abgelaufene Anmeldung. Mitgeschickt wird nur, was im Token
+        # selbst steht.
+        scope = _refresh_scope(used_refresh)
+        if scope:
+            payload["scope"] = scope
         try:
             data = self._request(self.partner["token_url"], "POST", payload,
                                  form=True, authenticated=False)
@@ -391,9 +474,20 @@ class TolinoClient:
             token_rejected = ("invalid_grant" in folded
                               or "reuse exceeded" in folded)
             if session_ended or token_rejected:
+                # Ein anderer Lauf (Keep-alive, zweite Calibre-Instanz) kann
+                # inzwischen rotiert haben: dann ist der gespeicherte Token
+                # der einzige, der noch gilt -- und ein Versuch damit ist
+                # kein zweiter Versuch mit dem abgelehnten. Genau EINER.
+                newer = self._newer_stored_token(used_refresh)
+                if newer:
+                    log_warning("Tolino-Anmeldung: der gespeicherte Zugang "
+                                "wurde inzwischen erneuert; neuer Versuch.")
+                    self.refresh = newer
+                    return self._login()
                 # A stale refresh token must never be tried again.
                 self.refresh = self.access = None
                 self.expires_at = 0
+                self._notify_access("", 0)
                 self._notify_token_rejected(used_refresh)
             if session_ended:
                 raise TolinoAuthError(
@@ -412,6 +506,25 @@ class TolinoClient:
                 short="Die Anmeldung bei tolino ist fehlgeschlagen.")
 
         return self._apply_token_response(data)
+
+    def _newer_stored_token(self, rejected):
+        """Inzwischen gespeicherten Refresh-Token holen -- einmalig.
+
+        Der Reader kommt vom Vault und liest ohne dessen Lock: dieser Pfad
+        laeuft ueber `relogin()` bereits darunter, ein zweiter waere ein
+        Deadlock. Ohne Reader gilt der Token als abgelehnt.
+        """
+        callback = self.stored_token_callback
+        if self._reuse_retried or callback is None:
+            return ""
+        try:
+            stored = normalize_refresh_token(callback())
+        except Exception:
+            return ""
+        if not stored or stored == rejected:
+            return ""
+        self._reuse_retried = True
+        return stored
 
     def _notify_token_rejected(self, rejected=""):
         """Den abgelehnten Token aus der Config loeschen lassen.
@@ -549,6 +662,10 @@ class TolinoClient:
     def _raise_http_auth_error(self, exc):
         """Raise the cleaned A01 error for a 401/403 response."""
         self.access = None
+        self.expires_at = 0
+        # Ein toter Access-Token darf den naechsten Start nicht in ein 401
+        # schicken; der Refresh-Token bleibt unangetastet.
+        self._notify_access("", 0)
         message = re.sub(r"<[^>]+>", " ", self.last_error_text or "")
         message = re.sub(r"\s+", " ", message).strip()
         message = message or "no response detail"
