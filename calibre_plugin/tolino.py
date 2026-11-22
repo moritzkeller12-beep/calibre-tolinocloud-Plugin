@@ -339,6 +339,9 @@ class TolinoClient:
         # Der einzige Weg zum gespeicherten Token: der Vault reicht hier
         # seinen lock-freien Reader herein, auch fuer den ersten Tausch.
         self.stored_token_callback = stored_token_callback
+        # Wird vor JEDEM Tausch aufgerufen; der Vault prueft hier, ob die
+        # Rotation unter seinem Lock speicherbar ist.
+        self.rotation_guard = None
         self.token_vault = None
         self.account_name = ""
         self._in_device_recovery = False
@@ -437,6 +440,8 @@ class TolinoClient:
     def _login(self):
         if not self.refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN, code="A01")
+        if self.rotation_guard is not None:
+            self.rotation_guard()
         # Der Token, der hier wirklich eingeloest wird. Nur er darf bei einer
         # Ablehnung geloescht werden -- der Vault kann inzwischen einen
         # anderen (per `relogin` geladenen) gespeichert haben.
@@ -1054,9 +1059,9 @@ class TolinoClient:
             # Beide Schreibweisen direkt nachschlagen: das Mapping ist schon
             # nach (Buch, Kategorie) indiziert.
             book = str(book_id)
-            marks = [(category, active.get((book, category)))
-                     for category in _sync_data.READ_TAG_CATEGORIES]
-            marks = [(category, item) for category, item in marks if item]
+            marks = [(category, active[(book, category)])
+                     for category in _sync_data.READ_TAG_CATEGORIES
+                     if (book, category) in active]
             if finished:
                 if not marks:
                     updates.append(_sync_data.tag_patch(

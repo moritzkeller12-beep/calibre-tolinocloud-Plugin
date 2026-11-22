@@ -47,18 +47,31 @@ def _partner_number(value):
         return 0
 
 
+def _require_savable_rotation():
+    """Ein Tausch darf nur starten, wenn die Rotation speicherbar ist."""
+    if settings_writable():
+        return
+    raise TolinoError(
+        "Die Einstellungen sind nicht beschreibbar; der Zugang "
+        "wird nicht erneuert.",
+        short="Die Einstellungen konnten nicht gespeichert werden. " + RELOGIN,
+        detail="Token-Tausch ohne speicherbare Rotation abgelehnt.")
+
+
 class TokenVault:
     """Read stored credentials and rotate their token under one lock."""
 
     def __init__(self):
         self._lock = threading.Lock()
 
-    def login(self, account_name, partner_id=None, lock_timeout=5, *,
-              keepalive=False):
+    def login(self, account_name, partner_id=None, lock_timeout=5):
         """Login-Client; der Shop steht im Konto (``partner_id`` nur als Ersatz).
+
+        Der Lock gilt fuer Lesen, Tausch und Speichern der Rotation -- auch
+        fuer eine zweite Calibre-Instanz. Ein noch gueltiger Access-Token
+        beendet den Aufruf, ohne die Einstellungen zu brauchen.
         """
-        guard = settings_write_lock() if keepalive else contextlib.nullcontext()
-        with self._held_lock(lock_timeout), guard:
+        with self._held_lock(lock_timeout), settings_write_lock():
             values = self._stored_credentials(account_name)
             client = TolinoClient(
                 partner_id or values["partner_id"], values["hardware_id"],
@@ -79,6 +92,7 @@ class TokenVault:
                 # `relogin()` ihn bereits haelt.
                 stored_token_callback=lambda: account_tokens(
                     account_name).get("refresh_token"))
+            client.rotation_guard = _require_savable_rotation
             # Nur der tatsaechlich eingeloeste Token darf verschwinden: ein
             # paralleler Refresh (Keep-alive, zweite Instanz) oder ein
             # `relogin()` kann inzwischen einen anderen gespeichert haben.
@@ -95,16 +109,6 @@ class TokenVault:
                     "Einstellungsdatei prüfen und erneut anmelden.",
                     short="Die Geräte-ID konnte nicht gespeichert werden.",
                     detail="Einstellungen konnten nicht geschrieben werden.")
-            # Der Tausch selbst muss speicherbar sein: ein rotierter
-            # Einmal-Token waere sonst verbrannt, bevor er im Konto steht.
-            if not settings_writable():
-                raise TolinoError(
-                    "Die Einstellungen sind nicht beschreibbar; der Zugang "
-                    "wird nicht erneuert.",
-                    short="Die Einstellungen konnten nicht gespeichert "
-                          "werden. " + RELOGIN,
-                    detail="Token-Tausch ohne speicherbare Rotation "
-                           "abgelehnt.")
             # Erst anmelden, dann den Vault einhaengen: `login()` wuerde
             # sonst ueber `relogin()` den bereits gehaltenen Lock anfordern.
             client.login()
@@ -141,9 +145,10 @@ class TokenVault:
 
         Der Keep-alive haelt den Lock ueber den Netzaufruf und dessen
         WAF-Retries. Ein Sync, der waehrenddessen neu anmelden muss, wartet
-        besser kurz, statt mit S91 fatal abzubrechen.
+        besser kurz, statt mit S91 fatal abzubrechen. Derselbe Lock gilt fuer
+        die zweite Calibre-Instanz.
         """
-        with self._held_lock(timeout):
+        with self._held_lock(timeout), settings_write_lock():
             values = self._stored_credentials(client.account_name)
             if values["partner_id"] != client.partner_id:
                 # Der gespeicherte Token gilt fuer den Buchhaendler des
@@ -159,6 +164,7 @@ class TokenVault:
                     detail="Bitte mit dem hinterlegten Buchhändler anmelden.")
             client.refresh = values["refresh_token"]
             client.hardware = values["hardware_id"] or client.hardware
+            client.rotation_guard = _require_savable_rotation
             # `_login()` meldet den neuen Token ueber den Callback, der ihn
             # bereits persistiert -- kein zweites Speichern hier.
             return client._login()
@@ -236,7 +242,7 @@ class TokenVault:
                 if due is not None and due > 0:
                     continue
             try:
-                self.login(name, lock_timeout=0, keepalive=True)
+                self.login(name, lock_timeout=0)
                 rotated += 1
             except Exception as exc:
                 # Ein belegter Lock ist kein Fehler -- nächste Runde.

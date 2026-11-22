@@ -2,6 +2,7 @@
 
 ## Unveröffentlicht
 
+- Token-Erneuerungen laufen bei normalem Login und bei Relogin unter derselben prozessübergreifenden Dateisperre wie das Speichern der Rotation. Die Schreibbarkeitsprüfung erwirbt diesen Lock selbst und blockiert nur noch dann, wenn tatsächlich ein Refresh-Token getauscht werden muss — ein noch gültiger Access-Token funktioniert auch bei nicht beschreibbaren Einstellungen.
 - Anmeldung bleibt länger gültig: der Keep-alive richtet sich nach der Laufzeit des gespeicherten Refresh-Tokens (ein Fünftel Vorlauf, höchstens alle 45, mindestens alle 5 Minuten) und beginnt mit einer sofortigen Prüfung statt nach einer vollen Wartezeit; Konten mit noch gültigem Access-Token werden übersprungen.
 - Ein gültiger Access-Token wird mit Ablaufzeit gespeichert. Ein Start innerhalb dieser Zeit tauscht nicht und verbraucht damit keine Rotation des Einmal-Tokens.
 - Die Gültigkeit wird gegen `expires_in` **und** die `iat`/`exp`-Claims gerechnet; weicht die lokale Uhr stark ab, gilt die relative Laufzeit (Warnung im Log) statt eines scheinbar ewig gültigen oder sofort abgelaufenen Tokens.

@@ -8,45 +8,40 @@ Uhrzeit, Logging und Calibres Einstellungsspeicher.
 
 import ast
 import os
-import re
 import unittest
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Ziele ausserhalb des Plugins: Modulname oder Funktionsname.
-ALLOWED_PATTERNS = (
-    r"^(urllib|http|ssl|socket|subprocess|shutil|os|sys|time|datetime|"
-    r"logging|copy|json|re|zipfile|pathlib|io)(\.|$)",
-    r"^(qt|PyQt5|PyQt6|calibre)\.",
-    # Dieselben Grenzen aus einem Plugin-Modul heraus gepatcht, etwa
-    # ``calibre_plugin.cdp.subprocess.Popen`` oder ``tolino.time.sleep``.
-    r"\.(os|subprocess|socket|tempfile|time)\.[a-z_][a-z_0-9]*$",
-    r"^fcntl\.flock$",                    # Dateisperre
-)
-
-# Funktionsnamen, die eine Systemgrenze darstellen (egal aus welchem Modul).
-# Die Liste nennt genau die Ziele, die die Suite heute braucht: ein neuer
-# Name ist eine bewusste Entscheidung und laeuft nicht still mit.
-ALLOWED_NAMES = frozenset((
-    "TolinoClient", "login",           # Netz/Anmeldung (TOKEN_VAULT.login)
-    "check_stored_login",              # Zugangspruefung (Netz)
-    "urlopen", "_http_get_json",       # HTTP
-    "_DOWNLOAD_OPENER",                # Download ohne Anmeldedaten
-    "log_warning",                     # Logging
-    "Popen", "which", "find_browsers", "in_flatpak_sandbox",  # Browser
-    # CDP-Grenze: Fenster, Ziel, Debug-Port und Prozesszustand liegen
-    # ausserhalb des Plugins; die Namen sind deshalb einzeln genannt.
-    "close_grabber_window", "grab_once_from_grabber",
-    "grabber_window_state", "launch_reader_window",
-    "_endpoint_answers", "_evaluate_in_target", "_group_alive",
-    "_open_target", "_wait_for_debug_port", "read_idb_tokens",
-    "grab_live_refresh",               # interaktiver Browser-Login
-    "info_dialog", "error_dialog",     # modale Qt-Dialoge
-    "getText",                         # modaler Eingabedialog (Qt)
-    "_lock_handle", "_read_frame",     # Sperrdatei (Dateisystem), Rahmen
-    "_aes",                            # optionale Krypto-Abhaengigkeit
-    "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL",  # Anmelde-Zeitfenster
-))
+# Genau die Systemgrenzen, die die Suite heute patcht. Ein neues Ziel ist
+# eine bewusste Entscheidung; der letzte Namensbestandteil allein genuegt
+# nicht, weil ``login`` sonst auch Plugin-Logik freigeben wuerde.
+ALLOWED_TARGETS = frozenset("""
+    os os.name os.path.isfile os.access os.path.isdir shutil.which
+    subprocess.run urllib.request.build_opener fcntl.flock getText login
+    error_dialog info_dialog module.check_stored_login _Ws._read_frame
+    calibre_plugin.browser_finder.in_flatpak_sandbox
+    calibre_plugin.browser_login.TolinoClient
+    calibre_plugin.browser_login._NEW_TOKEN_INTERVAL
+    calibre_plugin.browser_login._WINDOW_CHECK_INTERVAL
+    calibre_plugin.cdp._endpoint_answers calibre_plugin.cdp._evaluate_in_target
+    calibre_plugin.cdp._group_alive calibre_plugin.cdp._http_get_json
+    calibre_plugin.cdp._open_target calibre_plugin.cdp._wait_for_debug_port
+    calibre_plugin.cdp.browser_finder.find_browsers
+    calibre_plugin.cdp.close_grabber_window
+    calibre_plugin.cdp.grab_once_from_grabber
+    calibre_plugin.cdp.grabber_window_state
+    calibre_plugin.cdp.launch_reader_window calibre_plugin.cdp.os.killpg
+    calibre_plugin.cdp.read_idb_tokens calibre_plugin.cdp.subprocess.Popen
+    calibre_plugin.cdp.tempfile.mkdtemp calibre_plugin.cdp.time.monotonic
+    calibre_plugin.cdp.time.time calibre_plugin.cdp_transport.socket.create_connection
+    calibre_plugin.sync_results.error_dialog
+    calibre_plugin.sync_results.info_dialog
+    calibre_plugin.tolino._DOWNLOAD_OPENER calibre_plugin.tolino.log_warning
+    calibre_plugin.tolino.time.sleep calibre_plugin.ui_dashboard.error_dialog
+    calibre_plugin.ui_dashboard_parts.info_dialog
+    calibre_plugin.ui_dialogs.error_dialog calibre_plugin.ui_dialogs.info_dialog
+    calibre_plugin.ui_workers.TOKEN_VAULT.login
+""".split())
 
 SKIP_FILES = {"patch_policy_tests.py"}
 
@@ -158,10 +153,7 @@ def _targets(node, aliases=frozenset()):
 
 
 def _allowed(target):
-    last = target.rsplit(".", 1)[-1]
-    if last in ALLOWED_NAMES:
-        return True
-    return any(re.search(pattern, target) for pattern in ALLOWED_PATTERNS)
+    return target in ALLOWED_TARGETS
 
 
 def offenders():

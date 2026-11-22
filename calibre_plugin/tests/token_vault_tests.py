@@ -135,16 +135,45 @@ class LoginTests(VaultCase):
         self.assertEqual([], server.server.requests)
         self.assertEqual("start", config.account_summary("A")["refresh_token"])
 
-    def test_a_stored_access_token_spares_the_exchange(self):
+    def test_a_stored_access_token_spares_the_exchange_without_writes(self):
+        """Der gueltige Access-Token braucht weder Netz noch Schreibrecht."""
         server = TokenServer()
         config.save_account("A", {"refresh_token": "start", "hardware_id": "hw",
                                   "access_token": "acc-gut",
                                   "access_expires_at": time.time() + 1800})
+        break_settings(self)
         with self.vault(server):
             client = TOKEN_VAULT.login("A")
-        # Der gespeicherte Access-Token gilt noch: keine Rotation, kein Netz.
         self.assertEqual("acc-gut", client.access)
         self.assertEqual([], server.server.requests)
+
+    def test_login_and_relogin_hold_the_process_lock_during_the_exchange(self):
+        """Der Netzaufruf laeuft unter derselben Dateisperre wie das Speichern."""
+        try:
+            import fcntl
+        except ImportError:
+            self.skipTest("keine POSIX-Dateisperre")
+        probes = []
+
+        class LockProbeServer(TokenServer):
+            def respond(inner, *request):
+                lock_path = str(config.PREFERENCES.file_path) + ".lock"
+                with open(lock_path, "a+b") as handle:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        probes.append("locked")
+                    else:
+                        probes.append("free")
+                return super().respond(*request)
+
+        server = LockProbeServer()
+        config.save_account("A", {"refresh_token": "start", "hardware_id": "hw"})
+        with self.vault(server):
+            client = TOKEN_VAULT.login("A")
+            TOKEN_VAULT.relogin(client)
+        self.assertEqual(2, len(server.server.requests))
+        self.assertEqual(["locked", "locked"], probes)
 
     def test_a_rejected_token_is_retried_with_a_newer_stored_one(self):
         # Der Vault haengt dem Client den einen Lesepfad an. Hier vergisst
@@ -193,6 +222,17 @@ class LoginTests(VaultCase):
             self.assertEqual("rot-2", TOKEN_VAULT.relogin(client))
         self.assertEqual(["start", "rot-1-neu"], server.used_tokens)
         self.assertEqual("rot-2", config.account_summary("A")["refresh_token"])
+
+    def test_relogin_refuses_unreadable_settings_before_the_exchange(self):
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "start", "hardware_id": "hw"})
+        with self.vault(server):
+            client = TOKEN_VAULT.login("A")
+            break_settings(self)
+            with self.assertRaises(TolinoError):
+                TOKEN_VAULT.relogin(client)
+        self.assertEqual(1, len(server.server.requests))
+        self.assertEqual("rot-1", config.account_summary("A")["refresh_token"])
 
 
 class LockTests(VaultCase):

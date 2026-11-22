@@ -43,11 +43,6 @@ def _candidate_age_note(candidates):
     return "Alter des gefundenen Zugangs unbekannt (%s)" % shape
 
 
-def _refresh_token_iat_sort_key(value):
-    issued = _refresh_token_iat(value)
-    return issued if issued is not None else 0.0
-
-
 def _filter_live_candidates(candidates, max_age_seconds=1800):
     """Keep only JWT candidates issued within the last minutes."""
     now = time.time()

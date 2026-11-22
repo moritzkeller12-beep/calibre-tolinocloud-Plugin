@@ -16,9 +16,6 @@ from .jwt import issued_at as _issued_at, lifetime_seconds as _lifetime
 PREFERENCE_NAMESPACE = "plugins/Tolino Cloud Sync Lite"
 PREFERENCES = JSONConfig(PREFERENCE_NAMESPACE)
 DEFAULT_ACCOUNT_NAME = "default"
-ACCOUNT_KEYS = ("partner_id", "hardware_id", "refresh_token",
-                "refresh_rotated_at", "access_token", "access_expires_at",
-                "state")
 PREFERRED_FORMATS = "preferred_formats"
 DEFAULT_ACCOUNT = {
     "name": DEFAULT_ACCOUNT_NAME,
@@ -30,6 +27,8 @@ DEFAULT_ACCOUNT = {
     "access_expires_at": 0,
     "state": {},
 }
+# Eine Quelle fuer Schluessel und Reihenfolge: kein zweiter Driftpunkt.
+ACCOUNT_KEYS = tuple(key for key in DEFAULT_ACCOUNT if key != "name")
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
 # `_SETTINGS_LOCK` gilt nur in diesem Prozess. Eine zweite Calibre-Instanz
@@ -247,36 +246,31 @@ def _active_name(accounts):
 
 
 def settings_writable():
-    """True nur, wenn ein Schreibvorgang jetzt committen koennte.
+    """True nur, wenn eine Rotation jetzt gespeichert werden koennte.
 
-    Geprueft wird ohne zu schreiben: die Einstellungsdatei muss sich zum
-    Schreiben oeffnen lassen und die Sperrdatei anlegbar sein. Ein Token,
-    dessen Rotation danach nicht gespeichert werden kann, waere verbrannt.
+    Geprueft wird unter demselben Lock, den `settings_write_lock()` fuer den
+    Tausch haelt: die Sperrdatei muss erwerbbar sein und die Einstellungsdatei
+    lesbar und beschreibbar. So ist die Pruefung kein unabhaengiges
+    Versprechen ueber einen spaeteren Zugriff.
     """
-    path = getattr(PREFERENCES, "file_path", None)
-    if not path:
-        return False
-    # Der Keep-alive darf einen einmal nutzbaren Token nicht einloesen,
-    # wenn die Rotation anschliessend nicht gespeichert werden kann.
-    with _SETTINGS_LOCK:
-        if not _reload():
-            return False
     try:
-        with open(str(path), "r+b"):
-            pass
-    except FileNotFoundError:
-        # Noch keine Datei: der Commit legt sie an, wenn das Verzeichnis
-        # beschreibbar ist.
-        if not os.access(os.path.dirname(str(path)) or ".", os.W_OK):
-            return False
+        with _SETTINGS_LOCK, _settings_file_lock():
+            path = getattr(PREFERENCES, "file_path", None)
+            if not path or not _reload():
+                return False
+            try:
+                with open(str(path), "r+b"):
+                    pass
+            except FileNotFoundError:
+                # Noch keine Datei: der Commit legt sie an, wenn das
+                # Verzeichnis beschreibbar ist.
+                return os.access(os.path.dirname(str(path)) or ".",
+                                 os.W_OK)
+            except OSError:
+                return False
+            return True
     except OSError:
         return False
-    try:
-        with open(str(path) + ".lock", "a+b"):
-            pass
-    except OSError:
-        return False
-    return True
 
 
 def settings():

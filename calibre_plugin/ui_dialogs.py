@@ -20,14 +20,13 @@ def _selected_rows(table):
     return [index.row() for index in table.selectionModel().selectedRows()]
 
 
-def _by_title(row):
-    return (str(row.get("title") or "").casefold(),
-            str(row.get("authors") or "").casefold())
+def _by_pair(first, second):
+    return lambda row: (str(row.get(first) or "").casefold(),
+                        str(row.get(second) or "").casefold())
 
 
-def _by_authors(row):
-    return (str(row.get("authors") or "").casefold(),
-            str(row.get("title") or "").casefold())
+_by_title = _by_pair("title", "authors")
+_by_authors = _by_pair("authors", "title")
 
 
 def _confirm_overwrite(parent, path):
