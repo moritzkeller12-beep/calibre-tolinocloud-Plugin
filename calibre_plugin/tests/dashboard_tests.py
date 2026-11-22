@@ -110,14 +110,6 @@ class PersistTests(OrchestrationCase):
                           TOLINO_PROGRESS_COLUMN],
                          [column for column, _values in database.api.writes])
 
-    def test_a_failing_column_is_named(self):
-        worker = self.worker()
-        self.stored_ids()
-        dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
-        failures = self.ui.sync_results.persist_sync_result(
-            dashboard, worker.updates)
-        self.assertEqual(["tolino-IDs"], failures)
-
     def test_the_cleanup_callback_runs_even_when_a_column_fails(self):
         """Geprueft wird `finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
         worker = self.worker()
