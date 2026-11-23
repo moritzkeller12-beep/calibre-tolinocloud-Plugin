@@ -397,8 +397,7 @@ def _reader_targets(timeout=5):
     if record is None:
         return None
     port = int(record["port"])
-    targets = _http_get_json(
-        "http://127.0.0.1:%d/json/list" % port, timeout)
+    targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
     if not isinstance(targets, list):
         return None
     target, reader_found = _reader_target(targets, port)

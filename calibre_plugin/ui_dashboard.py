@@ -165,8 +165,7 @@ class SyncDashboard(DashboardParts, QDialog):
     def new_account(self):
         if not self._save_settings():
             return
-        base, accepted = QInputDialog.getText(
-            self, "Neues Konto", "Name:")
+        base, accepted = QInputDialog.getText(self, "Neues Konto", "Name:")
         base = str(base).strip()
         if not accepted or not base:
             return

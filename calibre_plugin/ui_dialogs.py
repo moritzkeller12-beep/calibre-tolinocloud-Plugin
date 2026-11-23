@@ -996,8 +996,7 @@ class InventoryDialog(QDialog):
         target = str(path)
         if target.casefold().endswith(".epub") and data[:4] == b"%PDF":
             target = target[:-5] + ".pdf"
-        if (target.casefold().endswith(".pdf")
-                and data[:4] == b"PK\x03\x04"):
+        if target.casefold().endswith(".pdf") and data[:4] == b"PK\x03\x04":
             target = target[:-4] + ".epub"
         if target != path and os.path.exists(target):
             # Die nachtraeglich angepasste Endung darf keine vorhandene

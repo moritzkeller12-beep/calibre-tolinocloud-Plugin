@@ -492,8 +492,7 @@ class DownloadSaveTests(unittest.TestCase):
         self.assertTrue(shown.called)
 
     def test_html_and_empty_bodies_are_not_saved(self):
-        for label, data in (("html", b"<html>Fehler</html>"),
-                            ("leer", b"")):
+        for label, data in (("html", b"<html>Fehler</html>"), ("leer", b"")):
             with self.subTest(label):
                 path, messages = self.save("%s.epub" % label, data)
                 self.assertFalse(os.path.exists(path))
@@ -546,8 +545,7 @@ class ConfirmationTests(unittest.TestCase):
 
     def test_no_returns_false_and_yes_returns_true(self):
         job = types.SimpleNamespace(label=lambda: "Der Schwarm", old_id="d1")
-        for answer, expected in ((self.box.No, False),
-                                 (self.box.Yes, True)):
+        for answer, expected in ((self.box.No, False), (self.box.Yes, True)):
             with self.subTest(answer=answer):
                 self.ask(answer)
                 self.assertEqual(
