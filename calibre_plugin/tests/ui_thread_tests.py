@@ -57,18 +57,13 @@ class ThreadLifecycleTests(CommonCase):
         self.assertIs(worker, dialog.worker)
         self.assertIn(thread, self.common._THREADS)
         self.assertIn(worker, self.common._WORKERS)
-        thread.finished.emit()
-        self.assertNotIn(thread, self.common._THREADS)
-        self.assertNotIn(worker, self.common._WORKERS)
-        self.assertTrue(thread.deleted)
-
-    def test_closing_the_dialog_does_not_drop_a_running_worker(self):
-        dialog, thread, worker = self.start()
         # closeEvent gibt seine eigenen Referenzen ab; der Lauf bleibt sicher.
         dialog.thread = dialog.worker = None
         self.assertIn(worker, self.common._WORKERS)
         thread.finished.emit()
+        self.assertNotIn(thread, self.common._THREADS)
         self.assertNotIn(worker, self.common._WORKERS)
+        self.assertTrue(thread.deleted)
 
     def test_a_timeout_keeps_the_thread_referenced(self):
         thread = SyncThread(wait_result=False)
