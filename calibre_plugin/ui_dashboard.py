@@ -1,5 +1,5 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
-from qt.core import QDialog, QInputDialog, QMessageBox, QThread, Qt
+from qt.core import QDialog, QInputDialog, QThread, Qt
 from .ui_common import (CANCEL_MESSAGE, COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP,
                         LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP,
                         LOGIN_NEXT_STEP, _active_work_thread, _apply_busy,
@@ -24,7 +24,7 @@ from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoError, hardware_id, log_info,
                      log_warning, normalize_hardware_id,
                      normalize_refresh_token, report_error, sanitize_error)
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
-from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
+from .ui_dashboard_parts import (DashboardParts, _ask, confirm_deletions,
                                  confirm_replacements, offer_next_step,
                                  report_skipped_uploads)
 from .ui_dialogs import InventoryDialog
@@ -43,8 +43,7 @@ class SyncDashboard(DashboardParts, QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.thread = None
         self.worker = None
-        self.login_thread = None
-        self.login_worker = None
+        self.login_thread = self.login_worker = None
         self.prepare_thread = None
         self.prepare_worker = None
         self.snapshot_thread = None
@@ -186,14 +185,9 @@ class SyncDashboard(DashboardParts, QDialog):
         if len(self.account_names) <= 1:
             return
         name = self.account_name
-        yes = QMessageBox.StandardButton.Yes
-        no = QMessageBox.StandardButton.No
-        answer = QMessageBox.question(
-            self, "Konto entfernen",
-            "Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
-            "werden gelöscht. Bücher in tolino und Calibre bleiben." % name,
-            yes | no, no)
-        if answer != yes:
+        text = ("Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
+                "werden gelöscht. Bücher in tolino und Calibre bleiben.")
+        if not _ask(self, "Konto entfernen", text % name):
             return
         if not remove_saved_account(name):
             return
@@ -489,12 +483,10 @@ class SyncDashboard(DashboardParts, QDialog):
     @gui_guard
     def login_completed(self, hardware):
         """Der Worker hat den Token bereits im richtigen Konto gespeichert."""
-        self._login_cleanup()
         if hardware:
             self.hardware.setText(str(hardware))
         self.refresh.setText("")
-        self.status.setText("Angemeldet.")
-        offer_next_step(self)
+        self.login_still_valid()
 
     @gui_guard
     def login_failed(self, error):
@@ -517,8 +509,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     @gui_guard
     def _login_cleanup(self):
-        self.login_thread = None
-        self.login_worker = None
+        self.login_thread = self.login_worker = None
         self.update_status()
 
     @staticmethod
@@ -866,6 +857,5 @@ class SyncDashboard(DashboardParts, QDialog):
         # raeumt danach auf. Eine laufende Browser-Anmeldung bleibt bewusst
         # unangetastet: ihr Thread endet selbst per Timeout, ein Join koennte
         # das Schliessen minutenlang blockieren.
-        self.login_thread = None
-        self.login_worker = None
+        self.login_thread = self.login_worker = None
         event.accept()

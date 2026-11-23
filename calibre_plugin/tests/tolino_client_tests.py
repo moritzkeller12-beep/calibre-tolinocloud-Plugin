@@ -39,11 +39,16 @@ def token_server(body=TOKEN_BODY, status=200, extra=None):
     return LocalHTTP(responder)
 
 
+@contextlib.contextmanager
+def served(http, refresh="start", hardware=HARDWARE, **options):
+    """Loopback-Server plus Client, dessen Endpunkte auf ihn zeigen."""
+    with http as server, local_tolino_endpoints(server.origin):
+        yield TolinoClient(1, hardware, refresh=refresh, **options), server
+
+
 def login_request(token="start", body=TOKEN_BODY):
     """Ein Login gegen den Testserver; Client und Formular-Body zurueck."""
-    with token_server(body=body) as server, \
-            local_tolino_endpoints(server.origin):
-        client = TolinoClient(1, HARDWARE, refresh=token)
+    with served(token_server(body=body), refresh=token) as (client, server):
         client.login()
         return client, parse_qs(server.requests[0]["body"].decode("utf-8"))
 
@@ -53,9 +58,8 @@ class LoginTests(unittest.TestCase):
 
     def test_login_exchanges_the_token_and_reports_the_rotation(self):
         saved = []
-        with token_server() as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  token_callback=saved.append)
+        with served(token_server(),
+                    token_callback=saved.append) as (client, server):
             self.assertEqual("rot-1", client.login())
             self.assertEqual("rot-1", client.login())
             self.assertEqual(1, len(server.requests))
@@ -67,10 +71,9 @@ class LoginTests(unittest.TestCase):
     def test_a_rejected_token_is_reported_and_cleared_once(self):
         rejected = []
         body = json.dumps({"error": "invalid_grant"}).encode()
-        with token_server(body=body, status=400) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  token_rejected_callback=rejected.append)
+        with served(token_server(body=body, status=400),
+                    token_rejected_callback=rejected.append) as (client,
+                                                                 server):
             with self.assertRaises(TolinoAuthError) as caught:
                 client.login()
         self.assertEqual("A01", caught.exception.code)
@@ -100,10 +103,8 @@ class LoginTests(unittest.TestCase):
                         json.dumps({"error": "invalid_grant"}).encode())
             return 200, {"Content-Type": "application/json"}, TOKEN_BODY
 
-        with token_server(extra=exchange) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="alt",
-                                  stored_token_callback=lambda: "neu")
+        with served(token_server(extra=exchange), refresh="alt",
+                    stored_token_callback=lambda: "neu") as (client, server):
             self.assertEqual("rot-1", client.login())
         self.assertEqual(["alt", "neu"], used)
 
@@ -158,9 +159,7 @@ class ErrorTextTests(unittest.TestCase):
 
     def test_a_broken_token_response_is_an_auth_error(self):
         body = json.dumps({"refresh_token": "rot-1"}).encode()
-        with token_server(body=body) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+        with served(token_server(body=body)) as (client, server):
             with self.assertRaises(TolinoAuthError):
                 client.login()
 
@@ -226,9 +225,7 @@ class RetryTests(unittest.TestCase):
                 return 401, {}, b'{"error": "expired"}'
             return devices_reply(method, path, headers, payload)
 
-        with LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+        with served(LocalHTTP(responder)) as (client, server):
             self.assertEqual(HARDWARE, client.fetch_hardware_id())
             sent = [request["headers"].get("t_auth_token")
                     for request in server.requests
@@ -249,9 +246,7 @@ class RetryTests(unittest.TestCase):
             return 200, JSON_HEADERS, TOKEN_BODY
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             self.assertEqual("rot-1", client.login())
         self.assertEqual(2, calls["token"])
         self.assertEqual([2.0], [call.args[0] for call in slept.call_args_list])
@@ -264,11 +259,10 @@ class RetryTests(unittest.TestCase):
         # Ausnahme und ``False`` sind derselbe Ausgang: nicht gespeichert.
         for callback in (fail, lambda _token: False):
             with self.subTest(callback=callback):
-                with token_server() as server, \
-                        local_tolino_endpoints(server.origin):
-                    client = TolinoClient(
-                        1, HARDWARE, refresh="start", token_callback=callback,
-                        token_rejected_callback=spent.append)
+                with served(
+                        token_server(), token_callback=callback,
+                        token_rejected_callback=spent.append) as (
+                            client, server):
                     with self.assertRaises(TolinoAuthError) as caught:
                         client.login()
                 self.assertEqual("A01", caught.exception.code)
@@ -295,9 +289,8 @@ class RetryTests(unittest.TestCase):
             update_ids.append(headers["hardware_id"])
             return 400, {}, b"{}"
 
-        with LocalHTTP(responder) as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, "old-hardware", refresh="start",
-                                  hardware_callback=saved.append)
+        with served(LocalHTTP(responder), hardware="old-hardware",
+                    hardware_callback=saved.append) as (client, server):
             with self.assertRaises(TolinoError):
                 client.update_metadata("book", {"title": "Neu"})
             self.assertEqual([], client.inventory())
@@ -310,10 +303,8 @@ class RetryTests(unittest.TestCase):
             return 500, {}, b""
 
         saved = []
-        with LocalHTTP(token_and(refuse)) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  hardware_callback=saved.append)
+        with served(LocalHTTP(token_and(refuse)),
+                    hardware_callback=saved.append) as (client, server):
             client.hardware = "adopted"
             client._hw_adopted = True
             # Gueltiger Zugang: der Fehler kommt aus dem Geraete-Aufruf, nicht
@@ -343,10 +334,8 @@ class RetryTests(unittest.TestCase):
 
         saved = []
         with patch("calibre_plugin.tolino.time.sleep"), \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  hardware_callback=saved.append)
+                served(LocalHTTP(responder),
+                       hardware_callback=saved.append) as (client, server):
             self.assertEqual("reg-1", client.fetch_hardware_id())
             sent = [request["headers"].get("hardware_id")
                     for request in server.requests
@@ -388,9 +377,7 @@ class RetryTests(unittest.TestCase):
             return devices_reply(method, path, headers, payload)
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             with self.assertRaises(TolinoApiError) as caught:
                 client.fetch_hardware_id()
         self.assertEqual("N03", caught.exception.code)
@@ -415,9 +402,7 @@ class RetryTests(unittest.TestCase):
             return 400, {}, b"{}"
 
         with patch("calibre_plugin.tolino.time.sleep"), \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             with self.assertRaises(TolinoApiError) as caught:
                 client.fetch_hardware_id()
         self.assertEqual("N03", caught.exception.code)
@@ -427,10 +412,8 @@ class RetryTests(unittest.TestCase):
 
     def test_a_403_without_a_bot_check_is_not_repeated(self):
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                token_server(body=b'{"error": "forbidden"}',
-                             status=403) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(token_server(body=b'{"error": "forbidden"}',
+                                    status=403)) as (client, server):
             with self.assertRaises(TolinoAuthError) as caught:
                 client.login()
         self.assertEqual("A01", caught.exception.code)
@@ -442,9 +425,7 @@ class RetryTests(unittest.TestCase):
             return 403, {}, b"quota exceeded"
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(token_and(responder)) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(token_and(responder))) as (client, server):
             client.access, client.expires_at = "acc-1", time.time() + 3600
             with self.assertRaises(TolinoApiError) as caught:
                 client.fetch_hardware_id()
@@ -456,9 +437,7 @@ class RetryTests(unittest.TestCase):
             return 403, {}, b"<html>captcha</html>"
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             with self.assertRaises(TolinoAuthError):
                 client.login()
         limit = len(tolino_module._WAF_RETRY_SECONDS)

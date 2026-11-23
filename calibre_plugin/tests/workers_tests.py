@@ -101,6 +101,12 @@ class WorkerCase(PreferencesCase):
             {"account_name": "A", "preferred_formats": ["EPUB"]},
             columns={"id": True, "read": True, "progress": True})
 
+    def run_with(self, worker, client):
+        """Worker laufen lassen; der Vault liefert das Client-Doppel."""
+        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
+                          return_value=client):
+            worker.run()
+
     def run_worker(self, client, jobs=(), removals=(), **kwargs):
         worker = self.ui.workers.SyncWorker(self.context, list(jobs),
                                             list(removals), **kwargs)
@@ -201,9 +207,7 @@ class StatePersistenceTests(WorkerCase):
         client = FakeClient(upload_results=["neu-1"],
                             on_upload=worker.cancel)
         break_settings(self)
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         self.assertEqual(["failed"], events)
 
 
@@ -243,9 +247,7 @@ class ReadingAndMetadataTests(WorkerCase):
             metadata=metadata,
             state=state)
         client = FakeClient(on_metadata=worker.cancel)
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         # Der Abbruch beendet die Phase nach dem ersten Patch: der bestaetigte
         # Stand muss trotzdem im Konto stehen, sonst gilt das Buch wieder
         # als «changed».
@@ -270,9 +272,7 @@ class ReadingAndMetadataTests(WorkerCase):
             state=state,
             series_map={UUID: "Erste", OTHER: "Zweite"})
         client = FakeClient(on_collection=worker.cancel)
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         # Nur die bestaetigte Zuordnung ist gesichert; die offene bleibt offen.
         self.assertEqual([("d1", "Erste")], client.collections)
         stored = config.account_by_name("A")["state"]
@@ -429,9 +429,7 @@ class FailureTests(WorkerCase):
         emitted = []
         worker.completed.connect(lambda *args: emitted.append("completed"))
         worker.failed.connect(lambda message: emitted.append("failed"))
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         self.assertTrue(worker.outcome["cancelled"])
         self.assertEqual([(1, "neu-1")], worker.updates)
         self.assertEqual("not_started", worker.operations[1]["status"])
