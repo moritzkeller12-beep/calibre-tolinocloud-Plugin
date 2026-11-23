@@ -688,8 +688,6 @@ class DownloadContentTests(unittest.TestCase):
         for name in ("t_auth_token", "hardware_id", "reseller_id"):
             self.assertNotIn(name, headers)
 
-    
-
 
 class RedirectTests(unittest.TestCase):
     """Eine unsichere Weiterleitung wird abgelehnt, bevor sie kontaktiert wird.

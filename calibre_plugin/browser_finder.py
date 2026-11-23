@@ -137,8 +137,6 @@ def _collect_candidates(home=None):
     return found, status
 
 
-
-
 def _windows_browser_paths(winreg_module=None):
     """Nur von Windows registrierte Browser: App-Paths, keine geratenen Ordner."""
     if winreg_module is None:
