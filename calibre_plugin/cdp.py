@@ -247,10 +247,10 @@ def _group_alive(group):
     return True
 
 
-def _wait_for_group_exit(group, seconds):
-    """Warten, bis die Gruppe verschwindet -- hoechstens `seconds` lang."""
+def _wait_until_settled(active, seconds):
+    """Warten, bis `active` aufhoert -- hoechstens `seconds` lang."""
     deadline = time.monotonic() + max(0.2, seconds)
-    while _group_alive(group) and time.monotonic() < deadline:
+    while active() and time.monotonic() < deadline:
         time.sleep(0.1)
 
 
@@ -292,13 +292,13 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
                 pass
         if group and not hard:
             # Nach SIGTERM bekommt die Gruppe kurz Zeit, selbst zu enden.
-            _wait_for_group_exit(group, timeout)
+            _wait_until_settled(lambda: _group_alive(group), timeout)
     if port:
         # Nach SIGKILL braucht der Port einen Moment, bis er geschlossen ist.
-        _wait_for_endpoint_exit(port, 0.3)
+        _wait_until_settled(lambda: _endpoint_answers(port, 0.2), 0.3)
     if group:
         # Das Browserkind einer beendeten Gruppe wird kurz zum Zombie.
-        _wait_for_group_exit(group, 0.3)
+        _wait_until_settled(lambda: _group_alive(group), 0.3)
     return not leftover()
 
 
@@ -454,13 +454,6 @@ def _endpoint_answers(port, timeout=0.5):
         _VERSION_URL % port, timeout)))
 
 
-def _wait_for_endpoint_exit(port, seconds):
-    """Warten, bis der Port schweigt -- hoechstens `seconds` lang."""
-    deadline = time.monotonic() + max(0.2, seconds)
-    while _endpoint_answers(port, 0.2) and time.monotonic() < deadline:
-        time.sleep(0.1)
-
-
 def _shutdown(record, timeout=2):
     """Close a launched browser, then remove its temporary profile."""
     process = record["process"]
@@ -469,11 +462,11 @@ def _shutdown(record, timeout=2):
         target = _browser_ws_for_record(record, timeout)
         if target:
             _send_browser_close(*target, timeout=timeout)
-        _wait_for_endpoint_exit(port, timeout)
+        _wait_until_settled(lambda: _endpoint_answers(port, 0.2), timeout)
     if not _stop_launched_process(process, timeout,
                                   pgid=record.get("pgid"), port=port):
         return False
-    _wait_for_endpoint_exit(port, timeout)
+    _wait_until_settled(lambda: _endpoint_answers(port, 0.2), timeout)
     if _endpoint_answers(port, 0.2):
         # A wrapper may have exited before its browser child; never delete
         # a profile while DevTools can still be using it.

@@ -69,6 +69,12 @@ def select_rows(table, rows):
         model.select(table.model().index(row, 0), flags)
 
 
+def mark_unread(dialog):
+    """Zeile 0 als ungelesen wählen, wie der Menüeintrag."""
+    select_rows(dialog.table, [0])
+    dialog.set_column_for_marked_rows("read", False, "sind bereits ungelesen")
+
+
 class CreateColumnTests(UiCase):
     """Ein Knopf legt genau seine Spalte an -- und nennt den Neustart."""
 
@@ -211,9 +217,7 @@ class InventoryDialogTests(UiCase):
 
     def test_marked_rows_can_be_set_to_unread(self):
         dialog = self._dialog()
-        select_rows(dialog.table, [0])
-        dialog.set_column_for_marked_rows("read", False,
-                                         "sind bereits ungelesen")
+        mark_unread(dialog)
         self.assertEqual([("d1", 1, False, UUID)],
                          dialog.selected_read_changes())
         self.assertEqual(1, dialog._selection_counts()["unread"])
@@ -221,9 +225,7 @@ class InventoryDialogTests(UiCase):
 
     def test_clearing_the_selection_leaves_no_work(self):
         dialog = self._dialog()
-        select_rows(dialog.table, [0])
-        dialog.set_column_for_marked_rows("read", False,
-                                         "sind bereits ungelesen")
+        mark_unread(dialog)
         dialog.clear_all_selection()
         self.assertEqual([], dialog.selected_read_changes())
         self.assertEqual(0, dialog._selection_counts()["work"])
@@ -237,9 +239,7 @@ class InventoryDialogTests(UiCase):
         self.assertEqual(1, clicked._selection_counts()["unread"])
 
         chosen = self._dialog()
-        select_rows(chosen.table, [0])
-        chosen.set_column_for_marked_rows("read", False,
-                                          "sind bereits ungelesen")
+        mark_unread(chosen)
         self.assertEqual(chosen.selected_read_changes(),
                          clicked.selected_read_changes())
 

@@ -190,8 +190,6 @@ def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     for book_id, metadata in metadata_by_id.items():
         if str(book_id) not in selected_ids:
             continue
-        if not isinstance(metadata, dict):
-            raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
         identifier = valid_book_uuid(metadata.get("uuid"))
         if not identifier or identifier in upload_uuids:
             continue
