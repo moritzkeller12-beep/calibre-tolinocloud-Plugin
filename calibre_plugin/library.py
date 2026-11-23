@@ -56,11 +56,6 @@ def _decode_tolino_ids(value):
             if name and isinstance(book_id, (str, int)) and str(book_id).strip()}
 
 
-def _encode_tolino_ids(ids):
-    return json.dumps(ids, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":")) if ids else ""
-
-
 def _column_available(database, column, datatypes):
     fields = database.field_metadata
     return column in fields and fields[column].get("datatype") in datatypes
@@ -270,7 +265,9 @@ def update_tolino_ids(database, updates, account_name=None):
             account_ids[account_name] = new_id
         else:
             account_ids.pop(account_name, None)
-        values[book_id] = _encode_tolino_ids(account_ids)
+        values[book_id] = (
+            json.dumps(account_ids, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) if account_ids else "")
     if not values:
         return 0
     api.set_field(TOLINO_COLUMN, values)

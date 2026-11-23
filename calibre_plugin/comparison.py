@@ -572,14 +572,6 @@ def comparison_sort_key(row):
     )
 
 
-def sort_comparison_rows(comparison_rows):
-    """Bestandsvergleich sortieren: erst ausgewählte Aktionen, dann Titel, Autoren.
-
-    Zeilen mit einer Aktion ("upload"/"metadata") stehen oben.
-    """
-    return sorted(comparison_rows, key=comparison_sort_key)
-
-
 def metadata_fingerprint(metadata):
     """Hash of the fields pushed in place to tolino instead of uploaded."""
     value = "%s|%s|%s|%s" % (

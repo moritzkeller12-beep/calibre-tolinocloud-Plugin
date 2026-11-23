@@ -10,7 +10,7 @@ from qt.core import (QCheckBox, QComboBox, QDialog, QEvent, QFileDialog,
 from .ui_common import _set_enabled, gui_guard, start_call
 from .planning import plural
 from calibre.gui2 import error_dialog, info_dialog
-from .comparison import comparison_sort_key, sort_comparison_rows
+from .comparison import comparison_sort_key
 from .library import TOLINO_IGNORE_COLUMN
 from .tolino import report_error
 
@@ -354,7 +354,7 @@ class InventoryDialog(QDialog):
             # Die Calibre-Spalte wird nur angezeigt. Die Auswahl folgt dem
             # Lesestatus des aktuell ausgewählten Tolino-Kontos.
             self.rows.append(row)
-        self.rows = sort_comparison_rows(self.rows)
+        self.rows = sorted(self.rows, key=comparison_sort_key)
 
     def _build_header(self, layout):
         """Einleitung, Zusammenfassung und Hinweis zu Automatiken."""
