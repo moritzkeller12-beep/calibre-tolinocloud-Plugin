@@ -88,6 +88,8 @@ class _Column(NamedTuple):
 _READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
 _READ_COLUMN_TOOLTIP = ("Auswahl = gelesen; keine Auswahl = ungelesen. Die "
                         "Calibre-Spalte #tolino_read ist nur informativ.")
+
+
 class _ActionSpec(NamedTuple):
     """Eine Auswahlspalte: Schlüssel, Titel, Tooltip, Sortierung, Texte."""
 
@@ -297,8 +299,6 @@ class InventoryDialog(QDialog):
         Upload-Vorschlag.
         """
         caps = row_capabilities(row)
-        # Gesperrte Zeilen und unsichere Zuordnungen bekommen keinen
-        # Vorschlag: ein Upload koennte Duplikate erzeugen.
         if not caps["usable"] or row.get("status") == "review":
             return (False, False)
         if row.get("book_id") is None or not row.get("tolino_id"):
@@ -840,11 +840,7 @@ class InventoryDialog(QDialog):
             self.table.setRowHidden(index, not visible)
 
     def _selection_counts(self):
-        """Alle Zahlen der Zusammenfassung in EINEM Durchlauf über die Zeilen.
-
-        Frueher zaehlten vier Methoden dieselben Zeilen je sechsmal -- bei
-        jedem Klick und nach jedem Neuaufbau.
-        """
+        """Alle Zahlen der Zusammenfassung in EINEM Durchlauf über die Zeilen."""
         uploads = metadata = 0
         marked_read = marked_unread = deletions = undecided = 0
         for row in self.rows:

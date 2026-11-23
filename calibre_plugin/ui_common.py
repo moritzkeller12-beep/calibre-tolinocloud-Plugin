@@ -65,12 +65,9 @@ OP_SKIPPED = "skipped"
 OP_FAILED = "failed"
 OP_NOT_STARTED = "not_started"
 
-# Laufende oder nach einem Timeout noch nicht beendete Threads bleiben bis
-# zum finished-Signal referenziert.
+# Threads und Worker bleiben bis zum finished-Signal referenziert: `closeEvent`
+# gibt seine Referenzen ab, waehrend eine `run()`-Methode noch laeuft.
 _THREADS = []
-# Dasselbe fuer die Worker: `closeEvent` gibt seine Referenzen bewusst ab,
-# waehrend ein Anmelde-Thread weiterlaeuft. Ohne diese Liste koennte Qt den
-# QObject einsammeln, waehrend seine `run()`-Methode noch im Thread laeuft.
 _WORKERS = []
 
 
@@ -120,8 +117,6 @@ def start_call(dialog, call, on_done, on_failed):
     """
     thread = QThread()
     worker = CallWorker(call)
-    # Der Worker muss den Dialog ueberleben: ohne die Referenz kann Qt ihn
-    # vor dem Thread-Start einsammeln, und der Dialog bleibt gesperrt.
     return start_worker(
         dialog, worker, thread, "_call_thread", "_call_worker",
         (worker.done, worker.failed),
@@ -141,11 +136,7 @@ def _discard_item(collection, item):
 
 
 def _retain(collection, item, finished):
-    """Keep `item` referenced until the signal `finished` fires.
-
-    `closeEvent` drops its worker reference while a sign-in thread keeps
-    running; without this guard Qt could collect the QObject mid-`run()`.
-    """
+    """Keep `item` referenced until the signal `finished` fires."""
     if not any(kept is item for kept in collection):
         collection.append(item)
         finished.connect(lambda: _discard_item(collection, item))

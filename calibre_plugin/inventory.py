@@ -17,6 +17,8 @@ _DELIVERABLE_KEYS = ("deliverableId", "identifier")
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
                             "ebook", "edata")
+
+
 def _nested_inventory_value(value, names, depth=0):
     """Wert in einem Bestands-Datensatz -- auch verschachtelt und in Listen.
 

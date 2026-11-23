@@ -706,10 +706,8 @@ class TolinoClient:
     def _multipart(fields, payload, filename, field="file"):
         """Build a multipart body in memory from bytes.
 
-        Memory note: the returned body is one contiguous bytes object, so a
-        large EPUB is held roughly twice while the chunks are joined. EPUBs
-        are usually small (single-digit MB); keeping the stdlib-only
-        transport (urllib) is worth that trade-off.
+        A large EPUB is briefly held twice while the chunks are joined; that
+        is the accepted cost of the stdlib-only transport.
         """
         boundary = ("----CalibreTolino%s" % uuid.uuid4().hex).encode("ascii")
         chunks = []
@@ -1042,8 +1040,6 @@ class TolinoClient:
         active = _sync_data.read_tag_patches(patches)
         updates = []
         for book_id in ids:
-            # Beide Schreibweisen direkt nachschlagen: das Mapping ist schon
-            # nach (Buch, Kategorie) indiziert.
             book = str(book_id)
             marks = [(category, active[(book, category)])
                      for category in _sync_data.READ_TAG_CATEGORIES

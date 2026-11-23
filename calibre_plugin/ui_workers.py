@@ -576,8 +576,7 @@ class SyncWorker(QObject):
             self._refresh_counts()
             self.completed.emit(self.updates)
         except Exception as exc:
-            # Alle nicht erreichten Operationen bleiben ausdruecklich
-            # "not_started" -- der Bericht unterscheidet sie von Fehlern.
+            # Nicht erreichte Schritte bleiben ausdrücklich «not_started».
             self._refresh_counts()
             message = (CANCEL_MESSAGE if str(exc) == CANCEL_MESSAGE
                        else report_error(exc, "Sync", (

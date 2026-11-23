@@ -10,15 +10,11 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
+from . import browser_finder
 from .partners import WEBREADER_URL
 from .tolino import TolinoAuthError, log_info
 from .cdp_transport import _Ws, _http_get_json
 from .cdp_scripts import _GRAB_SNIPPET, idb_expression
-
-
-# ---------------------------------------------------------------- Vorbedingungen
-
-from . import browser_finder
 
 
 def _start_port():
@@ -44,7 +40,6 @@ def _verified_owner(require_endpoint=True):
     if require_endpoint and not _endpoint_answers(record["port"]):
         return None
     return record
-
 
 
 def _open_target(target, timeout):

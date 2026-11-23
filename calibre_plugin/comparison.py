@@ -245,10 +245,8 @@ def store_reading_state(state, comparison):
 class _RemoteIndex:
     """Cloud-Zeilen plus Lookup-Indizes -- in derselben Reihenfolge.
 
-    Die Zuordnung suchte frueher fuer JEDES Buch die ganze Cloud-Liste
-    erneut ab (quadratisch). Die Listen in den Indizes enthalten dieselben
-    Zeilen in derselben Reihenfolge; `matched` entscheidet weiterhin, ob
-    eine Zeile noch frei ist.
+    Die Indizes ersetzen die frueher quadratische Suche je Buch; `matched`
+    entscheidet weiterhin, ob eine Zeile noch frei ist.
     """
 
     __slots__ = ("rows", "by_tolino_id", "by_isbn", "by_title",
@@ -526,29 +524,15 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     2. one unique *valid* ISBN,
     3. one unique normalized title+author pair.
 
-    A title on its own never matches: it produces a ``review`` row for a
-    human decision and leaves the cloud record untouched, so no automatic
-    upload and no ``identical`` can be derived from a title alone. Multiple
-    hits on the same lookup key are marked ``review`` as well; no hit is
-    picked by list position. Conflicting authors or ISBNs also stay
-    ``review`` so that the user confirms the assignment.
+    A title alone, multiple hits on one key and conflicting authors or ISBNs
+    all yield ``review`` rows; no hit is picked by list position, so neither
+    an automatic upload nor ``identical`` follows from them.
 
-    `read_ids` are tolino IDs already marked as read in the selected account.
-    They prefill the dialog's Cloud-status selection; Calibre's read column is
-    attached to each row as display-only information.
-    ``None`` bedeutet «Status unbekannt» (Abruf fehlgeschlagen): die Zeilen
-    tragen dann ``read_known=False``, damit die Oberfläche «unbekannt» nicht
-    als «ungelesen» darstellt und nichts zurückschreibt.
-
-    ``inventory`` enthält die von `TolinoClient.inventory()` gelieferten,
-    bereits normalisierten Cloud-Datensätze.
-
-    ``read_column`` adds the informational Calibre ``#tolino_read`` value;
-    it never changes the selected account's Cloud read status.
-
-    ``progress_by_id`` maps tolino IDs to the reading progress from
-    sync-data. ``None`` means «not loaded»; an empty mapping means «loaded,
-    but no bookmarks». Progress is display-only and is never written back.
+    ``read_ids`` are tolino IDs already read in the selected account; they
+    prefill the cloud selection, while ``None`` means «status unknown» and is
+    carried as ``read_known=False``. ``read_column`` only attaches Calibre's
+    ``#tolino_read`` for display. ``progress_by_id=None`` means «not loaded»,
+    an empty mapping «no bookmarks»; progress is never written back.
     """
     preferred_formats = normalize_formats(preferred_formats)
     read_known = read_ids is not None
@@ -575,6 +559,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
             local_rows.append(_leftover_remote_row(
                 row, disputed, remote.title_counts, index))
     return local_rows
+
 
 def comparison_sort_key(row):
     """Sortierschlüssel des Bestandsvergleichs: Aktionen zuerst, dann Titel."""

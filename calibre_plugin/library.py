@@ -146,9 +146,7 @@ def create_custom_columns(database, labels=None):
     auch die Calibre-Schnittstelle nicht befragt.
 
     Calibre fuehrt eine neue Spalte erst nach einem Neustart in
-    ``field_metadata``; bis dahin bleibt sie fuer dieses Plugin unbekannt
-    und wird nicht beschrieben. Der Merker ``CREATED_COLUMNS`` verhindert
-    nur, dass ein zweiter Klick dieselbe Spalte erneut anlegen will.
+    ``field_metadata``; bis dahin bleibt sie fuer dieses Plugin unbekannt.
     """
     wanted = None if labels is None else set(labels)
     selected = (CUSTOM_COLUMNS if wanted is None else
@@ -290,7 +288,6 @@ def normalize_formats(value):
     cleaned = ("" if part is None else str(part).strip().lstrip(".").upper()
                for part in values)
     return list(dict.fromkeys(text for text in cleaned if text))
-
 
 
 def safe_format_path(database, book_id, format_name):

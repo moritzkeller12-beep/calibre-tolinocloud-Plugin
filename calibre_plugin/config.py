@@ -81,13 +81,10 @@ def _lock_handle(handle):
 def _settings_file_lock():
     """Sperrdatei neben dem Speicher; im selben Thread wiederverwendbar.
 
-    Ohne Sperrdatei (unschreibbares Verzeichnis, fehlendes ``fcntl``) bleibt
-    nur `_SETTINGS_LOCK`: der eigene Prozess ist trotzdem geschuetzt, ein
-    fremder Schreiber aber nicht ausgeschlossen. Scheitert dagegen das
-    Sperren selbst, wird der ``OSError`` weitergegeben und der Schreibvorgang
-    bricht ab -- ungesperrt zu schreiben ersetzte sonst einen fremden Stand.
-    Verschachtelte Aufrufe (etwa `_write_account` aus `save_state`) sperren
-    nicht erneut.
+    Ohne Sperrdatei bleibt nur `_SETTINGS_LOCK` (best effort). Scheitert das
+    Sperren selbst, bricht der Schreibvorgang ab -- ungesperrt zu schreiben
+    ersetzte sonst einen fremden Stand. Verschachtelte Aufrufe sperren nicht
+    erneut.
     """
     depth = getattr(_LOCK_STATE, "depth", 0)
     if depth:
@@ -139,18 +136,14 @@ def settings_write_lock():
 def _reload():
     """Datei bei jedem Zugriff lesen; nur ein vollstaendiger Stand zaehlt.
 
-    Eine zweite Calibre-Instanz, der Keep-alive oder ein Kindprozess schreibt
-    in dieselbe Datei. Ohne Abgleich zeigt das offene Fenster bis zum Neustart
-    einen veralteten Kontostand. Gelesen wird der Rohinhalt und nicht der
-    Zeitstempel: dessen Aufloesung ist je nach Dateisystem grob, schnelle
-    Schreibvorgaenge gleicher Groesse blieben unsichtbar. Eine halb
-    geschriebene Datei zaehlt nicht als Stand -- Calibres `refresh()` wuerde
-    sie uebernehmen und dabei alle Konten verlieren.
+    Andere Prozesse schreiben dieselbe Datei. Gelesen wird der Rohinhalt
+    statt des Zeitstempels (grobe Aufloesung), und nur vollstaendiges JSON
+    wird uebernommen -- Calibres `refresh()` naehme auch eine halbe Datei
+    samt Konten.
 
-    ``False`` heisst: die Datei ist gerade unbrauchbar. Sie kann existieren
-    und nur gesperrt sein (Rechte, Verzeichnis, E/A-Fehler) -- das ist NICHT
-    dasselbe wie «es gibt sie nicht». Lesen bleibt dann beim letzten guten
-    Stand, ein Schreibvorgang bricht ab, statt ihn zu ueberschreiben.
+    ``False`` heisst: vorhanden, aber unbrauchbar (gesperrt, E/A-Fehler,
+    halb geschrieben). Lesen bleibt dann beim letzten guten Stand, ein
+    Schreibvorgang bricht ab; das ist nicht dasselbe wie «keine Datei».
     """
     with _SETTINGS_LOCK:
         path = getattr(PREFERENCES, "file_path", None)
@@ -301,14 +294,10 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
                    create=True, allow_virtual_default=False, reload=True):
     """Persist one account and optionally the active/format settings.
 
-    ``active`` ist ein Sentinel: Wird es übergeben (auch als ``None``), wird
-    das aktive Konto neu bestimmt. Fehlt es, bleibt die Auswahl unberührt.
-    ``reload=False`` nur für Aufrufer, die den Stand gerade selbst gelesen und
-    zusammengefuehrt haben: sie schreiben genau diesen Stand.
-
-    Laden und Commit laufen unter beiden Sperren: ein fremder Prozess kann
-    die Datei zwischen `_reload()` und `_commit()` nicht mehr aendern. Laesst
-    sich die Sperrdatei nicht halten, bricht der Schreibvorgang ab.
+    ``active`` ist ein Sentinel: übergeben (auch ``None``) bestimmt das aktive
+    Konto neu, weggelassen lässt es unberührt. ``reload=False`` nur für
+    Aufrufer, die den Stand selbst gelesen und zusammengefuehrt haben.
+    Laden und Commit laufen unter beiden Sperren.
     """
     with _SETTINGS_LOCK, _settings_file_lock():
         name = str(name or "").strip()
@@ -433,7 +422,7 @@ def _merge_state(stored, base, state):
     """
     merged = dict(stored)
     for key in set(base) - set(state):
-        merged.pop(key, None)  # in diesem Lauf entfernt
+        merged.pop(key, None)
     for key, entry in state.items():
         current = merged.get(key)
         if isinstance(entry, dict):
