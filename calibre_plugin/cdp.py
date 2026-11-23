@@ -28,7 +28,8 @@ def _start_port():
 # Popen-Handle dieses Plugins stehen hier. Die Prozessgruppe wird beim Start
 # festgehalten -- der Wrapper eines Flatpak-/Snap-Pakets kann vor seinem
 # Browserkind enden, danach findet os.getpgid(pid) nichts mehr.
-_LAUNCHED = {"process": None, "port": None, "profile": "", "pgid": None}
+_NO_OWNER = {"process": None, "port": None, "profile": "", "pgid": None}
+_LAUNCHED = dict(_NO_OWNER)
 
 
 def _verified_owner(require_endpoint=True):
@@ -207,8 +208,7 @@ def launch_reader_window():
                 "Browser schliessen und es erneut versuchen.", code="B01",
                 short=_BROWSER_NOT_POSSIBLE, detail="; ".join(failures))
         shutil.rmtree(profile, ignore_errors=True)
-    _LAUNCHED.update({"process": None, "port": None, "profile": "",
-                      "pgid": None})
+    _LAUNCHED.update(_NO_OWNER)
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
         "und es erneut versuchen.", code="B01", short=_BROWSER_NOT_POSSIBLE,
@@ -475,8 +475,7 @@ def _shutdown(record, timeout=2):
     if os.path.exists(record["profile"]):
         return False
     if _LAUNCHED["process"] is process:
-        _LAUNCHED.update({"process": None, "port": None, "profile": "",
-                          "pgid": None})
+        _LAUNCHED.update(_NO_OWNER)
     return True
 
 

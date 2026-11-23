@@ -20,6 +20,10 @@ def _selected_rows(table):
     return [index.row() for index in table.selectionModel().selectedRows()]
 
 
+def _info(dialog, title, text):
+    QMessageBox.information(dialog, title, text)
+
+
 def _by_pair(first, second):
     return lambda row: (str(row.get(first) or "").casefold(),
                         str(row.get(second) or "").casefold())
@@ -580,10 +584,9 @@ class InventoryDialog(QDialog):
         """Markierte (Index, Zeile)-Paare -- oder Hinweis, wenn keine markiert ist."""
         marked = _selected_rows(self.table)
         if not marked:
-            QMessageBox.information(
-                self, "Aktionen für markierte Bücher",
-                "Markiere zuerst mindestens ein Buch in der Tabelle. "
-                "Mehrere Bücher wählst du mit Strg-/Shift-Klick aus.")
+            _info(self, "Aktionen für markierte Bücher",
+                  "Markiere zuerst mindestens ein Buch in der Tabelle. "
+                  "Mehrere Bücher wählst du mit Strg-/Shift-Klick aus.")
             return []
         return [(index, self.rows[index]) for index in marked
                 if 0 <= index < len(self.rows)]
@@ -637,10 +640,9 @@ class InventoryDialog(QDialog):
         if not changed:
             self.action_feedback.setText("")
             count = skipped or len(marked)
-            QMessageBox.information(
-                self, "Nichts geändert",
-                "Nichts geändert: %d markierte %s %s."
-                % (count, plural(count, "Buch", "Bücher"), summary))
+            _info(self, "Nichts geändert",
+                  "Nichts geändert: %d markierte %s %s."
+                  % (count, plural(count, "Buch", "Bücher"), summary))
             return
         feedback = "%s für %d von %d markierten Büchern" % (
             self.ACTION_LABELS.get((key, bool(value)), "Aktion ausgeführt"),
@@ -916,16 +918,14 @@ class InventoryDialog(QDialog):
         """
         selected = _selected_rows(self.table)
         if not selected:
-            QMessageBox.information(
-                self, "Buch auswählen",
-                "Markiere zuerst das Buch, für das du diese Aktion "
-                "ausführen möchtest.")
+            _info(self, "Buch auswählen",
+                  "Markiere zuerst das Buch, für das du diese Aktion "
+                  "ausführen möchtest.")
             return None
         if len(selected) > 1:
-            QMessageBox.information(
-                self, "Ein Buch auswählen",
-                "Diese Aktion gilt nur für ein Buch. Markiere genau ein "
-                "Buch in der Tabelle.")
+            _info(self, "Ein Buch auswählen",
+                  "Diese Aktion gilt nur für ein Buch. Markiere genau ein "
+                  "Buch in der Tabelle.")
             return None
         row_index = selected[0]
         if row_index >= len(self.rows):
@@ -960,10 +960,9 @@ class InventoryDialog(QDialog):
             return
         tolino_id = row.get("tolino_id")
         if not tolino_id:
-            QMessageBox.information(
-                self, "Buch nicht in tolino vorhanden",
-                "Dieses Buch kann nicht aus tolino heruntergeladen werden, "
-                "weil es im ausgewählten Konto nicht vorhanden ist.")
+            _info(self, "Buch nicht in tolino vorhanden",
+                  "Dieses Buch kann nicht aus tolino heruntergeladen werden, "
+                  "weil es im ausgewählten Konto nicht vorhanden ist.")
             return
         # Erst den Speicherort erfragen, dann laden: ein Abbruch im
         # Dateidialog soll keinen Download ausloesen.
@@ -1056,10 +1055,9 @@ class InventoryDialog(QDialog):
                 continue
             candidates.append(row)
         if not candidates:
-            QMessageBox.information(
-                self, "Nichts zu löschen",
-                "Es wurde nichts geändert: Die markierten Bücher liegen nicht "
-                "in tolino oder sind bereits zum Löschen markiert.")
+            _info(self, "Nichts zu löschen",
+                  "Es wurde nichts geändert: Die markierten Bücher liegen nicht "
+                  "in tolino oder sind bereits zum Löschen markiert.")
             return
         for row in candidates:
             row["delete_cloud"] = True
@@ -1077,9 +1075,8 @@ class InventoryDialog(QDialog):
             if row.pop("delete_cloud", None) is not None:
                 changed += 1
         if not changed:
-            QMessageBox.information(
-                self, "Löschmarkierung aufheben",
-                "Es wurde nichts geändert: Die markierten Bücher sind nicht "
-                "zum Löschen vorgemerkt.")
+            _info(self, "Löschmarkierung aufheben",
+                  "Es wurde nichts geändert: Die markierten Bücher sind nicht "
+                  "zum Löschen vorgemerkt.")
             return
         self._rebuild_table(self.rows)
