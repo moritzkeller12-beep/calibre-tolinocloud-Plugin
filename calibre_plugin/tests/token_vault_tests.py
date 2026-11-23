@@ -15,10 +15,8 @@ from ..errors import TolinoAuthError, TolinoError
 from ..token_vault import (TOKEN_VAULT, check_stored_login,
                            start_token_keepalive, stop_token_keepalive)
 from ..tolino import BUSY_MESSAGE, TolinoClient
-from ._support import (LocalHTTP, PreferencesCase, break_settings,
-                       jwt_token, local_tolino_endpoints)
-
-JSON_HEADERS = {"Content-Type": "application/json"}
+from ._support import (JSON_HEADERS, LocalHTTP, PreferencesCase,
+                       break_settings, jwt_token, local_tolino_endpoints)
 
 
 class TokenServer:

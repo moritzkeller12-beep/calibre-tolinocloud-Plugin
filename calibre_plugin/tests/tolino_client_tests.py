@@ -19,7 +19,8 @@ from .. import tolino as tolino_module
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..sync_data import READ_TAG
 from ..tolino import TolinoClient, report_error, sanitize_error
-from ._support import LocalHTTP, jwt_token, local_tolino_endpoints
+from ._support import (JSON_HEADERS, LocalHTTP, jwt_token,
+                       local_tolino_endpoints)
 
 HARDWARE = "11111111-1111-4111-8111-111111111111"
 TOKEN_BODY = json.dumps({"access_token": "acc-1", "refresh_token": "rot-1",
@@ -162,9 +163,6 @@ class ErrorTextTests(unittest.TestCase):
         with served(token_server(body=body)) as (client, server):
             with self.assertRaises(TolinoAuthError):
                 client.login()
-
-
-JSON_HEADERS = {"Content-Type": "application/json"}
 
 
 def json_reply(payload):
