@@ -249,8 +249,7 @@ class _RemoteIndex:
     entscheidet weiterhin, ob eine Zeile noch frei ist.
     """
 
-    __slots__ = ("rows", "by_tolino_id", "by_isbn", "by_title",
-                 "title_counts")
+    __slots__ = ("rows", "by_tolino_id", "by_isbn", "by_title", "title_counts")
 
     def __init__(self, rows):
         self.rows = rows

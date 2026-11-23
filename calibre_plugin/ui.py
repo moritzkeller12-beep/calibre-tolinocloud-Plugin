@@ -5,8 +5,7 @@ from calibre.gui2.actions import InterfaceAction
 
 class TolinoSyncAction(InterfaceAction):
     name = "Tolino Cloud Sync"
-    action_spec = ("tolino Cloud Sync", None,
-                   "tolino Cloud Sync öffnen", None)
+    action_spec = ("tolino Cloud Sync", None, "tolino Cloud Sync öffnen", None)
 
     def genesis(self):
         self.qaction.triggered.connect(self.show_dashboard)

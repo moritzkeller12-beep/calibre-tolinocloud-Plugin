@@ -7,8 +7,7 @@ from qt.core import QObject, pyqtSignal
 from .ui_common import (CANCEL_MESSAGE, OP_FAILED, OP_NOT_STARTED, OP_SKIPPED,
                         OP_SUCCEEDED)
 from .token_vault import TOKEN_VAULT
-from .config import (account_by_name, account_secrets, load_state,
-                     save_state)
+from .config import (account_by_name, account_secrets, load_state, save_state)
 from .errors import SETTINGS_WRITE_DETAIL
 from .planning import (local_metadata, plan_collection_updates,
                        remember_collection)

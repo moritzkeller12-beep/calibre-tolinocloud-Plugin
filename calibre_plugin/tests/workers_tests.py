@@ -204,8 +204,7 @@ class StatePersistenceTests(WorkerCase):
         events = []
         worker.completed.connect(lambda *args: events.append("completed"))
         worker.failed.connect(lambda *args: events.append("failed"))
-        client = FakeClient(upload_results=["neu-1"],
-                            on_upload=worker.cancel)
+        client = FakeClient(upload_results=["neu-1"], on_upload=worker.cancel)
         break_settings(self)
         self.run_with(worker, client)
         self.assertEqual(["failed"], events)
@@ -424,8 +423,7 @@ class FailureTests(WorkerCase):
             self.context,
             [self.job(1, UUID, "/erst.epub"),
              self.job(2, OTHER, "/zweit.epub")], [], state={})
-        client = FakeClient(upload_results=["neu-1"],
-                            on_upload=worker.cancel)
+        client = FakeClient(upload_results=["neu-1"], on_upload=worker.cancel)
         emitted = []
         worker.completed.connect(lambda *args: emitted.append("completed"))
         worker.failed.connect(lambda message: emitted.append("failed"))
@@ -463,8 +461,7 @@ class PersistenceTests(WorkerCase):
         config.save_account("A", {"refresh_token": "tok-A"})
         config.save_account("B", {"refresh_token": "tok-B",
                                   "state": {"fremd": {"tolino_id": "x"}}})
-        self.run_worker(FakeClient(),
-                        jobs=[self.job(1, UUID, "/buch.epub")])
+        self.run_worker(FakeClient(), jobs=[self.job(1, UUID, "/buch.epub")])
         self.assertEqual({"fremd": {"tolino_id": "x"}},
                          config.account_by_name("B")["state"])
         self.assertEqual("neu-1",
@@ -507,8 +504,7 @@ class PersistenceTests(WorkerCase):
         duerfen nicht im Eintrag mit der neuen tolino-ID landen.
         """
         start = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
-        config.save_account("A", {"refresh_token": "tok-A",
-                                  "state": start})
+        config.save_account("A", {"refresh_token": "tok-A", "state": start})
 
         def foreign_change():
             stored = config.account_by_name("A")["state"]
@@ -529,8 +525,7 @@ class PersistenceTests(WorkerCase):
         # Das letzte Konto laesst sich nicht entfernen: ein zweites muss her.
         config.save_account("B", {"refresh_token": "tok-B"})
         self.assertTrue(config.remove_account("A"))
-        self.run_worker(FakeClient(),
-                        jobs=[self.job(1, UUID, "/buch.epub")])
+        self.run_worker(FakeClient(), jobs=[self.job(1, UUID, "/buch.epub")])
         self.assertEqual({}, config.account_by_name("A"))
 
 

@@ -625,8 +625,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _start_prepare_worker(self, context, metadata, state):
         """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
-        self._begin_progress("Vergleich läuft …",
-                             "Verbinde mit tolino …")
+        self._begin_progress("Vergleich läuft …", "Verbinde mit tolino …")
         worker = PrepareWorker(context, metadata, state)
         worker.progress.connect(self._prepare_progress)
         worker.ready.connect(self._prepare_ready)
@@ -735,8 +734,7 @@ class SyncDashboard(DashboardParts, QDialog):
         # Der Vault liest den möglicherweise rotierten Token erst beim Login.
         counts = _planning.PlanCounts(preparation, len(jobs))
         total = counts.steps
-        replacements = [job for job in jobs
-                        if job.old_id]
+        replacements = [job for job in jobs if job.old_id]
         if replacements and not confirm_replacements(self, replacements):
             self.status.setText(
                 "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")

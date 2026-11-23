@@ -14,8 +14,7 @@ from .identifiers import book_uuid, calibre_key
 from .library import (library_scope, update_progress_status,
                       update_read_status, update_tolino_ids)
 from .tolino import log_warning, sanitize_error
-from .ui_common import (CANCEL_MESSAGE, sync_result_detail,
-                        sync_result_text)
+from .ui_common import (CANCEL_MESSAGE, sync_result_detail, sync_result_text)
 
 
 def book_key_index(dashboard):

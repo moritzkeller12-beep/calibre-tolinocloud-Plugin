@@ -92,8 +92,7 @@ def normalize_inventory_record(item):
     deliverable = _record_identifier(item)
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
-    isbn = _nested_inventory_value(
-        item, ("isbn", "ISBN", "isbn13", "isbn10"))
+    isbn = _nested_inventory_value(item, ("isbn", "ISBN", "isbn13", "isbn10"))
     if not str(isbn or "").strip():
         # Gekaufte E-Books tragen oft nur eine Produktkennung wie
         # ``DT0400.978..._A...``; darin steckt die eigentliche ISBN.

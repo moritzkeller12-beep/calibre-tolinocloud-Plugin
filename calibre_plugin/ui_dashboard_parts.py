@@ -123,8 +123,7 @@ def report_skipped_uploads(dialog, skipped_uploads, nothing_else=False):
             % "\n".join(skipped_uploads))
     if not nothing_else:
         text += "\n\nDie übrigen Aktionen werden trotzdem ausgeführt."
-    QMessageBox.warning(
-        dialog, "Einige Bücher wurden nicht hochgeladen", text)
+    QMessageBox.warning(dialog, "Einige Bücher wurden nicht hochgeladen", text)
     return bool(nothing_else)
 
 

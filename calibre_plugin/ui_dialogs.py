@@ -186,8 +186,7 @@ class _CellCheckDelegate(QStyledItemDelegate):
         previous = state
         checked = (getattr(state, "value", state)
                    == Qt.CheckState.Checked.value)
-        state = (Qt.CheckState.Unchecked if checked
-                 else Qt.CheckState.Checked)
+        state = (Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
         changed = model.setData(index, state, Qt.ItemDataRole.CheckStateRole)
         if changed:
             self._last_toggle = (model, index, previous)
@@ -332,8 +331,7 @@ class InventoryDialog(QDialog):
         self.confirm = None
         self.action_feedback = None
         self._prepare_rows(rows)
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_QuitOnClose, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setMinimumSize(640, 460)
         self.resize(960, 560)
         layout = QVBoxLayout(self)
@@ -387,8 +385,7 @@ class InventoryDialog(QDialog):
             self.group_filter.addItem(label, key)
         self.group_filter.setToolTip(
             "Filtert nach Aktion, Cloud-Bestand, Prüfung oder unverändert.")
-        self.group_filter.currentIndexChanged.connect(
-            self._apply_group_filter)
+        self.group_filter.currentIndexChanged.connect(self._apply_group_filter)
         self.recommend = QPushButton("Empfohlene Aktionen auswählen")
         self.recommend.setToolTip(
             "Wählt Upload oder Metadaten für eindeutig zugeordnete Bücher.")
@@ -425,8 +422,7 @@ class InventoryDialog(QDialog):
         self._sort_descending = False
         table_header = self.table.horizontalHeader()
         table_header.setSortIndicatorShown(True)
-        table_header.setSortIndicator(
-            0, Qt.SortOrder.AscendingOrder)
+        table_header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         table_header.sectionClicked.connect(self._sort_by_column)
         self.table.itemChanged.connect(self._item_changed)
         self._rebuild_table(self.rows, resize_columns=True)
@@ -440,19 +436,16 @@ class InventoryDialog(QDialog):
 
         self.technical_toggle = QCheckBox(
             "Technische Details anzeigen (ISBN, tolino-ID, UUID)")
-        self.technical_toggle.setToolTip(
-            "Zeigt ISBN, tolino-ID und UUID.")
+        self.technical_toggle.setToolTip("Zeigt ISBN, tolino-ID und UUID.")
         self.technical_toggle.toggled.connect(self._toggle_technical_columns)
         layout.addWidget(self.technical_toggle)
         self._apply_technical_visibility()
 
         buttons = QHBoxLayout()
         confirm = QPushButton("Synchronisierung starten")
-        confirm.setToolTip(
-            "Überträgt die ausgewählten Änderungen.")
+        confirm.setToolTip("Überträgt die ausgewählten Änderungen.")
         cancel = QPushButton("Abbrechen")
-        cancel.setToolTip(
-            "Schliesst den Vergleich, ohne Änderungen.")
+        cancel.setToolTip("Schliesst den Vergleich, ohne Änderungen.")
         confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
         self.confirm = confirm
@@ -748,8 +741,7 @@ class InventoryDialog(QDialog):
         if row.get("delete_cloud"):
             explanation = (explanation + " Wird beim Start aus tolino gelöscht.").strip()
         progress = row.get("progress")
-        progress_text = (progress.text if progress is not None
-                         else "")
+        progress_text = (progress.text if progress is not None else "")
         return (
             "✓" if has_book else "",
             "✓" if in_cloud else "",
@@ -835,8 +827,7 @@ class InventoryDialog(QDialog):
         Es werden nur Tabellenzeilen versteckt; `self.rows` bleibt die
         vollstaendige Liste, damit Auswahl und Sortierung unberuehrt bleiben.
         """
-        combo = self.group_filter
-        selected = combo.currentData()
+        selected = self.group_filter.currentData()
         for index, row in enumerate(self.rows):
             visible = selected is None or row.get("group") == selected
             self.table.setRowHidden(index, not visible)
@@ -968,8 +959,7 @@ class InventoryDialog(QDialog):
         # Dateidialog soll keinen Download ausloesen.
         title = str(row.get("title") or "tolino-book")
         title = re.sub(r'[\\/:*?"<>|]', "_", title).strip(" .") or "tolino-book"
-        extension = ".epub"
-        suggested = title + extension
+        suggested = title + ".epub"
         path, _ = QFileDialog.getSaveFileName(
             self, "Buch speichern", suggested,
             "EPUB (*.epub);;PDF (*.pdf)")
@@ -1023,8 +1013,7 @@ class InventoryDialog(QDialog):
                 handle.write(data)
         except OSError as exc:
             message = report_error(exc, "Speichern")
-            error_dialog(self, "Speichern fehlgeschlagen",
-                         message, show=True)
+            error_dialog(self, "Speichern fehlgeschlagen", message, show=True)
             return
         info_dialog(self, "Buch gespeichert", "Gespeichert unter: %s" % path,
                     show=True, show_copy_button=False)

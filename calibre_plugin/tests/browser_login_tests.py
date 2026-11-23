@@ -32,8 +32,7 @@ def jwt(iat=None, typ="Refresh", iss=THALIA):
         payload["iss"] = iss
     head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
     body = base64.urlsafe_b64encode(json.dumps(payload).encode())
-    return "%s.%s.sig" % (head.decode().rstrip("="),
-                          body.decode().rstrip("="))
+    return "%s.%s.sig" % (head.decode().rstrip("="), body.decode().rstrip("="))
 
 
 class TokenCandidateTests(unittest.TestCase):

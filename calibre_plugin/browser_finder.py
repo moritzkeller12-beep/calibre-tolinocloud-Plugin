@@ -147,8 +147,7 @@ def _windows_browser_paths(winreg_module=None):
         except ImportError:
             return []
     app_paths = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
-    roots = (winreg_module.HKEY_CURRENT_USER,
-             winreg_module.HKEY_LOCAL_MACHINE)
+    roots = (winreg_module.HKEY_CURRENT_USER, winreg_module.HKEY_LOCAL_MACHINE)
     # Default-View plus die beiden WOW64-Views (auf 32-Bit-Windows ignoriert).
     views = (0, winreg_module.KEY_WOW64_64KEY, winreg_module.KEY_WOW64_32KEY)
     found = []

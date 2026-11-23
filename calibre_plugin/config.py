@@ -263,8 +263,7 @@ def settings_writable():
             except FileNotFoundError:
                 # Noch keine Datei: der Commit legt sie an, wenn das
                 # Verzeichnis beschreibbar ist.
-                return os.access(os.path.dirname(str(path)) or ".",
-                                 os.W_OK)
+                return os.access(os.path.dirname(str(path)) or ".", os.W_OK)
             except OSError:
                 return False
             return True

@@ -163,8 +163,7 @@ def create_custom_columns(database, labels=None):
     created = []
     for label, name, datatype in missing:
         create(label, name, datatype, False, editable=True, display={})
-        CREATED_COLUMNS.setdefault(
-            _library_key(database), set()).add(label)
+        CREATED_COLUMNS.setdefault(_library_key(database), set()).add(label)
         created.append(label)
     return created
 
@@ -259,8 +258,7 @@ def update_tolino_ids(database, updates, account_name=None):
         if book_id is None or not api.has_id(book_id):
             continue
         new_id = str(tolino_id or "").strip()
-        account_ids = _decode_tolino_ids(
-            api.field_for(TOLINO_COLUMN, book_id))
+        account_ids = _decode_tolino_ids(api.field_for(TOLINO_COLUMN, book_id))
         if new_id:
             account_ids[account_name] = new_id
         else:

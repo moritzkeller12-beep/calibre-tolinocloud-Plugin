@@ -31,8 +31,7 @@ class CommonCase(UiCase):
     def setUp(self):
         super().setUp()
         self.common = self.ui.common
-        self._saved = (list(self.common._THREADS),
-                       list(self.common._WORKERS))
+        self._saved = (list(self.common._THREADS), list(self.common._WORKERS))
         self.addCleanup(self._restore)
 
     def _restore(self):

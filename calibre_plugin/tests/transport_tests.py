@@ -187,8 +187,7 @@ class WebSocketTransportTests(unittest.TestCase):
         mask = read_exact(4) if masked else b""
         payload = read_exact(length) if length else b""
         if mask:
-            payload = bytes(b ^ mask[i % 4]
-                            for i, b in enumerate(payload))
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         return header[0] & 0x0F, bool(header[0] & 0x80), masked, payload
 
     def test_ping_gets_a_masked_pong_and_unsolicited_pong_is_ignored(self):

@@ -283,8 +283,7 @@ class InventoryDialogTests(UiCase):
         rows[0]["tolino_id"] = ""
         dialog = self._dialog(rows)
         select_rows(dialog.table, [0])
-        dialog.set_column_for_marked_rows("read", True,
-                                         "sind schon gelesen")
+        dialog.set_column_for_marked_rows("read", True, "sind schon gelesen")
         self.assertEqual([], dialog.selected_read_changes())
 
 

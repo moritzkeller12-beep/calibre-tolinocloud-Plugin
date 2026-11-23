@@ -295,8 +295,7 @@ class FakeWs:
 
 
 def value_message(message_id, value):
-    return {"id": message_id,
-            "result": {"result": {"value": value}}}
+    return {"id": message_id, "result": {"result": {"value": value}}}
 
 
 class EvaluateTests(unittest.TestCase):

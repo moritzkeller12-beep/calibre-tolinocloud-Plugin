@@ -344,8 +344,7 @@ class PlanActionsTests(unittest.TestCase):
         self.assertEqual([], result["skipped_uploads"])
 
     def test_a_book_without_the_preferred_format_is_skipped_with_a_reason(self):
-        result = self.plan(selection(uploads={1}),
-                           {1: book(formats=["PDF"])})
+        result = self.plan(selection(uploads={1}), {1: book(formats=["PDF"])})
         self.assertEqual([], result["jobs"])
         self.assertIn("kein Format EPUB", result["skipped_uploads"][0])
         self.assertEqual(1, result["selected_without_action"]["uploads"])

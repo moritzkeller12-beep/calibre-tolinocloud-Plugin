@@ -174,9 +174,7 @@ def _raise_transport_error(exc, secrets):
 _JWT_PATTERN = re.compile(
     r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"
 )
-_BEARER_PATTERN = re.compile(
-    r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"
-)
+_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 _CREDENTIAL_ASSIGNMENT = re.compile(
@@ -285,8 +283,7 @@ def _http_error_detail(raw_detail):
                   if key in payload}
         response_info = payload.get("ResponseInfo")
         if isinstance(response_info, dict) and response_info.get("message"):
-            detail.setdefault("message",
-                              str(response_info["message"])[:300])
+            detail.setdefault("message", str(response_info["message"])[:300])
         detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
     return detail
 
