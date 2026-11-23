@@ -196,8 +196,7 @@ def _account(value, fallback_name=DEFAULT_ACCOUNT_NAME, copy_state=True):
     result = dict(DEFAULT_ACCOUNT)
     result.update({key: source[key] for key in ACCOUNT_KEYS if key in source})
     result["name"] = str(source.get("name") or fallback_name).strip() or fallback_name
-    state = source.get("state")
-    state = state if isinstance(state, dict) else {}
+    state = load_state(source.get("state"))
     result["state"] = copy.deepcopy(state) if copy_state else state
     return result
 
@@ -447,8 +446,7 @@ def save_state(account_name, state, base):
         source = _account_record(account_name)
         if source is None:
             return False
-        stored = source.get("state")
-        stored = stored if isinstance(stored, dict) else {}
+        stored = load_state(source.get("state"))
         merged = _merge_state(stored, base, state)
         if merged == stored:
             # Nichts geaendert: kein vollstaendiger Schreibvorgang.
