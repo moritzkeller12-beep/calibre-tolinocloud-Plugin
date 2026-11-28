@@ -311,6 +311,11 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
         index = next((position for position, (stored, _source) in
                       enumerate(_named_accounts(records))
                       if stored == name), None)
+        if not records:
+            # Frische Installation: `_named_accounts` liefert dann nur das
+            # virtuelle Default-Konto ohne Rohdatensatz. Ob es angelegt
+            # wird, entscheiden `create`/`allow_virtual_default` unten.
+            index = None
         previous_active = (_active_name(
             [{"name": stored} for stored, _ in _named_accounts(records)])
             if active is not _UNSET else "")

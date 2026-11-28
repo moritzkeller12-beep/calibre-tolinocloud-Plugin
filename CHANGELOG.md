@@ -9,6 +9,7 @@
 - **Zugangsdaten und Hintergrund-Refresh sind abgesichert.** Einstellungs- und Sperrdatei sind unter POSIX nur für den Benutzer lesbar. `tools/token_refresh.py` erneuert fällige Konten auch ohne geöffnetes Calibre.
 - **Cloud-Antworten ohne Patch gelten als leerer Stand.** Antwortet tolino mit gültiger Revision, aber ohne `patches`, wertet das Plugin das als leere Markierungsliste statt als Fehler. Fehlende Revision, `patches: null` oder ein falscher Typ brechen weiterhin mit einem Hinweis ab.
 - **Das Dashboard schliesst kontrolliert.** Esc nutzt denselben Weg wie das Fensterkreuz: Zuerst werden die sichtbaren Einstellungen gesichert, erst danach wird ein laufender Sync abgebrochen. Scheitert das Speichern, bleibt das Fenster mit einer Meldung offen.
+- **Die Einstellungen einer frischen Installation lassen sich speichern.** Solange noch kein Konto gespeichert war, zielte das Sichern des virtuellen Standardkontos auf einen fehlenden Datensatz und brach mit `IndexError` ab; jetzt wird das Konto beim ersten Sichern angelegt.
 - **Intern aufgeräumt.** Private Helfer mit nur einem Aufrufer und doppelte Testschritte wurden zusammengeführt, die README auf Installation, Benutzung und Entwicklung reduziert; die CI prüft zusätzlich Python 3.10.
 
 ## 0.1.08

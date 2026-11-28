@@ -119,6 +119,16 @@ class ExternalChangeTests(PreferencesCase):
         self.assertTrue(os.path.exists(self.file_path()))
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
 
+    def test_the_virtual_default_account_can_be_saved(self):
+        """Das virtuelle Default-Konto laesst sich zuerst speichern."""
+        self.assertFalse(os.path.exists(self.file_path()))
+        self.assertTrue(config.save_account(
+            "default", {"refresh_token": "tok-D"}, active="default",
+            preferred_formats=["EPUB"]))
+        self.assertEqual("tok-D",
+                         config.account_summary("default")["refresh_token"])
+        self.assertEqual("default", config.settings()["active_account"])
+
     def test_a_file_changed_by_another_process_is_adopted(self):
         self.prepare_external(token="extern")
         self.assertEqual("extern",
