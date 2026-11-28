@@ -10,15 +10,11 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
+from . import browser_finder
 from .partners import WEBREADER_URL
 from .tolino import TolinoAuthError, log_info
 from .cdp_transport import _Ws, _http_get_json
 from .cdp_scripts import _GRAB_SNIPPET, idb_expression
-
-
-# ---------------------------------------------------------------- Vorbedingungen
-
-from . import browser_finder
 
 
 def _start_port():
@@ -28,12 +24,12 @@ def _start_port():
         return int(sock.getsockname()[1])
 
 
-# Ownership is deliberately process-local: this module records only the
-# ephemeral profile, loopback port and Popen handle created by this plugin.
-# Die Prozessgruppe wird beim Start festgehalten: der Wrapper eines
-# Flatpak-/Snap-Pakets kann vor seinem Browserkind enden, danach laesst
-# sich die Gruppe nicht mehr ueber os.getpgid(pid) finden.
-_LAUNCHED = {"process": None, "port": None, "profile": "", "pgid": None}
+# Der Besitz ist bewusst prozesslokal: nur Profil, Loopback-Port und
+# Popen-Handle dieses Plugins stehen hier. Der Start mit start_new_session
+# macht die Wrapper-PID zur Gruppen-ID; sie bleibt auch dann richtig, wenn
+# der Wrapper eines Flatpak-/Snap-Pakets vor seinem Browserkind endet.
+_NO_OWNER = {"process": None, "port": None, "profile": ""}
+_LAUNCHED = dict(_NO_OWNER)
 
 
 def _verified_owner(require_endpoint=True):
@@ -45,7 +41,6 @@ def _verified_owner(require_endpoint=True):
     if require_endpoint and not _endpoint_answers(record["port"]):
         return None
     return record
-
 
 
 def _open_target(target, timeout):
@@ -132,6 +127,8 @@ def _reader_flags(port, profile):
 _START_TIMEOUT = 12
 # Ein Titel fuer alle Startfehler: die Details stehen in `detail`.
 _BROWSER_NOT_POSSIBLE = "Browser-Anmeldung nicht möglich"
+# Loopback-Endpunkt dieses Prozesses; nur der DevTools-Port variiert.
+_VERSION_URL = "http://127.0.0.1:%d/json/version"
 
 
 def _wait_for_debug_port(port, timeout, process):
@@ -143,7 +140,7 @@ def _wait_for_debug_port(port, timeout, process):
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _http_get_json("http://127.0.0.1:%d/json/version" % port, 2):
+        if _http_get_json(_VERSION_URL % port, 2):
             return True
         if process.poll() is not None:
             return False
@@ -174,9 +171,8 @@ def launch_reader_window():
     failures = []
     for argv in options:
         # Jeder Kandidat wird versucht: ein installiertes, aber nicht
-        # startfaehiges Paket (defektes snap, deinstalliertes Flatpak) darf
-        # die Anmeldung nicht blockieren, solange ein spaeterer Browser
-        # funktioniert.
+        # startfaehiges Paket darf die Anmeldung nicht blockieren, solange
+        # ein spaeterer Browser funktioniert.
         profile = tempfile.mkdtemp(prefix="tolino-grab-")
         try:
             process = subprocess.Popen(
@@ -191,9 +187,7 @@ def launch_reader_window():
             failures.append("%s: %s" % (argv[0], exc))
             continue
         _LAUNCHED.update({"process": process, "port": port,
-                          "profile": profile,
-                          "pgid": (process.pid if os.name == "posix"
-                                   else None)})
+                          "profile": profile})
         if _wait_for_debug_port(port, _START_TIMEOUT, process):
             # Der Port gehört ins Log: nur so lässt sich die CDP-Verbindung
             # von aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
@@ -201,43 +195,21 @@ def launch_reader_window():
                      % port)
             return
         failures.append("%s: keine Antwort" % argv[0])
-        if not _stop_launched_process(process, timeout=2,
-                                      pgid=_LAUNCHED["pgid"], port=port):
-            # Der Prozess lebt weiter und haelt den DevTools-Port. Ein
-            # weiterer Kandidat wuerde dessen Antwort als eigene lesen und
-            # denselben Port doppelt belegen. Der Besitzer bleibt vermerkt,
-            # damit ein erneutes Schliessen ihn noch beenden kann; das
-            # Profil bleibt, solange der Browser es benutzt.
+        if not _stop_launched_process(process, timeout=2, port=port):
+            # Der Prozess lebt weiter und haelt den DevTools-Port; ein
+            # weiterer Kandidat wuerde dessen Antwort als eigene lesen. Der
+            # Besitzer bleibt vermerkt, damit ein erneutes Schliessen ihn
+            # beenden kann; das Profil bleibt, solange der Browser es nutzt.
             raise TolinoAuthError(
                 "Das Anmeldefenster liess sich nicht beenden. Bitte den "
                 "Browser schliessen und es erneut versuchen.", code="B01",
                 short=_BROWSER_NOT_POSSIBLE, detail="; ".join(failures))
         shutil.rmtree(profile, ignore_errors=True)
-    _LAUNCHED.update({"process": None, "port": None, "profile": "",
-                      "pgid": None})
+    _LAUNCHED.update(_NO_OWNER)
     raise TolinoAuthError(
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
         "und es erneut versuchen.", code="B01", short=_BROWSER_NOT_POSSIBLE,
         detail="; ".join(failures) or "kein Kandidat")
-
-
-def _process_group(process, pgid=None):
-    """Die eigene Prozessgruppe des Fensters, falls es eine hat.
-
-    Gestartet wird mit ``start_new_session``; die pid des Wrappers ist dann
-    die Gruppen-ID. Sie wird bevorzugt, weil die Gruppe auch dann noch
-    laufen kann, wenn der Wrapper bereits beendet ist.
-    """
-    if os.name != "posix":
-        return None
-    if pgid:
-        return int(pgid)
-    pid = getattr(process, "pid", None)
-    try:
-        own_group = bool(pid) and os.getpgid(pid) == pid
-    except OSError:
-        own_group = False
-    return pid if own_group else None
 
 
 def _group_alive(group):
@@ -253,14 +225,14 @@ def _group_alive(group):
     return True
 
 
-def _wait_for_group_exit(group, seconds):
-    """Warten, bis die Gruppe verschwindet -- hoechstens `seconds` lang."""
+def _wait_until_settled(active, seconds):
+    """Warten, bis `active` aufhoert -- hoechstens `seconds` lang."""
     deadline = time.monotonic() + max(0.2, seconds)
-    while _group_alive(group) and time.monotonic() < deadline:
+    while active() and time.monotonic() < deadline:
         time.sleep(0.1)
 
 
-def _stop_launched_process(process, timeout=2, pgid=None, port=None):
+def _stop_launched_process(process, timeout=2, port=None):
     """Den gestarteten Browser samt Gruppe beenden; True, wenn er weg ist.
 
     Das Ende des Wrapper-Prozesses beweist nicht, dass das Browserkind weg
@@ -269,7 +241,8 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
     wenn der Wrapper schon fertig ist. Sonst bliebe ein Browserkind (oder
     der Port fuer den naechsten Kandidaten) am Leben.
     """
-    group = _process_group(process, pgid)
+    # start_new_session: die Wrapper-PID ist zugleich die Gruppen-ID.
+    group = process.pid if os.name == "posix" else None
     port = int(port or 0)
 
     def leftover():
@@ -298,13 +271,13 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
                 pass
         if group and not hard:
             # Nach SIGTERM bekommt die Gruppe kurz Zeit, selbst zu enden.
-            _wait_for_group_exit(group, timeout)
+            _wait_until_settled(lambda: _group_alive(group), timeout)
     if port:
         # Nach SIGKILL braucht der Port einen Moment, bis er geschlossen ist.
-        _wait_for_endpoint_exit(port, 0.3)
+        _wait_until_settled(lambda: _endpoint_answers(port, 0.2), 0.3)
     if group:
         # Das Browserkind einer beendeten Gruppe wird kurz zum Zombie.
-        _wait_for_group_exit(group, 0.3)
+        _wait_until_settled(lambda: _group_alive(group), 0.3)
     return not leftover()
 
 
@@ -403,8 +376,7 @@ def _reader_targets(timeout=5):
     if record is None:
         return None
     port = int(record["port"])
-    targets = _http_get_json(
-        "http://127.0.0.1:%d/json/list" % port, timeout)
+    targets = _http_get_json("http://127.0.0.1:%d/json/list" % port, timeout)
     if not isinstance(targets, list):
         return None
     target, reader_found = _reader_target(targets, port)
@@ -428,8 +400,7 @@ def grab_once_from_grabber(timeout=12):
 def _browser_ws_for_record(record, timeout=2):
     """Return the browser's CDP address, limited to its chosen port."""
     port = int(record.get("port") or 0)
-    version = _http_get_json(
-        "http://127.0.0.1:%d/json/version" % port, timeout)
+    version = _http_get_json(_VERSION_URL % port, timeout)
     ws_url = str((version or {}).get("webSocketDebuggerUrl") or "")
     prefix = "ws://127.0.0.1:%d" % port
     if not ws_url.startswith(prefix + "/devtools/"):
@@ -458,14 +429,7 @@ def _endpoint_answers(port, timeout=0.5):
     """True while the selected loopback DevTools port answers."""
     port = int(port or 0)
     return (0 < port < 65536 and bool(_http_get_json(
-        "http://127.0.0.1:%d/json/version" % port, timeout)))
-
-
-def _wait_for_endpoint_exit(port, seconds):
-    """Warten, bis der Port schweigt -- hoechstens `seconds` lang."""
-    deadline = time.monotonic() + max(0.2, seconds)
-    while _endpoint_answers(port, 0.2) and time.monotonic() < deadline:
-        time.sleep(0.1)
+        _VERSION_URL % port, timeout)))
 
 
 def _shutdown(record, timeout=2):
@@ -476,11 +440,10 @@ def _shutdown(record, timeout=2):
         target = _browser_ws_for_record(record, timeout)
         if target:
             _send_browser_close(*target, timeout=timeout)
-        _wait_for_endpoint_exit(port, timeout)
-    if not _stop_launched_process(process, timeout,
-                                  pgid=record.get("pgid"), port=port):
+        _wait_until_settled(lambda: _endpoint_answers(port, 0.2), timeout)
+    if not _stop_launched_process(process, timeout, port=port):
         return False
-    _wait_for_endpoint_exit(port, timeout)
+    _wait_until_settled(lambda: _endpoint_answers(port, 0.2), timeout)
     if _endpoint_answers(port, 0.2):
         # A wrapper may have exited before its browser child; never delete
         # a profile while DevTools can still be using it.
@@ -489,8 +452,7 @@ def _shutdown(record, timeout=2):
     if os.path.exists(record["profile"]):
         return False
     if _LAUNCHED["process"] is process:
-        _LAUNCHED.update({"process": None, "port": None, "profile": "",
-                          "pgid": None})
+        _LAUNCHED.update(_NO_OWNER)
     return True
 
 

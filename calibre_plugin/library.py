@@ -17,8 +17,7 @@ _TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
 _FALSE_VALUES = frozenset(("false", "no", "nein", "0"))
 # Ohne Bibliothekskennung gibt es keinen echten Scope. Ein fester Ersatz
 # verhindert, dass der alte ungescopte Schluessel stillschweigend entsteht.
-DEFAULT_LIBRARY_SCOPE = hashlib.sha256(
-    b"tolino-cloud-sync-default-library").hexdigest()[:12]
+DEFAULT_LIBRARY_SCOPE = "f58f645cfed9"
 
 
 def library_scope(database):
@@ -54,11 +53,6 @@ def _decode_tolino_ids(value):
     return {str(name): str(book_id).strip()
             for name, book_id in decoded.items()
             if name and isinstance(book_id, (str, int)) and str(book_id).strip()}
-
-
-def _encode_tolino_ids(ids):
-    return json.dumps(ids, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":")) if ids else ""
 
 
 def _column_available(database, column, datatypes):
@@ -111,10 +105,9 @@ COLUMN_KIND_NAMES = {"text": "Text", "bool": "Ja/Nein",
                      "int": "Zahl", "float": "Zahl"}
 
 # Spalten, die dieses Plugin in DIESER Calibre-Sitzung angelegt hat -- je
-# Bibliothek, denn ein Bibliothekswechsel bringt eine andere field_metadata.
-# Calibre fuehrt eine neue Spalte erst nach einem Neustart in
-# `field_metadata`; ohne diesen Merker wollte ein zweiter Klick dieselbe
-# Spalte erneut anlegen.
+# Bibliothek, denn ein Wechsel bringt andere field_metadata. Calibre kennt
+# eine neue Spalte erst nach einem Neustart; ohne den Merker legte ein
+# zweiter Klick dieselbe Spalte erneut an.
 CREATED_COLUMNS = {}
 
 
@@ -147,9 +140,7 @@ def create_custom_columns(database, labels=None):
     auch die Calibre-Schnittstelle nicht befragt.
 
     Calibre fuehrt eine neue Spalte erst nach einem Neustart in
-    ``field_metadata``; bis dahin bleibt sie fuer dieses Plugin unbekannt
-    und wird nicht beschrieben. Der Merker ``CREATED_COLUMNS`` verhindert
-    nur, dass ein zweiter Klick dieselbe Spalte erneut anlegen will.
+    ``field_metadata``; bis dahin bleibt sie fuer dieses Plugin unbekannt.
     """
     wanted = None if labels is None else set(labels)
     selected = (CUSTOM_COLUMNS if wanted is None else
@@ -171,8 +162,7 @@ def create_custom_columns(database, labels=None):
     created = []
     for label, name, datatype in missing:
         create(label, name, datatype, False, editable=True, display={})
-        CREATED_COLUMNS.setdefault(
-            _library_key(database), set()).add(label)
+        CREATED_COLUMNS.setdefault(_library_key(database), set()).add(label)
         created.append(label)
     return created
 
@@ -267,13 +257,14 @@ def update_tolino_ids(database, updates, account_name=None):
         if book_id is None or not api.has_id(book_id):
             continue
         new_id = str(tolino_id or "").strip()
-        account_ids = _decode_tolino_ids(
-            api.field_for(TOLINO_COLUMN, book_id))
+        account_ids = _decode_tolino_ids(api.field_for(TOLINO_COLUMN, book_id))
         if new_id:
             account_ids[account_name] = new_id
         else:
             account_ids.pop(account_name, None)
-        values[book_id] = _encode_tolino_ids(account_ids)
+        values[book_id] = (
+            json.dumps(account_ids, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) if account_ids else "")
     if not values:
         return 0
     api.set_field(TOLINO_COLUMN, values)
@@ -293,7 +284,6 @@ def normalize_formats(value):
     return list(dict.fromkeys(text for text in cleaned if text))
 
 
-
 def safe_format_path(database, book_id, format_name):
     """Resolve a real Calibre id without falling back to view-index semantics."""
     if not isinstance(format_name, str):
@@ -304,14 +294,14 @@ def safe_format_path(database, book_id, format_name):
     api = database.new_api
     if not api.has_id(book_id):
         raise ValueError("Calibre database has no book with id %r." % (book_id,))
+    missing_path = ("Calibre returned no path for book %r format %s"
+                    % (book_id, format_name))
     try:
         path = api.format_abspath(book_id, format_name)
     except (ValueError, IndexError, KeyError, OSError) as exc:
-        raise ValueError("Calibre returned no path for book %r format %s" %
-                         (book_id, format_name)) from exc
+        raise ValueError(missing_path) from exc
     if not isinstance(path, str) or not path:
-        raise ValueError("Calibre returned no path for book %r format %s" %
-                         (book_id, format_name))
+        raise ValueError(missing_path)
     return path
 
 

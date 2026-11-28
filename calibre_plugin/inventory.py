@@ -10,14 +10,15 @@ _INVENTORY_CONTAINERS = ("edata", "ebook")
 # ISBN/Verlagsnummer und taugt nicht fuer /deletecontent und /downloadinfo.
 _INVENTORY_ID_KEYS = ("deliverableId", "deliverable_id")
 # Gekaufte Titel tragen kein ``deliverableId``; ihre Deliverables stehen als
-# Liste daneben (``epubMetaData.deliverable``). Deren ``identifier`` (z. B.
-# ``DT0400.978…_A…``) adressiert Download und Loeschen genauso -- live gegen
-# die Cloud geprueft. Bewusst nur dort gesucht: ein ``identifier`` auf oberster
-# Ebene ist eine Produktkennung und keine Deliverable-ID.
+# Liste daneben (``epubMetaData.deliverable``). Deren ``identifier``
+# (z. B. ``DT0400.978…_A…``) adressiert Download und Loeschen genauso --
+# live geprueft, und nur dort gesucht: oben ist es eine Produktkennung.
 _DELIVERABLE_KEYS = ("deliverableId", "identifier")
 # Container, in denen die Kennung stehen kann (Objekt ODER Liste).
 _INVENTORY_ID_CONTAINERS = ("epubMetaData", "deliverable", "metadata",
                             "ebook", "edata")
+
+
 def _nested_inventory_value(value, names, depth=0):
     """Wert in einem Bestands-Datensatz -- auch verschachtelt und in Listen.
 
@@ -91,8 +92,7 @@ def normalize_inventory_record(item):
     deliverable = _record_identifier(item)
     title = _nested_inventory_value(item, ("title", "bookTitle", "name"))
     author = _nested_inventory_value(item, ("authors", "author", "creator"))
-    isbn = _nested_inventory_value(
-        item, ("isbn", "ISBN", "isbn13", "isbn10"))
+    isbn = _nested_inventory_value(item, ("isbn", "ISBN", "isbn13", "isbn10"))
     if not str(isbn or "").strip():
         # Gekaufte E-Books tragen oft nur eine Produktkennung wie
         # ``DT0400.978..._A...``; darin steckt die eigentliche ISBN.
@@ -163,9 +163,8 @@ def parse_inventory(data):
     raw, problems = [], []
     _collect_inventory(container, raw, problems)
     records = [normalize_inventory_record(item) for item in raw]
-    # Eine leere, aber gültige Bibliothek hat keine Probleme. Jeder
-    # unlesbare Eintrag macht den Bestand unvollständig: die gute Nachbarn
-    # bleiben fuer die Fehlermeldung sichtbar, der Aufrufer verwirft den
-    # Bestand aber -- sonst gaelte eine fehlende Kopie als geloescht.
+    # Eine leere Bibliothek ist kein Problem; jeder unlesbare Eintrag macht
+    # den Bestand unvollstaendig. Die guten Nachbarn bleiben in der Meldung
+    # sichtbar; der Aufrufer verwirft ihn -- sonst gilt eine Kopie als weg.
     return records, problems, not problems
 

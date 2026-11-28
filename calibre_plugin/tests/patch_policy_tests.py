@@ -8,38 +8,37 @@ Uhrzeit, Logging und Calibres Einstellungsspeicher.
 
 import ast
 import os
-import re
 import unittest
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Ziele ausserhalb des Plugins: Modulname oder Funktionsname.
-ALLOWED_PATTERNS = (
-    r"^calibre_plugin\.tolino\.",          # HTTP-Client (Netz)
-    r"^calibre_plugin\.cdp",               # Browser-Fenster/DevTools
-    r"^(urllib|http|ssl|socket|subprocess|shutil|os|sys|time|datetime|"
-    r"logging|copy|json|re|zipfile|pathlib|io)(\.|$)",
-    r"^(qt|PyQt5|PyQt6|calibre)\.",
-    r"^fcntl\.flock$",                    # Dateisperre
-    r"\.time\.(monotonic|time|sleep)$",   # Uhr
-)
-
-# Funktionsnamen, die eine Systemgrenze darstellen (egal aus welchem Modul).
-# Die Liste nennt genau die Ziele, die die Suite heute braucht: ein neuer
-# Name ist eine bewusste Entscheidung und laeuft nicht still mit.
-ALLOWED_NAMES = frozenset((
-    "TolinoClient", "login",           # Netz/Anmeldung (TOKEN_VAULT.login)
-    "check_stored_login",              # Zugangspruefung (Netz)
-    "urlopen", "_http_get_json",       # HTTP
-    "Popen", "which", "find_browsers", "in_flatpak_sandbox",  # Browser
-    "grab_live_refresh",               # interaktiver Browser-Login
-    "info_dialog", "error_dialog",     # modale Qt-Dialoge
-    "getText",                         # modaler Eingabedialog (Qt)
-    "grab_live_refresh",               # Browserfenster (Anmeldung)
-    "_lock_handle", "_read_frame",     # Sperrdatei (Dateisystem), Rahmen
-    "_aes",                            # optionale Krypto-Abhaengigkeit
-    "_NEW_TOKEN_INTERVAL", "_WINDOW_CHECK_INTERVAL",  # Anmelde-Zeitfenster
-))
+# Nur diese Namen unter ``calibre_plugin.*`` sind echte Grenzen (Netz,
+# Browser, Prozess, Qt, Dateisystem, Logging). Ziele ausserhalb des Plugins
+# sind immer erlaubt; alles andere im Plugin ist Logik und muss laufen.
+ALLOWED_PLUGIN_TARGETS = frozenset("""
+    calibre_plugin.browser_finder.in_flatpak_sandbox
+    calibre_plugin.browser_login.TolinoClient
+    calibre_plugin.browser_login._NEW_TOKEN_INTERVAL
+    calibre_plugin.browser_login._WINDOW_CHECK_INTERVAL
+    calibre_plugin.cdp._endpoint_answers calibre_plugin.cdp._evaluate_in_target
+    calibre_plugin.cdp._group_alive calibre_plugin.cdp._http_get_json
+    calibre_plugin.cdp._open_target calibre_plugin.cdp._wait_for_debug_port
+    calibre_plugin.cdp.browser_finder.find_browsers
+    calibre_plugin.cdp.close_grabber_window
+    calibre_plugin.cdp.grab_once_from_grabber
+    calibre_plugin.cdp.grabber_window_state
+    calibre_plugin.cdp.launch_reader_window calibre_plugin.cdp.os.killpg
+    calibre_plugin.cdp.read_idb_tokens calibre_plugin.cdp.subprocess.Popen
+    calibre_plugin.cdp.tempfile.mkdtemp calibre_plugin.cdp.time.monotonic
+    calibre_plugin.cdp.time.time calibre_plugin.cdp_transport.socket.create_connection
+    calibre_plugin.sync_results.error_dialog
+    calibre_plugin.sync_results.info_dialog
+    calibre_plugin.tolino._DOWNLOAD_OPENER calibre_plugin.tolino.log_warning
+    calibre_plugin.tolino.time.sleep calibre_plugin.ui_dashboard.error_dialog
+    calibre_plugin.ui_dashboard_parts.info_dialog
+    calibre_plugin.ui_dialogs.error_dialog calibre_plugin.ui_dialogs.info_dialog
+    calibre_plugin.ui_workers.TOKEN_VAULT.login
+""".split())
 
 SKIP_FILES = {"patch_policy_tests.py"}
 
@@ -151,10 +150,9 @@ def _targets(node, aliases=frozenset()):
 
 
 def _allowed(target):
-    last = target.rsplit(".", 1)[-1]
-    if last in ALLOWED_NAMES:
-        return True
-    return any(re.search(pattern, target) for pattern in ALLOWED_PATTERNS)
+    """Plugin-Logik ist tabu; fremde Systemgrenzen brauchen keinen Eintrag."""
+    return (not target.startswith("calibre_plugin.")
+            or target in ALLOWED_PLUGIN_TARGETS)
 
 
 def offenders():
@@ -210,11 +208,11 @@ mock.patch.multiple("qualified_multiple", value=1)
     def test_patch_multiple_on_a_module_object_is_still_a_verdict(self):
         """Ein Modulobjekt statt String darf die gepatchte Funktion nicht
         verstecken; Steuerargumente bleiben aussen vor."""
-        tree = ast.parse(
-            "patch.multiple(module, interne_funktion=ersatz, spec=True)\n")
+        tree = ast.parse("patch.multiple(calibre_plugin, fremd=ersatz,\n"
+                         "                spec=True)\n")
         targets = _targets(tree, _patch_aliases(tree))
-        self.assertEqual(["module", "module.interne_funktion"], targets)
-        self.assertFalse(_allowed("module.interne_funktion"))
+        self.assertEqual(["calibre_plugin", "calibre_plugin.fremd"], targets)
+        self.assertFalse(_allowed("calibre_plugin.fremd"))
 
     def test_only_system_boundaries_are_patched(self):
         bad = offenders()

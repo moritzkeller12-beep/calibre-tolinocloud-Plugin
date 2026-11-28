@@ -4,6 +4,7 @@ Kein Test startet einen Browser: ``shutil.which``, ``subprocess.run``, die
 Dateipruefungen und (fuer Windows) ein Registry-Doppel werden ersetzt. Die
 Auswahl- und Deduplizierungslogik laeuft echt.
 """
+import contextlib
 import os
 import types
 import unittest
@@ -15,13 +16,25 @@ from ..browser_finder import (missing_browser_error, _collect_candidates,
 EXTRA = "/opt/google/chrome/chrome"
 
 
-def which_for(mapping):
-    """``shutil.which`` aus einem Namens-Dict; Unbekanntes fehlt."""
-    return lambda name: mapping.get(name)
-
-
 def run_result(stdout="", returncode=0):
     return types.SimpleNamespace(stdout=stdout, returncode=returncode)
+
+
+@contextlib.contextmanager
+def boundaries(mapping, sandbox=False, files=False, dirs=False, access=False,
+               run=None):
+    """Systemgrenzen der Browser-Suche; ``run`` ist das subprocess-Doppel."""
+    file_check = (patch("os.path.isfile", side_effect=files) if callable(files)
+                  else patch("os.path.isfile", return_value=files))
+    dir_check = (patch("os.path.isdir", side_effect=dirs) if callable(dirs)
+                 else patch("os.path.isdir", return_value=dirs))
+    with patch("shutil.which", lambda name: mapping.get(name)), \
+            patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
+                  return_value=sandbox), \
+            file_check, dir_check, \
+            patch("os.access", return_value=access), \
+            patch("subprocess.run", return_value=run) as run_mock:
+        yield run_mock
 
 
 class LinuxCandidateTests(unittest.TestCase):
@@ -29,12 +42,8 @@ class LinuxCandidateTests(unittest.TestCase):
 
     def test_path_and_extra_paths_are_merged_without_duplicates(self):
         mapping = {"chrome": EXTRA, "chromium": "/usr/bin/chromium"}
-        with patch("shutil.which", which_for(mapping)), \
-                patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
-                      return_value=False), \
-                patch("os.path.isfile", side_effect=lambda path: path == EXTRA), \
-                patch("os.access", return_value=True), \
-                patch("os.path.isdir", return_value=False):
+        with boundaries(mapping, files=lambda path: path == EXTRA,
+                        access=True):
             found, status = _collect_candidates(home="/home/test")
         self.assertEqual("", status)
         self.assertEqual([[EXTRA], ["/usr/bin/chromium"]], found)
@@ -45,14 +54,8 @@ class LinuxCandidateTests(unittest.TestCase):
                     or path.startswith("/home/test/.var/app/")
                     or path.endswith("chromium"))
 
-        with patch("shutil.which",
-                   which_for({"flatpak": "/usr/bin/flatpak",
-                              "snap": "/usr/bin/snap"})), \
-                patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
-                      return_value=False), \
-                patch("os.path.isfile", return_value=False), \
-                patch("os.access", return_value=False), \
-                patch("os.path.isdir", side_effect=isdir):
+        with boundaries({"flatpak": "/usr/bin/flatpak", "snap": "/usr/bin/snap"},
+                        dirs=isdir):
             found, _status = _collect_candidates(home="/home/test")
         self.assertIn(["/usr/bin/flatpak", "run", "--command=chrome",
                        "org.chromium.Chromium"], found)
@@ -64,14 +67,8 @@ class FlatpakTests(unittest.TestCase):
 
     def test_host_launchers_are_composed_only_inside_the_sandbox(self):
         output = "NATIVE /usr/bin/chromium\nFLATPAK com.brave.Browser\n"
-        with patch("shutil.which",
-                   which_for({"flatpak-spawn": "/usr/bin/flatpak-spawn"})), \
-                patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
-                      return_value=True), \
-                patch("subprocess.run", return_value=run_result(output)) as run, \
-                patch("os.path.isfile", return_value=False), \
-                patch("os.access", return_value=False), \
-                patch("os.path.isdir", return_value=False):
+        with boundaries({"flatpak-spawn": "/usr/bin/flatpak-spawn"},
+                        sandbox=True, run=run_result(output)) as run:
             found, status = _collect_candidates(home="/home/test")
         self.assertEqual("ok", status)
         self.assertIn(["/usr/bin/flatpak-spawn", "--host", "/usr/bin/chromium"],
@@ -84,45 +81,23 @@ class FlatpakTests(unittest.TestCase):
         self.assertNotIn("--user-data-dir", script)
 
     def test_without_the_sandbox_no_host_command_runs(self):
-        with patch("shutil.which", which_for({"chromium": "/usr/bin/chromium"})), \
-                patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
-                      return_value=False), \
-                patch("subprocess.run") as run, \
-                patch("os.path.isfile", return_value=False), \
-                patch("os.access", return_value=False), \
-                patch("os.path.isdir", return_value=False):
+        with boundaries({"chromium": "/usr/bin/chromium"}) as run:
             _found, status = _collect_candidates(home="/home/test")
         self.assertEqual("", status)
         run.assert_not_called()
 
     def test_a_missing_flatpak_spawn_is_reported(self):
-        with patch("shutil.which", which_for({})), \
-                patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
-                      return_value=True), \
-                patch("os.path.isfile", return_value=False), \
-                patch("os.access", return_value=False), \
-                patch("os.path.isdir", return_value=False):
+        with boundaries({}, sandbox=True):
             found, status = _collect_candidates(home="/home/test")
         self.assertEqual([], found)
         self.assertEqual("unavailable", status)
 
     def test_a_denied_probe_is_not_an_empty_library(self):
-        with patch("shutil.which",
-                   which_for({"flatpak-spawn": "/usr/bin/flatpak-spawn"})), \
-                patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
-                      return_value=True), \
-                patch("subprocess.run",
-                      return_value=run_result("", returncode=1)), \
-                patch("os.path.isfile", return_value=False), \
-                patch("os.access", return_value=False), \
-                patch("os.path.isdir", return_value=False):
+        with boundaries({"flatpak-spawn": "/usr/bin/flatpak-spawn"},
+                        sandbox=True, run=run_result("", returncode=1)):
             found, status = _collect_candidates(home="/home/test")
         self.assertEqual([], found)
         self.assertEqual("denied", status)
-
-
-class FakeKey(tuple):
-    """Registry-Schluessel: (Root, View, Executable) als Identitaet."""
 
 
 class FakeWinreg:
@@ -141,7 +116,7 @@ class FakeWinreg:
     def OpenKey(self, root, path, _reserved, access):
         executable = path.rsplit("\\", 1)[-1]
         view = access & (self.KEY_WOW64_64KEY | self.KEY_WOW64_32KEY)
-        key = FakeKey((root, view, executable))
+        key = (root, view, executable)
         if key not in self.entries:
             raise OSError(2, "not found")
         self.opened.append(key)
@@ -223,7 +198,3 @@ class ErrorMessageTests(unittest.TestCase):
                            return_value=sandbox):
                     message = missing_browser_error(status)
                 self.assertIn(expected, message)
-
-
-if __name__ == "__main__":
-    unittest.main()

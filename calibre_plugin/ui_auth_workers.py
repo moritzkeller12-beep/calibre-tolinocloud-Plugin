@@ -2,7 +2,7 @@
 from qt.core import QObject, pyqtSignal
 from .browser_login import LOGIN_TIMEOUT, grab_live_refresh
 from .config import save_credentials
-from .errors import TolinoAuthError
+from .errors import SETTINGS_WRITE_DETAIL, TolinoAuthError
 from .token_vault import check_stored_login
 from .tolino import RELOGIN, report_error
 
@@ -24,14 +24,13 @@ class BrowserLoginWorker(QObject):
                 self.hardware, timeout=LOGIN_TIMEOUT,
                 progress=self.progress.emit)
             # Vor dem Signal speichern: das Dashboard darf vorher schliessen,
-            # ohne dass der neue Single-Use-Token verloren geht. ``False``
-            # heisst nicht gespeichert -- dann ist die Anmeldung gescheitert.
+            # ohne dass der Single-Use-Token verloren geht; ``False`` = Fehler.
             if save_credentials(self.account_name, refresh, hardware,
                                 partner_id) is False:
                 raise TolinoAuthError(
                     "Die Anmeldung konnte nicht gespeichert werden. " + RELOGIN,
                     code="A01",
-                    detail="Einstellungen konnten nicht geschrieben werden.")
+                    detail=SETTINGS_WRITE_DETAIL)
         except Exception as exc:
             self.failed.emit(exc)
             return

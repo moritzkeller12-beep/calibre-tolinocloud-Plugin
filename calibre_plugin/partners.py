@@ -12,46 +12,29 @@ WEBREADER_TOKEN_HEADERS = {
 WEBREADER_CLIENT_TYPE = "TOLINO_WEBREADER"
 WEBREADER_CLIENT_VERSION = "5.2.0"
 
-# "reseller_id" is sent to Tolino and is independent of this plugin's IDs.
+def _shop(name, reseller_id, token_url, client_id="webreader"):
+    """Ein Buchhaendler-Datensatz; "reseller_id" ist Tolinos eigene Kennung."""
+    return {"name": name, "reseller_id": reseller_id,
+            "client_id": client_id, "token_url": token_url}
+
+
 PARTNERS = {
-    1: {
-        "name": "Thalia.de", "reseller_id": "3",
-        "client_id": "webreader", "scope": "SCOPE_BOSH",
-        "token_url": "https://www.thalia.de/auth/oauth2/token",
-    },
-    2: {
-        "name": "Thalia.at", "reseller_id": "4",
-        "client_id": "webreader", "scope": "SCOPE_BOSH",
-        "token_url": "https://www.thalia.at/auth/oauth2/token",
-    },
-    4: {
-        "name": "Books.ch / orellfuessli.ch",
-        "reseller_id": "8", "client_id": "webreader",
-        "scope": "SCOPE_BOSH",
-        "token_url": "https://www.orellfuessli.ch/auth/oauth2/token",
-    },
-    5: {
-        "name": "Hugendubel.de", "reseller_id": "13",
-        "client_id": "4c20de744aa8b83b79b692524c7ec6ae",
-        "scope": "ebook_library",
-        "token_url": "https://www.hugendubel.de/oauth/token",
-    },
-    6: {
-        "name": "Osiander.de", "reseller_id": "23",
-        "client_id": "webreader", "scope": "SCOPE_BOSH",
-        "token_url": "https://www.osiander.de/auth/oauth2/token",
-    },
-    7: {
-        "name": "Buecher.de", "reseller_id": "30",
-        "client_id": "webreader", "scope": "SCOPE_BOSH",
-        "token_url": "https://www.buecher.de/auth/oauth2/token",
-    },
-    8: {
-        "name": "eBook.de", "reseller_id": "81",
-        "client_id": "ebookde0501html5readerV0001",
-        "scope": "e-publishing",
-        "token_url": "https://www.ebook.de/oauth/token",
-    },
+    1: _shop("Thalia.de", "3",
+             "https://www.thalia.de/auth/oauth2/token"),
+    2: _shop("Thalia.at", "4",
+             "https://www.thalia.at/auth/oauth2/token"),
+    4: _shop("Books.ch / orellfuessli.ch", "8",
+             "https://www.orellfuessli.ch/auth/oauth2/token"),
+    5: _shop("Hugendubel.de", "13",
+             "https://www.hugendubel.de/oauth/token",
+             "4c20de744aa8b83b79b692524c7ec6ae"),
+    6: _shop("Osiander.de", "23",
+             "https://www.osiander.de/auth/oauth2/token"),
+    7: _shop("Buecher.de", "30",
+             "https://www.buecher.de/auth/oauth2/token"),
+    8: _shop("eBook.de", "81",
+             "https://www.ebook.de/oauth/token",
+             "ebookde0501html5readerV0001"),
 }
 
 

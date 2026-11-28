@@ -6,8 +6,8 @@ Tausch im Konto steht und was bei Ablehnung oder belegtem Lock passiert.
 """
 import contextlib
 import json
-import unittest
-import uuid
+import os
+import time
 from urllib.parse import parse_qs
 
 from .. import config
@@ -15,9 +15,8 @@ from ..errors import TolinoAuthError, TolinoError
 from ..token_vault import (TOKEN_VAULT, check_stored_login,
                            start_token_keepalive, stop_token_keepalive)
 from ..tolino import BUSY_MESSAGE, TolinoClient
-from ._support import LocalHTTP, break_settings, local_tolino_endpoints
-
-JSON_HEADERS = {"Content-Type": "application/json"}
+from ._support import (JSON_HEADERS, LocalHTTP, PreferencesCase,
+                       break_settings, jwt_token, local_tolino_endpoints)
 
 
 class TokenServer:
@@ -47,15 +46,8 @@ class TokenServer:
                 for request in self.server.requests]
 
 
-class VaultCase(unittest.TestCase):
+class VaultCase(PreferencesCase):
     """Frischer Einstellungsspeicher je Test."""
-
-    def setUp(self):
-        self._original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-
-    def tearDown(self):
-        config.PREFERENCES = self._original
 
     @contextlib.contextmanager
     def vault(self, server):
@@ -66,7 +58,7 @@ class VaultCase(unittest.TestCase):
 class LoginTests(VaultCase):
     """Ein Login tauscht genau einen Token und schreibt die Rotation zurück."""
 
-    def test_the_rotated_token_replaces_the_stored_one(self):
+    def test_a_login_rotates_the_token_and_stores_the_hardware_id(self):
         server = TokenServer()
         config.save_account("A", {"refresh_token": "start"})
         with self.vault(server):
@@ -75,12 +67,6 @@ class LoginTests(VaultCase):
         self.assertEqual("rot-1", config.account_summary("A")["refresh_token"])
         self.assertEqual(["start"], server.used_tokens)
         self.assertEqual("A", client.account_name)
-
-    def test_a_generated_hardware_id_is_stored_in_the_account(self):
-        server = TokenServer()
-        config.save_account("A", {"refresh_token": "start"})
-        with self.vault(server):
-            client = TOKEN_VAULT.login("A")
         stored = config.account_summary("A")["hardware_id"]
         self.assertTrue(stored)
         self.assertEqual(client.hardware, stored)
@@ -140,6 +126,81 @@ class LoginTests(VaultCase):
         self.assertEqual([], server.server.requests)
         self.assertEqual("start", config.account_summary("A")["refresh_token"])
 
+    def test_a_stored_access_token_spares_the_exchange_without_writes(self):
+        """Der gueltige Access-Token braucht weder Netz noch Schreibrecht."""
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "start", "hardware_id": "hw",
+                                  "access_token": "acc-gut",
+                                  "access_expires_at": time.time() + 1800})
+        break_settings(self)
+        with self.vault(server):
+            client = TOKEN_VAULT.login("A")
+        self.assertEqual("acc-gut", client.access)
+        self.assertEqual([], server.server.requests)
+
+    def test_login_and_relogin_hold_the_process_lock_during_the_exchange(self):
+        """Der Netzaufruf laeuft unter derselben Dateisperre wie das Speichern."""
+        try:
+            import fcntl
+        except ImportError:
+            self.skipTest("keine POSIX-Dateisperre")
+        probes = []
+
+        class LockProbeServer(TokenServer):
+            def respond(inner, *request):
+                lock_path = str(config.PREFERENCES.file_path) + ".lock"
+                with open(lock_path, "a+b") as handle:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        probes.append("locked")
+                    else:
+                        probes.append("free")
+                return super().respond(*request)
+
+        server = LockProbeServer()
+        config.save_account("A", {"refresh_token": "start", "hardware_id": "hw"})
+        with self.vault(server):
+            client = TOKEN_VAULT.login("A")
+            TOKEN_VAULT.relogin(client)
+        self.assertEqual(2, len(server.server.requests))
+        self.assertEqual(["locked", "locked"], probes)
+
+    def test_a_rejected_token_is_retried_with_a_newer_stored_one(self):
+        # Der Vault haengt dem Client den einen Lesepfad an. Hier vergisst
+        # der Client absichtlich eine Rotation -- der gespeicherte Token
+        # gilt, der abgelehnte wird genau einmal durch ihn ersetzt.
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "start", "hardware_id": "hw"})
+        with self.vault(server):
+            client = TOKEN_VAULT.login("A")
+            self.assertEqual("rot-1",
+                             config.account_summary("A")["refresh_token"])
+            # Der erste Token gilt nicht mehr; der Client "vergaß" die
+            # Rotation und laeuft deshalb in die Ablehnung.
+            server.rejected.add("start")
+            client.refresh = "start"
+            self.assertEqual("rot-2", client._login())
+        self.assertEqual(["start", "rot-1"], server.used_tokens[-2:])
+        self.assertEqual("rot-2", config.account_summary("A")["refresh_token"])
+
+    def test_a_harvested_token_is_stamped_with_its_issue_time(self):
+        # Aus dem Browser uebernommene Token sind schon aelter als der Lauf;
+        # fuer den Takt zaehlt die Ausstellung, nicht das Speichern.
+        now = time.time()
+        config.save_account("A", {"hardware_id": "hw"})
+        config.save_refresh_token("A", jwt_token({"iat": int(now) - 600,
+                                                 "exp": int(now) + 1200}))
+        stamp = config.account_tokens("A")["refresh_rotated_at"]
+        self.assertAlmostEqual(now - 600, stamp, delta=5)
+
+    def test_the_settings_file_is_private(self):
+        if os.name == "nt":
+            self.skipTest("POSIX-Rechte")
+        config.save_account("A", {"refresh_token": "tok-A"})
+        mode = os.stat(config.PREFERENCES.file_path).st_mode & 0o777
+        self.assertEqual(0o600, mode)
+
     def test_relogin_uses_the_token_saved_in_the_meantime(self):
         # Der Client kennt nach dem Login nur rot-1; der Server lehnt genau
         # diesen ab. Nur der inzwischen NEUER gespeicherte Token kommt durch.
@@ -152,6 +213,17 @@ class LoginTests(VaultCase):
             self.assertEqual("rot-2", TOKEN_VAULT.relogin(client))
         self.assertEqual(["start", "rot-1-neu"], server.used_tokens)
         self.assertEqual("rot-2", config.account_summary("A")["refresh_token"])
+
+    def test_relogin_refuses_unreadable_settings_before_the_exchange(self):
+        server = TokenServer()
+        config.save_account("A", {"refresh_token": "start", "hardware_id": "hw"})
+        with self.vault(server):
+            client = TOKEN_VAULT.login("A")
+            break_settings(self)
+            with self.assertRaises(TolinoError):
+                TOKEN_VAULT.relogin(client)
+        self.assertEqual(1, len(server.server.requests))
+        self.assertEqual("rot-1", config.account_summary("A")["refresh_token"])
 
 
 class LockTests(VaultCase):
@@ -243,6 +315,48 @@ class KeepaliveTests(VaultCase):
         with open(path, encoding="utf-8") as handle:
             self.assertEqual('{"accounts": [', handle.read())
 
+    def test_an_account_with_a_fresh_access_token_is_skipped(self):
+        server = TokenServer()
+        now = time.time()
+        config.save_account("A", {
+            "refresh_token": jwt_token({"iat": int(now),
+                                        "exp": int(now) + 3600}),
+            "refresh_rotated_at": now, "hardware_id": "hw",
+            "access_token": "acc-gut", "access_expires_at": now + 1800})
+        with self.vault(server):
+            self.assertEqual(0, TOKEN_VAULT.keepalive_refresh(only_due=True))
+        self.assertEqual([], server.server.requests)
+
+    def test_a_due_account_is_rotated_even_with_a_valid_access_token(self):
+        """Der Keep-alive tauscht den faelligen Refresh-Token wirklich."""
+        server = TokenServer()
+        now = time.time()
+        token = jwt_token({"iat": int(now) - 3600, "exp": int(now) + 300})
+        config.save_account("A", {
+            "refresh_token": token, "refresh_rotated_at": now - 3600,
+            "hardware_id": "hw", "access_token": "acc-gut",
+            "access_expires_at": now + 1800})
+        self.assertEqual(0, TOKEN_VAULT.due_in("A"))
+        with self.vault(server):
+            self.assertEqual(1, TOKEN_VAULT.keepalive_refresh(only_due=True))
+        self.assertEqual([token], server.used_tokens)
+        self.assertEqual("rot-1", config.account_summary("A")["refresh_token"])
+
+    def test_the_round_follows_the_token_lifetime(self):
+        now = time.time()
+        config.save_account("A", {
+            "refresh_token": jwt_token({"iat": int(now),
+                                        "exp": int(now) + 3600}),
+            "refresh_rotated_at": now})
+        # Ein Fuenftel Vorlauf waere 48 Minuten -- die Obergrenze gewinnt.
+        self.assertAlmostEqual(45 * 60, TOKEN_VAULT.next_delay(45 * 60), delta=5)
+        config.save_account("B", {
+            "refresh_token": jwt_token({"iat": int(now),
+                                        "exp": int(now) + 600}),
+            "refresh_rotated_at": now})
+        # Kurze Laufzeit bestimmt den Takt: nach 8 Minuten ist B faellig.
+        self.assertAlmostEqual(8 * 60, TOKEN_VAULT.next_delay(45 * 60), delta=5)
+
     def test_the_thread_starts_once_and_stops_cleanly(self):
         self.addCleanup(stop_token_keepalive)
         thread = start_token_keepalive(interval=3600)
@@ -256,7 +370,3 @@ class KeepaliveTests(VaultCase):
         finally:
             stop_token_keepalive()
         self.assertTrue(stop_token_keepalive())
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -4,8 +4,10 @@ Enthaelt nur, was die Suite wirklich braucht: der UI-Loader mit Qt-/Calibre-
 Stubs, ein echtes PyQt6-Offscreen-Fenster, ein Loopback-HTTP-Server, die
 Calibre-Datenbankgrenze und das Dashboard-Doppel.
 """
+import base64
 import contextlib
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -13,7 +15,36 @@ import tempfile
 import threading
 import types
 import unittest
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
+
+from ..errors import TolinoAuthError
+
+# Feste Buch- und Kontokennungen fuer die Fixtures: dieselben Werte in allen
+# Testmodulen, damit eine Buchzeile ueberall denselben Schluessel hat.
+UUID = "11111111-1111-4111-8111-111111111111"
+OTHER = "22222222-2222-4222-8222-222222222222"
+JSON_HEADERS = {"Content-Type": "application/json"}
+
+
+class PreferencesCase(unittest.TestCase):
+    """Jeder Test bekommt einen eigenen Einstellungsspeicher."""
+
+    def setUp(self):
+        from .. import config
+
+        self._original_preferences = config.PREFERENCES
+        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
+        self.addCleanup(setattr, config, "PREFERENCES",
+                        self._original_preferences)
+
+
+def no_crypto():
+    """Steht fuer eine Installation ohne PyCryptodome."""
+    return patch("calibre_plugin.browser_crypto._aes",
+                 side_effect=TolinoAuthError("PyCryptodome fehlt",
+                                             code="A01"))
 
 
 def break_settings(case):
@@ -30,6 +61,31 @@ def break_settings(case):
     config.PREFERENCES.file_path = broken
 
 
+def jwt_token(claims):
+    """JWT-foermiger Token mit frei waehlbaren Claims (ohne Signatur)."""
+    segment = base64.urlsafe_b64encode(
+        json.dumps(claims).encode("utf-8")).decode("ascii").rstrip("=")
+    return "eyJhbGciOiJub25lIn0." + segment + ".sig"
+
+
+def record(worker, *names):
+    """Signale eines Workers mitschreiben: Name -> Argument(e)."""
+    emitted = {}
+    for name in names:
+        getattr(worker, name).connect(
+            lambda *args, name=name: emitted.setdefault(
+                name, args[0] if len(args) == 1 else args))
+    return emitted
+
+
+def execute_worker(worker, client, ui, success="ready"):
+    """Worker mit ersetztem Login ausfuehren, Signale mitschreiben."""
+    emitted = record(worker, success, "failed")
+    with patch.object(ui.workers.TOKEN_VAULT, "login", return_value=client):
+        worker.run()
+    return emitted
+
+
 class FakeSignal:
     """Minimales Qt-Signal: Slots verbinden, ausloesen, ``fire``-Alias."""
 
@@ -42,8 +98,6 @@ class FakeSignal:
     def emit(self, *args):
         for slot in list(self.slots):
             slot(*args)
-
-    fire = emit
 
 
 _WORKER_FIELDS = ("thread", "worker", "prepare_thread", "prepare_worker",
@@ -66,7 +120,7 @@ def dashboard_stub(**attrs):
     return types.SimpleNamespace(**values)
 
 
-def load_ui_module(get_icons_result, qt_stub):
+def ui_module_for(test_case, qt_stub):
     """Import ui.py with Calibre and Qt imports stubbed.
 
     `qt_stub` kommt aus `real_qt_stub()`: Widgets, Tabellen, Enums und
@@ -98,7 +152,7 @@ def load_ui_module(get_icons_result, qt_stub):
     calibre_gui2 = types.ModuleType("calibre.gui2")
     calibre_gui2.error_dialog = None
     calibre_gui2.info_dialog = None
-    calibre_gui2.get_icons = lambda name, context=None: get_icons_result
+    calibre_gui2.get_icons = lambda name, context=None: None
     calibre_actions = types.ModuleType("calibre.gui2.actions")
     calibre_actions.InterfaceAction = object
     calibre.gui2 = calibre_gui2
@@ -140,9 +194,7 @@ def load_ui_module(get_icons_result, qt_stub):
                       "ui_dashboard_parts", "planning", "sync_results"):
         if getattr(calibre_plugin, attribute, None) is not None:
             delattr(calibre_plugin, attribute)
-    modules_before_entry = set(sys.modules)
     ui_module = importlib.import_module("calibre_plugin.ui")
-    loaded_by_entry = set(sys.modules) - modules_before_entry
     # Tests use these modules directly; production's Calibre entrypoint does
     # not re-export them or import them eagerly.
     ui_module.common = importlib.import_module("calibre_plugin.ui_common")
@@ -153,7 +205,6 @@ def load_ui_module(get_icons_result, qt_stub):
     ui_module.workers = importlib.import_module("calibre_plugin.ui_workers")
     ui_module.sync_results = importlib.import_module("calibre_plugin.sync_results")
     ui_module.auth_workers = importlib.import_module("calibre_plugin.ui_auth_workers")
-    ui_module._loaded_by_entry_for_tests = loaded_by_entry
     # Stubs stay active until restore_stubs() so that function-level
     # imports (from calibre.gui2 import get_icons) still resolve.
     def restore_stubs():
@@ -163,14 +214,15 @@ def load_ui_module(get_icons_result, qt_stub):
             else:
                 sys.modules[name] = module
     ui_module._restore_stubs_for_tests = restore_stubs
+    test_case.addCleanup(ui_module._restore_stubs_for_tests)
     return ui_module
 
 
-def ui_module_for(test_case, qt_stub):
-    """UI-Modul für einen Test laden und die Stubs danach zurücknehmen."""
-    module = load_ui_module(lambda *args, **kwargs: None, qt_stub=qt_stub)
-    test_case.addCleanup(module._restore_stubs_for_tests)
-    return module
+class UiCase(unittest.TestCase):
+    """Geladenes UI-Modul mit echtem PyQt6 fuer einen Test."""
+
+    def setUp(self):
+        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
 
 # --- Echte Qt-Oberflaeche fuer die Dialogtests -------------------------
@@ -210,8 +262,7 @@ class SyncThread:
         self.deleted = False
 
     def start(self):
-        for slot in list(self.started.slots):
-            slot()
+        self.started.emit()
 
     def quit(self, *_args):
         self.stopped = True
@@ -314,8 +365,7 @@ def real_qt_stub():
             QApplication, QCheckBox, QComboBox, QDialog, QFormLayout,
             QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
             QLineEdit, QProgressBar, QPushButton, QStyledItemDelegate,
-            QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
-            QVBoxLayout)
+            QTableWidget, QTableWidgetItem, QVBoxLayout)
     except ImportError as exc:
         raise unittest.SkipTest("PyQt6 fehlt: %s" % exc) from exc
     if _REAL_QT_APP is None:
@@ -341,7 +391,6 @@ def real_qt_stub():
         "QTableWidget": QTableWidget,
         "QTableWidgetItem": QTableWidgetItem,
         "QStyledItemDelegate": QStyledItemDelegate,
-        "QStyleOptionViewItem": QStyleOptionViewItem,
         "QInputDialog": QInputDialog,
         "QMessageBox": RecordingMessageBox,
         "QMenu": RecordingMenu,
@@ -417,9 +466,6 @@ class LocalHTTP:
     def url(self, path):
         return self.origin + path
 
-    def paths(self):
-        return [request["path"] for request in self.requests]
-
     def __exit__(self, *_exc):
         self._server.shutdown()
         self._server.server_close()
@@ -439,23 +485,14 @@ def local_tolino_endpoints(origin, partner_ids=(1, 4, 5, 8)):
     from ..partners import PARTNERS
 
     partners = {pid: PARTNERS[pid]["token_url"] for pid in partner_ids}
-    saved = (module.BASE_URL, module.TolinoClient.META_URL,
-             module.TolinoClient.DEVICES_URL,
-             module.TolinoClient.SYNC_DATA_URL)
+    saved = module.BASE_URL
     module.BASE_URL = origin + "/bosh/rest"
-    module.TolinoClient.META_URL = module.BASE_URL + "/meta"
-    module.TolinoClient.DEVICES_URL = (module.BASE_URL
-                                       + "/handshake/devices/list")
-    module.TolinoClient.SYNC_DATA_URL = (module.BASE_URL
-                                         + "/sync-data?paths=publications")
     for partner_id in partner_ids:
         PARTNERS[partner_id]["token_url"] = origin + "/token/%d" % partner_id
     try:
         yield
     finally:
-        (module.BASE_URL, module.TolinoClient.META_URL,
-         module.TolinoClient.DEVICES_URL,
-         module.TolinoClient.SYNC_DATA_URL) = saved
+        module.BASE_URL = saved
         for partner_id, value in partners.items():
             PARTNERS[partner_id]["token_url"] = value
 
@@ -522,6 +559,7 @@ class CalibreDatabase:
         self.dbpath = dbpath
         self.api = CalibreApi(fail, books, metadata, paths, cover)
         self.created = []
+        self.specs = []
         self.create_error = create_error
 
     @property
@@ -533,6 +571,7 @@ class CalibreDatabase:
         if self.create_error is not None:
             raise self.create_error
         self.created.append(label)
+        self.specs.append((label, datatype))
         return len(self.created)
 
 

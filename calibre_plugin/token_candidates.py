@@ -5,22 +5,11 @@ import time
 
 from .browser_crypto import cryptojs_decrypt
 from .errors import TolinoAuthError
-from .jwt import payload
+from .jwt import issued_at as _refresh_token_iat, payload
 
 # Values used by the Web Reader for credentials and device identity.
 TOKEN_VALUE_KEYS = ("refresh_token", "t_auth_token", "refreshToken", "refresh-token")
 HARDWARE_VALUE_KEYS = ("hardware_id", "hardwareId", "device_id", "deviceId")
-
-def _refresh_token_iat(token):
-    """Issue time (unix seconds) of a JWT refresh token; None if unknown."""
-    claims = payload(token)
-    if not claims:
-        return None
-    try:
-        value = float(claims.get("iat"))
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
 
 
 def _jwt_shaped(text):
@@ -52,11 +41,6 @@ def _candidate_age_note(candidates):
         shape += (", Payload ohne iat" if payload(text)
                   else ", Payload unlesbar")
     return "Alter des gefundenen Zugangs unbekannt (%s)" % shape
-
-
-def _refresh_token_iat_sort_key(value):
-    issued = _refresh_token_iat(value)
-    return issued if issued is not None else 0.0
 
 
 def _filter_live_candidates(candidates, max_age_seconds=1800):

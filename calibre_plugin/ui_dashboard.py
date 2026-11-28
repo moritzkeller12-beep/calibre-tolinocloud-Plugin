@@ -1,5 +1,5 @@
 """Hauptfenster, Einstellungen und der sichtbare Sync-Ablauf."""
-from qt.core import QDialog, QInputDialog, QMessageBox, QThread, Qt
+from qt.core import QDialog, QInputDialog, QThread, Qt
 from .ui_common import (CANCEL_MESSAGE, COMPARE_BUTTON_TEXT, COMPARE_BUTTON_TIP,
                         LOGIN_BUTTON_TEXT, LOGIN_BUTTON_TIP,
                         LOGIN_NEXT_STEP, _active_work_thread, _apply_busy,
@@ -24,7 +24,7 @@ from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoError, hardware_id, log_info,
                      log_warning, normalize_hardware_id,
                      normalize_refresh_token, report_error, sanitize_error)
 from .ui_auth_workers import BrowserLoginWorker, SessionCheckWorker
-from .ui_dashboard_parts import (DashboardParts, confirm_deletions,
+from .ui_dashboard_parts import (DashboardParts, _ask, confirm_deletions,
                                  confirm_replacements, offer_next_step,
                                  report_skipped_uploads)
 from .ui_dialogs import InventoryDialog
@@ -43,8 +43,7 @@ class SyncDashboard(DashboardParts, QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.thread = None
         self.worker = None
-        self.login_thread = None
-        self.login_worker = None
+        self.login_thread = self.login_worker = None
         self.prepare_thread = None
         self.prepare_worker = None
         self.snapshot_thread = None
@@ -166,8 +165,7 @@ class SyncDashboard(DashboardParts, QDialog):
     def new_account(self):
         if not self._save_settings():
             return
-        base, accepted = QInputDialog.getText(
-            self, "Neues Konto", "Name:")
+        base, accepted = QInputDialog.getText(self, "Neues Konto", "Name:")
         base = str(base).strip()
         if not accepted or not base:
             return
@@ -186,14 +184,9 @@ class SyncDashboard(DashboardParts, QDialog):
         if len(self.account_names) <= 1:
             return
         name = self.account_name
-        yes = QMessageBox.StandardButton.Yes
-        no = QMessageBox.StandardButton.No
-        answer = QMessageBox.question(
-            self, "Konto entfernen",
-            "Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
-            "werden gelöscht. Bücher in tolino und Calibre bleiben." % name,
-            yes | no, no)
-        if answer != yes:
+        text = ("Konto «%s» entfernen? Anmeldung und Sync-Stand dieses Kontos "
+                "werden gelöscht. Bücher in tolino und Calibre bleiben.")
+        if not _ask(self, "Konto entfernen", text % name):
             return
         if not remove_saved_account(name):
             return
@@ -240,8 +233,7 @@ class SyncDashboard(DashboardParts, QDialog):
             return
         # Ein eingetippter Zugangstoken ist eine Eingabe wie jede andere:
         # «Speichern und schliessen» darf ihn nicht still verwerfen. Ohne
-        # erkannten Buchhändler bleibt das Fenster offen, damit die Eingabe
-        # nicht verloren geht -- die Meldung nennt den Grund.
+        # erkannten Buchhändler bleibt das Fenster offen und nennt den Grund.
         if typed and self.account_name and not self.store_refresh(typed):
             return
         self.settings_dialog.accept()
@@ -490,12 +482,10 @@ class SyncDashboard(DashboardParts, QDialog):
     @gui_guard
     def login_completed(self, hardware):
         """Der Worker hat den Token bereits im richtigen Konto gespeichert."""
-        self._login_cleanup()
         if hardware:
             self.hardware.setText(str(hardware))
         self.refresh.setText("")
-        self.status.setText("Angemeldet.")
-        offer_next_step(self)
+        self.login_still_valid()
 
     @gui_guard
     def login_failed(self, error):
@@ -518,14 +508,8 @@ class SyncDashboard(DashboardParts, QDialog):
 
     @gui_guard
     def _login_cleanup(self):
-        self.login_thread = None
-        self.login_worker = None
+        self.login_thread = self.login_worker = None
         self.update_status()
-
-    @staticmethod
-    def _worker_client(context):
-        """Client aus dem Lauf-Kontext bauen; der Vault liest den Token."""
-        return TOKEN_VAULT.login(context.account_name)
 
     def _show_prepare_error(self, exc, context):
         """Nur den kurzen Fehlertext zeigen; technische Details protokollieren."""
@@ -635,8 +619,7 @@ class SyncDashboard(DashboardParts, QDialog):
 
     def _start_prepare_worker(self, context, metadata, state):
         """Netz-Vorbereitung im Hintergrund starten (GUI bleibt bedienbar)."""
-        self._begin_progress("Vergleich läuft …",
-                             "Verbinde mit tolino …")
+        self._begin_progress("Vergleich läuft …", "Verbinde mit tolino …")
         worker = PrepareWorker(context, metadata, state)
         worker.progress.connect(self._prepare_progress)
         worker.ready.connect(self._prepare_ready)
@@ -692,8 +675,9 @@ class SyncDashboard(DashboardParts, QDialog):
             _planning.syncable_metadata(metadata))
         try:
             selection = self._confirm_comparison(
-                payload["comparison"], context,
-                client_factory=lambda: self._worker_client(context),
+                payload["comparison"],
+                client_factory=lambda: TOKEN_VAULT.login(
+                    context.account_name),
                 automatic=len(_planning.plan_collection_updates(
                     series_map, state)))
             if selection is None:
@@ -714,13 +698,11 @@ class SyncDashboard(DashboardParts, QDialog):
             # geschlossenes Fenster und keinen einzigen Upload.
             self._show_prepare_error(exc, context)
 
-    def _confirm_comparison(self, comparison, context, client_factory=None,
-                            automatic=0):
+    def _confirm_comparison(self, comparison, client_factory, automatic):
         """Bestätigungsfenster zeigen; None, wenn es abgebrochen wurde."""
         dialog = InventoryDialog(
             comparison, self,
-            client_factory=(client_factory or
-                            (lambda: self._worker_client(context))),
+            client_factory=client_factory,
             options={
                 "automatic": int(automatic or 0),
                 # Für den Hinweis im Fenster: ohne diese Spalte bleiben
@@ -745,8 +727,7 @@ class SyncDashboard(DashboardParts, QDialog):
         # Der Vault liest den möglicherweise rotierten Token erst beim Login.
         counts = _planning.PlanCounts(preparation, len(jobs))
         total = counts.steps
-        replacements = [job for job in jobs
-                        if job.old_id]
+        replacements = [job for job in jobs if job.old_id]
         if replacements and not confirm_replacements(self, replacements):
             self.status.setText(
                 "Abgebrochen. Die Cloud-Kopie bleibt unverändert.")
@@ -835,8 +816,23 @@ class SyncDashboard(DashboardParts, QDialog):
         self.progress_label.setText("Bereit")
         self.update_status()
 
+    def reject(self):
+        """Esc schliesst wie das Fensterkreuz: erst laeuft `closeEvent`.
+
+        `QDialog.reject()` blendet das Fenster nur aus und ueberspringt
+        `closeEvent`; laufende Worker liefen dann ohne Fenster weiter und
+        die sichtbaren Einstellungen blieben ungesichert.
+        """
+        self.close()
+
     def closeEvent(self, event):
-        """Schliessen: Abbruch anfordern, aber nie unbegrenzt blockieren."""
+        """Schliessen: erst sichern, dann Worker beenden, nie blockieren."""
+        # Schliesst nur, wenn die sichtbaren Einstellungen gesichert sind:
+        # `_save_settings` meldet den Fehler und der Dialog bleibt offen --
+        # samt Worker-Referenzen, damit ein erneuter Versuch moeglich ist.
+        if not self._save_settings():
+            event.ignore()
+            return
         if _active_work_thread(self):
             self.cancel_sync()
         for thread_name, worker_name in (
@@ -848,12 +844,9 @@ class SyncDashboard(DashboardParts, QDialog):
             if worker_name:
                 setattr(self, worker_name, None)
         # `self.worker` bleibt bis zur Auswertung stehen: nach einem
-        # Thread-Timeout kann das Ergebnis noch eintreffen und braucht
-        # Ergebnis, Konto und Spalten; `finish_thread()` raeumt danach auf.
-        # A running browser sign-in is left alone on purpose: its thread is
-        # unparented and self-terminates after its timeout, and joining it
-        # here could freeze the close for minutes.
-        self.login_thread = None
-        self.login_worker = None
-        self._save_visible_account()
+        # Thread-Timeout kann das Ergebnis noch eintreffen; `finish_thread()`
+        # raeumt danach auf. Eine laufende Browser-Anmeldung bleibt bewusst
+        # unangetastet: ihr Thread endet selbst per Timeout, ein Join koennte
+        # das Schliessen minutenlang blockieren.
+        self.login_thread = self.login_worker = None
         event.accept()

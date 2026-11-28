@@ -105,32 +105,6 @@ def plan_sync(metadata_by_id, state, preferred_formats, upload_book_ids):
     return uploads
 
 
-def normalize_removals(explicit=()):
-    """Normalize user-picked cloud deletions.
-
-    `explicit` holds (book_uuid, tolino_id, title) triples marked in the
-    comparison dialog. A cloud copy is deleted once. Returns the selected
-    pairs and a title map keyed by tolino id.
-    """
-    merged = []
-    seen = set()
-    titles = {}
-    for entry in tuple(explicit or ()):
-        if not isinstance(entry, (tuple, list)) or len(entry) < 2:
-            continue
-        book_uuid, tolino_id = entry[0], entry[1]
-        title = str(entry[2] or "") if len(entry) > 2 else ""
-        tolino_id = str(tolino_id or "").strip()
-        if not tolino_id:
-            continue
-        if title:
-            titles[tolino_id] = title
-        if tolino_id not in seen:
-            seen.add(tolino_id)
-            merged.append((str(book_uuid or ""), tolino_id))
-    return merged, titles
-
-
 def series_map_from_metadata(metadata_by_id):
     """uuid -> Serienname fuer alle Buecher mit Serie.
 
@@ -154,10 +128,7 @@ def remember_collection(state, book_uuid, series):
     series = str(series or "").strip()
     if not series:
         return False
-    entry = state.get(book_uuid)
-    if not isinstance(entry, dict):
-        entry = {}
-        state[book_uuid] = entry
+    entry = state_entry(state, book_uuid, create=True)
     recorded = entry.get("collections")
     if not isinstance(recorded, list):
         recorded = []
@@ -219,8 +190,6 @@ def plan_metadata_updates(metadata_by_id, state, uploads, only_book_ids):
     for book_id, metadata in metadata_by_id.items():
         if str(book_id) not in selected_ids:
             continue
-        if not isinstance(metadata, dict):
-            raise ValueError("Preparation returned invalid metadata for book %r." % (book_id,))
         identifier = valid_book_uuid(metadata.get("uuid"))
         if not identifier or identifier in upload_uuids:
             continue
@@ -302,8 +271,21 @@ def plan_actions(dialog, context, metadata, state, selection, series_map=None):
         skipped_formats.append(
             "Buch %s (%s): kein Format %s." %
             (book_id, title, display))
-    removals, removal_titles = normalize_removals(
-        (selection or {}).get("cloud_deletions"))
+    explicit = (selection or {}).get("cloud_deletions")
+    removals, seen, removal_titles = [], set(), {}
+    for entry in tuple(explicit or ()):
+        if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+            continue
+        book_uuid, tolino_id = entry[0], entry[1]
+        title = str(entry[2] or "") if len(entry) > 2 else ""
+        tolino_id = str(tolino_id or "").strip()
+        if not tolino_id:
+            continue
+        if title:
+            removal_titles[tolino_id] = title
+        if tolino_id not in seen:
+            seen.add(tolino_id)
+            removals.append((str(book_uuid or ""), tolino_id))
     titles = {valid_book_uuid(item.get("uuid")): str(item.get("title") or "")
               for item in (metadata or {}).values() if isinstance(item, dict)}
     titles.pop("", None)

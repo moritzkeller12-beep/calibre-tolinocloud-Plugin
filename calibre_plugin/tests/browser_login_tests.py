@@ -15,6 +15,7 @@ from ..browser_login import (_exchange_grabbed_token, _exchange_live_grab,
 from ..errors import TolinoAuthError
 from ..token_candidates import (_candidate_age_note, _filter_live_candidates,
                                 _normalize_live_grab)
+from ._support import no_crypto
 
 # Ein formal gueltiger CryptoJS-Blob ("Salted__" + Salt + ein Block),
 # damit der Decoder wirklich nach PyCryptodome fragt.
@@ -31,15 +32,7 @@ def jwt(iat=None, typ="Refresh", iss=THALIA):
         payload["iss"] = iss
     head = base64.urlsafe_b64encode(b'{"alg":"HS512","typ":"JWT"}')
     body = base64.urlsafe_b64encode(json.dumps(payload).encode())
-    return "%s.%s.sig" % (head.decode().rstrip("="),
-                          body.decode().rstrip("="))
-
-
-def no_crypto():
-    """Steht fuer eine Installation ohne PyCryptodome."""
-    return patch("calibre_plugin.browser_crypto._aes",
-                 side_effect=TolinoAuthError("PyCryptodome fehlt",
-                                             code="A01"))
+    return "%s.%s.sig" % (head.decode().rstrip("="), body.decode().rstrip("="))
 
 
 class TokenCandidateTests(unittest.TestCase):
@@ -81,22 +74,21 @@ class GrabEndTests(unittest.TestCase):
         self.assertEqual("B02", caught.exception.code)
         return caught.exception
 
-    def test_an_open_login_page_asks_for_the_sign_in(self):
-        error = self._error({"window": True, "reader_tab": False}, True,
-                            {"refresh": []}, set(), "invalid_grant")
-        self.assertIn("noch nicht angemeldet", str(error))
-        self.assertIn("invalid_grant", error.detail)
-
-    def test_a_closed_window_after_a_read_reports_the_rejection(self):
-        error = self._error({"window": False}, True, {"refresh": [jwt()]},
-                            set(), "")
-        self.assertIn("kein gültiger Zugang gelesen", str(error))
-        self.assertIn("Sekunden alt", error.detail)
-
-    def test_a_timeout_without_reader_tab_names_the_missing_tab(self):
-        error = self._error(None, False, {"refresh": []}, set(), "")
-        self.assertIn("Zeitüberschreitung", str(error))
-        self.assertIn("kein Web-Reader-Tab", error.detail)
+    def test_the_end_of_a_grab_names_the_matching_reason(self):
+        cases = (
+            (({"window": True, "reader_tab": False}, True,
+              {"refresh": []}, set(), "invalid_grant"),
+             "noch nicht angemeldet", "invalid_grant"),
+            (({"window": False}, True, {"refresh": [jwt()]}, set(), ""),
+             "kein gültiger Zugang gelesen", "Sekunden alt"),
+            ((None, False, {"refresh": []}, set(), ""),
+             "Zeitüberschreitung", "kein Web-Reader-Tab"),
+        )
+        for arguments, message, detail in cases:
+            with self.subTest(message=message):
+                error = self._error(*arguments)
+                self.assertIn(message, str(error))
+                self.assertIn(detail, error.detail)
 
     def test_the_message_contains_no_token(self):
         token = jwt(iat=time.time() - 30)
@@ -125,8 +117,8 @@ class FakeTolinoClient:
         self.refresh_in = self.refresh
 
 
-class ExchangeTests(unittest.TestCase):
-    """Welcher gelesene Token eingeloest wird und welcher nicht."""
+class FakeClientCase(unittest.TestCase):
+    """Der Netzwerk-Client ist durch das Doppel ersetzt, Zaehler frisch."""
 
     def setUp(self):
         FakeTolinoClient.instances = []
@@ -135,6 +127,10 @@ class ExchangeTests(unittest.TestCase):
                         FakeTolinoClient)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+
+class ExchangeTests(FakeClientCase):
+    """Welcher gelesene Token eingeloest wird und welcher nicht."""
 
     def test_the_freshest_refresh_token_of_a_known_shop_is_used(self):
         access = jwt(iat=2000, typ="Access")
@@ -177,16 +173,8 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(1, len(FakeTolinoClient.instances))
 
 
-class GrabFlowTests(unittest.TestCase):
+class GrabFlowTests(FakeClientCase):
     """Der Wartepfad endet mit Token, Zeitueberschreitung oder Fensterschluss."""
-
-    def setUp(self):
-        FakeTolinoClient.instances = []
-        FakeTolinoClient.failure = None
-        patcher = patch("calibre_plugin.browser_login.TolinoClient",
-                        FakeTolinoClient)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def test_a_successful_grab_returns_token_partner_and_closes(self):
         with patch("calibre_plugin.cdp.launch_reader_window"), \
@@ -234,7 +222,3 @@ class GrabFlowTests(unittest.TestCase):
         self.assertEqual("B02", caught.exception.code)
         self.assertIn("kein gültiger Zugang", str(caught.exception))
         self.assertTrue(close.called)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -19,7 +19,8 @@ from .. import tolino as tolino_module
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..sync_data import READ_TAG
 from ..tolino import TolinoClient, report_error, sanitize_error
-from ._support import LocalHTTP, local_tolino_endpoints
+from ._support import (JSON_HEADERS, LocalHTTP, jwt_token,
+                       local_tolino_endpoints)
 
 HARDWARE = "11111111-1111-4111-8111-111111111111"
 TOKEN_BODY = json.dumps({"access_token": "acc-1", "refresh_token": "rot-1",
@@ -39,15 +40,30 @@ def token_server(body=TOKEN_BODY, status=200, extra=None):
     return LocalHTTP(responder)
 
 
+@contextlib.contextmanager
+def served(http, refresh="start", hardware=HARDWARE, **options):
+    """Loopback-Server plus Client, dessen Endpunkte auf ihn zeigen."""
+    with http as server, local_tolino_endpoints(server.origin):
+        yield TolinoClient(1, hardware, refresh=refresh, **options), server
+
+
+def login_request(token="start", body=TOKEN_BODY):
+    """Ein Login gegen den Testserver; Client und Formular-Body zurueck."""
+    with served(token_server(body=body), refresh=token) as (client, server):
+        client.login()
+        return client, parse_qs(server.requests[0]["body"].decode("utf-8"))
+
+
 class LoginTests(unittest.TestCase):
     """Der Refresh-Token ist einmalig: Reihenfolge und Meldung muessen stimmen."""
 
     def test_login_exchanges_the_token_and_reports_the_rotation(self):
         saved = []
-        with token_server() as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  token_callback=saved.append)
+        with served(token_server(),
+                    token_callback=saved.append) as (client, server):
             self.assertEqual("rot-1", client.login())
+            self.assertEqual("rot-1", client.login())
+            self.assertEqual(1, len(server.requests))
             request = server.requests[0]
         self.assertEqual(["rot-1"], saved)
         self.assertIn("grant_type=refresh_token", request["body"].decode())
@@ -56,10 +72,9 @@ class LoginTests(unittest.TestCase):
     def test_a_rejected_token_is_reported_and_cleared_once(self):
         rejected = []
         body = json.dumps({"error": "invalid_grant"}).encode()
-        with token_server(body=body, status=400) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  token_rejected_callback=rejected.append)
+        with served(token_server(body=body, status=400),
+                    token_rejected_callback=rejected.append) as (client,
+                                                                 server):
             with self.assertRaises(TolinoAuthError) as caught:
                 client.login()
         self.assertEqual("A01", caught.exception.code)
@@ -77,17 +92,61 @@ class LoginTests(unittest.TestCase):
         self.assertEqual("N01", caught.exception.code)
         self.assertEqual("start", client.refresh)
 
-    def test_a_second_login_reuses_the_valid_access_token(self):
-        with token_server() as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
-            client.login()
-            client.login()
-            requests = len(server.requests)
-        self.assertEqual(1, requests)
+    def test_a_rejected_token_is_retried_once_with_the_stored_one(self):
+        # Der Parallel-Lauf (Keep-alive, zweite Instanz) hat inzwischen
+        # rotiert: der gespeicherte Token gilt, der abgelehnte nicht mehr.
+        used = []
+
+        def exchange(method, path, headers, payload):
+            used.append(parse_qs(payload.decode("utf-8"))["refresh_token"][0])
+            if used[-1] == "alt":
+                return (400, {"Content-Type": "application/json"},
+                        json.dumps({"error": "invalid_grant"}).encode())
+            return 200, {"Content-Type": "application/json"}, TOKEN_BODY
+
+        with served(token_server(extra=exchange), refresh="alt",
+                    stored_token_callback=lambda: "neu") as (client, server):
+            self.assertEqual("rot-1", client.login())
+        self.assertEqual(["alt", "neu"], used)
 
     def test_an_unknown_partner_is_rejected(self):
         with self.assertRaises(TolinoError):
             TolinoClient(99, HARDWARE, refresh="start")
+
+
+class FreshnessTests(unittest.TestCase):
+    """Ablauf, Uhr und Scope entscheiden, wie lange ein Login haelt."""
+
+    def test_an_unknown_scope_is_not_sent(self):
+        # Ein hartkodierter Scope kann vom ausgestellten abweichen und die
+        # Erneuerung mit invalid_scope scheitern lassen.
+        _client, body = login_request()
+        self.assertNotIn("scope", body)
+        self.assertIn("client_id", body)
+
+    def test_the_scope_of_the_token_is_reused(self):
+        token = jwt_token({"iat": int(time.time()),
+                           "exp": int(time.time()) + 3600,
+                           "scope": "SCOPE_BOSH offline_access"})
+        _client, body = login_request(token)
+        self.assertEqual(["SCOPE_BOSH offline_access"], body["scope"])
+
+    def test_a_shorter_claim_wins_over_expires_in(self):
+        now = time.time()
+        access = jwt_token({"iat": int(now), "exp": int(now) + 120})
+        body = json.dumps({"access_token": access, "refresh_token": "rot-1",
+                           "expires_in": 3600}).encode()
+        client, _body = login_request(body=body)
+        self.assertLessEqual(client.expires_at, now + 120)
+
+    def test_a_clock_far_from_the_claims_uses_expires_in(self):
+        now = time.time()
+        access = jwt_token({"iat": int(now) + 86400,
+                           "exp": int(now) + 86400 + 3600})
+        body = json.dumps({"access_token": access, "refresh_token": "rot-1",
+                           "expires_in": 3600}).encode()
+        client, _body = login_request(body=body)
+        self.assertAlmostEqual(now + 3600 - 300, client.expires_at, delta=10)
 
 
 class ErrorTextTests(unittest.TestCase):
@@ -101,14 +160,9 @@ class ErrorTextTests(unittest.TestCase):
 
     def test_a_broken_token_response_is_an_auth_error(self):
         body = json.dumps({"refresh_token": "rot-1"}).encode()
-        with token_server(body=body) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+        with served(token_server(body=body)) as (client, server):
             with self.assertRaises(TolinoAuthError):
                 client.login()
-
-
-JSON_HEADERS = {"Content-Type": "application/json"}
 
 
 def json_reply(payload):
@@ -169,9 +223,7 @@ class RetryTests(unittest.TestCase):
                 return 401, {}, b'{"error": "expired"}'
             return devices_reply(method, path, headers, payload)
 
-        with LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+        with served(LocalHTTP(responder)) as (client, server):
             self.assertEqual(HARDWARE, client.fetch_hardware_id())
             sent = [request["headers"].get("t_auth_token")
                     for request in server.requests
@@ -192,9 +244,7 @@ class RetryTests(unittest.TestCase):
             return 200, JSON_HEADERS, TOKEN_BODY
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             self.assertEqual("rot-1", client.login())
         self.assertEqual(2, calls["token"])
         self.assertEqual([2.0], [call.args[0] for call in slept.call_args_list])
@@ -203,29 +253,23 @@ class RetryTests(unittest.TestCase):
         def fail(_token):
             raise OSError("Platte voll")
 
-        with token_server() as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  token_callback=fail)
-            with self.assertRaises(TolinoAuthError) as caught:
-                client.login()
-        self.assertEqual("A01", caught.exception.code)
-        self.assertIsNone(client.access)
-
-    def test_a_token_callback_that_returns_false_stops_the_login(self):
         spent = []
-        with token_server() as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  token_callback=lambda _token: False,
-                                  token_rejected_callback=spent.append)
-            with self.assertRaises(TolinoAuthError) as caught:
-                client.login()
-        self.assertEqual("A01", caught.exception.code)
-        self.assertIsNone(client.access)
-        # Der neue Token bleibt im Speicher; der bisherige gespeicherte wird
-        # nicht geloescht -- ein Schreibfehler sagt nichts ueber seine
-        # Gueltigkeit aus, und der Nutzer soll nicht ohne Not draussen sein.
-        self.assertEqual("rot-1", client.refresh)
-        self.assertEqual([], spent)
+        # Ausnahme und ``False`` sind derselbe Ausgang: nicht gespeichert.
+        for callback in (fail, lambda _token: False):
+            with self.subTest(callback=callback):
+                with served(
+                        token_server(), token_callback=callback,
+                        token_rejected_callback=spent.append) as (
+                            client, server):
+                    with self.assertRaises(TolinoAuthError) as caught:
+                        client.login()
+                self.assertEqual("A01", caught.exception.code)
+                self.assertIsNone(client.access)
+                # Der neue Token bleibt im Speicher; der bisherige gespeicherte
+                # wird nicht geloescht -- ein Schreibfehler sagt nichts ueber
+                # seine Gueltigkeit aus.
+                self.assertEqual("rot-1", client.refresh)
+                self.assertEqual([], spent)
 
     def test_a_failed_update_retry_does_not_confirm_hardware_on_inventory(self):
         saved = []
@@ -243,9 +287,8 @@ class RetryTests(unittest.TestCase):
             update_ids.append(headers["hardware_id"])
             return 400, {}, b"{}"
 
-        with LocalHTTP(responder) as server, local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, "old-hardware", refresh="start",
-                                  hardware_callback=saved.append)
+        with served(LocalHTTP(responder), hardware="old-hardware",
+                    hardware_callback=saved.append) as (client, server):
             with self.assertRaises(TolinoError):
                 client.update_metadata("book", {"title": "Neu"})
             self.assertEqual([], client.inventory())
@@ -258,10 +301,8 @@ class RetryTests(unittest.TestCase):
             return 500, {}, b""
 
         saved = []
-        with LocalHTTP(token_and(refuse)) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  hardware_callback=saved.append)
+        with served(LocalHTTP(token_and(refuse)),
+                    hardware_callback=saved.append) as (client, server):
             client.hardware = "adopted"
             client._hw_adopted = True
             # Gueltiger Zugang: der Fehler kommt aus dem Geraete-Aufruf, nicht
@@ -291,10 +332,8 @@ class RetryTests(unittest.TestCase):
 
         saved = []
         with patch("calibre_plugin.tolino.time.sleep"), \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start",
-                                  hardware_callback=saved.append)
+                served(LocalHTTP(responder),
+                       hardware_callback=saved.append) as (client, server):
             self.assertEqual("reg-1", client.fetch_hardware_id())
             sent = [request["headers"].get("hardware_id")
                     for request in server.requests
@@ -336,9 +375,7 @@ class RetryTests(unittest.TestCase):
             return devices_reply(method, path, headers, payload)
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             with self.assertRaises(TolinoApiError) as caught:
                 client.fetch_hardware_id()
         self.assertEqual("N03", caught.exception.code)
@@ -363,9 +400,7 @@ class RetryTests(unittest.TestCase):
             return 400, {}, b"{}"
 
         with patch("calibre_plugin.tolino.time.sleep"), \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             with self.assertRaises(TolinoApiError) as caught:
                 client.fetch_hardware_id()
         self.assertEqual("N03", caught.exception.code)
@@ -375,10 +410,8 @@ class RetryTests(unittest.TestCase):
 
     def test_a_403_without_a_bot_check_is_not_repeated(self):
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                token_server(body=b'{"error": "forbidden"}',
-                             status=403) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(token_server(body=b'{"error": "forbidden"}',
+                                    status=403)) as (client, server):
             with self.assertRaises(TolinoAuthError) as caught:
                 client.login()
         self.assertEqual("A01", caught.exception.code)
@@ -390,9 +423,7 @@ class RetryTests(unittest.TestCase):
             return 403, {}, b"quota exceeded"
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(token_and(responder)) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(token_and(responder))) as (client, server):
             client.access, client.expires_at = "acc-1", time.time() + 3600
             with self.assertRaises(TolinoApiError) as caught:
                 client.fetch_hardware_id()
@@ -404,9 +435,7 @@ class RetryTests(unittest.TestCase):
             return 403, {}, b"<html>captcha</html>"
 
         with patch("calibre_plugin.tolino.time.sleep") as slept, \
-                LocalHTTP(responder) as server, \
-                local_tolino_endpoints(server.origin):
-            client = TolinoClient(1, HARDWARE, refresh="start")
+                served(LocalHTTP(responder)) as (client, server):
             with self.assertRaises(TolinoAuthError):
                 client.login()
         limit = len(tolino_module._WAF_RETRY_SECONDS)
@@ -659,8 +688,6 @@ class DownloadContentTests(unittest.TestCase):
         for name in ("t_auth_token", "hardware_id", "reseller_id"):
             self.assertNotIn(name, headers)
 
-    
-
 
 class RedirectTests(unittest.TestCase):
     """Eine unsichere Weiterleitung wird abgelehnt, bevor sie kontaktiert wird.
@@ -767,7 +794,7 @@ class ReadMarkTests(unittest.TestCase):
         self.assertEqual("N02", caught.exception.code)
         self.assertEqual([], backend.patch_bodies)
 
-    def test_a_malformed_snapshot_is_not_an_empty_read_state(self):
+    def test_snapshot_validation_distinguishes_empty_from_malformed(self):
         backend = Backend()
         backend.sync_response = {}
         with write_client(backend) as client:
@@ -775,10 +802,15 @@ class ReadMarkTests(unittest.TestCase):
                 client.read_ids()
             with self.assertRaises(TolinoApiError):
                 client.mark_read_many(["d1"])
+            # Nur lesende PATCHes, kein Schreibvorgang mit leerem Bestand.
+            self.assertTrue(all(body["patches"] == []
+                                for body in backend.patch_bodies))
+            # Die dokumentierte patchlose Antwort ist dagegen leer, nicht defekt.
+            backend.sync_response = {"revision": 7}
+            self.assertEqual(set(), client.read_ids())
+            self.assertEqual(set(), client.collection_pairs())
+            self.assertEqual(7, client.add_to_collection("d1", "Grenzwelten"))
         self.assertEqual("N02", caught.exception.code)
-        # Nur lesende PATCHes, kein Schreibvorgang mit leerem Bestand.
-        self.assertTrue(all(body["patches"] == []
-                            for body in backend.patch_bodies))
 
     def test_an_already_read_book_causes_no_write(self):
         backend = Backend()
@@ -892,7 +924,3 @@ class DeleteAndDownloadTests(unittest.TestCase):
                 client.download("d1")
         self.assertEqual("N02", caught.exception.code)
         self.assertIn("HTTPS", caught.exception.short)
-
-
-if __name__ == "__main__":
-    unittest.main()

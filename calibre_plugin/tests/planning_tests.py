@@ -23,10 +23,7 @@ from ..planning import (NOTHING_TO_DO_TEXT, local_metadata, metadata_update_fiel
                         PlanCounts,
                         series_map_from_metadata, syncable_metadata)
 from ..run_context import RunContext
-from ._support import CalibreDatabase
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
+from ._support import OTHER, UUID, CalibreDatabase
 
 
 def book(**extra):
@@ -347,8 +344,7 @@ class PlanActionsTests(unittest.TestCase):
         self.assertEqual([], result["skipped_uploads"])
 
     def test_a_book_without_the_preferred_format_is_skipped_with_a_reason(self):
-        result = self.plan(selection(uploads={1}),
-                           {1: book(formats=["PDF"])})
+        result = self.plan(selection(uploads={1}), {1: book(formats=["PDF"])})
         self.assertEqual([], result["jobs"])
         self.assertIn("kein Format EPUB", result["skipped_uploads"][0])
         self.assertEqual(1, result["selected_without_action"]["uploads"])
@@ -531,7 +527,3 @@ class ReadingStateTests(unittest.TestCase):
         self.assertTrue(state[UUID]["reading"]["read"])
         self.assertEqual({"percent": 10}, state[UUID]["reading"]["progress"])
         self.assertEqual({"tolino_id": "alt"}, state["calibre-1-abc"])
-
-
-if __name__ == "__main__":
-    unittest.main()

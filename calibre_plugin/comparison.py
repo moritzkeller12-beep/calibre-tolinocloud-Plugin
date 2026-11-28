@@ -6,18 +6,9 @@ from .library import normalize_formats
 from .matching import (author_tokens, authors_match, is_valid_isbn,
                        normalize_isbn, normalize_match_text, normalize_title)
 
-IGNORED_EXPLANATION = (
-    "In Calibre als «ignoriert» markiert (#tolino_ignore) – wird weder "
-    "hochgeladen noch abgeglichen.")
-
 # Felder, die zu genau EINER Cloud-Kopie gehoeren: nach einem Kopiewechsel
-# (neue tolino-ID) sind sie wertlos. Dieselbe Liste nutzen das Zuruecksetzen
-# eines Eintrags und der Drei-Wege-Merge der Einstellungen.
+# wertlos. Dieselbe Liste nutzen Zuruecksetzen und Drei-Wege-Merge.
 COPY_BOUND_FIELDS = ("reading", "collections", "meta_verified_fp")
-
-
-def _metadata_text(metadata, name):
-    return str(metadata.get(name) or "")
 
 
 def _file_changed(metadata, previous_entry, format_name):
@@ -77,9 +68,9 @@ def _same_comparison_fields(metadata, remote):
     fehlender Wert ist kein Unterschied.
     """
     values = {
-        "title": _metadata_text(metadata, "title"),
-        "authors": _metadata_text(metadata, "authors"),
-        "isbn": _metadata_text(metadata, "isbn"),
+        "title": str(metadata.get("title") or ""),
+        "authors": str(metadata.get("authors") or ""),
+        "isbn": str(metadata.get("isbn") or ""),
     }
     for field, local in values.items():
         remote_value = remote.get(field)
@@ -114,9 +105,6 @@ class ReadState:
     def changed(self):
         """Übertragen wird nur eine Änderung -- und nur bei bekanntem Stand."""
         return self.known and self.chosen != self.cloud
-
-    def __bool__(self):
-        return self.chosen
 
 
 def _read_flags(tolino_id, read_known, read_ids):
@@ -232,10 +220,7 @@ def store_reading_state(state, comparison):
                               and getattr(progress, "known", False))
         if not (read_known or progress_known):
             continue
-        entry = state.get(key)
-        if not isinstance(entry, dict):
-            entry = {}
-            state[key] = entry
+        entry = state_entry(state, key, create=True)
         recorded = str(entry.get("tolino_id") or "").strip()
         if recorded and recorded != tolino_id:
             continue
@@ -253,14 +238,11 @@ def store_reading_state(state, comparison):
 class _RemoteIndex:
     """Cloud-Zeilen plus Lookup-Indizes -- in derselben Reihenfolge.
 
-    Die Zuordnung suchte frueher fuer JEDES Buch die ganze Cloud-Liste
-    erneut ab (quadratisch). Die Listen in den Indizes enthalten dieselben
-    Zeilen in derselben Reihenfolge; `matched` entscheidet weiterhin, ob
-    eine Zeile noch frei ist.
+    Die Indizes ersetzen die frueher quadratische Suche je Buch; `matched`
+    entscheidet weiterhin, ob eine Zeile noch frei ist.
     """
 
-    __slots__ = ("rows", "by_tolino_id", "by_isbn", "by_title",
-                 "title_counts")
+    __slots__ = ("rows", "by_tolino_id", "by_isbn", "by_title", "title_counts")
 
     def __init__(self, rows):
         self.rows = rows
@@ -398,12 +380,10 @@ def _matched_status(metadata, remote, old, selected_format, authors,
         return "review", "conflict", file_changed
     same_fields = _same_comparison_fields(metadata, remote)
     current_meta_fp = metadata_fingerprint(metadata)
-    # Nur ein nach PUT per GET bestaetigter Patch darf explizite Inventarwerte
-    # ueberstimmen. Bewusster Kompromiss: aendert die Cloud den Titel spaeter,
-    # gilt die Zeile weiter als gleich -- sonst wuerde jede externe Aenderung
-    # beim naechsten Sync sofort wieder ueberschrieben.
-    # Eine Bestaetigung gilt nur fuer die Kopie, fuer die sie geschrieben
-    # wurde: nach einem Wechsel der Cloud-ID ist sie wertlos.
+    # Nur ein nach PUT per GET bestaetigter Patch ueberstimmt Inventarwerte.
+    # Bewusster Kompromiss: aendert die Cloud den Titel spaeter, gilt die
+    # Zeile weiter als gleich -- sonst wuerde jede externe Aenderung sofort
+    # wieder ueberschrieben. Die Bestaetigung gilt nur fuer ihre Cloud-Kopie.
     verified_metadata_matches = (
         bool(old.get("meta_verified_fp"))
         and old.get("meta_verified_fp") == current_meta_fp
@@ -438,10 +418,7 @@ def reset_copy_state(entry):
 
 def _remember_tolino_match(state, book_uuid, book_id, tolino_id):
     """Persist a confirmed assignment under the Calibre UUID."""
-    entry = state.get(book_uuid)
-    if not isinstance(entry, dict):
-        entry = {}
-        state[book_uuid] = entry
+    entry = state_entry(state, book_uuid, create=True)
     previous = str(entry.get("tolino_id") or "").strip()
     if previous and previous != str(tolino_id):
         reset_copy_state(entry)
@@ -457,9 +434,9 @@ def _local_comparison_row(book_id, metadata, remote, state, reserved,
     # Ignorierte Bücher bleiben zugeordnet, erhalten aber keine Aktion.
     ignored = bool(metadata.get("ignored"))
     book_uuid = valid_book_uuid(metadata.get("uuid"))
-    title = _metadata_text(metadata, "title")
-    authors = _metadata_text(metadata, "authors")
-    isbn = _metadata_text(metadata, "isbn")
+    title = str(metadata.get("title") or "")
+    authors = str(metadata.get("authors") or "")
+    isbn = str(metadata.get("isbn") or "")
     old = state_entry(state, book_uuid)
     stored_id = str(old.get("tolino_id") or "").strip()
     title_key = normalize_title(title)
@@ -494,7 +471,8 @@ def _local_comparison_row(book_id, metadata, remote, state, reserved,
         book_id, title, authors, isbn, tolino_id, status,
         _read_flags(tolino_id, read_known, read_ids),
         _progress_state(tolino_id, progress_known, progress_by_id),
-        (IGNORED_EXPLANATION if ignored
+        (("In Calibre als «ignoriert» markiert (#tolino_ignore) – wird "
+          "weder hochgeladen noch abgeglichen.") if ignored
          else _row_explanation(status, match_reason, file_changed)),
         group="ignored" if ignored else comparison_group(status),
         uuid=book_uuid or str(metadata.get("uuid") or ""),
@@ -538,29 +516,15 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
     2. one unique *valid* ISBN,
     3. one unique normalized title+author pair.
 
-    A title on its own never matches: it produces a ``review`` row for a
-    human decision and leaves the cloud record untouched, so no automatic
-    upload and no ``identical`` can be derived from a title alone. Multiple
-    hits on the same lookup key are marked ``review`` as well; no hit is
-    picked by list position. Conflicting authors or ISBNs also stay
-    ``review`` so that the user confirms the assignment.
+    A title alone, multiple hits on one key and conflicting authors or ISBNs
+    all yield ``review`` rows; no hit is picked by list position, so neither
+    an automatic upload nor ``identical`` follows from them.
 
-    `read_ids` are tolino IDs already marked as read in the selected account.
-    They prefill the dialog's Cloud-status selection; Calibre's read column is
-    attached to each row as display-only information.
-    ``None`` bedeutet «Status unbekannt» (Abruf fehlgeschlagen): die Zeilen
-    tragen dann ``read_known=False``, damit die Oberfläche «unbekannt» nicht
-    als «ungelesen» darstellt und nichts zurückschreibt.
-
-    ``inventory`` enthält die von `TolinoClient.inventory()` gelieferten,
-    bereits normalisierten Cloud-Datensätze.
-
-    ``read_column`` adds the informational Calibre ``#tolino_read`` value;
-    it never changes the selected account's Cloud read status.
-
-    ``progress_by_id`` maps tolino IDs to the reading progress from
-    sync-data. ``None`` means «not loaded»; an empty mapping means «loaded,
-    but no bookmarks». Progress is display-only and is never written back.
+    ``read_ids`` are tolino IDs already read in the selected account; they
+    prefill the cloud selection, while ``None`` means «status unknown» and is
+    carried as ``read_known=False``. ``read_column`` only attaches Calibre's
+    ``#tolino_read`` for display. ``progress_by_id=None`` means «not loaded»,
+    an empty mapping «no bookmarks»; progress is never written back.
     """
     preferred_formats = normalize_formats(preferred_formats)
     read_known = read_ids is not None
@@ -588,6 +552,7 @@ def compare_inventory(metadata_by_id, state, inventory, preferred_formats=(),
                 row, disputed, remote.title_counts, index))
     return local_rows
 
+
 def comparison_sort_key(row):
     """Sortierschlüssel des Bestandsvergleichs: Aktionen zuerst, dann Titel."""
     return (
@@ -597,14 +562,6 @@ def comparison_sort_key(row):
         str(row.get("authors") or "").casefold(),
         str(row.get("isbn") or ""),
     )
-
-
-def sort_comparison_rows(comparison_rows):
-    """Bestandsvergleich sortieren: erst ausgewählte Aktionen, dann Titel, Autoren.
-
-    Zeilen mit einer Aktion ("upload"/"metadata") stehen oben.
-    """
-    return sorted(comparison_rows, key=comparison_sort_key)
 
 
 def metadata_fingerprint(metadata):

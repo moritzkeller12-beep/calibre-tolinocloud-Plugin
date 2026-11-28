@@ -65,12 +65,9 @@ OP_SKIPPED = "skipped"
 OP_FAILED = "failed"
 OP_NOT_STARTED = "not_started"
 
-# Laufende oder nach einem Timeout noch nicht beendete Threads bleiben bis
-# zum finished-Signal referenziert.
+# Threads und Worker bleiben bis zum finished-Signal referenziert: `closeEvent`
+# gibt seine Referenzen ab, waehrend eine `run()`-Methode noch laeuft.
 _THREADS = []
-# Dasselbe fuer die Worker: `closeEvent` gibt seine Referenzen bewusst ab,
-# waehrend ein Anmelde-Thread weiterlaeuft. Ohne diese Liste koennte Qt den
-# QObject einsammeln, waehrend seine `run()`-Methode noch im Thread laeuft.
 _WORKERS = []
 
 
@@ -102,8 +99,8 @@ def start_worker(dialog, worker, thread, thread_name, worker_name,
     for signal, slot in extra_slots:
         signal.connect(slot)
     thread.finished.connect(thread.deleteLater)
-    _keep_thread_alive(thread)
-    _keep_worker_alive(thread, worker)
+    _retain(_THREADS, thread, thread.finished)
+    _retain(_WORKERS, worker, thread.finished)
     setattr(dialog, thread_name, thread)
     setattr(dialog, worker_name, worker)
     thread.start()
@@ -120,8 +117,6 @@ def start_call(dialog, call, on_done, on_failed):
     """
     thread = QThread()
     worker = CallWorker(call)
-    # Der Worker muss den Dialog ueberleben: ohne die Referenz kann Qt ihn
-    # vor dem Thread-Start einsammeln, und der Dialog bleibt gesperrt.
     return start_worker(
         dialog, worker, thread, "_call_thread", "_call_worker",
         (worker.done, worker.failed),
@@ -140,23 +135,11 @@ def _discard_item(collection, item):
             return
 
 
-def _keep_thread_alive(thread):
-    """Retain a thread until Qt reports that it has finished."""
-    if not any(kept is thread for kept in _THREADS):
-        _THREADS.append(thread)
-        thread.finished.connect(lambda: _discard_item(_THREADS, thread))
-
-
-def _keep_worker_alive(thread, worker):
-    """Keep the worker referenced until its thread reports `finished`.
-
-    `closeEvent` drops `self.login_worker` while the sign-in thread keeps
-    running. Without this reference Qt could collect the QObject while its
-    `run()` method is still executing in that thread.
-    """
-    if not any(kept is worker for kept in _WORKERS):
-        _WORKERS.append(worker)
-        thread.finished.connect(lambda: _discard_item(_WORKERS, worker))
+def _retain(collection, item, finished):
+    """Keep `item` referenced until the signal `finished` fires."""
+    if not any(kept is item for kept in collection):
+        collection.append(item)
+        finished.connect(lambda: _discard_item(collection, item))
 
 
 def _stop_thread(thread, timeout_ms=3000):
@@ -176,7 +159,7 @@ def _stop_thread(thread, timeout_ms=3000):
             thread.setParent(None)
         except Exception:
             pass
-        _keep_thread_alive(thread)
+        _retain(_THREADS, thread, thread.finished)
         try:
             if thread.isFinished():
                 _discard_item(_THREADS, thread)

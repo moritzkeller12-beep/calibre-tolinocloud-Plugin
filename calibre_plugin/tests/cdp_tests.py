@@ -17,7 +17,7 @@ from unittest.mock import patch
 from .. import cdp, cdp_scripts
 from ..errors import TolinoAuthError
 
-PID = 4194304  # existiert nicht: os.getpgid() scheitert, keine Prozessgruppe
+PID = 4194304  # liegt ueber pid_max: keine echte Prozessgruppe
 REAL_MKDTEMP = tempfile.mkdtemp
 
 
@@ -55,8 +55,8 @@ class LaunchCase(unittest.TestCase):
 
     def setUp(self):
         self._saved = dict(cdp._LAUNCHED)
-        cdp._LAUNCHED.update({"process": None, "port": None, "profile": "",
-                              "pgid": None})
+        cdp._LAUNCHED.update({"process": None, "port": None,
+                              "profile": ""})
         self.created = []
         self.addCleanup(self._restore)
 
@@ -117,8 +117,8 @@ class StartTests(LaunchCase):
             with self.assertRaises(TolinoAuthError) as caught:
                 cdp.launch_reader_window()
         self.assertEqual("B01", caught.exception.code)
-        self.assertEqual({"process": None, "port": None, "profile": "",
-                          "pgid": None}, cdp._LAUNCHED)
+        self.assertEqual({"process": None, "port": None, "profile": ""},
+                         cdp._LAUNCHED)
         self.assertTrue(self.created)
         self.assertFalse(any(os.path.exists(path) for path in self.created))
 
@@ -156,7 +156,7 @@ class StartTests(LaunchCase):
                 patch("calibre_plugin.cdp.time.monotonic",
                       side_effect=itertools.count(0, 100).__next__):
             self.assertFalse(cdp._stop_launched_process(
-                wrapper, timeout=0.2, pgid=wrapper.pid, port=0))
+                wrapper, timeout=0.2, port=0))
         self.assertEqual([(wrapper.pid, signal.SIGTERM),
                           (wrapper.pid, signal.SIGKILL)], signals)
 
@@ -182,13 +182,12 @@ class StartTests(LaunchCase):
                 cdp.launch_reader_window()
         self.assertIn("nicht beenden", str(caught.exception))
         self.assertEqual(1, popen.call_count)
-        # Erst hoeflich an die GEMERKTE Gruppe (nicht mehr per getpgid), dann
-        # hart -- obwohl der Wrapper schon beendet ist.
+        # Erst hoeflich an die Wrapper-Gruppe, dann hart -- obwohl der
+        # Wrapper schon beendet ist.
         self.assertEqual([(wrapper.pid, signal.SIGTERM),
                           (wrapper.pid, signal.SIGKILL)],
                          [call.args for call in killpg.call_args_list])
         self.assertIs(wrapper, cdp._LAUNCHED["process"])
-        self.assertEqual(wrapper.pid, cdp._LAUNCHED["pgid"])
         self.assertTrue(os.path.isdir(cdp._LAUNCHED["profile"]))
 
 
@@ -217,10 +216,14 @@ class OwnershipTests(LaunchCase):
         process = FakeProcess()
         cdp._LAUNCHED.update({"process": process, "port": 5555,
                               "profile": profile})
-        with patch("calibre_plugin.cdp._http_get_json", return_value=None):
+        with patch("calibre_plugin.cdp._http_get_json", return_value=None), \
+                patch("calibre_plugin.cdp.os.killpg",
+                      side_effect=lambda *_a: setattr(process, "alive", False)), \
+                patch("calibre_plugin.cdp._group_alive",
+                      side_effect=lambda _group: process.poll() is None):
             self.assertTrue(cdp.close_grabber_window())
-        self.assertEqual({"process": None, "port": None, "profile": "",
-                          "pgid": None}, cdp._LAUNCHED)
+        self.assertEqual({"process": None, "port": None, "profile": ""},
+                         cdp._LAUNCHED)
         self.assertFalse(os.path.exists(profile))
         self.assertTrue(os.path.isdir(other))
 
@@ -232,7 +235,9 @@ class OwnershipTests(LaunchCase):
                               "profile": profile})
         version = {"webSocketDebuggerUrl":
                    "ws://127.0.0.1:5555/devtools/browser/x"}
-        with patch("calibre_plugin.cdp._http_get_json", return_value=version):
+        with patch("calibre_plugin.cdp._http_get_json", return_value=version), \
+                patch("calibre_plugin.cdp.os.killpg",
+                      side_effect=lambda *_a: setattr(process, "alive", False)):
             self.assertFalse(cdp.close_grabber_window(timeout=0.3))
         self.assertTrue(os.path.isdir(profile))
         self.assertIs(process, cdp._LAUNCHED["process"])
@@ -260,7 +265,7 @@ class GroupStopTests(unittest.TestCase):
                 patch("calibre_plugin.cdp._endpoint_answers",
                       side_effect=lambda *args, **kwargs: alive["orphan"]):
             self.assertTrue(cdp._stop_launched_process(
-                wrapper, timeout=1, pgid=wrapper.pid, port=5555))
+                wrapper, timeout=1, port=5555))
         self.assertEqual([(wrapper.pid, signal.SIGTERM),
                           (wrapper.pid, signal.SIGKILL)], signals)
 
@@ -273,7 +278,7 @@ class GroupStopTests(unittest.TestCase):
                 patch("calibre_plugin.cdp.time.monotonic",
                       side_effect=itertools.count(0, 100).__next__):
             self.assertFalse(cdp._stop_launched_process(
-                wrapper, timeout=0.2, pgid=wrapper.pid, port=5555))
+                wrapper, timeout=0.2, port=5555))
 
 
 class FakeWs:
@@ -295,8 +300,7 @@ class FakeWs:
 
 
 def value_message(message_id, value):
-    return {"id": message_id,
-            "result": {"result": {"value": value}}}
+    return {"id": message_id, "result": {"result": {"value": value}}}
 
 
 class EvaluateTests(unittest.TestCase):
@@ -433,7 +437,3 @@ class ReaderTargetTests(unittest.TestCase):
     def test_a_malformed_target_list_is_no_reader(self):
         self.assertEqual((None, False), cdp._reader_target(None, 5555))
         self.assertEqual((None, False), cdp._reader_target(["kaputt"], 5555))
-
-
-if __name__ == "__main__":
-    unittest.main()

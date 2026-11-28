@@ -6,14 +6,23 @@ sofort zurueck; niemand sonst haelt eine zweite Kopie.
 """
 import contextlib
 import threading
+import time
 
-from .config import (account_secrets, account_summary,
-                     clear_refresh_token_if_unchanged, save_hardware_id,
-                     save_refresh_token, settings, settings_write_lock,
-                     settings_writable)
+from .config import (account_secrets, account_tokens,
+                     clear_refresh_token_if_unchanged, save_access_token,
+                     save_hardware_id, save_refresh_token, settings,
+                     settings_write_lock, settings_writable)
+from .errors import SETTINGS_WRITE_DETAIL
+from .jwt import lifetime_seconds
 from .tolino import (BUSY_MESSAGE, RELOGIN, TolinoAuthError, TolinoClient,
                      TolinoError, log_info, log_warning,
                      normalize_refresh_token, sanitize_error)
+
+# Der Keep-alive folgt der Laufzeit des Refresh-Tokens: ein Fuenftel Vorlauf,
+# mindestens zwei Minuten, und nicht oefter als alle fuenf Minuten.
+KEEPALIVE_MIN_DELAY = 5 * 60
+REFRESH_MARGIN_MIN = 120
+REFRESH_MARGIN_FRACTION = 0.2
 
 
 def _lock_busy(exc):
@@ -21,14 +30,23 @@ def _lock_busy(exc):
     return isinstance(exc, TolinoAuthError) and exc.code == "S91"
 
 
-def _partner_number(value):
-    """Buchhaendler-Nummer des Kontos; ohne Angabe der Standardpartner."""
-    if value is None:
-        return 1
+def _seconds(value):
+    """Zahl aus dem Einstellungsspeicher (JSON liefert int/float/str) oder 0."""
     try:
-        return int(value)
+        return max(0.0, float(value or 0))
     except (TypeError, ValueError):
-        return 0
+        return 0.0
+
+
+def _require_savable_rotation():
+    """Ein Tausch darf nur starten, wenn die Rotation speicherbar ist."""
+    if settings_writable():
+        return
+    raise TolinoError(
+        "Die Einstellungen sind nicht beschreibbar; der Zugang "
+        "wird nicht erneuert.",
+        short="Die Einstellungen konnten nicht gespeichert werden. " + RELOGIN,
+        detail="Token-Tausch ohne speicherbare Rotation abgelehnt.")
 
 
 class TokenVault:
@@ -37,12 +55,16 @@ class TokenVault:
     def __init__(self):
         self._lock = threading.Lock()
 
-    def login(self, account_name, partner_id=None, lock_timeout=5, *,
-              keepalive=False):
+    def login(self, account_name, partner_id=None, lock_timeout=5,
+              force=False):
         """Login-Client; der Shop steht im Konto (``partner_id`` nur als Ersatz).
+
+        Der Lock gilt fuer Lesen, Tausch und Speichern der Rotation -- auch
+        fuer eine zweite Calibre-Instanz. Ein noch gueltiger Access-Token
+        beendet den Aufruf, ohne die Einstellungen zu brauchen; ``force``
+        erzwingt dagegen den Tausch des Refresh-Tokens (Keep-alive).
         """
-        guard = settings_write_lock() if keepalive else contextlib.nullcontext()
-        with self._held_lock(lock_timeout), guard:
+        with self._held_lock(lock_timeout), settings_write_lock():
             values = self._stored_credentials(account_name)
             client = TolinoClient(
                 partner_id or values["partner_id"], values["hardware_id"],
@@ -50,7 +72,20 @@ class TokenVault:
                 token_callback=lambda token: save_refresh_token(
                     account_name, token),
                 hardware_callback=lambda hardware: save_hardware_id(
-                    account_name, hardware))
+                    account_name, hardware),
+                # Ein noch gueltiger Access-Token erspart den Tausch -- und
+                # damit eine Rotation des Einmal-Tokens.
+                access=values["access_token"],
+                access_expires_at=values["access_expires_at"],
+                access_callback=lambda token, expires: save_access_token(
+                    account_name, token, expires),
+                # Der eine Weg zum gespeicherten Token: auch beim ersten
+                # Tausch sichtbar, damit ein parallel rotierter Token nicht
+                # als abgelehnt geloescht wird. Liest ohne Vault-Lock, weil
+                # `relogin()` ihn bereits haelt.
+                stored_token_callback=lambda: account_tokens(
+                    account_name).get("refresh_token"))
+            client.rotation_guard = _require_savable_rotation
             # Nur der tatsaechlich eingeloeste Token darf verschwinden: ein
             # paralleler Refresh (Keep-alive, zweite Instanz) oder ein
             # `relogin()` kann inzwischen einen anderen gespeichert haben.
@@ -66,20 +101,10 @@ class TokenVault:
                     "gilt jeder Lauf als neues Gerät; bitte die "
                     "Einstellungsdatei prüfen und erneut anmelden.",
                     short="Die Geräte-ID konnte nicht gespeichert werden.",
-                    detail="Einstellungen konnten nicht geschrieben werden.")
-            # Der Tausch selbst muss speicherbar sein: ein rotierter
-            # Einmal-Token waere sonst verbrannt, bevor er im Konto steht.
-            if not settings_writable():
-                raise TolinoError(
-                    "Die Einstellungen sind nicht beschreibbar; der Zugang "
-                    "wird nicht erneuert.",
-                    short="Die Einstellungen konnten nicht gespeichert "
-                          "werden. " + RELOGIN,
-                    detail="Token-Tausch ohne speicherbare Rotation "
-                           "abgelehnt.")
+                    detail=SETTINGS_WRITE_DETAIL)
             # Erst anmelden, dann den Vault einhaengen: `login()` wuerde
             # sonst ueber `relogin()` den bereits gehaltenen Lock anfordern.
-            client.login()
+            client.login(force=force)
             client.account_name = account_name
             client.token_vault = self
         return client
@@ -97,23 +122,31 @@ class TokenVault:
     @staticmethod
     def _stored_credentials(account_name):
         """Token und Geraete-ID des Kontos; leer heisst «nicht angemeldet»."""
-        account = account_summary(account_name) or {}
+        account = account_tokens(account_name) or {}
         refresh = normalize_refresh_token(account.get("refresh_token"))
         if not refresh:
             raise TolinoAuthError("Noch nicht angemeldet. " + RELOGIN,
                                   code="A01")
+        partner = account.get("partner_id")
+        try:
+            partner = 1 if partner is None else int(partner)
+        except (TypeError, ValueError):
+            partner = 0
         return {"refresh_token": refresh,
                 "hardware_id": str(account.get("hardware_id") or ""),
-                "partner_id": _partner_number(account.get("partner_id"))}
+                "partner_id": partner,
+                "access_token": str(account.get("access_token") or ""),
+                "access_expires_at": _seconds(account.get("access_expires_at"))}
 
     def relogin(self, client, timeout=30):
         """Refresh once under the shared lock using the freshest saved token.
 
         Der Keep-alive haelt den Lock ueber den Netzaufruf und dessen
         WAF-Retries. Ein Sync, der waehrenddessen neu anmelden muss, wartet
-        besser kurz, statt mit S91 fatal abzubrechen.
+        besser kurz, statt mit S91 fatal abzubrechen. Derselbe Lock gilt fuer
+        die zweite Calibre-Instanz.
         """
-        with self._held_lock(timeout):
+        with self._held_lock(timeout), settings_write_lock():
             values = self._stored_credentials(client.account_name)
             if values["partner_id"] != client.partner_id:
                 # Der gespeicherte Token gilt fuer den Buchhaendler des
@@ -129,12 +162,60 @@ class TokenVault:
                     detail="Bitte mit dem hinterlegten Buchhändler anmelden.")
             client.refresh = values["refresh_token"]
             client.hardware = values["hardware_id"] or client.hardware
+            client.rotation_guard = _require_savable_rotation
             # `_login()` meldet den neuen Token ueber den Callback, der ihn
             # bereits persistiert -- kein zweites Speichern hier.
             return client._login()
 
-    def keepalive_refresh(self):
-        """Refresh saved accounts; return only the number of rotations."""
+    def due_in(self, account_name):
+        """Sekunden bis zur naechsten Erneuerung; None heisst unbekannt.
+
+        Zwei Grenzen zaehlen: ein Fuenftel der Refresh-Token-Laufzeit (aus
+        ``exp-iat``, also unabhaengig von der lokalen Uhr) und der Ablauf des
+        gespeicherten Access-Tokens.
+        """
+        values = account_tokens(account_name)
+        if not normalize_refresh_token(values.get("refresh_token")):
+            return None
+        now, deadlines = time.time(), []
+        lifetime = lifetime_seconds(values["refresh_token"])
+        rotated = _seconds(values.get("refresh_rotated_at"))
+        if lifetime and rotated:
+            margin = max(REFRESH_MARGIN_MIN,
+                         lifetime * REFRESH_MARGIN_FRACTION)
+            deadlines.append(rotated + lifetime - margin)
+        access_expires = _seconds(values.get("access_expires_at"))
+        if access_expires:
+            deadlines.append(access_expires)
+        if not deadlines:
+            return None
+        return max(0.0, min(deadlines) - now)
+
+    def next_delay(self, default):
+        """Wartezeit bis zur naechsten Runde (5 min bis ``default``)."""
+        try:
+            accounts = settings()["accounts"]
+        except Exception:
+            return default
+        delays = []
+        for account in accounts:
+            if not normalize_refresh_token(account.get("refresh_token")):
+                continue
+            due = self.due_in(str(account.get("name") or ""))
+            if due is not None:
+                delays.append(due)
+        if not delays:
+            return default
+        return max(KEEPALIVE_MIN_DELAY, min(default, min(delays)))
+
+    def keepalive_refresh(self, only_due=False):
+        """Refresh saved accounts; return only the number of rotations.
+
+        Mit ``only_due`` bleiben Konten aus, deren Token noch lange gilt:
+        jede Rotation ist ein Einmal-Tausch und soll nur passieren, wenn die
+        Laufzeit es verlangt. Ein faelliges Konto wird auch dann getauscht,
+        wenn sein Access-Token noch gilt -- sonst liefe der Refresh-Token ab.
+        """
         if not settings_writable():
             # Ein Token, dessen Rotation nicht gespeichert werden kann, waere
             # verbrannt: lieber gar nicht erst einloesen.
@@ -155,8 +236,12 @@ class TokenVault:
             if not name or not normalize_refresh_token(
                     account.get("refresh_token")):
                 continue
+            if only_due:
+                due = self.due_in(name)
+                if due is not None and due > 0:
+                    continue
             try:
-                self.login(name, lock_timeout=0, keepalive=True)
+                self.login(name, lock_timeout=0, force=True)
                 rotated += 1
             except Exception as exc:
                 # Ein belegter Lock ist kein Fehler -- nächste Runde.
@@ -179,9 +264,14 @@ _KEEPALIVE_LOCK = threading.Lock()
 
 
 def start_token_keepalive(interval=45 * 60):
-    """Rotate saved refresh tokens periodically in one daemon thread."""
+    """Rotate saved refresh tokens as their own lifetime requires.
+
+    ``interval`` ist die Obergrenze zwischen zwei Runden; gearbeitet wird
+    frueher, wenn die Laufzeit des Tokens es verlangt. Die erste Runde laeuft
+    sofort: nach Tagen ohne Calibre ist der gespeicherte Zugang oft faellig.
+    """
     global _KEEPALIVE_THREAD, _KEEPALIVE_STOP
-    wait = max(60, interval)
+    cap = max(60, interval)
     with _KEEPALIVE_LOCK:
         if _KEEPALIVE_THREAD is not None and _KEEPALIVE_THREAD.is_alive():
             return None
@@ -190,14 +280,16 @@ def start_token_keepalive(interval=45 * 60):
         stop = threading.Event()
 
         def loop():
-            while not stop.wait(wait):
-                TOKEN_VAULT.keepalive_refresh()
+            TOKEN_VAULT.keepalive_refresh(only_due=True)
+            while not stop.wait(TOKEN_VAULT.next_delay(cap)):
+                TOKEN_VAULT.keepalive_refresh(only_due=True)
 
         thread = threading.Thread(
             target=loop, name="tolino-token-keepalive", daemon=True)
         _KEEPALIVE_THREAD, _KEEPALIVE_STOP = thread, stop
         thread.start()
-    log_info("Tolino-Keep-alive gestartet: alle %d Minuten." % (wait // 60))
+    log_info("Tolino-Keep-alive gestartet: nächste Runde nach der Laufzeit "
+             "des Tokens (spätestens alle %d Minuten)." % (cap // 60))
     return thread
 
 

@@ -4,31 +4,51 @@ import copy
 import json
 import os
 import threading
+import time
 
 from calibre.utils.config import JSONConfig
 
 from .comparison import COPY_BOUND_FIELDS
+from .jwt import issued_at as _issued_at, lifetime_seconds as _lifetime
 
 # Der bisherige Store bleibt der aktive Datenspeicher: Der neue Namespace
 # aus dem 0.1.08-Entwicklungsstand wurde vor der Verteilung zurückgenommen.
 PREFERENCE_NAMESPACE = "plugins/Tolino Cloud Sync Lite"
 PREFERENCES = JSONConfig(PREFERENCE_NAMESPACE)
 DEFAULT_ACCOUNT_NAME = "default"
-ACCOUNT_KEYS = ("partner_id", "hardware_id", "refresh_token", "state")
 PREFERRED_FORMATS = "preferred_formats"
 DEFAULT_ACCOUNT = {
     "name": DEFAULT_ACCOUNT_NAME,
     "partner_id": 1,
     "hardware_id": "",
     "refresh_token": "",
+    "refresh_rotated_at": 0,
+    "access_token": "",
+    "access_expires_at": 0,
     "state": {},
 }
+# Eine Quelle fuer Schluessel und Reihenfolge: kein zweiter Driftpunkt.
+ACCOUNT_KEYS = tuple(key for key in DEFAULT_ACCOUNT if key != "name")
 _SETTINGS_LOCK = threading.RLock()
 _UNSET = object()
-# `_SETTINGS_LOCK` gilt nur in diesem Prozess. Eine zweite Calibre-Instanz
-# kann dieselbe Datei schreiben. Wo verfuegbar, schuetzt eine zusaetzliche
-# Dateisperre das Laden, Vergleichen und Schreiben.
+# `_SETTINGS_LOCK` gilt nur in diesem Prozess; eine zweite Calibre-Instanz
+# kann dieselbe Datei schreiben. Wo verfuegbar, schuetzt eine Dateisperre.
 _LOCK_STATE = threading.local()
+
+
+def _restrict_permissions(path):
+    """Die Einstellungsdatei gehoert nur dem Eigentuemer (best effort).
+
+    Sie enthaelt den einzigen gespeicherten Refresh-Token; Calibre legt sie
+    mit der Standard-umask an. Windows kennt keine POSIX-Rechte -- dort
+    bleibt der Schutz beim Benutzerprofil.
+    """
+    if not path or os.name == "nt":
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _lock_handle(handle):
@@ -43,7 +63,15 @@ def _lock_handle(handle):
     if os.name == "nt":
         import msvcrt
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        while True:  # LK_LOCK waere nach zehn Sekunden beendet
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if (getattr(exc, "winerror", None) != 33
+                        and exc.errno not in (11, 13, 36)):
+                    raise
+                time.sleep(0.05)
     else:
         import fcntl
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -53,13 +81,10 @@ def _lock_handle(handle):
 def _settings_file_lock():
     """Sperrdatei neben dem Speicher; im selben Thread wiederverwendbar.
 
-    Ohne Sperrdatei (unschreibbares Verzeichnis, fehlendes ``fcntl``) bleibt
-    nur `_SETTINGS_LOCK`: der eigene Prozess ist trotzdem geschuetzt, ein
-    fremder Schreiber aber nicht ausgeschlossen. Scheitert dagegen das
-    Sperren selbst, wird der ``OSError`` weitergegeben und der Schreibvorgang
-    bricht ab -- ungesperrt zu schreiben ersetzte sonst einen fremden Stand.
-    Verschachtelte Aufrufe (etwa `_write_account` aus `save_state`) sperren
-    nicht erneut.
+    Ohne Sperrdatei bleibt nur `_SETTINGS_LOCK` (best effort). Scheitert das
+    Sperren selbst, bricht der Schreibvorgang ab -- ungesperrt zu schreiben
+    ersetzte sonst einen fremden Stand. Verschachtelte Aufrufe sperren nicht
+    erneut.
     """
     depth = getattr(_LOCK_STATE, "depth", 0)
     if depth:
@@ -77,6 +102,7 @@ def _settings_file_lock():
             # Keine Sperrdatei (unschreibbares Verzeichnis): best effort.
             handle = None
         if handle is not None:
+            _restrict_permissions(str(path) + ".lock")
             try:
                 if os.fstat(handle.fileno()).st_size == 0:
                     # msvcrt sperrt ein Byte; eine leere Datei liesse sich
@@ -110,18 +136,14 @@ def settings_write_lock():
 def _reload():
     """Datei bei jedem Zugriff lesen; nur ein vollstaendiger Stand zaehlt.
 
-    Eine zweite Calibre-Instanz, der Keep-alive oder ein Kindprozess schreibt
-    in dieselbe Datei. Ohne Abgleich zeigt das offene Fenster bis zum Neustart
-    einen veralteten Kontostand. Gelesen wird der Rohinhalt und nicht der
-    Zeitstempel: dessen Aufloesung ist je nach Dateisystem grob, schnelle
-    Schreibvorgaenge gleicher Groesse blieben unsichtbar. Eine halb
-    geschriebene Datei zaehlt nicht als Stand -- Calibres `refresh()` wuerde
-    sie uebernehmen und dabei alle Konten verlieren.
+    Andere Prozesse schreiben dieselbe Datei. Gelesen wird der Rohinhalt
+    statt des Zeitstempels (grobe Aufloesung), und nur vollstaendiges JSON
+    wird uebernommen -- Calibres `refresh()` naehme auch eine halbe Datei
+    samt Konten.
 
-    ``False`` heisst: die Datei ist gerade unbrauchbar. Sie kann existieren
-    und nur gesperrt sein (Rechte, Verzeichnis, E/A-Fehler) -- das ist NICHT
-    dasselbe wie «es gibt sie nicht». Lesen bleibt dann beim letzten guten
-    Stand, ein Schreibvorgang bricht ab, statt ihn zu ueberschreiben.
+    ``False`` heisst: vorhanden, aber unbrauchbar (gesperrt, E/A-Fehler,
+    halb geschrieben). Lesen bleibt dann beim letzten guten Stand, ein
+    Schreibvorgang bricht ab; das ist nicht dasselbe wie «keine Datei».
     """
     with _SETTINGS_LOCK:
         path = getattr(PREFERENCES, "file_path", None)
@@ -156,8 +178,9 @@ def _reload():
 
 
 def _commit():
-    """Schreiben abschliessen."""
+    """Schreiben abschliessen; die Datei bleibt Eigentum des Nutzers."""
     PREFERENCES.commit()
+    _restrict_permissions(getattr(PREFERENCES, "file_path", None))
 
 
 def load_state(raw):
@@ -173,8 +196,7 @@ def _account(value, fallback_name=DEFAULT_ACCOUNT_NAME, copy_state=True):
     result = dict(DEFAULT_ACCOUNT)
     result.update({key: source[key] for key in ACCOUNT_KEYS if key in source})
     result["name"] = str(source.get("name") or fallback_name).strip() or fallback_name
-    state = source.get("state")
-    state = state if isinstance(state, dict) else {}
+    state = load_state(source.get("state"))
     result["state"] = copy.deepcopy(state) if copy_state else state
     return result
 
@@ -222,42 +244,31 @@ def _active_name(accounts):
     return active if active in names else accounts[0]["name"]
 
 
-def settings_readable():
-    """True nur, wenn der Einstellungsspeicher gerade lesbar ist.
-
-    Der Keep-alive darf einen einmal nutzbaren Token nicht einloesen, wenn
-    die Rotation anschliessend nicht gespeichert werden kann.
-    """
-    with _SETTINGS_LOCK:
-        return _reload()
-
-
 def settings_writable():
-    """True nur, wenn ein Schreibvorgang jetzt committen koennte.
+    """True nur, wenn eine Rotation jetzt gespeichert werden koennte.
 
-    Geprueft wird ohne zu schreiben: die Einstellungsdatei muss sich zum
-    Schreiben oeffnen lassen und die Sperrdatei anlegbar sein. Ein Token,
-    dessen Rotation danach nicht gespeichert werden kann, waere verbrannt.
+    Geprueft wird unter demselben Lock, den `settings_write_lock()` fuer den
+    Tausch haelt: die Sperrdatei muss erwerbbar sein und die Einstellungsdatei
+    lesbar und beschreibbar. So ist die Pruefung kein unabhaengiges
+    Versprechen ueber einen spaeteren Zugriff.
     """
-    path = getattr(PREFERENCES, "file_path", None)
-    if not path or not settings_readable():
-        return False
     try:
-        with open(str(path), "r+b"):
-            pass
-    except FileNotFoundError:
-        # Noch keine Datei: der Commit legt sie an, wenn das Verzeichnis
-        # beschreibbar ist.
-        if not os.access(os.path.dirname(str(path)) or ".", os.W_OK):
-            return False
+        with _SETTINGS_LOCK, _settings_file_lock():
+            path = getattr(PREFERENCES, "file_path", None)
+            if not path or not _reload():
+                return False
+            try:
+                with open(str(path), "r+b"):
+                    pass
+            except FileNotFoundError:
+                # Noch keine Datei: der Commit legt sie an, wenn das
+                # Verzeichnis beschreibbar ist.
+                return os.access(os.path.dirname(str(path)) or ".", os.W_OK)
+            except OSError:
+                return False
+            return True
     except OSError:
         return False
-    try:
-        with open(str(path) + ".lock", "a+b"):
-            pass
-    except OSError:
-        return False
-    return True
 
 
 def settings():
@@ -281,39 +292,33 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
                    create=True, allow_virtual_default=False, reload=True):
     """Persist one account and optionally the active/format settings.
 
-    ``active`` ist ein Sentinel: Wird es übergeben (auch als ``None``), wird
-    das aktive Konto neu bestimmt. Fehlt es, bleibt die Auswahl unberührt.
-    ``reload=False`` nur für Aufrufer, die den Stand gerade selbst gelesen und
-    zusammengefuehrt haben: sie schreiben genau diesen Stand.
-
-    Laden und Commit laufen unter beiden Sperren: ein fremder Prozess kann
-    die Datei zwischen `_reload()` und `_commit()` nicht mehr aendern. Laesst
-    sich die Sperrdatei nicht halten, bricht der Schreibvorgang ab.
+    ``active`` ist ein Sentinel: übergeben (auch ``None``) bestimmt das aktive
+    Konto neu, weggelassen lässt es unberührt. ``reload=False`` nur für
+    Aufrufer, die den Stand selbst gelesen und zusammengefuehrt haben.
+    Laden und Commit laufen unter beiden Sperren.
     """
     with _SETTINGS_LOCK, _settings_file_lock():
         name = str(name or "").strip()
         if not name or not isinstance(values, dict):
             return False
-        # Eine zweite Calibre-Instanz oder der Keep-alive kann inzwischen
-        # geschrieben haben. `JSONConfig` haelt den Stand im Speicher und
-        # schreibt beim naechsten Commit ALLES zurueck -- ohne diesen Abgleich
-        # loescht der eigene, gecachte Stand fremde Token.
+        # Eine zweite Instanz oder der Keep-alive kann inzwischen geschrieben
+        # haben; `JSONConfig` schreibt beim Commit seinen ganzen Speicherstand
+        # zurueck -- ohne Abgleich loescht der gecachte Stand fremde Token.
         if reload and not _reload():
             return False
         raw = PREFERENCES.get("accounts", None)
         records = list(raw) if isinstance(raw, list) else []
-        index = None
-        if records:
-            for position, (stored, _source) in enumerate(
-                    _named_accounts(records)):
-                if stored == name:
-                    index = position
-                    break
-        previous_active = ""
-        if active is not _UNSET:
-            previous_active = _active_name(
-                [{"name": stored}
-                 for stored, _source in _named_accounts(records)])
+        index = next((position for position, (stored, _source) in
+                      enumerate(_named_accounts(records))
+                      if stored == name), None)
+        if not records:
+            # Frische Installation: `_named_accounts` liefert dann nur das
+            # virtuelle Default-Konto ohne Rohdatensatz. Ob es angelegt
+            # wird, entscheiden `create`/`allow_virtual_default` unten.
+            index = None
+        previous_active = (_active_name(
+            [{"name": stored} for stored, _ in _named_accounts(records)])
+            if active is not _UNSET else "")
         if index is None:
             if not (create or (allow_virtual_default and not records
                                and name == DEFAULT_ACCOUNT_NAME)):
@@ -335,8 +340,7 @@ def _write_account(name, values, *, active=_UNSET, preferred_formats=None,
         if preferred_formats is not None:
             changes[PREFERRED_FORMATS] = list(preferred_formats)
         # `update` umgeht Calibres committendes `__setitem__`: alle Werte
-        # landen in EINEM Schreibvorgang, statt halb geschrieben auf der
-        # Platte zu stehen.
+        # landen in EINEM Schreibvorgang statt halb auf der Platte.
         PREFERENCES.update(changes)
         _commit()
         return True
@@ -352,11 +356,10 @@ def save_account(name, values, active=None, preferred_formats=None,
     verspäteter Hintergrund-Schreibvorgang darf kein gelöschtes Konto
     wieder anlegen.
     """
-    with _SETTINGS_LOCK:
-        return _write_account(
-            name, values, active=active,
-            preferred_formats=preferred_formats, create=create,
-            allow_virtual_default=True)
+    return _write_account(
+        name, values, active=active,
+        preferred_formats=preferred_formats, create=create,
+        allow_virtual_default=True)
 
 
 def _cloud_id(entry):
@@ -422,7 +425,7 @@ def _merge_state(stored, base, state):
     """
     merged = dict(stored)
     for key in set(base) - set(state):
-        merged.pop(key, None)  # in diesem Lauf entfernt
+        merged.pop(key, None)
     for key, entry in state.items():
         current = merged.get(key)
         if isinstance(entry, dict):
@@ -447,8 +450,7 @@ def save_state(account_name, state, base):
         source = _account_record(account_name)
         if source is None:
             return False
-        stored = source.get("state")
-        stored = stored if isinstance(stored, dict) else {}
+        stored = load_state(source.get("state"))
         merged = _merge_state(stored, base, state)
         if merged == stored:
             # Nichts geaendert: kein vollstaendiger Schreibvorgang.
@@ -467,6 +469,19 @@ def _account_record(name):
     return None
 
 
+def account_tokens(account_name):
+    """Zugang eines Kontos inkl. Access-Token -- nur fuer Client und Vault.
+
+    Bewusst getrennt von `account_summary`: die Oberflaeche sieht weiterhin
+    nur Buchhaendler, Geraete-ID und Refresh-Token.
+    """
+    with _SETTINGS_LOCK:
+        _reload()
+        source = _account_record(account_name) or {}
+    return {key: source.get(key, DEFAULT_ACCOUNT[key])
+            for key in ACCOUNT_KEYS if key != "state"}
+
+
 def account_by_name(name):
     """Return one account without copying every other account's state."""
     with _SETTINGS_LOCK:
@@ -481,16 +496,9 @@ def _update_account(name, values, allow_virtual_default=True):
     ``allow_virtual_default=False`` fuer Aufrufer, die auch das virtuelle
     Default-Konto nicht anlegen duerfen (etwa das Loeschen eines Tokens).
     """
-    with _SETTINGS_LOCK:
-        return _write_account(
-            name, values, create=False,
-            allow_virtual_default=allow_virtual_default)
-
-
-def _stored_token(account_name):
-    """Der gespeicherte Refresh-Token eines Kontos, leer heisst «keiner»."""
-    return str(
-        account_summary(account_name).get("refresh_token") or "").strip()
+    return _write_account(
+        name, values, create=False,
+        allow_virtual_default=allow_virtual_default)
 
 
 def set_active_account(name):
@@ -509,13 +517,33 @@ def set_active_account(name):
         return True
 
 
-def save_credentials(account_name, refresh_token, hardware, partner_id=None):
-    """Persist a rotated refresh token, hardware ID and detected shop.
+def _rotation_stamp(token, now=None):
+    """Zeitpunkt, ab dem die Laufzeit eines neuen Tokens zaehlt.
 
-    Das aktive Konto bleibt unberührt: der Keep-alive rotiert alle Konten,
-    ein Token-Rotationsschritt darf die Auswahl nicht umschalten.
+    ``iat`` nennt die Ausstellung durch den Server und ist damit der
+    ehrlichste Startpunkt (ein aus dem Browser uebernommener Token ist schon
+    aelter als der Plugin-Lauf). Geglaubt wird er nur, wenn das Alter zur
+    Laufzeit des Tokens passt -- sonst ist die lokale Uhr falsch gestellt und
+    der Speicherzeitpunkt ist die sichere Naeherung.
     """
-    values = {"refresh_token": refresh_token, "hardware_id": hardware}
+    now = time.time() if now is None else now
+    issued = _issued_at(token)
+    lifetime = _lifetime(token)
+    if issued and lifetime and 0 <= now - issued <= lifetime:
+        return issued
+    return now
+
+
+def save_credentials(account_name, refresh_token, hardware, partner_id=None):
+    """Persist a new login: refresh token, hardware ID and detected shop.
+
+    Ein neuer Zugang ersetzt die Sitzung: der Access-Token des vorherigen
+    tolino-Kontos darf nicht weiterverwendet werden. Das aktive Konto bleibt
+    unberührt: ein neuer Zugang darf die Auswahl nicht umschalten.
+    """
+    values = {"refresh_token": refresh_token, "hardware_id": hardware,
+              "refresh_rotated_at": _rotation_stamp(refresh_token),
+              "access_token": "", "access_expires_at": 0}
     if partner_id:
         values["partner_id"] = partner_id
     return _update_account(account_name, values)
@@ -531,8 +559,24 @@ def save_refresh_token(account_name, token):
     """
     token = str(token or "").strip()
     if token:
-        return _update_account(account_name, {"refresh_token": token})
+        return _update_account(account_name, {
+            "refresh_token": token,
+            "refresh_rotated_at": _rotation_stamp(token)})
     return False
+
+
+def save_access_token(account_name, token, expires_at):
+    """Den Access-Token samt Ablaufzeit sichern.
+
+    Nicht fatal: der Access-Token ist ersetzbar, ein misslungenes Speichern
+    kostet beim naechsten Start nur einen Token-Tausch.
+    """
+    try:
+        expires = float(expires_at or 0)
+    except (TypeError, ValueError):
+        expires = 0.0
+    return _update_account(account_name, {
+        "access_token": str(token or ""), "access_expires_at": expires})
 
 
 def clear_refresh_token_if_unchanged(account_name, rejected_token):
@@ -546,16 +590,19 @@ def clear_refresh_token_if_unchanged(account_name, rejected_token):
     Konto, bleibt er unangetastet.
     """
     rejected = str(rejected_token or "").strip()
-    # Vergleich und Loeschen unter beiden Sperren: sonst kann zwischen beiden
-    # Schritten genau die Rotation stattfinden, die geschuetzt werden soll --
-    # auch aus einer zweiten Calibre-Instanz.
+    # Vergleich und Loeschen unter beiden Sperren: sonst kann dazwischen genau
+    # die Rotation stattfinden, die geschuetzt werden soll -- auch extern.
     with _SETTINGS_LOCK, _settings_file_lock():
-        current = _stored_token(account_name)
+        current = str(account_summary(account_name).get(
+            "refresh_token") or "").strip()
         if rejected and current and current != rejected:
             return False
         # Ein entferntes Konto darf ein verspaeteter Callback nicht anlegen.
-        return _update_account(account_name, {"refresh_token": ""},
-                               allow_virtual_default=False)
+        # Mit dem Refresh-Token ist auch der Access-Token dieser Sitzung tot.
+        return _update_account(account_name, {
+            "refresh_token": "", "refresh_rotated_at": 0,
+            "access_token": "", "access_expires_at": 0},
+            allow_virtual_default=False)
 
 
 def save_hardware_id(account_name, hardware):
@@ -565,8 +612,10 @@ def save_hardware_id(account_name, hardware):
 
 def account_secrets(account_name):
     """Bekannte Geheimnisse eines Kontos fuer die Log-Redaktion."""
-    token = _stored_token(account_name)
-    return (token,) if token else ()
+    values = account_tokens(account_name)
+    tokens = (str(values.get("refresh_token") or ""),
+              str(values.get("access_token") or ""))
+    return tuple(token for token in tokens if token)
 
 
 def remove_account(name):

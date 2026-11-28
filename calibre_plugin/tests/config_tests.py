@@ -1,27 +1,30 @@
 """Konten und Tokens: Trennung, Rotation und verspaetete Rueckmeldungen."""
 import json
 import os
-import shutil
-import tempfile
 import unittest
-import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from .. import config
+from ._support import PreferencesCase, break_settings
 
 
-class ConfigCase(unittest.TestCase):
-    """Jeder Test bekommt einen eigenen Einstellungsspeicher."""
+class StoreDoubleTests(unittest.TestCase):
+    """Das Test-Doppel schreibt erst bei ``commit()``, wie Calibres Vorbild."""
 
-    def setUp(self):
-        self._original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
+    def test_update_touches_memory_only_until_commit(self):
+        store = config.JSONConfig("store-double")
+        store.update({"a": 1})
+        self.assertEqual(1, store["a"])
+        self.assertFalse(os.path.exists(store.file_path))
+        store.commit()
+        with open(store.file_path, encoding="utf-8") as handle:
+            self.assertEqual({"a": 1}, json.load(handle))
+        dict.clear(store)
+        store.refresh()
+        self.assertEqual(1, store["a"])
 
-    def tearDown(self):
-        config.PREFERENCES = self._original
 
-
-class AccountTests(ConfigCase):
+class AccountTests(PreferencesCase):
     """Mehrere Konten bleiben getrennt; die Auswahl aendert keine Werte."""
 
     def test_accounts_keep_their_tokens_and_state_apart(self):
@@ -52,6 +55,20 @@ class AccountTests(ConfigCase):
         config.save_account("B", {"refresh_token": "tok-B"})
         self.assertEqual(["PDF"], config.settings()["preferred_formats"])
 
+    def test_a_new_login_drops_the_previous_access_token(self):
+        """Ein neuer Zugang darf nicht den Bearer des alten Kontos erben."""
+        config.save_account("A", {"refresh_token": "tok-A"})
+        config.save_access_token("A", "acc-A", 4102444800)
+        self.assertTrue(config.save_credentials("A", "tok-neu", "hw"))
+        tokens = config.account_tokens("A")
+        self.assertEqual("", tokens["access_token"])
+        self.assertEqual(0, tokens["access_expires_at"])
+        # Eine gewoehnliche Rotation behaelt den noch gueltigen Access-Token.
+        config.save_access_token("A", "acc-neu", 4102444800)
+        self.assertTrue(config.save_refresh_token("A", "tok-rot"))
+        self.assertEqual("acc-neu",
+                         config.account_tokens("A")["access_token"])
+
     def test_a_removed_account_is_not_recreated_by_a_late_callback(self):
         config.save_account("A", {"refresh_token": "tok-A"})
         config.save_account("B", {"refresh_token": "tok-B"})
@@ -61,7 +78,7 @@ class AccountTests(ConfigCase):
         self.assertEqual({}, config.account_by_name("A"))
 
 
-class ExternalChangeTests(ConfigCase):
+class ExternalChangeTests(PreferencesCase):
     """Die Datei gehoert mehreren Prozessen: fremde Staende bleiben erhalten.
 
     Geprueft wird die beobachtbare Datei, nicht die Zahl der Schreibaufrufe:
@@ -88,6 +105,11 @@ class ExternalChangeTests(ConfigCase):
         return {"name": name, "partner_id": 1, "hardware_id": "",
                 "refresh_token": token, "state": state or {}}
 
+    def prepare_external(self, active="A", token="alt"):
+        config.save_account("A", {"refresh_token": "alt"}, active="A")
+        self.write_externally([self.account("A", token),
+                               self.account("B", "tok-B")], active=active)
+
     def test_a_missing_settings_file_is_a_fresh_installation(self):
         """Ohne Datei gibt es ein virtuelles Default-Konto, keinen Fehler."""
         self.assertFalse(os.path.exists(self.file_path()))
@@ -97,29 +119,30 @@ class ExternalChangeTests(ConfigCase):
         self.assertTrue(os.path.exists(self.file_path()))
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
 
+    def test_the_virtual_default_account_can_be_saved(self):
+        """Das virtuelle Default-Konto laesst sich zuerst speichern."""
+        self.assertFalse(os.path.exists(self.file_path()))
+        self.assertTrue(config.save_account(
+            "default", {"refresh_token": "tok-D"}, active="default",
+            preferred_formats=["EPUB"]))
+        self.assertEqual("tok-D",
+                         config.account_summary("default")["refresh_token"])
+        self.assertEqual("default", config.settings()["active_account"])
+
     def test_a_file_changed_by_another_process_is_adopted(self):
-        config.save_account("A", {"refresh_token": "alt"}, active="A")
-        self.write_externally(
-            [self.account("A", "extern"), self.account("B", "tok-B")],
-            active="A")
+        self.prepare_external(token="extern")
         self.assertEqual("extern",
                          config.account_summary("A")["refresh_token"])
         self.assertEqual("tok-B", config.account_summary("B")["refresh_token"])
 
     def test_an_externally_added_account_survives_a_local_write(self):
-        config.save_account("A", {"refresh_token": "alt"}, active="A")
-        self.write_externally(
-            [self.account("A", "alt"), self.account("B", "tok-B")],
-            active="A")
+        self.prepare_external()
         self.assertTrue(config.save_refresh_token("A", "neu"))
         self.assertEqual("neu", config.account_summary("A")["refresh_token"])
         self.assertEqual("tok-B", config.account_summary("B")["refresh_token"])
 
     def test_an_externally_selected_account_stays_active(self):
-        config.save_account("A", {"refresh_token": "alt"}, active="A")
-        self.write_externally(
-            [self.account("A", "alt"), self.account("B", "tok-B")],
-            active="B")
+        self.prepare_external(active="B")
         # Eine Token-Rotation darf die Auswahl nicht umschalten.
         self.assertTrue(config.save_refresh_token("A", "neu"))
         self.assertEqual("B", config.settings()["active_account"])
@@ -135,9 +158,7 @@ class ExternalChangeTests(ConfigCase):
         path = self.file_path()
         with open(path, "rb") as handle:
             before = handle.read()
-        unreadable = tempfile.mkdtemp(prefix="tolino-unreadable-")
-        self.addCleanup(shutil.rmtree, unreadable, True)
-        config.PREFERENCES.file_path = unreadable
+        break_settings(self)
         # Lesen bleibt beim letzten guten Stand ...
         self.assertEqual("tok-A", config.account_summary("A")["refresh_token"])
         # ... und ein Schreibvorgang bricht ab, statt zu ueberschreiben.
@@ -165,19 +186,33 @@ class ExternalChangeTests(ConfigCase):
         self.assertTrue(config.save_refresh_token("A", "tok-B"))
         self.assertEqual("tok-B", config.account_summary("A")["refresh_token"])
 
+    def test_the_windows_lock_retries_contention(self):
+        """msvcrt.LK_LOCK bricht nach zehn Sekunden ab; der Lock muss warten."""
+        fake = type("FakeMsvcrt", (), {
+            "LK_NBLCK": 2,
+            "locking": Mock(side_effect=[OSError(13, "belegt")] * 2 + [None])})
+        with patch("os.name", "nt"), \
+                patch.dict("sys.modules", {"msvcrt": fake}):
+            config._lock_handle(Mock())
+        self.assertEqual(3, fake.locking.call_count)
+        broken = type("BrokenMsvcrt", (), {
+            "LK_NBLCK": 2,
+            "locking": Mock(side_effect=OSError(5, "kaputt"))})
+        with patch("os.name", "nt"), \
+                patch.dict("sys.modules", {"msvcrt": broken}):
+            with self.assertRaises(OSError):
+                config._lock_handle(Mock())
 
-class TokenTests(ConfigCase):
+
+class TokenTests(PreferencesCase):
     """Token-Rotation: nur der abgelehnte Token darf verschwinden."""
 
-    def test_a_rotated_token_replaces_the_stored_one(self):
-        config.save_account("A", {"refresh_token": "alt"})
-        self.assertTrue(config.save_refresh_token("A", "neu"))
-        self.assertEqual("neu", config.account_summary("A")["refresh_token"])
-
-    def test_an_empty_token_does_not_clear_the_login(self):
+    def test_only_a_non_empty_rotation_replaces_the_login(self):
         config.save_account("A", {"refresh_token": "alt"})
         self.assertFalse(config.save_refresh_token("A", ""))
         self.assertEqual("alt", config.account_summary("A")["refresh_token"])
+        self.assertTrue(config.save_refresh_token("A", "neu"))
+        self.assertEqual("neu", config.account_summary("A")["refresh_token"])
 
     def test_only_the_rejected_token_is_cleared(self):
         config.save_account("A", {"refresh_token": "verloren"})
@@ -223,26 +258,17 @@ class TokenTests(ConfigCase):
         self.assertEqual({"tolino_id": "neu"},
                          config.account_by_name("A")["state"]["b1"])
 
-    def test_a_stored_entry_of_the_new_copy_keeps_its_values(self):
+    def test_stored_values_of_the_new_copy_survive_a_replacement(self):
         """Der andere Lauf hat die Ersatzkopie schon gelesen: nicht verwerfen."""
-        config.save_account("A", {"refresh_token": "tok-A", "state": {
-            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
-        base = {"b1": {"tolino_id": "alt"}}
-        self.assertTrue(config.save_state(
-            "A", {"b1": {"tolino_id": "neu"}}, base))
-        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
-                         config.account_by_name("A")["state"]["b1"])
-
-    def test_a_local_change_does_not_move_to_a_foreign_copy(self):
-        """Lokale Lesedaten der alten Kopie bleiben bei der neuen Kopie weg."""
-        config.save_account("A", {"refresh_token": "tok-A", "state": {
-            "b1": {"tolino_id": "neu", "reading": {"read": True}}}})
-        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
-        self.assertTrue(config.save_state(
-            "A", {"b1": {"tolino_id": "alt", "reading": {"read": True}}},
-            base))
-        self.assertEqual({"tolino_id": "neu", "reading": {"read": True}},
-                         config.account_by_name("A")["state"]["b1"])
+        stored = {"tolino_id": "neu", "reading": {"read": True}}
+        for base in ({"b1": {"tolino_id": "alt"}},
+                     {"b1": {"tolino_id": "alt", "reading": {"read": False}}}):
+            with self.subTest(base=base):
+                config.save_account("A", {"state": {"b1": stored}})
+                self.assertTrue(config.save_state(
+                    "A", {"b1": {"tolino_id": "neu"}}, base))
+                self.assertEqual(stored,
+                                 config.account_by_name("A")["state"]["b1"])
 
     def test_a_field_removed_locally_disappears_from_the_stored_state(self):
         config.save_account("A", {"refresh_token": "tok-A", "state": {
@@ -270,22 +296,12 @@ class TokenTests(ConfigCase):
     def test_a_local_reading_change_applies_only_to_its_own_copy(self):
         base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
         local = {"b1": {"tolino_id": "alt", "reading": {"read": True}}}
-        for stored_id in ("alt", "neu"):
-            with self.subTest(stored_id=stored_id):
-                stored = {"tolino_id": stored_id, "reading": {"read": False}}
+        for stored_id, stored_reading in (("alt", {"read": False}),
+                                           ("neu", {"read": False}),
+                                           ("neu", {"read": True})):
+            with self.subTest(stored_id=stored_id, reading=stored_reading):
+                stored = {"tolino_id": stored_id, "reading": stored_reading}
                 config.save_account("A", {"state": {"b1": stored}})
                 self.assertTrue(config.save_state("A", local, base))
                 self.assertEqual(local["b1"] if stored_id == "alt" else stored,
                                  config.account_by_name("A")["state"]["b1"])
-
-    def test_a_replacement_keeps_reading_already_saved_for_the_new_copy(self):
-        stored = {"tolino_id": "neu", "reading": {"read": True}}
-        config.save_account("A", {"state": {"b1": stored}})
-        base = {"b1": {"tolino_id": "alt", "reading": {"read": False}}}
-        self.assertTrue(config.save_state("A", {"b1": {"tolino_id": "neu"}},
-                                          base))
-        self.assertEqual(stored, config.account_by_name("A")["state"]["b1"])
-
-
-if __name__ == "__main__":
-    unittest.main()

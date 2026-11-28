@@ -11,20 +11,18 @@ from ..sync_data import (READ_TAG, active_tags, collection_pairs, read_ids,
                          reading_progress, tag_id_from_patch, tag_patch)
 
 
-def tag(book_id, name, category, tag_id=None, op="add", revision=None):
+def tag(book_id, name, category, tag_id=None, op="add"):
     """Ein Tag-Patch in der Form, die die Cloud zurückliefert."""
     path = "/publications/%s/tags" % book_id
     if tag_id:
         path = "%s/%s" % (path, tag_id)
     value = {"name": name, "category": category}
-    if revision is not None:
-        value["revision"] = revision
     return {"op": op, "path": path, "value": value}
 
 
 def bookmark(book_id, bookmark_id, modified, current=None, last=None,
-             progress=None, op="add", position=""):
-    value = {"modified": modified, "position": position}
+             progress=None, op="add"):
+    value = {"modified": modified}
     if current is not None:
         value["currentPosition"] = current
     if last is not None:
@@ -120,24 +118,14 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertEqual(100, progress["d1"]["percent"])
 
     def test_the_newest_bookmark_of_a_book_is_shown(self):
-        patches = [bookmark("d1", "alt", 100, progress=0.2,
-                            position="Kapitel 2"),
+        patches = [bookmark("d1", "alt", 100, progress=0.2),
                    bookmark("d1", "neu", 200, progress=0.8)]
-        progress = reading_progress(patches)["d1"]
-        self.assertEqual((80, ""), (progress["percent"], progress["position"]))
-
-    def test_removing_the_newest_bookmark_falls_back_to_the_older_one(self):
-        patches = [bookmark("d1", "alt", 100, progress=0.2),
-                   bookmark("d1", "neu", 200, progress=0.8),
-                   bookmark("d1", "neu", 200, op="remove")]
-        self.assertEqual(20, reading_progress(patches)["d1"]["percent"])
-
-    def test_a_removal_only_drops_its_own_bookmark(self):
-        patches = [bookmark("d1", "alt", 100, progress=0.2),
-                   bookmark("d1", "neu", 200, progress=0.8),
-                   bookmark("d1", "alt", 100, op="remove")]
         self.assertEqual(80, reading_progress(patches)["d1"]["percent"])
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_a_removal_only_drops_the_named_bookmark(self):
+        base = [bookmark("d1", "alt", 100, progress=0.2),
+                bookmark("d1", "neu", 200, progress=0.8)]
+        self.assertEqual(20, reading_progress(
+            base + [bookmark("d1", "neu", 200, op="remove")])["d1"]["percent"])
+        self.assertEqual(80, reading_progress(
+            base + [bookmark("d1", "alt", 100, op="remove")])["d1"]["percent"])

@@ -13,10 +13,8 @@ from unittest.mock import patch
 from ..comparison import compare_inventory
 from ..errors import TolinoError
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, RecordingFileDialog, dashboard_stub,
-                       real_qt_stub, ui_module_for)
-
-UUID = "11111111-1111-4111-8111-111111111111"
+from ._support import (UUID, CalibreDatabase, RecordingFileDialog, UiCase,
+                       dashboard_stub, real_qt_stub, ui_module_for)
 
 
 def comparison_rows(**kwargs):
@@ -29,6 +27,25 @@ def comparison_rows(**kwargs):
     kwargs.setdefault("read_ids", {"d1"})
     return compare_inventory({1: book}, {UUID: {"tolino_id": "d1"}},
                              [cloud], ["EPUB"], **kwargs)
+
+
+def bare_dashboard(ui):
+    """Dashboard ohne Widget-Aufbau; nur das Geraete-Feld."""
+    from PyQt6.QtWidgets import QLineEdit
+
+    class Dashboard(ui.dashboard.SyncDashboard):
+        def _build_ui(self):
+            self.hardware = QLineEdit()
+
+        def load_values(self):
+            pass
+
+    return Dashboard
+
+
+def job(label, old_id=None):
+    """Platzhalter fuer einen Upload-Job im Bestaetigungsdialog."""
+    return types.SimpleNamespace(label=lambda: label, old_id=old_id)
 
 
 def click_cell(table, row, column):
@@ -52,11 +69,14 @@ def select_rows(table, rows):
         model.select(table.model().index(row, 0), flags)
 
 
-class CreateColumnTests(unittest.TestCase):
-    """Ein Knopf legt genau seine Spalte an -- und nennt den Neustart."""
+def mark_unread(dialog):
+    """Zeile 0 als ungelesen wählen, wie der Menüeintrag."""
+    select_rows(dialog.table, [0])
+    dialog.set_column_for_marked_rows("read", False, "sind bereits ungelesen")
 
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
+
+class CreateColumnTests(UiCase):
+    """Ein Knopf legt genau seine Spalte an -- und nennt den Neustart."""
 
     def _dashboard(self, database):
         cls = self.ui.dashboard.SyncDashboard
@@ -86,11 +106,85 @@ class CreateColumnTests(unittest.TestCase):
         self.assertIn("schon vorhanden", boxes[0][2])
 
 
-class ReadingMirrorTests(unittest.TestCase):
-    """Lesestatus und Fortschritt sind getrennte Spalten."""
+class EscapeCloseTests(UiCase):
+    """Esc schliesst wie das Fensterkreuz: `closeEvent` laeuft wirklich."""
 
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
+    def test_escape_runs_close_event_and_saves_the_visible_account(self):
+        """Esc schliesst wie das Fensterkreuz: `closeEvent` laeuft und `exec()`
+        endet.
+
+        `QDialog.reject()` allein liesse `closeEvent` aus -- kein Abbruch,
+        keine Sicherung der sichtbaren Einstellungen. Die Schleife prueft
+        beides am echten `exec()`, weil das Fenster nur so benutzt wird.
+        """
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QDialog
+
+        events = []
+        base = self.ui.dashboard.SyncDashboard
+
+        class Dashboard(bare_dashboard(self.ui)):
+            """Ohne Widget-Aufbau; Schliessen und Speichern aufgezeichnet."""
+
+            def _save_visible_account(self, values=None):
+                events.append("saved")
+                return True
+
+            def closeEvent(self, event):
+                events.append("closed")
+                base.closeEvent(self, event)
+
+        dashboard = Dashboard(None)
+        dashboard.account_name = "A"
+        self.addCleanup(dashboard.deleteLater)
+        state = {"timed_out": False}
+        QTimer.singleShot(10, lambda: QTest.keyClick(
+            dashboard, Qt.Key.Key_Escape))
+
+        def force_close():
+            # Notausstieg, damit ein Fehler den Test nicht haengen laesst.
+            state["timed_out"] = True
+            QDialog.reject(dashboard)
+
+        guard = QTimer()
+        guard.setSingleShot(True)
+        guard.timeout.connect(force_close)
+        guard.start(1500)
+        try:
+            dashboard.exec()
+        finally:
+            # Nach `exec()` darf der Timer nicht mehr auf das Fenster zugreifen.
+            guard.stop()
+        self.assertFalse(state["timed_out"], "exec() lief nach Esc weiter")
+        # Genau einmal, und das Speichern erst nach dem Abbruch im closeEvent.
+        self.assertEqual(["closed", "saved"], events)
+        self.assertEqual(QDialog.DialogCode.Rejected, dashboard.result())
+
+    def test_a_failed_save_keeps_the_window_open(self):
+        """Ein Speicherfehler beim Schliessen darf die Eingaben nicht verlieren."""
+        messages = []
+
+        class Dashboard(bare_dashboard(self.ui)):
+            """Ohne Widget-Aufbau; der Speicher schlaegt fehl."""
+
+            def _save_visible_account(self, values=None):
+                return False
+
+            def _save_failed(self, title):
+                messages.append(title)
+
+        dashboard = Dashboard(None)
+        dashboard.account_name = "A"
+        self.addCleanup(dashboard.deleteLater)
+        dashboard.show()
+        self.assertFalse(dashboard.close())
+        self.assertEqual(["Einstellungen nicht gespeichert"], messages)
+        self.assertTrue(dashboard.isVisible())
+
+
+class ReadingMirrorTests(UiCase):
+    """Lesestatus und Fortschritt sind getrennte Spalten."""
 
     def test_a_failing_column_does_not_block_the_other_write(self):
         database = CalibreDatabase(
@@ -105,11 +199,8 @@ class ReadingMirrorTests(unittest.TestCase):
         self.assertEqual([("#tolino_progress", {2: 42})], database.api.writes)
 
 
-class InventoryDialogTests(unittest.TestCase):
+class InventoryDialogTests(UiCase):
     """Vergleichsfenster: Aufbau, Auswahl je Zeile, Gelesen-Markierung."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def _dialog(self, rows=None):
         return self.ui.dialogs.InventoryDialog(
@@ -126,9 +217,7 @@ class InventoryDialogTests(unittest.TestCase):
 
     def test_marked_rows_can_be_set_to_unread(self):
         dialog = self._dialog()
-        select_rows(dialog.table, [0])
-        dialog.set_column_for_marked_rows("read", False,
-                                         "sind bereits ungelesen")
+        mark_unread(dialog)
         self.assertEqual([("d1", 1, False, UUID)],
                          dialog.selected_read_changes())
         self.assertEqual(1, dialog._selection_counts()["unread"])
@@ -136,9 +225,7 @@ class InventoryDialogTests(unittest.TestCase):
 
     def test_clearing_the_selection_leaves_no_work(self):
         dialog = self._dialog()
-        select_rows(dialog.table, [0])
-        dialog.set_column_for_marked_rows("read", False,
-                                         "sind bereits ungelesen")
+        mark_unread(dialog)
         dialog.clear_all_selection()
         self.assertEqual([], dialog.selected_read_changes())
         self.assertEqual(0, dialog._selection_counts()["work"])
@@ -152,9 +239,7 @@ class InventoryDialogTests(unittest.TestCase):
         self.assertEqual(1, clicked._selection_counts()["unread"])
 
         chosen = self._dialog()
-        select_rows(chosen.table, [0])
-        chosen.set_column_for_marked_rows("read", False,
-                                          "sind bereits ungelesen")
+        mark_unread(chosen)
         self.assertEqual(chosen.selected_read_changes(),
                          clicked.selected_read_changes())
 
@@ -198,8 +283,7 @@ class InventoryDialogTests(unittest.TestCase):
         rows[0]["tolino_id"] = ""
         dialog = self._dialog(rows)
         select_rows(dialog.table, [0])
-        dialog.set_column_for_marked_rows("read", True,
-                                         "sind schon gelesen")
+        dialog.set_column_for_marked_rows("read", True, "sind schon gelesen")
         self.assertEqual([], dialog.selected_read_changes())
 
 
@@ -220,11 +304,8 @@ def two_books():
     return compare_inventory({1: first, 2: second}, {}, cloud, ["EPUB"])
 
 
-class DestructiveSelectionTests(unittest.TestCase):
+class DestructiveSelectionTests(UiCase):
     """Loeschen ist destruktiv: nur ausgewaehlte, konkrete Cloud-Kopien."""
-
-    def setUp(self):
-        self.ui = ui_module_for(self, qt_stub=real_qt_stub())
 
     def dialog(self, rows=None):
         return self.ui.dialogs.InventoryDialog(
@@ -411,8 +492,7 @@ class DownloadSaveTests(unittest.TestCase):
         self.assertTrue(shown.called)
 
     def test_html_and_empty_bodies_are_not_saved(self):
-        for label, data in (("html", b"<html>Fehler</html>"),
-                            ("leer", b"")):
+        for label, data in (("html", b"<html>Fehler</html>"), ("leer", b"")):
             with self.subTest(label):
                 path, messages = self.save("%s.epub" % label, data)
                 self.assertFalse(os.path.exists(path))
@@ -453,11 +533,8 @@ class ConfirmationTests(unittest.TestCase):
         self.assertIn("in Calibre bleibt", text)
 
     def test_replacing_more_than_twenty_books_names_the_rest(self):
-        def job(label):
-            return types.SimpleNamespace(label=lambda: label, old_id="d1")
-
         self.ask(self.box.Yes)
-        jobs = [job("Buch %d" % number) for number in range(22)]
+        jobs = [job("Buch %d" % number, "d1") for number in range(22)]
         self.assertTrue(self.parts.confirm_replacements(None, jobs))
         text = self.question_text()
         self.assertIn("Lesestatus", text)
@@ -468,8 +545,7 @@ class ConfirmationTests(unittest.TestCase):
 
     def test_no_returns_false_and_yes_returns_true(self):
         job = types.SimpleNamespace(label=lambda: "Der Schwarm", old_id="d1")
-        for answer, expected in ((self.box.No, False),
-                                 (self.box.Yes, True)):
+        for answer, expected in ((self.box.No, False), (self.box.Yes, True)):
             with self.subTest(answer=answer):
                 self.ask(answer)
                 self.assertEqual(
@@ -533,9 +609,6 @@ class ConfirmationTests(unittest.TestCase):
     def test_an_accepted_replacement_confirmation_starts_the_same_jobs(self):
         self.ask(self.box.Yes)
 
-        def job(label, old_id=None):
-            return types.SimpleNamespace(label=lambda: label, old_id=old_id)
-
         jobs = [job("Der Schwarm", "d1"), job("Nur in Calibre")]
         stub = self.start_sync(self.sync_stub(), {
             "jobs": jobs, "removals": [], "meta_updates": [],
@@ -550,9 +623,6 @@ class ConfirmationTests(unittest.TestCase):
 
     def test_a_cancelled_replacement_confirmation_starts_no_worker(self):
         self.ask(self.box.No)
-
-        def job(label, old_id=None):
-            return types.SimpleNamespace(label=lambda: label, old_id=old_id)
 
         context = RunContext.from_values(
             {"account_name": "A", "preferred_formats": ["EPUB"]})
@@ -572,7 +642,3 @@ class ConfirmationTests(unittest.TestCase):
         text = self.question_text()
         self.assertIn("Der Schwarm", text)
         self.assertNotIn("Ohne Kopie", text)
-
-
-if __name__ == "__main__":
-    unittest.main()

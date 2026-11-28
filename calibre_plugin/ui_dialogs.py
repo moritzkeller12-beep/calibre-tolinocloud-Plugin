@@ -10,7 +10,7 @@ from qt.core import (QCheckBox, QComboBox, QDialog, QEvent, QFileDialog,
 from .ui_common import _set_enabled, gui_guard, start_call
 from .planning import plural
 from calibre.gui2 import error_dialog, info_dialog
-from .comparison import comparison_sort_key, sort_comparison_rows
+from .comparison import comparison_sort_key
 from .library import TOLINO_IGNORE_COLUMN
 from .tolino import report_error
 
@@ -20,24 +20,17 @@ def _selected_rows(table):
     return [index.row() for index in table.selectionModel().selectedRows()]
 
 
-def _by_title(row):
-    return (str(row.get("title") or "").casefold(),
-            str(row.get("authors") or "").casefold())
+def _info(dialog, title, text):
+    QMessageBox.information(dialog, title, text)
 
 
-def _by_authors(row):
-    return (str(row.get("authors") or "").casefold(),
-            str(row.get("title") or "").casefold())
+def _by_pair(first, second):
+    return lambda row: (str(row.get(first) or "").casefold(),
+                        str(row.get(second) or "").casefold())
 
 
-def download_target(path, data):
-    """Dateiendung an den gelieferten Inhalt anpassen (EPUB/PDF)."""
-    path = str(path)
-    if path.casefold().endswith(".epub") and data[:4] == b"%PDF":
-        return path[:-5] + ".pdf"
-    if path.casefold().endswith(".pdf") and data[:4] == b"PK\x03\x04":
-        return path[:-4] + ".epub"
-    return path
+_by_title = _by_pair("title", "authors")
+_by_authors = _by_pair("authors", "title")
 
 
 def _confirm_overwrite(parent, path):
@@ -60,12 +53,13 @@ _by_tolino_id = _by_field("tolino_id")
 _by_uuid = _by_field("uuid")
 
 
-def _by_calibre(row):
-    return (0 if row.get("book_id") is not None else 1,) + _by_title(row)
+def _by_presence(is_present):
+    """Zeilen mit vorhandenem Feld zuerst, innerhalb dessen nach Titel."""
+    return lambda row: (0 if is_present(row) else 1,) + _by_title(row)
 
 
-def _by_cloud(row):
-    return (0 if row.get("tolino_id") else 1,) + _by_title(row)
+_by_calibre = _by_presence(lambda row: row.get("book_id") is not None)
+_by_cloud = _by_presence(lambda row: bool(row.get("tolino_id")))
 
 
 def _metadata_first(row):
@@ -73,9 +67,7 @@ def _metadata_first(row):
             + comparison_sort_key(row)[2:])
 
 
-def _read_first(row):
-    return ((0 if row.get("read") else 1,)
-            + _by_title(row))
+_read_first = _by_presence(lambda row: bool(row.get("read")))
 
 
 def _by_progress(row):
@@ -97,9 +89,10 @@ class _Column(NamedTuple):
     technical: bool = False
 
 
-_READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
 _READ_COLUMN_TOOLTIP = ("Auswahl = gelesen; keine Auswahl = ungelesen. Die "
                         "Calibre-Spalte #tolino_read ist nur informativ.")
+
+
 class _ActionSpec(NamedTuple):
     """Eine Auswahlspalte: Schlüssel, Titel, Tooltip, Sortierung, Texte."""
 
@@ -185,16 +178,14 @@ class _CellCheckDelegate(QStyledItemDelegate):
         if event.button() != Qt.MouseButton.LeftButton:
             return False
         flags = model.flags(index)
-        if not (flags & Qt.ItemFlag.ItemIsUserCheckable):
-            return False
-        if not (flags & Qt.ItemFlag.ItemIsEnabled):
+        if not (flags & (Qt.ItemFlag.ItemIsUserCheckable
+                         | Qt.ItemFlag.ItemIsEnabled)):
             return False
         state = index.data(Qt.ItemDataRole.CheckStateRole)
         previous = state
         checked = (getattr(state, "value", state)
                    == Qt.CheckState.Checked.value)
-        state = (Qt.CheckState.Unchecked if checked
-                 else Qt.CheckState.Checked)
+        state = (Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
         changed = model.setData(index, state, Qt.ItemDataRole.CheckStateRole)
         if changed:
             self._last_toggle = (model, index, previous)
@@ -219,7 +210,7 @@ class InventoryDialog(QDialog):
         for spec in _ACTION_SPECS for enabled in (True, False)
     }
     ACTION_TOOLTIPS = {spec.key: spec.tooltip for spec in _ACTION_SPECS}
-    ACTION_TOOLTIPS["read"] = (_READ_TOOLTIP
+    ACTION_TOOLTIPS["read"] = (_READ_COLUMN_TOOLTIP
                                + " Im ausgewählten tolino-Konto änderbar.")
     DATA_COLUMNS = (
         _Column("Calibre", "Buch in Calibre vorhanden.", _by_calibre),
@@ -310,16 +301,11 @@ class InventoryDialog(QDialog):
         Upload-Vorschlag.
         """
         caps = row_capabilities(row)
-        if not caps["usable"]:
-            return (False, False)
-        # Bei unsicheren Zuordnungen könnte ein Upload Duplikate erzeugen.
-        if row.get("status") == "review":
+        if not caps["usable"] or row.get("status") == "review":
             return (False, False)
         if row.get("book_id") is None or not row.get("tolino_id"):
             if row.get("stale_cloud_id"):
                 return (False, False)
-            return (caps["upload"], False)
-        if row.get("status") == "new_in_calibre":
             return (caps["upload"], False)
         if row.get("status") == "changed":
             if row.get("file_changed"):
@@ -344,8 +330,7 @@ class InventoryDialog(QDialog):
         self.confirm = None
         self.action_feedback = None
         self._prepare_rows(rows)
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_QuitOnClose, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setMinimumSize(640, 460)
         self.resize(960, 560)
         layout = QVBoxLayout(self)
@@ -366,7 +351,7 @@ class InventoryDialog(QDialog):
             # Die Calibre-Spalte wird nur angezeigt. Die Auswahl folgt dem
             # Lesestatus des aktuell ausgewählten Tolino-Kontos.
             self.rows.append(row)
-        self.rows = sort_comparison_rows(self.rows)
+        self.rows = sorted(self.rows, key=comparison_sort_key)
 
     def _build_header(self, layout):
         """Einleitung, Zusammenfassung und Hinweis zu Automatiken."""
@@ -399,8 +384,7 @@ class InventoryDialog(QDialog):
             self.group_filter.addItem(label, key)
         self.group_filter.setToolTip(
             "Filtert nach Aktion, Cloud-Bestand, Prüfung oder unverändert.")
-        self.group_filter.currentIndexChanged.connect(
-            self._apply_group_filter)
+        self.group_filter.currentIndexChanged.connect(self._apply_group_filter)
         self.recommend = QPushButton("Empfohlene Aktionen auswählen")
         self.recommend.setToolTip(
             "Wählt Upload oder Metadaten für eindeutig zugeordnete Bücher.")
@@ -431,15 +415,13 @@ class InventoryDialog(QDialog):
             QTableWidget.SelectionMode.ExtendedSelection)
         for index, column in enumerate(self.COLUMNS):
             self.table.horizontalHeaderItem(index).setToolTip(column.tooltip)
-        # Spaltenkopf-Klick sortiert (QTableWidget-eigenes Sortieren würde
-        # die Check-Zellen nicht mit den Zeilen mitziehen -- alles wird
-        # deshalb über _rebuild_table neu aufgebaut).
+        # Spaltenkopf-Klick sortiert; QTableWidget-eigenes Sortieren zoege die
+        # Check-Zellen nicht mit -- deshalb baut _rebuild_table neu auf.
         self._sort_column = 0
         self._sort_descending = False
         table_header = self.table.horizontalHeader()
         table_header.setSortIndicatorShown(True)
-        table_header.setSortIndicator(
-            0, Qt.SortOrder.AscendingOrder)
+        table_header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         table_header.sectionClicked.connect(self._sort_by_column)
         self.table.itemChanged.connect(self._item_changed)
         self._rebuild_table(self.rows, resize_columns=True)
@@ -453,24 +435,19 @@ class InventoryDialog(QDialog):
 
         self.technical_toggle = QCheckBox(
             "Technische Details anzeigen (ISBN, tolino-ID, UUID)")
-        self.technical_toggle.setToolTip(
-            "Zeigt ISBN, tolino-ID und UUID.")
+        self.technical_toggle.setToolTip("Zeigt ISBN, tolino-ID und UUID.")
         self.technical_toggle.toggled.connect(self._toggle_technical_columns)
         layout.addWidget(self.technical_toggle)
         self._apply_technical_visibility()
 
         buttons = QHBoxLayout()
-        confirm = QPushButton("Synchronisierung starten")
-        confirm.setToolTip(
-            "Überträgt die ausgewählten Änderungen.")
+        self.confirm = QPushButton("Synchronisierung starten")
+        self.confirm.setToolTip("Überträgt die ausgewählten Änderungen.")
         cancel = QPushButton("Abbrechen")
-        cancel.setToolTip(
-            "Schliesst den Vergleich, ohne Änderungen.")
-        confirm.clicked.connect(self.accept)
+        cancel.setToolTip("Schliesst den Vergleich, ohne Änderungen.")
+        self.confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
-        self.confirm = confirm
-        self.cancel = cancel
-        buttons.addWidget(confirm)
+        buttons.addWidget(self.confirm)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
@@ -548,10 +525,9 @@ class InventoryDialog(QDialog):
             if not caps["usable"]:
                 continue
             wanted = tuple(self.default_actions(row))
-            for column, key in enumerate(self.ACTION_KEYS[:2]):
-                checked = bool(wanted[column]) and caps[key]
-                row[key] = checked
-                self._set_check_quietly(index, column, checked)
+            for key, wanted_value in zip(self.ACTION_KEYS[:2], wanted):
+                self._set_row_choice(index, key,
+                                     bool(wanted_value) and caps[key], caps)
         self._update_summary()
 
     def automatic_actions_enabled(self):
@@ -599,10 +575,9 @@ class InventoryDialog(QDialog):
         """Markierte (Index, Zeile)-Paare -- oder Hinweis, wenn keine markiert ist."""
         marked = _selected_rows(self.table)
         if not marked:
-            QMessageBox.information(
-                self, "Aktionen für markierte Bücher",
-                "Markiere zuerst mindestens ein Buch in der Tabelle. "
-                "Mehrere Bücher wählst du mit Strg-/Shift-Klick aus.")
+            _info(self, "Aktionen für markierte Bücher",
+                  "Markiere zuerst mindestens ein Buch in der Tabelle. "
+                  "Mehrere Bücher wählst du mit Strg-/Shift-Klick aus.")
             return []
         return [(index, self.rows[index]) for index in marked
                 if 0 <= index < len(self.rows)]
@@ -656,10 +631,9 @@ class InventoryDialog(QDialog):
         if not changed:
             self.action_feedback.setText("")
             count = skipped or len(marked)
-            QMessageBox.information(
-                self, "Nichts geändert",
-                "Nichts geändert: %d markierte %s %s."
-                % (count, plural(count, "Buch", "Bücher"), summary))
+            _info(self, "Nichts geändert",
+                  "Nichts geändert: %d markierte %s %s."
+                  % (count, plural(count, "Buch", "Bücher"), summary))
             return
         feedback = "%s für %d von %d markierten Büchern" % (
             self.ACTION_LABELS.get((key, bool(value)), "Aktion ausgeführt"),
@@ -765,8 +739,7 @@ class InventoryDialog(QDialog):
         if row.get("delete_cloud"):
             explanation = (explanation + " Wird beim Start aus tolino gelöscht.").strip()
         progress = row.get("progress")
-        progress_text = (progress.text if progress is not None
-                         else "")
+        progress_text = (progress.text if progress is not None else "")
         return (
             "✓" if has_book else "",
             "✓" if in_cloud else "",
@@ -852,23 +825,19 @@ class InventoryDialog(QDialog):
         Es werden nur Tabellenzeilen versteckt; `self.rows` bleibt die
         vollstaendige Liste, damit Auswahl und Sortierung unberuehrt bleiben.
         """
-        combo = self.group_filter
-        selected = combo.currentData()
+        selected = self.group_filter.currentData()
         for index, row in enumerate(self.rows):
             visible = selected is None or row.get("group") == selected
             self.table.setRowHidden(index, not visible)
 
     def _selection_counts(self):
-        """Alle Zahlen der Zusammenfassung in EINEM Durchlauf über die Zeilen.
-
-        Frueher zaehlten vier Methoden dieselben Zeilen je sechsmal -- bei
-        jedem Klick und nach jedem Neuaufbau.
-        """
+        """Alle Zahlen der Zusammenfassung in EINEM Durchlauf über die Zeilen."""
         uploads = metadata = 0
         marked_read = marked_unread = deletions = undecided = 0
-        review_groups = ("review", "duplicate_tolino", "not_matchable")
         for row in self.rows:
-            if row.get("group") in review_groups:
+            # `group` traegt nur die Werte aus `comparison_group` bzw.
+            # "ignored"; die Statusnamen aus «zu pruefen» kommen hier nie an.
+            if row.get("group") == "review":
                 undecided += 1
             caps = row_capabilities(row)
             if caps["delete"] and row.get("delete_cloud"):
@@ -938,16 +907,14 @@ class InventoryDialog(QDialog):
         """
         selected = _selected_rows(self.table)
         if not selected:
-            QMessageBox.information(
-                self, "Buch auswählen",
-                "Markiere zuerst das Buch, für das du diese Aktion "
-                "ausführen möchtest.")
+            _info(self, "Buch auswählen",
+                  "Markiere zuerst das Buch, für das du diese Aktion "
+                  "ausführen möchtest.")
             return None
         if len(selected) > 1:
-            QMessageBox.information(
-                self, "Ein Buch auswählen",
-                "Diese Aktion gilt nur für ein Buch. Markiere genau ein "
-                "Buch in der Tabelle.")
+            _info(self, "Ein Buch auswählen",
+                  "Diese Aktion gilt nur für ein Buch. Markiere genau ein "
+                  "Buch in der Tabelle.")
             return None
         row_index = selected[0]
         if row_index >= len(self.rows):
@@ -982,17 +949,15 @@ class InventoryDialog(QDialog):
             return
         tolino_id = row.get("tolino_id")
         if not tolino_id:
-            QMessageBox.information(
-                self, "Buch nicht in tolino vorhanden",
-                "Dieses Buch kann nicht aus tolino heruntergeladen werden, "
-                "weil es im ausgewählten Konto nicht vorhanden ist.")
+            _info(self, "Buch nicht in tolino vorhanden",
+                  "Dieses Buch kann nicht aus tolino heruntergeladen werden, "
+                  "weil es im ausgewählten Konto nicht vorhanden ist.")
             return
         # Erst den Speicherort erfragen, dann laden: ein Abbruch im
         # Dateidialog soll keinen Download ausloesen.
         title = str(row.get("title") or "tolino-book")
         title = re.sub(r'[\\/:*?"<>|]', "_", title).strip(" .") or "tolino-book"
-        extension = ".epub"
-        suggested = title + extension
+        suggested = title + ".epub"
         path, _ = QFileDialog.getSaveFileName(
             self, "Buch speichern", suggested,
             "EPUB (*.epub);;PDF (*.pdf)")
@@ -1025,7 +990,12 @@ class InventoryDialog(QDialog):
                 "Die Cloud-Antwort ist keine EPUB- oder PDF-Datei. "
                 "Gespeichert wurde nichts.", show=True)
             return
-        target = download_target(path, data)
+        # Dateiendung an den gelieferten Inhalt anpassen (EPUB/PDF).
+        target = str(path)
+        if target.casefold().endswith(".epub") and data[:4] == b"%PDF":
+            target = target[:-5] + ".pdf"
+        if target.casefold().endswith(".pdf") and data[:4] == b"PK\x03\x04":
+            target = target[:-4] + ".epub"
         if target != path and os.path.exists(target):
             # Die nachtraeglich angepasste Endung darf keine vorhandene
             # Datei ohne Rueckfrage ueberschreiben.
@@ -1040,8 +1010,7 @@ class InventoryDialog(QDialog):
                 handle.write(data)
         except OSError as exc:
             message = report_error(exc, "Speichern")
-            error_dialog(self, "Speichern fehlgeschlagen",
-                         message, show=True)
+            error_dialog(self, "Speichern fehlgeschlagen", message, show=True)
             return
         info_dialog(self, "Buch gespeichert", "Gespeichert unter: %s" % path,
                     show=True, show_copy_button=False)
@@ -1072,10 +1041,9 @@ class InventoryDialog(QDialog):
                 continue
             candidates.append(row)
         if not candidates:
-            QMessageBox.information(
-                self, "Nichts zu löschen",
-                "Es wurde nichts geändert: Die markierten Bücher liegen nicht "
-                "in tolino oder sind bereits zum Löschen markiert.")
+            _info(self, "Nichts zu löschen",
+                  "Es wurde nichts geändert: Die markierten Bücher liegen nicht "
+                  "in tolino oder sind bereits zum Löschen markiert.")
             return
         for row in candidates:
             row["delete_cloud"] = True
@@ -1093,9 +1061,8 @@ class InventoryDialog(QDialog):
             if row.pop("delete_cloud", None) is not None:
                 changed += 1
         if not changed:
-            QMessageBox.information(
-                self, "Löschmarkierung aufheben",
-                "Es wurde nichts geändert: Die markierten Bücher sind nicht "
-                "zum Löschen vorgemerkt.")
+            _info(self, "Löschmarkierung aufheben",
+                  "Es wurde nichts geändert: Die markierten Bücher sind nicht "
+                  "zum Löschen vorgemerkt.")
             return
         self._rebuild_table(self.rows)

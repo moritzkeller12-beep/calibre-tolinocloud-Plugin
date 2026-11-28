@@ -3,19 +3,12 @@
 Der Client ist ein Doppel an der Netznaht; Vergleich, Zustandsfuehrung und
 Kontospeicherung laufen im Produktivcode.
 """
-import shutil
-import tempfile
-import unittest
-import uuid
-from unittest.mock import patch
 
 from .. import config
 from ..errors import TolinoAuthError, TolinoError
 from ..run_context import RunContext
-from ._support import real_qt_stub, ui_module_for
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
+from ._support import (OTHER, UUID, PreferencesCase, break_settings,
+                       execute_worker, real_qt_stub, ui_module_for)
 BOOK = {"uuid": UUID, "title": "Der Schwarm", "authors": "Frank Schätzing",
         "isbn": "9780306406157", "formats": ["EPUB"], "ignored": False}
 CLOUD = {"tolino_id": "d1", "title": "Der Schwarm",
@@ -57,13 +50,11 @@ class FakeClient:
         return dict(self.progress_result)
 
 
-class PrepareCase(unittest.TestCase):
+class PrepareCase(PreferencesCase):
     """Frischer Einstellungsspeicher und geladenes UI-Modul je Test."""
 
     def setUp(self):
-        self._original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-        self.addCleanup(setattr, config, "PREFERENCES", self._original)
+        super().setUp()
         self.ui = ui_module_for(self, qt_stub=real_qt_stub())
         self.context = RunContext.from_values(
             {"account_name": "A", "preferred_formats": ["EPUB"]},
@@ -73,13 +64,7 @@ class PrepareCase(unittest.TestCase):
         worker = self.ui.workers.PrepareWorker(
             self.context, {1: dict(BOOK)} if metadata is None else metadata,
             {} if state is None else state)
-        emitted = {}
-        worker.ready.connect(lambda payload: emitted.setdefault("ready", payload))
-        worker.failed.connect(lambda message: emitted.setdefault("failed", message))
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
-        return worker, emitted
+        return worker, execute_worker(worker, client, self.ui)
 
 
 class ComparisonTests(PrepareCase):
@@ -113,9 +98,7 @@ class ComparisonTests(PrepareCase):
 
     def test_a_failed_comparison_save_is_not_reported_as_ready(self):
         config.save_account("A", {"refresh_token": "tok-A"})
-        broken = tempfile.mkdtemp(prefix="tolino-unreadable-")
-        self.addCleanup(shutil.rmtree, broken, True)
-        config.PREFERENCES.file_path = broken
+        break_settings(self)
         _worker, emitted = self.prepare(FakeClient([CLOUD]))
         self.assertNotIn("ready", emitted)
         self.assertIn("gespeichert", str(emitted.get("failed")))
@@ -158,23 +141,17 @@ class OptionalDataTests(PrepareCase):
         self.assertNotIn("progress", payload["state"].get(UUID, {})
                          .get("reading", {}))
 
-    def test_a_rejected_login_while_reading_the_status_fails_the_run(self):
+    def test_a_rejected_login_while_reading_a_status_fails_the_run(self):
         """Ein abgelehnter Token ist kein «unbekannter» Lesewert."""
-        config.save_account("A", {"refresh_token": "tok-A"})
-        _worker, emitted = self.prepare(FakeClient(
-            [CLOUD], read_error=TolinoAuthError("abgelehnt", code="A01")))
-        self.assertNotIn("ready", emitted)
-        self.assertIn("abgelehnt", emitted["failed"])
-        self.assertEqual({}, config.account_by_name("A")["state"])
-
-    def test_a_rejected_login_while_reading_the_progress_fails_the_run(self):
-        config.save_account("A", {"refresh_token": "tok-A"})
-        _worker, emitted = self.prepare(FakeClient(
-            [CLOUD], progress_error=TolinoAuthError("abgelehnt",
-                                                    code="A01")))
-        self.assertNotIn("ready", emitted)
-        self.assertIn("abgelehnt", emitted["failed"])
-        self.assertEqual({}, config.account_by_name("A")["state"])
+        for failure in ("read_error", "progress_error"):
+            with self.subTest(failure=failure):
+                config.save_account("A", {"refresh_token": "tok-A"})
+                _worker, emitted = self.prepare(FakeClient(
+                    [CLOUD], **{failure: TolinoAuthError("abgelehnt",
+                                                         code="A01")}))
+                self.assertNotIn("ready", emitted)
+                self.assertIn("abgelehnt", emitted["failed"])
+                self.assertEqual({}, config.account_by_name("A")["state"])
 
     def test_progress_is_not_requested_while_the_read_status_is_unknown(self):
         client = FakeClient([CLOUD], read_error=TolinoError("weg"))
@@ -189,13 +166,8 @@ class CancelAndStaleTests(PrepareCase):
     def test_a_cancel_before_the_cloud_call_reports_cancellation(self):
         client = FakeClient([CLOUD])
         worker = self.ui.workers.PrepareWorker(self.context, {1: dict(BOOK)}, {})
-        emitted = {}
-        worker.ready.connect(lambda payload: emitted.setdefault("ready", payload))
-        worker.failed.connect(lambda message: emitted.setdefault("failed", message))
         worker.cancel()
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        emitted = execute_worker(worker, client, self.ui)
         self.assertNotIn("ready", emitted)
         self.assertEqual(self.ui.common.CANCEL_MESSAGE, emitted["failed"])
         self.assertEqual([], client.calls)
@@ -221,7 +193,3 @@ class CancelAndStaleTests(PrepareCase):
             FakeClient(inventory_error=TolinoError("weg")), state=state)
         self.assertNotIn("ready", emitted)
         self.assertEqual("weg", state[UUID]["tolino_id"])
-
-
-if __name__ == "__main__":
-    unittest.main()

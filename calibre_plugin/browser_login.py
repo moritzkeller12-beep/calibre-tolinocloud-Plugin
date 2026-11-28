@@ -6,10 +6,9 @@ from .partners import UNKNOWN_SHOP, partner_from_token
 from .tolino import (RELOGIN, RELOGIN_THEN, TolinoAuthError,
                      TolinoClient, log_info, log_warning,
                      normalize_hardware_id, sanitize_error)
-from .jwt import payload
+from .jwt import issued_at, payload
 from .token_candidates import (
-    _candidate_age_note, _filter_live_candidates,
-    _refresh_token_iat_sort_key, _normalize_live_grab,
+    _candidate_age_note, _filter_live_candidates, _normalize_live_grab,
 )
 
 LOGIN_TIMEOUT = 300
@@ -21,25 +20,20 @@ def _exchange_grabbed_token(hardware, grabbed, fresh):
     Returns (refresh, hardware, partner_id). Ohne erkennbaren Shop wird
     nichts getauscht -- ein geratener Endpunkt verbrennt den Einmal-Token.
     """
-    # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sind
-    # kurzlebig und haben denselben JWT-Aufbau -- ein Access-Token am
-    # Token-Endpunkt "zu verbrauchen" hilft niemandem und der eigentliche
-    # Refresh-Token wird dann womoeglich gar nicht erst probiert.
-    def _is_refresh_typ(token):
-        claims = payload(token) or {}
-        return str(claims.get("typ", "")).casefold() == "refresh"
-
+    # Keycloak-Refresh-JWTs tragen "typ": "Refresh"; Access-Tokens sehen
+    # gleich aus. Ein Access-Token am Token-Endpunkt zu verbrauchen hilft
+    # niemandem und der echte Refresh-Token wuerde gar nicht probiert.
     known = {token: partner_from_token(token) for token in fresh}
     if not any(known.values()):
         raise TolinoAuthError(UNKNOWN_SHOP + RELOGIN, code="B03")
     candidate = min((token for token in fresh if known[token]),
-                    key=lambda token: (not _is_refresh_typ(token),
-                                       -_refresh_token_iat_sort_key(token)))
+                    key=lambda token: (
+                        str((payload(token) or {}).get("typ", "")).casefold()
+                        != "refresh", -(issued_at(token) or 0.0)))
     partner_id = known[candidate]
-    hardware_candidates = [normalize_hardware_id(value)
-                           for value in (grabbed.get("hardware") or ())]
-    hardware_candidates = [value for value in hardware_candidates if value]
-    hardware_id = hardware_candidates[0] if hardware_candidates else hardware
+    hardware_id = next((value for value in (
+        normalize_hardware_id(item) for item in (grabbed.get("hardware") or ()))
+        if value), hardware)
     client = TolinoClient(partner_id, hardware_id or "")
     client.refresh = candidate
     try:

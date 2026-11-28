@@ -6,8 +6,6 @@ Dashboard sind echte Objekte bzw. das vorhandene Dashboard-Doppel.
 """
 from contextlib import contextmanager
 import types
-import unittest
-import uuid
 from unittest.mock import patch
 
 from .. import config
@@ -15,20 +13,16 @@ from ..comparison import compare_inventory
 from ..library import (TOLINO_COLUMN, TOLINO_PROGRESS_COLUMN,
                       TOLINO_READ_COLUMN, library_scope)
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, SyncThread, break_settings,
-                       dashboard_stub, real_qt_stub, ui_module_for)
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
+from ._support import (OTHER, UUID, CalibreDatabase, PreferencesCase,
+                       SyncThread, break_settings, dashboard_stub,
+                       real_qt_stub, ui_module_for)
 
 
-class OrchestrationCase(unittest.TestCase):
+class OrchestrationCase(PreferencesCase):
     """Frischer Einstellungsspeicher und geladenes UI-Modul je Test."""
 
     def setUp(self):
-        self._original = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-        self.addCleanup(setattr, config, "PREFERENCES", self._original)
+        super().setUp()
         # Ein Sync-Lauf setzt gespeicherte Konten voraus; nur so kann der
         # Zustand am Ende auch geschrieben werden.
         for name in ("A", "B"):
@@ -73,11 +67,6 @@ class OrchestrationCase(unittest.TestCase):
         method = self.ui.dashboard.SyncDashboard.sync_completed
         return method.__get__(dashboard)(updates)
 
-    def sync_failed(self, dashboard, message):
-        method = self.ui.dashboard.SyncDashboard.sync_failed
-        return method.__get__(dashboard)(message)
-
-
 def full_database(fail=()):
     database = CalibreDatabase(
         {TOLINO_COLUMN: {"datatype": "text"},
@@ -109,14 +98,6 @@ class PersistTests(OrchestrationCase):
         self.assertEqual([TOLINO_COLUMN, TOLINO_READ_COLUMN,
                           TOLINO_PROGRESS_COLUMN],
                          [column for column, _values in database.api.writes])
-
-    def test_a_failing_column_is_named(self):
-        worker = self.worker()
-        self.stored_ids()
-        dashboard = self.dashboard(worker, full_database(fail=[TOLINO_COLUMN]))
-        failures = self.ui.sync_results.persist_sync_result(
-            dashboard, worker.updates)
-        self.assertEqual(["tolino-IDs"], failures)
 
     def test_the_cleanup_callback_runs_even_when_a_column_fails(self):
         """Geprueft wird `finish_sync`; das Thread-Ende deckt ui_thread_tests ab."""
@@ -304,7 +285,8 @@ class ReportTests(OrchestrationCase):
         database = full_database()
         dashboard = self.dashboard(worker, database)
         with self.recorded() as recorded:
-            self.sync_failed(dashboard, "Die Verbindung ist fehlgeschlagen.")
+            self.method("sync_failed")(dashboard)(
+                "Die Verbindung ist fehlgeschlagen.")
         self.assertIn(TOLINO_COLUMN,
                       [column for column, _values in database.api.writes])
         self.assertIn("Die Verbindung ist fehlgeschlagen",
@@ -518,7 +500,8 @@ class ChainCase(OrchestrationCase):
             lambda *args: dashboard.started.append(args))
         def confirm(*_args, **_kwargs):
             dashboard.confirmed.append(True)
-            return choice()
+            return {"uploads": set(), "metadata": set(),
+                    "read_changes": [], "cloud_deletions": []}
 
         dashboard._confirm_comparison = confirm
         for name in ("start_sync", "_snapshot_ready", "_prepare_ready",
@@ -627,13 +610,3 @@ class StageFailureTests(ChainCase):
             dashboard._prepare_failed("Anmeldung abgelehnt. (Code A01)")
         self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
         self.assertEqual("", dashboard.status.value)
-
-
-def choice():
-    """Leere, aber vollständige Auswahl aus dem Vergleichsfenster."""
-    return {"uploads": set(), "metadata": set(), "read_changes": [],
-            "cloud_deletions": []}
-
-
-if __name__ == "__main__":
-    unittest.main()

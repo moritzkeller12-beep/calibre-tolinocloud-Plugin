@@ -3,8 +3,6 @@
 Der Worker wird mit einem Client-Doppel an der Netznaht ausgeführt; alles
 andere (Planung, Zustand, Signale, Bericht) ist Produktivcode.
 """
-import unittest
-import uuid
 from unittest.mock import patch
 
 from .. import config
@@ -12,11 +10,9 @@ from ..comparison import content_fingerprint
 from ..errors import TolinoApiError, TolinoAuthError, TolinoError
 from ..planning import MetaUpdateRecord, SyncJob
 from ..run_context import RunContext
-from ._support import (CalibreDatabase, break_settings, real_qt_stub,
+from ._support import (OTHER, UUID, CalibreDatabase, PreferencesCase,
+                       break_settings, execute_worker, real_qt_stub, record,
                        ui_module_for)
-
-UUID = "11111111-1111-4111-8111-111111111111"
-OTHER = "22222222-2222-4222-8222-222222222222"
 
 
 class FakeClient:
@@ -92,14 +88,11 @@ class FakeClient:
         return True
 
 
-class WorkerCase(unittest.TestCase):
+class WorkerCase(PreferencesCase):
     """Laedt die Oberflaeche (fuer die echten Worker-Klassen) je Test neu."""
 
     def setUp(self):
-        self._original_preferences = config.PREFERENCES
-        config.PREFERENCES = config.JSONConfig("test-%s" % uuid.uuid4().hex)
-        self.addCleanup(setattr, config, "PREFERENCES",
-                        self._original_preferences)
+        super().setUp()
         # Der Lauf sichert seinen Zwischenstand in genau diesem Konto.
         config.save_account("A", {"refresh_token": "tok-A",
                                   "hardware_id": "hw"})
@@ -108,17 +101,16 @@ class WorkerCase(unittest.TestCase):
             {"account_name": "A", "preferred_formats": ["EPUB"]},
             columns={"id": True, "read": True, "progress": True})
 
-    def run_worker(self, client, jobs=(), removals=(), **kwargs):
-        worker = self.ui.workers.SyncWorker(self.context, list(jobs),
-                                            list(removals), **kwargs)
-        emitted = {}
-        worker.completed.connect(
-            lambda *args: emitted.setdefault("completed", args))
-        worker.failed.connect(
-            lambda message: emitted.setdefault("failed", message))
+    def run_with(self, worker, client):
+        """Worker laufen lassen; der Vault liefert das Client-Doppel."""
         with patch.object(self.ui.workers.TOKEN_VAULT, "login",
                           return_value=client):
             worker.run()
+
+    def run_worker(self, client, jobs=(), removals=(), **kwargs):
+        worker = self.ui.workers.SyncWorker(self.context, list(jobs),
+                                            list(removals), **kwargs)
+        emitted = execute_worker(worker, client, self.ui, "completed")
         return worker, emitted
 
     def job(self, book_id, book_uuid, path, title="Titel", old_id=None):
@@ -176,13 +168,8 @@ class UploadTests(WorkerCase):
         client = FakeClient()
         worker = self.ui.workers.SyncWorker(
             self.context, [self.job(1, UUID, "/buch.epub")], [])
-        emitted = {}
-        worker.completed.connect(
-            lambda *args: emitted.setdefault("completed", args))
         worker.cancel()
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        emitted = execute_worker(worker, client, self.ui, "completed")
         self.assertEqual([], client.uploads)
         self.assertEqual([], worker.updates)
         self.assertTrue(worker.outcome["cancelled"])
@@ -217,12 +204,9 @@ class StatePersistenceTests(WorkerCase):
         events = []
         worker.completed.connect(lambda *args: events.append("completed"))
         worker.failed.connect(lambda *args: events.append("failed"))
-        client = FakeClient(upload_results=["neu-1"],
-                            on_upload=worker.cancel)
+        client = FakeClient(upload_results=["neu-1"], on_upload=worker.cancel)
         break_settings(self)
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         self.assertEqual(["failed"], events)
 
 
@@ -262,9 +246,7 @@ class ReadingAndMetadataTests(WorkerCase):
             metadata=metadata,
             state=state)
         client = FakeClient(on_metadata=worker.cancel)
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         # Der Abbruch beendet die Phase nach dem ersten Patch: der bestaetigte
         # Stand muss trotzdem im Konto stehen, sonst gilt das Buch wieder
         # als «changed».
@@ -289,9 +271,7 @@ class ReadingAndMetadataTests(WorkerCase):
             state=state,
             series_map={UUID: "Erste", OTHER: "Zweite"})
         client = FakeClient(on_collection=worker.cancel)
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         # Nur die bestaetigte Zuordnung ist gesichert; die offene bleibt offen.
         self.assertEqual([("d1", "Erste")], client.collections)
         stored = config.account_by_name("A")["state"]
@@ -336,14 +316,22 @@ class DeleteTests(WorkerCase):
         self.assertEqual({}, worker.state)
         self.assertEqual([(7, "")], worker.updates)
 
-    def test_an_unreadable_inventory_is_not_an_already_gone_copy(self):
-        state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
-        client = FakeClient(delete_fail={"d1"},
-                            inventory_error=TolinoError("Bestand weg"))
-        worker, _emitted = self.run_worker(
-            client, state=state, removals=[(UUID, "d1")])
-        self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual("d1", worker.state[UUID]["tolino_id"])
+    def test_a_copy_that_is_not_gone_keeps_the_error_and_the_state(self):
+        cases = (
+            ("Bestand unlesbar", FakeClient(
+                delete_fail={"d1"},
+                inventory_error=TolinoError("Bestand weg"))),
+            ("noch in der Cloud", FakeClient(
+                delete_fail={"d1"},
+                inventory_rows=[{"tolino_id": "d1"}])),
+        )
+        for label, client in cases:
+            with self.subTest(label):
+                state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
+                worker, _emitted = self.run_worker(
+                    client, state=state, removals=[(UUID, "d1")])
+                self.assertEqual(1, worker.outcome["failed"])
+                self.assertEqual("d1", worker.state[UUID]["tolino_id"])
 
     def test_an_auth_failure_while_checking_a_deletion_stops_the_run(self):
         state = {UUID: {"tolino_id": "d1"}, OTHER: {"tolino_id": "d2"}}
@@ -354,15 +342,6 @@ class DeleteTests(WorkerCase):
             client, state=state, removals=[(UUID, "d1"), (OTHER, "d2")])
         self.assertEqual(["d1"], client.deleted)
         self.assertIn("Sitzung beendet", emitted["failed"])
-
-    def test_a_copy_still_in_the_cloud_keeps_the_error_and_the_state(self):
-        state = {UUID: {"tolino_id": "d1", "calibre_id": 7}}
-        client = FakeClient(delete_fail={"d1"},
-                            inventory_rows=[{"tolino_id": "d1"}])
-        worker, _emitted = self.run_worker(
-            client, state=state, removals=[(UUID, "d1")])
-        self.assertEqual(1, worker.outcome["failed"])
-        self.assertEqual("d1", worker.state[UUID]["tolino_id"])
 
     def test_a_failed_deletion_does_not_skip_the_following_one(self):
         state = {UUID: {"tolino_id": "d1", "calibre_id": 1},
@@ -382,24 +361,20 @@ class DeleteTests(WorkerCase):
 class ReplaceTests(WorkerCase):
     """Ersetzen: die alte Kopie wird nur nach echtem neuen Upload geloescht."""
 
-    def test_a_new_copy_deletes_the_previous_cloud_copy(self):
-        state = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
-        client = FakeClient(upload_results=["neu-1"])
-        worker, _emitted = self.run_worker(
-            client, jobs=[self.job(1, UUID, "/buch.epub", old_id="alt")],
-            state=state)
-        self.assertEqual(["alt"], client.deleted)
-        self.assertEqual("neu-1", worker.state[UUID]["tolino_id"])
-        self.assertEqual(1, worker.outcome["deleted"])
-
-    def test_the_same_id_from_the_upload_is_never_deleted(self):
-        state = {UUID: {"tolino_id": "d1", "calibre_id": 1}}
-        client = FakeClient(upload_results=["d1"])
-        worker, _emitted = self.run_worker(
-            client, jobs=[self.job(1, UUID, "/buch.epub", old_id="d1")],
-            state=state)
-        self.assertEqual([], client.deleted)
-        self.assertEqual("d1", worker.state[UUID]["tolino_id"])
+    def test_a_new_copy_deletes_the_previous_id_but_not_the_uploaded_one(self):
+        for old_id, uploaded, deleted in (
+                ("alt", "neu-1", ["alt"]),
+                ("d1", "d1", [])):
+            with self.subTest(old_id=old_id):
+                state = {UUID: {"tolino_id": old_id, "calibre_id": 1}}
+                client = FakeClient(upload_results=[uploaded])
+                worker, _emitted = self.run_worker(
+                    client,
+                    jobs=[self.job(1, UUID, "/buch.epub", old_id=old_id)],
+                    state=state)
+                self.assertEqual(deleted, client.deleted)
+                self.assertEqual(uploaded, worker.state[UUID]["tolino_id"])
+                self.assertEqual(len(deleted), worker.outcome["deleted"])
 
     def test_a_read_mark_never_targets_the_replaced_copy(self):
         state = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
@@ -435,11 +410,7 @@ class FailureTests(WorkerCase):
     def test_an_authentication_error_stops_the_run(self):
         worker = self.ui.workers.SyncWorker(
             self.context, [self.job(1, UUID, "/buch.epub")], [])
-        emitted = {}
-        worker.completed.connect(
-            lambda *args: emitted.setdefault("completed", args))
-        worker.failed.connect(
-            lambda message: emitted.setdefault("failed", message))
+        emitted = record(worker, "completed", "failed")
         with patch.object(self.ui.workers.TOKEN_VAULT, "login",
                           side_effect=TolinoAuthError("abgelaufen", code="A01")):
             worker.run()
@@ -452,14 +423,11 @@ class FailureTests(WorkerCase):
             self.context,
             [self.job(1, UUID, "/erst.epub"),
              self.job(2, OTHER, "/zweit.epub")], [], state={})
-        client = FakeClient(upload_results=["neu-1"],
-                            on_upload=worker.cancel)
+        client = FakeClient(upload_results=["neu-1"], on_upload=worker.cancel)
         emitted = []
         worker.completed.connect(lambda *args: emitted.append("completed"))
         worker.failed.connect(lambda message: emitted.append("failed"))
-        with patch.object(self.ui.workers.TOKEN_VAULT, "login",
-                          return_value=client):
-            worker.run()
+        self.run_with(worker, client)
         self.assertTrue(worker.outcome["cancelled"])
         self.assertEqual([(1, "neu-1")], worker.updates)
         self.assertEqual("not_started", worker.operations[1]["status"])
@@ -493,8 +461,7 @@ class PersistenceTests(WorkerCase):
         config.save_account("A", {"refresh_token": "tok-A"})
         config.save_account("B", {"refresh_token": "tok-B",
                                   "state": {"fremd": {"tolino_id": "x"}}})
-        self.run_worker(FakeClient(),
-                        jobs=[self.job(1, UUID, "/buch.epub")])
+        self.run_worker(FakeClient(), jobs=[self.job(1, UUID, "/buch.epub")])
         self.assertEqual({"fremd": {"tolino_id": "x"}},
                          config.account_by_name("B")["state"])
         self.assertEqual("neu-1",
@@ -537,8 +504,7 @@ class PersistenceTests(WorkerCase):
         duerfen nicht im Eintrag mit der neuen tolino-ID landen.
         """
         start = {UUID: {"tolino_id": "alt", "calibre_id": 1}}
-        config.save_account("A", {"refresh_token": "tok-A",
-                                  "state": start})
+        config.save_account("A", {"refresh_token": "tok-A", "state": start})
 
         def foreign_change():
             stored = config.account_by_name("A")["state"]
@@ -559,8 +525,7 @@ class PersistenceTests(WorkerCase):
         # Das letzte Konto laesst sich nicht entfernen: ein zweites muss her.
         config.save_account("B", {"refresh_token": "tok-B"})
         self.assertTrue(config.remove_account("A"))
-        self.run_worker(FakeClient(),
-                        jobs=[self.job(1, UUID, "/buch.epub")])
+        self.run_worker(FakeClient(), jobs=[self.job(1, UUID, "/buch.epub")])
         self.assertEqual({}, config.account_by_name("A"))
 
 
@@ -570,11 +535,7 @@ class LocalSnapshotTests(WorkerCase):
     def run_snapshot(self, database):
         worker = self.ui.workers.LocalMetadataWorker(
             database, self.context, {"marke": True})
-        emitted = {}
-        worker.ready.connect(
-            lambda payload: emitted.setdefault("ready", payload))
-        worker.failed.connect(
-            lambda message: emitted.setdefault("failed", message))
+        emitted = record(worker, "ready", "failed")
         worker.run()
         return worker, emitted
 
@@ -601,7 +562,3 @@ class LocalSnapshotTests(WorkerCase):
         _worker, emitted = self.run_snapshot(database)
         self.assertEqual({"failed"}, set(emitted))
         self.assertIn("Bibliothek gesperrt", emitted["failed"])
-
-
-if __name__ == "__main__":
-    unittest.main()
