@@ -110,9 +110,6 @@ class ReadState:
         """Übertragen wird nur eine Änderung -- und nur bei bekanntem Stand."""
         return self.known and self.chosen != self.cloud
 
-    def __bool__(self):
-        return self.chosen
-
 
 def _read_flags(tolino_id, read_known, read_ids):
     """Lesestatus einer Zeile: Cloud-Stand und Auswahl in einem Objekt."""

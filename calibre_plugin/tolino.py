@@ -975,8 +975,7 @@ class TolinoClient:
         `mark_read_many` setzt. Damit kann der Bestandsvergleich die
         Spalte «Gelesen» vorbelegen.
         """
-        _revision, patches = self.sync_snapshot()
-        return _sync_data.read_ids(patches)
+        return _sync_data.read_ids(self.sync_snapshot()[1])
 
     def progress_by_id(self):
         """Lesefortschritt je tolino-ID aus denselben sync-data-Daten.
@@ -984,8 +983,7 @@ class TolinoClient:
         Die Werte sind reine Anzeige: Das Plugin schreibt keine Leseposition
         in die Cloud zurück. Der Snapshot wird mit `read_ids` geteilt.
         """
-        _revision, patches = self.sync_snapshot()
-        return _sync_data.reading_progress(patches)
+        return _sync_data.reading_progress(self.sync_snapshot()[1])
 
     def _current_revision(self, revision):
         """Revision fuer einen Schreibvorgang: die aktuelle, nie None.
@@ -1064,5 +1062,4 @@ class TolinoClient:
         Reads sync-data once so the series reconcile only has to
         PATCH genuinely missing assignments.
         """
-        _revision, patches = self.sync_snapshot()
-        return _sync_data.collection_pairs(patches)
+        return _sync_data.collection_pairs(self.sync_snapshot()[1])

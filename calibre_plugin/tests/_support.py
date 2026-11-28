@@ -262,8 +262,7 @@ class SyncThread:
         self.deleted = False
 
     def start(self):
-        for slot in list(self.started.slots):
-            slot()
+        self.started.emit()
 
     def quit(self, *_args):
         self.stopped = True
