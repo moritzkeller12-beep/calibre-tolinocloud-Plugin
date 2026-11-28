@@ -441,14 +441,13 @@ class InventoryDialog(QDialog):
         self._apply_technical_visibility()
 
         buttons = QHBoxLayout()
-        confirm = QPushButton("Synchronisierung starten")
-        confirm.setToolTip("Überträgt die ausgewählten Änderungen.")
+        self.confirm = QPushButton("Synchronisierung starten")
+        self.confirm.setToolTip("Überträgt die ausgewählten Änderungen.")
         cancel = QPushButton("Abbrechen")
         cancel.setToolTip("Schliesst den Vergleich, ohne Änderungen.")
-        confirm.clicked.connect(self.accept)
+        self.confirm.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
-        self.confirm = confirm
-        buttons.addWidget(confirm)
+        buttons.addWidget(self.confirm)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)

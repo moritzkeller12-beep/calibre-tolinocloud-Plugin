@@ -35,8 +35,7 @@ class RunContext:
         values = values if isinstance(values, dict) else {}
         return cls(
             account_name=values.get("account_name") or "",
-            preferred_formats=(values.get("preferred_formats")
-                               or DEFAULT_PREFERRED_FORMATS),
+            preferred_formats=values.get("preferred_formats"),
             columns=columns or {},
             library_scope=library_scope,
         )

@@ -16,11 +16,6 @@ from ..browser_finder import (missing_browser_error, _collect_candidates,
 EXTRA = "/opt/google/chrome/chrome"
 
 
-def which_for(mapping):
-    """``shutil.which`` aus einem Namens-Dict; Unbekanntes fehlt."""
-    return lambda name: mapping.get(name)
-
-
 def run_result(stdout="", returncode=0):
     return types.SimpleNamespace(stdout=stdout, returncode=returncode)
 
@@ -33,7 +28,7 @@ def boundaries(mapping, sandbox=False, files=False, dirs=False, access=False,
                   else patch("os.path.isfile", return_value=files))
     dir_check = (patch("os.path.isdir", side_effect=dirs) if callable(dirs)
                  else patch("os.path.isdir", return_value=dirs))
-    with patch("shutil.which", which_for(mapping)), \
+    with patch("shutil.which", lambda name: mapping.get(name)), \
             patch("calibre_plugin.browser_finder.in_flatpak_sandbox",
                   return_value=sandbox), \
             file_check, dir_check, \
@@ -105,10 +100,6 @@ class FlatpakTests(unittest.TestCase):
         self.assertEqual("denied", status)
 
 
-class FakeKey(tuple):
-    """Registry-Schluessel: (Root, View, Executable) als Identitaet."""
-
-
 class FakeWinreg:
     """Minimales ``winreg``: App-Paths je Root und View."""
 
@@ -125,7 +116,7 @@ class FakeWinreg:
     def OpenKey(self, root, path, _reserved, access):
         executable = path.rsplit("\\", 1)[-1]
         view = access & (self.KEY_WOW64_64KEY | self.KEY_WOW64_32KEY)
-        key = FakeKey((root, view, executable))
+        key = (root, view, executable)
         if key not in self.entries:
             raise OSError(2, "not found")
         self.opened.append(key)

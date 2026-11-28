@@ -675,7 +675,7 @@ class SyncDashboard(DashboardParts, QDialog):
             _planning.syncable_metadata(metadata))
         try:
             selection = self._confirm_comparison(
-                payload["comparison"], context,
+                payload["comparison"],
                 client_factory=lambda: TOKEN_VAULT.login(
                     context.account_name),
                 automatic=len(_planning.plan_collection_updates(
@@ -698,14 +698,11 @@ class SyncDashboard(DashboardParts, QDialog):
             # geschlossenes Fenster und keinen einzigen Upload.
             self._show_prepare_error(exc, context)
 
-    def _confirm_comparison(self, comparison, context, client_factory=None,
-                            automatic=0):
+    def _confirm_comparison(self, comparison, client_factory, automatic):
         """Bestätigungsfenster zeigen; None, wenn es abgebrochen wurde."""
         dialog = InventoryDialog(
             comparison, self,
-            client_factory=(client_factory or
-                            (lambda: TOKEN_VAULT.login(
-                                context.account_name))),
+            client_factory=client_factory,
             options={
                 "automatic": int(automatic or 0),
                 # Für den Hinweis im Fenster: ohne diese Spalte bleiben

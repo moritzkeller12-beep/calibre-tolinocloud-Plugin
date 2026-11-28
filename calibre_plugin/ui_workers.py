@@ -356,12 +356,10 @@ class SyncWorker(_CancellableWorker):
         """Ausgewählten Lesestatus übertragen."""
         self._drop_replaced_read_changes()
         actions = (
-            (read_op, self.read_marks, True,
-             "Als gelesen markieren", "Als gelesen markiert"),
-            (unread_op, self.read_unmarks, False,
-             "Als ungelesen markieren", "Als ungelesen markiert"),
+            (read_op, self.read_marks, True, "Als gelesen markiert"),
+            (unread_op, self.read_unmarks, False, "Als ungelesen markiert"),
         )
-        for operation, book_ids, finished, start_text, done_text in actions:
+        for operation, book_ids, finished, done_text in actions:
             if operation is None:
                 continue
             operation["count"] = len(book_ids)
@@ -372,7 +370,7 @@ class SyncWorker(_CancellableWorker):
                 self._advance()
                 continue
             ok, _result = self._step(
-                operation, start_text,
+                operation, operation["label"],
                 partial(self._client.mark_read_many, book_ids,
                         finished=finished))
             if ok:

@@ -504,7 +504,8 @@ class ChainCase(OrchestrationCase):
             lambda *args: dashboard.started.append(args))
         def confirm(*_args, **_kwargs):
             dashboard.confirmed.append(True)
-            return choice()
+            return {"uploads": set(), "metadata": set(),
+                    "read_changes": [], "cloud_deletions": []}
 
         dashboard._confirm_comparison = confirm
         for name in ("start_sync", "_snapshot_ready", "_prepare_ready",
@@ -613,9 +614,3 @@ class StageFailureTests(ChainCase):
             dashboard._prepare_failed("Anmeldung abgelehnt. (Code A01)")
         self.assertEqual([("error", "Vergleich fehlgeschlagen")], messages)
         self.assertEqual("", dashboard.status.value)
-
-
-def choice():
-    """Leere, aber vollständige Auswahl aus dem Vergleichsfenster."""
-    return {"uploads": set(), "metadata": set(), "read_changes": [],
-            "cloud_deletions": []}
