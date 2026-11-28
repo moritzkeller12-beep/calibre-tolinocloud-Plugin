@@ -11,10 +11,6 @@ from .matching import (author_tokens, authors_match, is_valid_isbn,
 COPY_BOUND_FIELDS = ("reading", "collections", "meta_verified_fp")
 
 
-def _metadata_text(metadata, name):
-    return str(metadata.get(name) or "")
-
-
 def _file_changed(metadata, previous_entry, format_name):
     """True, wenn sich die Buchdatei seit dem letzten Sync geändert hat.
 
@@ -72,9 +68,9 @@ def _same_comparison_fields(metadata, remote):
     fehlender Wert ist kein Unterschied.
     """
     values = {
-        "title": _metadata_text(metadata, "title"),
-        "authors": _metadata_text(metadata, "authors"),
-        "isbn": _metadata_text(metadata, "isbn"),
+        "title": str(metadata.get("title") or ""),
+        "authors": str(metadata.get("authors") or ""),
+        "isbn": str(metadata.get("isbn") or ""),
     }
     for field, local in values.items():
         remote_value = remote.get(field)
@@ -438,9 +434,9 @@ def _local_comparison_row(book_id, metadata, remote, state, reserved,
     # Ignorierte Bücher bleiben zugeordnet, erhalten aber keine Aktion.
     ignored = bool(metadata.get("ignored"))
     book_uuid = valid_book_uuid(metadata.get("uuid"))
-    title = _metadata_text(metadata, "title")
-    authors = _metadata_text(metadata, "authors")
-    isbn = _metadata_text(metadata, "isbn")
+    title = str(metadata.get("title") or "")
+    authors = str(metadata.get("authors") or "")
+    isbn = str(metadata.get("isbn") or "")
     old = state_entry(state, book_uuid)
     stored_id = str(old.get("tolino_id") or "").strip()
     title_key = normalize_title(title)

@@ -365,8 +365,7 @@ def real_qt_stub():
             QApplication, QCheckBox, QComboBox, QDialog, QFormLayout,
             QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
             QLineEdit, QProgressBar, QPushButton, QStyledItemDelegate,
-            QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
-            QVBoxLayout)
+            QTableWidget, QTableWidgetItem, QVBoxLayout)
     except ImportError as exc:
         raise unittest.SkipTest("PyQt6 fehlt: %s" % exc) from exc
     if _REAL_QT_APP is None:
@@ -392,7 +391,6 @@ def real_qt_stub():
         "QTableWidget": QTableWidget,
         "QTableWidgetItem": QTableWidgetItem,
         "QStyledItemDelegate": QStyledItemDelegate,
-        "QStyleOptionViewItem": QStyleOptionViewItem,
         "QInputDialog": QInputDialog,
         "QMessageBox": RecordingMessageBox,
         "QMenu": RecordingMenu,

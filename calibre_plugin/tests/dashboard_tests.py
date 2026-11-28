@@ -67,11 +67,6 @@ class OrchestrationCase(PreferencesCase):
         method = self.ui.dashboard.SyncDashboard.sync_completed
         return method.__get__(dashboard)(updates)
 
-    def sync_failed(self, dashboard, message):
-        method = self.ui.dashboard.SyncDashboard.sync_failed
-        return method.__get__(dashboard)(message)
-
-
 def full_database(fail=()):
     database = CalibreDatabase(
         {TOLINO_COLUMN: {"datatype": "text"},
@@ -290,7 +285,8 @@ class ReportTests(OrchestrationCase):
         database = full_database()
         dashboard = self.dashboard(worker, database)
         with self.recorded() as recorded:
-            self.sync_failed(dashboard, "Die Verbindung ist fehlgeschlagen.")
+            self.method("sync_failed")(dashboard)(
+                "Die Verbindung ist fehlgeschlagen.")
         self.assertIn(TOLINO_COLUMN,
                       [column for column, _values in database.api.writes])
         self.assertIn("Die Verbindung ist fehlgeschlagen",
