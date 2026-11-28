@@ -487,23 +487,14 @@ def local_tolino_endpoints(origin, partner_ids=(1, 4, 5, 8)):
     from ..partners import PARTNERS
 
     partners = {pid: PARTNERS[pid]["token_url"] for pid in partner_ids}
-    saved = (module.BASE_URL, module.TolinoClient.META_URL,
-             module.TolinoClient.DEVICES_URL,
-             module.TolinoClient.SYNC_DATA_URL)
+    saved = module.BASE_URL
     module.BASE_URL = origin + "/bosh/rest"
-    module.TolinoClient.META_URL = module.BASE_URL + "/meta"
-    module.TolinoClient.DEVICES_URL = (module.BASE_URL
-                                       + "/handshake/devices/list")
-    module.TolinoClient.SYNC_DATA_URL = (module.BASE_URL
-                                         + "/sync-data?paths=publications")
     for partner_id in partner_ids:
         PARTNERS[partner_id]["token_url"] = origin + "/token/%d" % partner_id
     try:
         yield
     finally:
-        (module.BASE_URL, module.TolinoClient.META_URL,
-         module.TolinoClient.DEVICES_URL,
-         module.TolinoClient.SYNC_DATA_URL) = saved
+        module.BASE_URL = saved
         for partner_id, value in partners.items():
             PARTNERS[partner_id]["token_url"] = value
 

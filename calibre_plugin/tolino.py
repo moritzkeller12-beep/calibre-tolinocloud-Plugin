@@ -754,8 +754,6 @@ class TolinoClient:
         self._request(BASE_URL + "/deletecontent?deliverableId="
                       + _url_quote(str(deliverable_id)))
 
-    META_URL = BASE_URL + "/meta"
-
     def update_metadata(self, deliverable_id, fields):
         """Update title/author/isbn on an existing book instead of
         re-uploading the file.
@@ -765,7 +763,8 @@ class TolinoClient:
         """
         if not isinstance(fields, dict) or not fields:
             raise TolinoApiError("Metadaten-Update ohne Felder.", code="E99", short="Es gibt nichts zu aktualisieren.")
-        url = self.META_URL + "/?deliverableId=" + _url_quote(str(deliverable_id))
+        url = (BASE_URL + "/meta/?deliverableId="
+               + _url_quote(str(deliverable_id)))
         book = self._request(url)
         metadata = book.get("metadata") if isinstance(book, dict) else None
         if not isinstance(metadata, dict):
@@ -790,9 +789,6 @@ class TolinoClient:
                 short="tolino hat die Metadaten nicht übernommen.")
         return verified_metadata
 
-
-    DEVICES_URL = "https://bosh.pageplace.de/bosh/rest/handshake/devices/list"
-
     def fetch_hardware_id(self):
         """Return the most recently used hardware ID registered for the account."""
         payload = {
@@ -803,8 +799,8 @@ class TolinoClient:
                 }],
             },
         }
-        data = self._request(self.DEVICES_URL, "POST", payload,
-                             content_type="application/json")
+        data = self._request(BASE_URL + "/handshake/devices/list", "POST",
+                             payload, content_type="application/json")
         devices = (data.get("deviceListResponse") or {}).get("devices") or []
         devices = [item for item in devices if isinstance(item, dict)]
         if not devices:
@@ -935,14 +931,12 @@ class TolinoClient:
                                  code="N02", short="Der Download von Tolino ist fehlgeschlagen.")
         return content
 
-
-    SYNC_DATA_URL = BASE_URL + "/sync-data?paths=publications"
-
     def _sync_patch(self, payload):
         # Nach Schreibvorgängen muss die Revision neu gelesen werden.
         self._sync_cache = None
-        data = self._request(self.SYNC_DATA_URL, "PATCH", payload,
-                             content_type="application/json")
+        data = self._request(
+            BASE_URL + "/sync-data?paths=publications", "PATCH", payload,
+            content_type="application/json")
         return data if isinstance(data, dict) else {}
 
     def sync_snapshot(self):

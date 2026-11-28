@@ -20,7 +20,16 @@ from .tolino import (TolinoApiError, TolinoAuthError, TolinoError, log_warning,
                      report_error, sanitize_error)
 
 
-class SyncWorker(QObject):
+class _CancellableWorker(QObject):
+    """Gemeinsamer Abbruchschalter der Hintergrund-Worker."""
+
+    cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class SyncWorker(_CancellableWorker):
     progress = pyqtSignal(int, int, str)
     completed = pyqtSignal(object)
     failed = pyqtSignal(str)
@@ -28,7 +37,7 @@ class SyncWorker(QObject):
     def __init__(self, context, jobs, removals, meta_updates=None,
                  series_map=None, read_changes=None, titles=None,
                  metadata=None, state=None):
-        QObject.__init__(self)
+        _CancellableWorker.__init__(self)
         # Alle Schreibvorgänge gehören zum Startkonto dieses Laufs.
         self.context = context
         self.account_name = self.context.account_name
@@ -53,7 +62,6 @@ class SyncWorker(QObject):
             for item in (metadata or {}).values()
             if isinstance(item, dict) and item.get("uuid")
         }
-        self.cancelled = False
         # Der Worker ändert eine private Zustandskopie; `_state_base` ist der
         # Ausgangsstand, gegen den nur Änderungen gespeichert werden.
         snapshot = state if isinstance(state, dict) else {}
@@ -66,15 +74,16 @@ class SyncWorker(QObject):
         # (Calibre-Nummer, None) für Kopien ohne alten Lesefortschritt.
         self.progress_updates = []
         self.operations = []
+        # Laufzustand: Client, Fortschritt und der Plan dieses Laufs.
+        self._client = None
+        self._done = 0
+        self._total = 0
         self.outcome = {
             "uploaded": 0, "deleted": 0,
             "metadata": 0, "read_marked": 0, "read_unmarked": 0,
             "collections": 0, "skipped": 0, "failed": 0,
             "cancelled": False, "operations": self.operations,
         }
-
-    def cancel(self):
-        self.cancelled = True
 
     # Abgeleitet statt gepflegt: `_drop_replaced_read_changes()` kürzt
     # `read_changes`, beide Listen müssen dann nicht nachgezogen werden.
@@ -128,7 +137,7 @@ class SyncWorker(QObject):
             failed=states[OP_FAILED],
             cancelled=bool(self.cancelled))
 
-    def _fail(self, operation, exc, client=None, fatal=False):
+    def _fail(self, operation, exc, fatal=False):
         """Einen Schritt als gescheitert zaehlen; `fatal` beendet den Lauf.
 
         Ein fehlendes Cover oder eine einzelne Datei darf die uebrigen
@@ -137,17 +146,27 @@ class SyncWorker(QObject):
         Grund steht am Schritt (fuer den Abschlussbericht) und im Log -- ohne
         Zugangsdaten.
         """
-        detail = sanitize_error(exc, account_secrets(self.account_name)
-                                + (client.access if client else None,))
+        detail = sanitize_error(exc, account_secrets(self.account_name) + (
+            self._client.access if self._client else None,))
         self._finish_operation(operation, OP_FAILED, error=detail)
         log_warning("Schritt gescheitert (%s): %s"
                     % ((operation or {}).get("label") or "?", detail))
         if fatal and isinstance(exc, TolinoAuthError):
             raise exc
 
-    def _step(self, client, checkpoint, operation, text, action, done, total,
-              finish=None):
-        """Einen Schritt ausfuehren: Abbruch pruefen, melden, zaehlen.
+    def _checkpoint(self):
+        """Abbruch nur intern signalisieren: `run()` sendet das Ende."""
+        if self.cancelled:
+            raise _SyncCancelled()
+
+    def _advance(self, text=None):
+        """Einen Schritt zaehlen; `text` meldet ihn mit dem neuen Stand."""
+        self._done += 1
+        if text is not None:
+            self.progress.emit(self._done, self._total, text)
+
+    def _step(self, operation, text, action, finish=None):
+        """Einen Schritt ausfuehren: Abbruch pruefen, melden, verbuchen.
 
         `action` laeuft genau einmal. Ein Fehler wird am Schritt gezaehlt
         (fatale Fehler gehen weiter nach oben) und der Aufrufer entscheidet,
@@ -155,12 +174,12 @@ class SyncWorker(QObject):
         von `action`; ohne Angabe gilt der Schritt als gelungen.
         Rueckgabe: ``(ok, Ergebnis)``.
         """
-        checkpoint()
-        self.progress.emit(done, total, text)
+        self._checkpoint()
+        self.progress.emit(self._done, self._total, text)
         try:
             result = action()
         except Exception as exc:
-            self._fail(operation, exc, client, fatal=True)
+            self._fail(operation, exc, fatal=True)
             return False, None
         if finish is None:
             self._finish_operation(operation, OP_SUCCEEDED)
@@ -199,7 +218,7 @@ class SyncWorker(QObject):
         # fremde Aenderungen an denselben Feldern stehen.
         self._state_base = copy.deepcopy(self.state)
 
-    def _copy_is_gone(self, client, deliverable_id):
+    def _copy_is_gone(self, deliverable_id):
         """Steht die Kopie noch in der Cloud? Unlesbar heisst: Fehler behalten.
 
         Nach einem mehrdeutigen Löschfehler zaehlt nur ein JETZT gelesener
@@ -209,7 +228,8 @@ class SyncWorker(QObject):
         """
         try:
             cloud_ids = {
-                str(record.get("tolino_id")) for record in client.inventory()
+                str(record.get("tolino_id"))
+                for record in self._client.inventory()
                 if isinstance(record, dict)}
         except TolinoAuthError:
             # Eine abgelehnte Anmeldung heisst nicht «schon geloescht»: der
@@ -219,7 +239,7 @@ class SyncWorker(QObject):
             return False
         return str(deliverable_id) not in cloud_ids
 
-    def _delete_or_skip(self, client, deliverable_id):
+    def _delete_or_skip(self, deliverable_id):
         """Return False when the cloud copy is already gone.
 
         Die Cloud meldet eine unbekannte Kennung je nach Endpunkt mit 404
@@ -227,13 +247,12 @@ class SyncWorker(QObject):
         war nichts zu loeschen; steht sie noch da, bleibt es ein Fehler.
         """
         try:
-            client.delete(deliverable_id)
+            self._client.delete(deliverable_id)
         except TolinoApiError as exc:
             text = (str(exc) + " " + str(exc.detail)).casefold()
             if exc.code != "N03":
                 raise
-            if "http 404" in text or self._copy_is_gone(
-                    client, deliverable_id):
+            if "http 404" in text or self._copy_is_gone(deliverable_id):
                 return False
             raise
         return True
@@ -246,38 +265,39 @@ class SyncWorker(QObject):
 
     def _plan_operations(self):
         """Plan selected actions; collections are added after uploads."""
-        meta_ops = []
+        self.meta_ops = []
         for update in self.meta_updates:
             fields = update.fields or {}
-            meta_ops.append((update, self._add_operation(
+            self.meta_ops.append((update, self._add_operation(
                 "metadata", "Metadaten: %s"
                 % self._label(update.book_uuid, update.book_id,
                               fields.get("title")),
                 book_uuid=update.book_uuid)))
-        upload_ops = []
+        self.upload_ops = []
         for job in self.jobs:
-            upload_ops.append((job, self._add_operation(
+            self.upload_ops.append((job, self._add_operation(
                 "upload", "Hochladen: %s (%s)" %
                 (job.label(), job.format_name),
                 book_uuid=job.book_uuid, format=job.format_name)))
-        delete_ops = []
+        self.delete_ops = []
         for book_uuid, tolino_id in self.removals:
-            delete_ops.append((book_uuid, tolino_id, self._add_operation(
-                "delete", "Aus tolino löschen: %s"
-                % self._label(book_uuid, None,
-                              self.titles.get(str(tolino_id), "")),
-                book_uuid=book_uuid, tolino_id=str(tolino_id))))
-        read_op = (self._add_operation(
+            self.delete_ops.append((
+                book_uuid, tolino_id, self._add_operation(
+                    "delete", "Aus tolino löschen: %s"
+                    % self._label(book_uuid, None,
+                                  self.titles.get(str(tolino_id), "")),
+                    book_uuid=book_uuid, tolino_id=str(tolino_id))))
+        self.read_op = (self._add_operation(
             "read", "Als gelesen markieren", count=len(self.read_marks))
             if self.read_marks else None)
-        unread_op = (self._add_operation(
+        self.unread_op = (self._add_operation(
             "unread", "Als ungelesen markieren",
             count=len(self.read_unmarks)) if self.read_unmarks else None)
-        total = sum(map(len, (meta_ops, upload_ops, delete_ops)))
-        total += bool(read_op) + bool(unread_op)
-        return meta_ops, upload_ops, delete_ops, read_op, unread_op, total
+        self._total = sum(map(len, (self.meta_ops, self.upload_ops,
+                                    self.delete_ops)))
+        self._total += bool(self.read_op) + bool(self.unread_op)
 
-    def _remove_replaced_copy(self, client, job):
+    def _remove_replaced_copy(self, job):
         """Delete the explicitly replaced cloud copy without a preflight read."""
         if not job.old_id:
             return
@@ -285,25 +305,23 @@ class SyncWorker(QObject):
             "delete", "Alte Kopie löschen: %s" % job.label(),
             book_uuid=job.book_uuid)
         try:
-            deleted = self._delete_or_skip(client, job.old_id)
+            deleted = self._delete_or_skip(job.old_id)
         except Exception as exc:
-            self._fail(operation, exc, client, fatal=True)
+            self._fail(operation, exc, fatal=True)
         else:
             self._finish_delete(operation, deleted)
 
-    def _run_deletions(self, client, delete_ops, checkpoint, done, total):
+    def _run_deletions(self):
         """Execute only the deletions explicitly selected by the user."""
-        for book_uuid, tolino_id, operation in delete_ops:
+        for book_uuid, tolino_id, operation in self.delete_ops:
             label = self._label(book_uuid, None,
                                 self.titles.get(str(tolino_id), ""))
             ok, deleted = self._step(
-                client, checkpoint, operation,
-                "Lösche aus tolino: %s" % label,
-                partial(self._delete_or_skip, client, tolino_id),
-                done, total,
+                operation, "Lösche aus tolino: %s" % label,
+                partial(self._delete_or_skip, tolino_id),
                 finish=partial(self._finish_delete, operation))
             if not ok:
-                done += 1
+                self._advance()
                 continue
             entry = self.state.get(book_uuid)
             recorded = (str(entry.get("tolino_id") or "")
@@ -313,10 +331,7 @@ class SyncWorker(QObject):
                     self.updates.append((entry.get("calibre_id"), ""))
                 self.state.pop(book_uuid, None)
                 self._persist_state()
-            done += 1
-            if deleted:
-                self.progress.emit(done, total, "Erledigt: %s" % label)
-        return done
+            self._advance("Erledigt: %s" % label if deleted else None)
 
     def _drop_replaced_read_changes(self):
         """Nur die Kopie markieren, auf die der Lesestatus noch zeigt.
@@ -337,8 +352,7 @@ class SyncWorker(QObject):
             kept.append(change)
         self.read_changes = kept
 
-    def _run_read_marks(self, client, read_op, unread_op, checkpoint,
-                        done, total):
+    def _run_read_marks(self, read_op, unread_op):
         """Ausgewählten Lesestatus übertragen."""
         self._drop_replaced_read_changes()
         actions = (
@@ -355,12 +369,12 @@ class SyncWorker(QObject):
                 # Die Kopie wurde in diesem Lauf ersetzt oder gelöscht.
                 self._finish_operation(operation, OP_SKIPPED,
                                        reason="Kopie ersetzt oder gelöscht")
-                done += 1
+                self._advance()
                 continue
             ok, _result = self._step(
-                client, checkpoint, operation, start_text,
-                partial(client.mark_read_many, book_ids, finished=finished),
-                done, total)
+                operation, start_text,
+                partial(self._client.mark_read_many, book_ids,
+                        finished=finished))
             if ok:
                 stored = False
                 for _tolino, book_id, wanted, book_uuid in self.read_changes:
@@ -371,9 +385,8 @@ class SyncWorker(QObject):
                     stored = self._store_read_state(book_uuid, finished) or stored
                 if stored:
                     self._persist_state()
-                self.progress.emit(done, total, done_text)
-            done += 1
-        return done
+                self.progress.emit(self._done, self._total, done_text)
+            self._advance()
 
     def _store_read_state(self, book_uuid, finished):
         """Bestätigten Lesestatus im Account-State dieses Laufs sichern."""
@@ -387,98 +400,90 @@ class SyncWorker(QObject):
         reading["read"] = bool(finished)
         return True
 
-    def _load_collection_pairs(self, client, collection_ops, done, total):
+    def _load_collection_pairs(self, collection_ops):
         """Cloud-Zuordnungen lesen; ein Fehler zaehlt jede Aktion als beendet."""
         try:
-            return client.collection_pairs(), done
+            return self._client.collection_pairs()
         except Exception as exc:
             # Ohne Bestand liesse sich nicht erkennen, was schon zugeordnet
             # ist -- jede Zuordnung gilt als gescheitert.
             for _book, _tolino, _series, operation in collection_ops:
-                self._fail(operation, exc, client, fatal=True)
+                self._fail(operation, exc, fatal=True)
                 # Auch ein gescheiterter Schritt ist abgeschlossen; sonst
                 # bliebe der Fortschrittsbalken am Beginn der Phase stehen.
-                done += 1
-                self.progress.emit(
-                    done, total, "Fehlgeschlagen: %s"
-                    % (operation.get("label") or "Sammlung"))
-            return None, done
+                self._advance("Fehlgeschlagen: %s"
+                              % (operation.get("label") or "Sammlung"))
+            return None
 
     def _plan_collection_operations(self):
         """Offene Serienzuordnungen als Operationen vormerken."""
-        operations = []
+        self.collection_ops = []
         for book_uuid, tolino_id, series in plan_collection_updates(
                 self.series_map, self.state):
-            operations.append((
+            self.collection_ops.append((
                 book_uuid, tolino_id, series,
                 self._add_operation(
                     "collection", "Serie in tolino: %s" % series,
                     book_uuid=book_uuid, series=series)))
-        return operations
+        self._total += len(self.collection_ops)
 
-    def _run_collections(self, client, collection_ops, checkpoint, done,
-                         total):
+    def _run_collections(self):
         """Serien → Cloud-Sammlungen: nur die offenen Zuordnungen."""
-        if not collection_ops:
-            return done
-        known, done = self._load_collection_pairs(
-            client, collection_ops, done, total)
+        if not self.collection_ops:
+            return
+        known = self._load_collection_pairs(self.collection_ops)
         revision = None
         changed = False
         # Ohne Bestand ist keine Zuordnung möglich: dann startet kein
         # Schritt -- auch kein Checkpoint.
         try:
             for book_uuid, tolino_id, series, operation in (
-                    collection_ops if known is not None else ()):
+                    self.collection_ops if known is not None else ()):
                 if (tolino_id, series) in known:
-                    checkpoint()  # Skip-Zweig läuft nicht durch _step().
+                    self._checkpoint()  # Skip-Zweig läuft nicht durch _step().
                     remember_collection(self.state, book_uuid, series)
                     self._finish_operation(operation, OP_SKIPPED,
                                            reason="schon in der Cloud")
                     changed = True
-                    done += 1
+                    self._advance()
                     continue
 
                 ok, new_revision = self._step(
-                    client, checkpoint, operation,
-                    "Serie in der Cloud: %s" % series,
-                    partial(client.add_to_collection, tolino_id, series,
-                            revision=revision),
-                    done, total)
+                    operation, "Serie in der Cloud: %s" % series,
+                    partial(self._client.add_to_collection, tolino_id, series,
+                            revision=revision))
                 if not ok:
                     # Nach einem Fehler ist die Revision nicht mehr verlaesslich.
                     revision = None
-                    done += 1
+                    self._advance()
                     continue
 
                 revision = new_revision
                 known.add((tolino_id, series))
                 remember_collection(self.state, book_uuid, series)
                 changed = True
-                done += 1
+                self._advance()
         finally:
             # Auch ein Abbruch oder Auth-Fehler behaelt die bestaetigten
             # Zuordnungen; sonst stehen sie nur im Speicher.
             if changed:
                 self._persist_state()
-        self.progress.emit(done, total, "Serien geprüft")
-        return done
+        self.progress.emit(self._done, self._total, "Serien geprüft")
 
-    def _run_metadata_updates(self, client, operations, checkpoint, done, total):
+    def _run_metadata_updates(self, operations):
         """Apply selected metadata patches and persist their confirmed state."""
         changed = False
         try:
             for record, operation in operations:
                 ok, _result = self._step(
-                    client, checkpoint, operation,
+                    operation,
                     "Metadaten: %s" % self._label(
                         record.book_uuid, record.book_id,
                         (record.fields or {}).get("title")),
-                    partial(client.update_metadata, record.tolino_id,
-                            record.fields),
-                    done, total)
+                    partial(self._client.update_metadata, record.tolino_id,
+                            record.fields))
                 if not ok:
-                    done += 1
+                    self._advance()
                     continue
                 entry = self.state.get(record.book_uuid)
                 metadata = self.metadata_by_uuid.get(record.book_uuid)
@@ -486,25 +491,22 @@ class SyncWorker(QObject):
                     entry["meta_verified_fp"] = metadata_fingerprint(metadata)
                 self.updates.append((record.book_id, record.tolino_id))
                 changed = True
-                done += 1
+                self._advance()
         finally:
             # Einmal je Phase statt je Buch -- und auch nach Abbruch oder
             # Auth-Fehler, damit der Patch nicht nur im Speicher steht.
             if changed:
                 self._persist_state()
-        return done
 
-    def _run_uploads(self, client, operations, checkpoint, done, total):
+    def _run_uploads(self, operations):
         """Upload selected books and preserve each successful partial result."""
         for job, operation in operations:
             ok, new_id = self._step(
-                client, checkpoint, operation,
+                operation,
                 "Lade hoch: %s (%s)" % (job.label(), job.format_name),
-                partial(client.upload, job.path), done, total)
+                partial(self._client.upload, job.path))
             if not ok:
-                done += 1
-                self.progress.emit(done, total, "Fehlgeschlagen: %s"
-                                   % job.label())
+                self._advance("Fehlgeschlagen: %s" % job.label())
                 continue
             # Die neue Cloud-Kopie startet ungelesen und ohne Sammlungen;
             # alles Kopiegebundene der ersetzten Kopie faellt weg.
@@ -527,47 +529,29 @@ class SyncWorker(QObject):
             replaced = bool(job.old_id) and str(job.old_id) != str(new_id)
             if job.cover:
                 try:
-                    client.upload_cover(new_id, job.cover,
-                                        image_suffix(job.cover))
+                    self._client.upload_cover(new_id, job.cover,
+                                              image_suffix(job.cover))
                 except Exception as exc:
                     cover_op = self._add_operation(
                         "cover", "Buchcover: %s" % job.label(),
                         book_uuid=job.book_uuid)
-                    self._fail(cover_op, exc, client, fatal=True)
+                    self._fail(cover_op, exc, fatal=True)
             # Liefert tolino beim Ersetzen dieselbe ID, ist das die neue
             # Kopie -- sie darf nicht als «alte» gelöscht werden.
             if replaced:
-                self._remove_replaced_copy(client, job)
-            done += 1
-            self.progress.emit(done, total, "Hochgeladen: %s" % job.label())
-        return done
+                self._remove_replaced_copy(job)
+            self._advance("Hochgeladen: %s" % job.label())
 
     def run(self):
-        client = None
         try:
-            client = TOKEN_VAULT.login(self.account_name)
-            (meta_ops, upload_ops, delete_ops, read_op, unread_op,
-             total) = self._plan_operations()
-            done = 0
-
-            def checkpoint():
-                # Abbruch nur intern signalisieren: genau EIN terminales
-                # Signal sendet `run()`, nachdem der Zustand gesichert ist.
-                if self.cancelled:
-                    raise _SyncCancelled()
-
-            done = self._run_metadata_updates(
-                client, meta_ops, checkpoint, done, total)
-            done = self._run_uploads(
-                client, upload_ops, checkpoint, done, total)
-            done = self._run_deletions(
-                client, delete_ops, checkpoint, done, total)
-            done = self._run_read_marks(
-                client, read_op, unread_op, checkpoint, done, total)
-            collection_ops = self._plan_collection_operations()
-            total += len(collection_ops)
-            done = self._run_collections(
-                client, collection_ops, checkpoint, done, total)
+            self._client = TOKEN_VAULT.login(self.account_name)
+            self._plan_operations()
+            self._run_metadata_updates(self.meta_ops)
+            self._run_uploads(self.upload_ops)
+            self._run_deletions()
+            self._run_read_marks(self.read_op, self.unread_op)
+            self._plan_collection_operations()
+            self._run_collections()
             self._refresh_counts()
             self.completed.emit(self.updates)
         except _SyncCancelled:
@@ -580,15 +564,19 @@ class SyncWorker(QObject):
             message = (CANCEL_MESSAGE if str(exc) == CANCEL_MESSAGE
                        else report_error(exc, "Sync", (
                            account_secrets(self.account_name)
-                           + (client.access if client else None,))))
+                           + (self._client.access
+                              if self._client else None,))))
             self.failed.emit(message)
+        finally:
+            # Keinen Zugangstoken am fertigen Worker behalten.
+            self._client = None
 
 
 class _SyncCancelled(Exception):
     """Internes Abbruchsignal: kein Fehler, sondern ein regulaerer Halt."""
 
 
-class LocalMetadataWorker(QObject):
+class LocalMetadataWorker(_CancellableWorker):
     """Read the Calibre snapshot outside the GUI thread.
 
     Calibre's ``new_api`` is documented as thread-safe (multiple readers,
@@ -599,14 +587,10 @@ class LocalMetadataWorker(QObject):
     failed = pyqtSignal(str)
 
     def __init__(self, database, context, state=None):
-        QObject.__init__(self)
+        _CancellableWorker.__init__(self)
         self.database = database
         self.context = context
         self.state = state
-        self.cancelled = False
-
-    def cancel(self):
-        self.cancelled = True
 
     def run(self):
         try:
@@ -623,7 +607,7 @@ class LocalMetadataWorker(QObject):
                          "state": self.state})
 
 
-class PrepareWorker(QObject):
+class PrepareWorker(_CancellableWorker):
     """Netz-Teil der Vorbereitung -- bewusst NICHT im GUI-Thread.
 
     Der lokale Metadaten-Snapshot kommt aus `LocalMetadataWorker`; hier
@@ -635,7 +619,7 @@ class PrepareWorker(QObject):
     progress = pyqtSignal(str)
 
     def __init__(self, context, metadata, state=None, lock_timeout=5):
-        QObject.__init__(self)
+        _CancellableWorker.__init__(self)
         self.context = context
         self.metadata = metadata
         # Ausgangszustand des Kontos; der Worker kopiert ihn vor dem
@@ -643,10 +627,6 @@ class PrepareWorker(QObject):
         self.state = state
         self.lock_timeout = lock_timeout
         self.account_name = self.context.account_name
-        self.cancelled = False
-
-    def cancel(self):
-        self.cancelled = True
 
     def _stop_requested(self):
         """Abbruch melden und True liefern -- ein Muster für alle Schritte."""

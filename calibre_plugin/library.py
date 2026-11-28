@@ -17,8 +17,7 @@ _TRUE_VALUES = frozenset(("true", "yes", "ja", "1"))
 _FALSE_VALUES = frozenset(("false", "no", "nein", "0"))
 # Ohne Bibliothekskennung gibt es keinen echten Scope. Ein fester Ersatz
 # verhindert, dass der alte ungescopte Schluessel stillschweigend entsteht.
-DEFAULT_LIBRARY_SCOPE = hashlib.sha256(
-    b"tolino-cloud-sync-default-library").hexdigest()[:12]
+DEFAULT_LIBRARY_SCOPE = "f58f645cfed9"
 
 
 def library_scope(database):

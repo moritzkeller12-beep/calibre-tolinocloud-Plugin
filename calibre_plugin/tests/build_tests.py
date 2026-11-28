@@ -87,19 +87,32 @@ class PluginArchiveTests(unittest.TestCase):
         # Nicht zerlegbarer Quelltext wird unverändert ausgeliefert.
         self.assertEqual(b"x = (\n", strip_source(b"x = (\n"))
 
-    def test_a_module_docstring_before_a_future_import_is_removed(self):
+    def test_docstrings_before_a_future_import_are_removed(self):
         """Ein ``0``-Platzhalter machte den Future-Import ungueltig."""
-        source = (b'"""Modul."""\n'
-                  b"# Hinweis\n"
-                  b"from __future__ import annotations\n"
-                  b"X = 1\n")
-        stripped = strip_source(source)
-        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
-        self.assertNotIn(b"Modul.", stripped)
-        self.assertEqual(b"from __future__ import annotations",
-                         stripped.splitlines()[2])
+        cases = (
+            (b'"""Modul."""\n'
+             b"# Hinweis\n"
+             b"from __future__ import annotations\n"
+             b"X = 1\n"),
+            (b'"""Modul.\nBeschreibung."""  # Hinweis\n'
+             b"from __future__ import annotations\n"
+             b"class Empty:\n"
+             b'    """Klasse."""\n'
+             b"def empty():\n"
+             b'    """Funktion."""\n'),
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                stripped = strip_source(source)
+                self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
+                self.assertNotIn(b"Modul.", stripped)
+                self.assertNotIn(b"Hinweis", stripped)
+                self.assertEqual(b"from __future__ import annotations",
+                                 stripped.splitlines()[2])
+                self.assertEqual([], _docstring_owners(stripped))
+                compile(stripped, "<test>", "exec")
         namespace = {}
-        exec(compile(stripped, "<test>", "exec"), namespace)
+        exec(compile(strip_source(cases[0]), "<test>", "exec"), namespace)
         self.assertEqual(1, namespace["X"])
         # Leere Rumpfe behalten ihren Platzhalter.
         self.assertIn(b"    0\n", strip_source(
@@ -117,19 +130,6 @@ class PluginArchiveTests(unittest.TestCase):
         namespace = {}
         exec(compile(stripped, "<test>", "exec"), namespace)
         self.assertEqual(42, namespace["answer"]())
-
-    def test_a_module_docstring_does_not_precede_a_future_import(self):
-        source = (b'"""Modul.\nBeschreibung."""  # Hinweis\n'
-                  b"from __future__ import annotations\n"
-                  b"class Empty:\n"
-                  b'    """Klasse."""\n'
-                  b"def empty():\n"
-                  b'    """Funktion."""\n')
-        stripped = strip_source(source)
-        self.assertEqual(source.count(b"\n"), stripped.count(b"\n"))
-        self.assertEqual([], _docstring_owners(stripped))
-        self.assertNotIn(b"Hinweis", stripped)
-        compile(stripped, "<test>", "exec")
 
     def test_the_documented_version_matches_the_plugin_version(self):
         """README und CHANGELOG zeigen dieselbe Nummer wie __init__.py."""

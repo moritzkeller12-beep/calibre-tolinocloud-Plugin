@@ -6,9 +6,6 @@ _UUID_TEXT = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # State keys for books without a real UUID always carry a library scope.
 _SCOPED_CALIBRE_KEY = re.compile(r"calibre-[0-9a-f]{12}-\d+")
-# Calibre's database path may return 'dummy' when the field is absent.
-_UUID_PLACEHOLDERS = frozenset(("none", "null", "undefined", "dummy"))
-
 
 def _text(value):
     """Getrimmter Kleinbuchstaben-Text eines Werts; keine Byte-/Repr-Deutung."""
@@ -18,10 +15,6 @@ def _text(value):
 def valid_book_uuid(value):
     """Return a supported Calibre key, or empty for junk/incomplete data."""
     text = _text(value)
-    if not text or text in _UUID_PLACEHOLDERS:
-        return ""
-    if len(text) > 128 or any(character.isspace() for character in text):
-        return ""
     if _UUID_TEXT.fullmatch(text) or _SCOPED_CALIBRE_KEY.fullmatch(text):
         return text
     return ""

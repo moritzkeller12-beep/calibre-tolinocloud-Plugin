@@ -511,11 +511,6 @@ class SyncDashboard(DashboardParts, QDialog):
         self.login_thread = self.login_worker = None
         self.update_status()
 
-    @staticmethod
-    def _worker_client(context):
-        """Client aus dem Lauf-Kontext bauen; der Vault liest den Token."""
-        return TOKEN_VAULT.login(context.account_name)
-
     def _show_prepare_error(self, exc, context):
         """Nur den kurzen Fehlertext zeigen; technische Details protokollieren."""
         message = report_error(exc, "Vorbereitung", context.secrets())
@@ -681,7 +676,8 @@ class SyncDashboard(DashboardParts, QDialog):
         try:
             selection = self._confirm_comparison(
                 payload["comparison"], context,
-                client_factory=lambda: self._worker_client(context),
+                client_factory=lambda: TOKEN_VAULT.login(
+                    context.account_name),
                 automatic=len(_planning.plan_collection_updates(
                     series_map, state)))
             if selection is None:
@@ -708,7 +704,8 @@ class SyncDashboard(DashboardParts, QDialog):
         dialog = InventoryDialog(
             comparison, self,
             client_factory=(client_factory or
-                            (lambda: self._worker_client(context))),
+                            (lambda: TOKEN_VAULT.login(
+                                context.account_name))),
             options={
                 "automatic": int(automatic or 0),
                 # Für den Hinweis im Fenster: ohne diese Spalte bleiben

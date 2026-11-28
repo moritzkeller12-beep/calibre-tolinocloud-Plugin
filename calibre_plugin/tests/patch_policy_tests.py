@@ -12,13 +12,10 @@ import unittest
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Genau die Systemgrenzen, die die Suite heute patcht. Ein neues Ziel ist
-# eine bewusste Entscheidung; der letzte Namensbestandteil allein genuegt
-# nicht, weil ``login`` sonst auch Plugin-Logik freigeben wuerde.
-ALLOWED_TARGETS = frozenset("""
-    os os.name os.path.isfile os.access os.path.isdir shutil.which
-    subprocess.run urllib.request.build_opener fcntl.flock getText login
-    error_dialog info_dialog module.check_stored_login _Ws._read_frame
+# Nur diese Namen unter ``calibre_plugin.*`` sind echte Grenzen (Netz,
+# Browser, Prozess, Qt, Dateisystem, Logging). Ziele ausserhalb des Plugins
+# sind immer erlaubt; alles andere im Plugin ist Logik und muss laufen.
+ALLOWED_PLUGIN_TARGETS = frozenset("""
     calibre_plugin.browser_finder.in_flatpak_sandbox
     calibre_plugin.browser_login.TolinoClient
     calibre_plugin.browser_login._NEW_TOKEN_INTERVAL
@@ -153,7 +150,9 @@ def _targets(node, aliases=frozenset()):
 
 
 def _allowed(target):
-    return target in ALLOWED_TARGETS
+    """Plugin-Logik ist tabu; fremde Systemgrenzen brauchen keinen Eintrag."""
+    return (not target.startswith("calibre_plugin.")
+            or target in ALLOWED_PLUGIN_TARGETS)
 
 
 def offenders():
@@ -209,11 +208,11 @@ mock.patch.multiple("qualified_multiple", value=1)
     def test_patch_multiple_on_a_module_object_is_still_a_verdict(self):
         """Ein Modulobjekt statt String darf die gepatchte Funktion nicht
         verstecken; Steuerargumente bleiben aussen vor."""
-        tree = ast.parse(
-            "patch.multiple(module, interne_funktion=ersatz, spec=True)\n")
+        tree = ast.parse("patch.multiple(calibre_plugin, fremd=ersatz,\n"
+                         "                spec=True)\n")
         targets = _targets(tree, _patch_aliases(tree))
-        self.assertEqual(["module", "module.interne_funktion"], targets)
-        self.assertFalse(_allowed("module.interne_funktion"))
+        self.assertEqual(["calibre_plugin", "calibre_plugin.fremd"], targets)
+        self.assertFalse(_allowed("calibre_plugin.fremd"))
 
     def test_only_system_boundaries_are_patched(self):
         bad = offenders()

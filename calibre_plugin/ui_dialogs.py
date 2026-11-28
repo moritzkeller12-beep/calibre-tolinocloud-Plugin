@@ -89,7 +89,6 @@ class _Column(NamedTuple):
     technical: bool = False
 
 
-_READ_TOOLTIP = "Ausgewählt = gelesen, nicht ausgewählt = ungelesen."
 _READ_COLUMN_TOOLTIP = ("Auswahl = gelesen; keine Auswahl = ungelesen. Die "
                         "Calibre-Spalte #tolino_read ist nur informativ.")
 
@@ -211,7 +210,7 @@ class InventoryDialog(QDialog):
         for spec in _ACTION_SPECS for enabled in (True, False)
     }
     ACTION_TOOLTIPS = {spec.key: spec.tooltip for spec in _ACTION_SPECS}
-    ACTION_TOOLTIPS["read"] = (_READ_TOOLTIP
+    ACTION_TOOLTIPS["read"] = (_READ_COLUMN_TOOLTIP
                                + " Im ausgewählten tolino-Konto änderbar.")
     DATA_COLUMNS = (
         _Column("Calibre", "Buch in Calibre vorhanden.", _by_calibre),

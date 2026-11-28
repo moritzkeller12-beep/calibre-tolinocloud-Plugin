@@ -136,7 +136,6 @@ def _bookmark_entry(value):
         "percent": percent,
         "current": current,
         "last": last,
-        "position": str(value.get("position") or "").strip(),
         "modified": modified,
     }
 

@@ -25,10 +25,10 @@ def _start_port():
 
 
 # Der Besitz ist bewusst prozesslokal: nur Profil, Loopback-Port und
-# Popen-Handle dieses Plugins stehen hier. Die Prozessgruppe wird beim Start
-# festgehalten -- der Wrapper eines Flatpak-/Snap-Pakets kann vor seinem
-# Browserkind enden, danach findet os.getpgid(pid) nichts mehr.
-_NO_OWNER = {"process": None, "port": None, "profile": "", "pgid": None}
+# Popen-Handle dieses Plugins stehen hier. Der Start mit start_new_session
+# macht die Wrapper-PID zur Gruppen-ID; sie bleibt auch dann richtig, wenn
+# der Wrapper eines Flatpak-/Snap-Pakets vor seinem Browserkind endet.
+_NO_OWNER = {"process": None, "port": None, "profile": ""}
 _LAUNCHED = dict(_NO_OWNER)
 
 
@@ -187,9 +187,7 @@ def launch_reader_window():
             failures.append("%s: %s" % (argv[0], exc))
             continue
         _LAUNCHED.update({"process": process, "port": port,
-                          "profile": profile,
-                          "pgid": (process.pid if os.name == "posix"
-                                   else None)})
+                          "profile": profile})
         if _wait_for_debug_port(port, _START_TIMEOUT, process):
             # Der Port gehört ins Log: nur so lässt sich die CDP-Verbindung
             # von aussen prüfen (curl http://127.0.0.1:<Port>/json/list).
@@ -197,8 +195,7 @@ def launch_reader_window():
                      % port)
             return
         failures.append("%s: keine Antwort" % argv[0])
-        if not _stop_launched_process(process, timeout=2,
-                                      pgid=_LAUNCHED["pgid"], port=port):
+        if not _stop_launched_process(process, timeout=2, port=port):
             # Der Prozess lebt weiter und haelt den DevTools-Port; ein
             # weiterer Kandidat wuerde dessen Antwort als eigene lesen. Der
             # Besitzer bleibt vermerkt, damit ein erneutes Schliessen ihn
@@ -213,25 +210,6 @@ def launch_reader_window():
         "Chromium reagiert nicht. Bitte alle Chromium-Fenster schliessen "
         "und es erneut versuchen.", code="B01", short=_BROWSER_NOT_POSSIBLE,
         detail="; ".join(failures) or "kein Kandidat")
-
-
-def _process_group(process, pgid=None):
-    """Die eigene Prozessgruppe des Fensters, falls es eine hat.
-
-    Gestartet wird mit ``start_new_session``; die pid des Wrappers ist dann
-    die Gruppen-ID. Sie wird bevorzugt, weil die Gruppe auch dann noch
-    laufen kann, wenn der Wrapper bereits beendet ist.
-    """
-    if os.name != "posix":
-        return None
-    if pgid:
-        return int(pgid)
-    pid = getattr(process, "pid", None)
-    try:
-        own_group = bool(pid) and os.getpgid(pid) == pid
-    except OSError:
-        own_group = False
-    return pid if own_group else None
 
 
 def _group_alive(group):
@@ -254,7 +232,7 @@ def _wait_until_settled(active, seconds):
         time.sleep(0.1)
 
 
-def _stop_launched_process(process, timeout=2, pgid=None, port=None):
+def _stop_launched_process(process, timeout=2, port=None):
     """Den gestarteten Browser samt Gruppe beenden; True, wenn er weg ist.
 
     Das Ende des Wrapper-Prozesses beweist nicht, dass das Browserkind weg
@@ -263,7 +241,8 @@ def _stop_launched_process(process, timeout=2, pgid=None, port=None):
     wenn der Wrapper schon fertig ist. Sonst bliebe ein Browserkind (oder
     der Port fuer den naechsten Kandidaten) am Leben.
     """
-    group = _process_group(process, pgid)
+    # start_new_session: die Wrapper-PID ist zugleich die Gruppen-ID.
+    group = process.pid if os.name == "posix" else None
     port = int(port or 0)
 
     def leftover():
@@ -462,8 +441,7 @@ def _shutdown(record, timeout=2):
         if target:
             _send_browser_close(*target, timeout=timeout)
         _wait_until_settled(lambda: _endpoint_answers(port, 0.2), timeout)
-    if not _stop_launched_process(process, timeout,
-                                  pgid=record.get("pgid"), port=port):
+    if not _stop_launched_process(process, timeout, port=port):
         return False
     _wait_until_settled(lambda: _endpoint_answers(port, 0.2), timeout)
     if _endpoint_answers(port, 0.2):

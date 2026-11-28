@@ -21,8 +21,8 @@ def tag(book_id, name, category, tag_id=None, op="add"):
 
 
 def bookmark(book_id, bookmark_id, modified, current=None, last=None,
-             progress=None, op="add", position=""):
-    value = {"modified": modified, "position": position}
+             progress=None, op="add"):
+    value = {"modified": modified}
     if current is not None:
         value["currentPosition"] = current
     if last is not None:
@@ -118,11 +118,9 @@ class ReadingProgressTests(unittest.TestCase):
         self.assertEqual(100, progress["d1"]["percent"])
 
     def test_the_newest_bookmark_of_a_book_is_shown(self):
-        patches = [bookmark("d1", "alt", 100, progress=0.2,
-                            position="Kapitel 2"),
+        patches = [bookmark("d1", "alt", 100, progress=0.2),
                    bookmark("d1", "neu", 200, progress=0.8)]
-        progress = reading_progress(patches)["d1"]
-        self.assertEqual((80, ""), (progress["percent"], progress["position"]))
+        self.assertEqual(80, reading_progress(patches)["d1"]["percent"])
 
     def test_a_removal_only_drops_the_named_bookmark(self):
         base = [bookmark("d1", "alt", 100, progress=0.2),
